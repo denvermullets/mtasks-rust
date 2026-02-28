@@ -434,19 +434,24 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let team_sidebar = team_list::view(&self.teams, self.selected_team_id.as_deref());
 
-        let header_text = match self.selected_team() {
-            Some(t) => format!("JAIT  |  Team: {}", t.identifier),
-            None => "JAIT".to_string(),
+        let header_content: Element<'_, Message> = match self.selected_team() {
+            Some(team) => row![]
+                .spacing(10)
+                .align_y(iced::Alignment::Center)
+                .push(text(&team.identifier).size(18).color(t::TEXT_PRIMARY))
+                .push(text(&team.name).size(14).color(t::TEXT_MUTED))
+                .into(),
+            None => text("JAIT").size(18).color(t::TEXT_PRIMARY).into(),
         };
 
-        let header = container(text(header_text).size(16).color(t::TEXT_PRIMARY))
-            .padding([10, 16])
+        let header = container(header_content)
+            .padding([12, 16])
             .width(Length::Fill)
             .style(|_theme: &Theme| iced::widget::container::Style {
                 background: Some(iced::Background::Color(t::BG_SECONDARY)),
                 border: iced::Border {
                     color: t::BORDER,
-                    width: 1.0,
+                    width: 0.0,
                     radius: 0.0.into(),
                 },
                 ..Default::default()
@@ -472,13 +477,13 @@ impl App {
         let layout = row![]
             .push(
                 container(team_sidebar)
-                    .width(Length::Fixed(180.0))
+                    .width(Length::Fixed(190.0))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(t::BG_PRIMARY)),
+                        background: Some(iced::Background::Color(t::BG_MENU)),
                         border: iced::Border {
                             color: t::BORDER,
-                            width: 1.0,
+                            width: 0.0,
                             radius: 0.0.into(),
                         },
                         ..Default::default()
@@ -525,14 +530,18 @@ impl App {
 
 fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
     use iced::widget::{button, column, container, row, text};
+    use iced::Border;
 
     let content = column![]
         .spacing(16)
         .push(text("Delete Issue?").size(18).color(t::TEXT_PRIMARY))
         .push(
-            text(format!("Are you sure you want to delete \"{}\"?", issue_title))
-                .size(14)
-                .color(t::TEXT_SECONDARY),
+            text(format!(
+                "Are you sure you want to delete \"{}\"?",
+                issue_title
+            ))
+            .size(14)
+            .color(t::TEXT_SECONDARY),
         )
         .push(
             row![]
@@ -540,19 +549,27 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
                 .push(
                     button(text("Delete").size(14).color(iced::Color::WHITE))
                         .on_press(Message::DeleteConfirmed)
-                        .padding([8, 20])
-                        .style(button::danger),
+                        .padding([8, 24])
+                        .style(move |_theme: &Theme, _status| button::Style {
+                            background: Some(iced::Background::Color(t::DANGER)),
+                            text_color: iced::Color::WHITE,
+                            border: Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
                 )
                 .push(
                     button(text("Cancel").size(14))
                         .on_press(Message::CloseModal)
-                        .padding([8, 20])
+                        .padding([8, 24])
                         .style(button::secondary),
                 ),
         );
 
     let modal = container(content)
-        .padding(24)
+        .padding(28)
         .style(|_theme: &Theme| iced::widget::container::Style {
             background: Some(iced::Background::Color(t::BG_MODAL)),
             border: iced::Border {
@@ -570,7 +587,7 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(|_theme: &Theme| iced::widget::container::Style {
             background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.6,
+                0.0, 0.0, 0.0, 0.7,
             ))),
             ..Default::default()
         })

@@ -63,19 +63,19 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
     let selected_lane = lane_options.iter().find(|l| l.id == form.lane_id).cloned();
 
     let form_content = column![]
-        .spacing(12)
-        .width(Length::Fixed(400.0))
+        .spacing(14)
+        .width(Length::Fixed(420.0))
         .push(text(title).size(18).color(t::TEXT_PRIMARY))
         .push(
             text_input("Title", &form.title)
                 .on_input(Message::IssueTitleChanged)
-                .padding(8)
+                .padding(10)
                 .size(14),
         )
         .push(
             text_input("Description", &form.description)
                 .on_input(Message::IssueDescriptionChanged)
-                .padding(8)
+                .padding(10)
                 .size(14),
         )
         .push(
@@ -84,7 +84,8 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
                 .push(
                     column![]
                         .spacing(4)
-                        .push(text("Priority").size(12).color(t::TEXT_SECONDARY))
+                        .width(Length::Fill)
+                        .push(text("Priority").size(12).color(t::TEXT_MUTED))
                         .push(pick_list(
                             PRIORITIES.as_slice(),
                             Some(form.priority),
@@ -94,7 +95,8 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
                 .push(
                     column![]
                         .spacing(4)
-                        .push(text("Lane").size(12).color(t::TEXT_SECONDARY))
+                        .width(Length::Fill)
+                        .push(text("Lane").size(12).color(t::TEXT_MUTED))
                         .push(pick_list(lane_options, selected_lane, |l: LaneOption| {
                             Message::IssueLaneChanged(l.id)
                         })),
@@ -104,21 +106,29 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
             row![]
                 .spacing(8)
                 .push(
-                    button(text("Save").size(14))
+                    button(text("Save").size(14).color(t::BG_PRIMARY))
                         .on_press(Message::SaveIssue)
-                        .padding([8, 20])
-                        .style(button::primary),
+                        .padding([8, 24])
+                        .style(move |_theme: &Theme, _status| button::Style {
+                            background: Some(iced::Background::Color(t::ACCENT)),
+                            text_color: t::BG_PRIMARY,
+                            border: Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
                 )
                 .push(
                     button(text("Cancel").size(14))
                         .on_press(Message::CloseModal)
-                        .padding([8, 20])
+                        .padding([8, 24])
                         .style(button::secondary),
                 ),
         );
 
     let modal = container(form_content)
-        .padding(24)
+        .padding(28)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::BG_MODAL)),
             border: Border {
@@ -136,7 +146,7 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.6,
+                0.0, 0.0, 0.0, 0.7,
             ))),
             ..Default::default()
         })

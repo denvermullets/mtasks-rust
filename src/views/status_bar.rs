@@ -12,7 +12,7 @@ pub fn view<'a>(pending_sync_count: i32, show_help: bool) -> Element<'a, Message
     };
 
     let shortcuts = if show_help {
-        "[n]ew  [e]dit  [m]ove  [M]ove back  [d]elete  [j/k]↕  [h/l]↔  [1-4]priority  [s]ync  [?]close help"
+        "[n]ew  [e]dit  [m]ove  [M]ove back  [d]elete  [j/k]\u{2195}  [h/l]\u{2194}  [1-4]priority  [s]ync  [?]close help"
     } else {
         "[n]ew [e]dit [m]ove [d]elete [s]ync [?]help"
     };
@@ -25,10 +25,10 @@ pub fn view<'a>(pending_sync_count: i32, show_help: bool) -> Element<'a, Message
                 .color(t::TEXT_MUTED)
                 .width(Length::Fill),
         )
-        .push(text(sync_text).size(12).color(t::TEXT_SECONDARY));
+        .push(text(sync_text).size(12).color(t::TEXT_MUTED));
 
     container(bar)
-        .padding([6, 12])
+        .padding([6, 14])
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::BG_SECONDARY)),
