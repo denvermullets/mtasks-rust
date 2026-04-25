@@ -10,6 +10,7 @@ pub struct SettingsFormState {
     pub api_base_url: String,
     pub api_token: String,
     pub status: Option<String>,
+    pub testing: bool,
 }
 
 impl SettingsFormState {
@@ -18,6 +19,7 @@ impl SettingsFormState {
             api_base_url: cfg.api_base_url.clone(),
             api_token: cfg.api_token.clone().unwrap_or_default(),
             status: None,
+            testing: false,
         }
     }
 }
@@ -25,7 +27,7 @@ impl SettingsFormState {
 pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
     let status_line: Element<'a, Message> = match form.status.as_deref() {
         Some(s) => {
-            let color = if s.starts_with("Error") {
+            let color = if s.starts_with("Failed") || s.starts_with("Error") {
                 t::DANGER
             } else {
                 t::TEXT_MUTED
@@ -67,10 +69,17 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
             row![]
                 .spacing(8)
                 .push(
-                    button(text("Test Connection").size(14))
-                        .on_press(Message::TestConnection)
-                        .padding([8, 18])
-                        .style(button::secondary),
+                    button(
+                        text(if form.testing {
+                            "Testing…"
+                        } else {
+                            "Test Connection"
+                        })
+                        .size(14),
+                    )
+                    .on_press_maybe((!form.testing).then_some(Message::TestConnection))
+                    .padding([8, 18])
+                    .style(button::secondary),
                 )
                 .push(iced::widget::horizontal_space().width(Length::Fill))
                 .push(
