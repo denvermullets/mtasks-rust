@@ -2,6 +2,7 @@ use iced::keyboard;
 use iced::widget::{column, container, row, text};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
+use crate::api::{ApiClient, ApiError};
 use crate::config::{self, Config};
 use crate::db::models::{Issue, Lane, Priority, Team};
 use crate::db::{connection, queries, sync_queue};
@@ -49,6 +50,7 @@ pub enum Message {
     SettingsBaseUrlChanged(String),
     SettingsTokenChanged(String),
     TestConnection,
+    TestConnectionResult(Result<usize, String>),
     SaveSettings,
 
     // Sync
@@ -461,7 +463,38 @@ impl App {
 
             Message::TestConnection => {
                 if let Some(ref mut form) = self.settings_form {
-                    form.status = Some("Test connection coming in DESK-04".to_string());
+                    let base_url = form.api_base_url.trim().to_string();
+                    let token = form.api_token.trim().to_string();
+                    match ApiClient::new(base_url, token) {
+                        Ok(client) => {
+                            form.status = Some("Testing…".to_string());
+                            return Task::perform(
+                                async move {
+                                    client
+                                        .get::<serde_json::Value>("/api/v1/teams")
+                                        .await
+                                        .map(|v| v.as_array().map(|a| a.len()).unwrap_or(0))
+                                        .map_err(|e| e.to_string())
+                                },
+                                Message::TestConnectionResult,
+                            );
+                        }
+                        Err(ApiError::MissingToken) => {
+                            form.status = Some("Set an API token first.".to_string());
+                        }
+                        Err(e) => {
+                            form.status = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+
+            Message::TestConnectionResult(result) => {
+                if let Some(ref mut form) = self.settings_form {
+                    form.status = Some(match result {
+                        Ok(n) => format!("Connected — {} teams", n),
+                        Err(msg) => msg,
+                    });
                 }
             }
 
