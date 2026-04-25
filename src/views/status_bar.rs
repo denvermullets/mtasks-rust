@@ -4,7 +4,11 @@ use iced::{Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::theme as t;
 
-pub fn view<'a>(pending_sync_count: i32, show_help: bool) -> Element<'a, Message> {
+pub fn view<'a>(
+    pending_sync_count: i32,
+    show_help: bool,
+    config_error: Option<&str>,
+) -> Element<'a, Message> {
     let sync_text = if pending_sync_count > 0 {
         format!("{} pending sync", pending_sync_count)
     } else {
@@ -17,15 +21,24 @@ pub fn view<'a>(pending_sync_count: i32, show_help: bool) -> Element<'a, Message
         "[n]ew [e]dit [m]ove [d]elete [s]ync [?]help"
     };
 
-    let bar = row![]
+    let mut bar = row![]
         .spacing(16)
         .push(
             text(shortcuts)
                 .size(12)
                 .color(t::TEXT_MUTED)
                 .width(Length::Fill),
-        )
-        .push(text(sync_text).size(12).color(t::TEXT_MUTED));
+        );
+
+    if let Some(msg) = config_error {
+        bar = bar.push(
+            text(format!("\u{26A0} config: {}", msg))
+                .size(12)
+                .color(t::DANGER),
+        );
+    }
+
+    let bar = bar.push(text(sync_text).size(12).color(t::TEXT_MUTED));
 
     container(bar)
         .padding([6, 14])

@@ -2,6 +2,7 @@ use iced::keyboard;
 use iced::widget::{column, container, row, text};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
+use crate::config::{self, Config};
 use crate::db::models::{Issue, Lane, Priority, Team};
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
@@ -68,6 +69,8 @@ pub struct App {
     issue_form: Option<issue_form::IssueFormState>,
     show_help: bool,
     pending_sync_count: i32,
+    config: Config,
+    config_error: Option<String>,
 }
 
 impl App {
@@ -141,6 +144,8 @@ impl App {
 
 impl App {
     pub fn new() -> (Self, Task<Message>) {
+        let (config, config_error) = config::load();
+
         let conn = connection::open().expect("Failed to open database");
         connection::seed_default_data(&conn).expect("Failed to seed data");
 
@@ -169,6 +174,8 @@ impl App {
             issue_form: None,
             show_help: false,
             pending_sync_count,
+            config,
+            config_error,
         };
 
         (app, Task::none())
@@ -465,7 +472,11 @@ impl App {
             self.focused_issue,
         );
 
-        let status = status_bar::view(self.pending_sync_count, self.show_help);
+        let status = status_bar::view(
+            self.pending_sync_count,
+            self.show_help,
+            self.config_error.as_deref(),
+        );
 
         let main_content = column![]
             .push(header)
