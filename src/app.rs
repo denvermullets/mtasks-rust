@@ -7,7 +7,7 @@ use crate::db::models::{Issue, Lane, Priority, Team};
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
 use crate::theme as t;
-use crate::views::{board, issue_form, status_bar, team_list};
+use crate::views::{board, issue_form, settings, status_bar, team_list};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -44,6 +44,13 @@ pub enum Message {
     CloseModal,
     ToggleHelp,
 
+    // Settings
+    OpenSettings,
+    SettingsBaseUrlChanged(String),
+    SettingsTokenChanged(String),
+    TestConnection,
+    SaveSettings,
+
     // Sync
     SyncNow,
 
@@ -56,6 +63,7 @@ pub enum Modal {
     None,
     IssueForm,
     DeleteConfirm(String),
+    Settings,
 }
 
 pub struct App {
@@ -67,6 +75,7 @@ pub struct App {
     focused_issue: usize,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
+    settings_form: Option<settings::SettingsFormState>,
     show_help: bool,
     pending_sync_count: i32,
     config: Config,
@@ -172,6 +181,7 @@ impl App {
             focused_issue: 0,
             modal: Modal::None,
             issue_form: None,
+            settings_form: None,
             show_help: false,
             pending_sync_count,
             config,
@@ -423,10 +433,62 @@ impl App {
             Message::CloseModal => {
                 self.modal = Modal::None;
                 self.issue_form = None;
+                self.settings_form = None;
             }
 
             Message::ToggleHelp => {
                 self.show_help = !self.show_help;
+            }
+
+            Message::OpenSettings => {
+                self.settings_form = Some(settings::SettingsFormState::from_config(&self.config));
+                self.modal = Modal::Settings;
+            }
+
+            Message::SettingsBaseUrlChanged(v) => {
+                if let Some(ref mut form) = self.settings_form {
+                    form.api_base_url = v;
+                    form.status = None;
+                }
+            }
+
+            Message::SettingsTokenChanged(v) => {
+                if let Some(ref mut form) = self.settings_form {
+                    form.api_token = v;
+                    form.status = None;
+                }
+            }
+
+            Message::TestConnection => {
+                if let Some(ref mut form) = self.settings_form {
+                    form.status = Some("Test connection coming in DESK-04".to_string());
+                }
+            }
+
+            Message::SaveSettings => {
+                if let Some(form) = self.settings_form.as_ref() {
+                    let mut new_cfg = self.config.clone();
+                    new_cfg.api_base_url = form.api_base_url.trim().to_string();
+                    let token = form.api_token.trim();
+                    new_cfg.api_token = if token.is_empty() {
+                        None
+                    } else {
+                        Some(token.to_string())
+                    };
+                    match config::save(&new_cfg) {
+                        Ok(()) => {
+                            self.config = new_cfg;
+                            self.config_error = None;
+                            self.modal = Modal::None;
+                            self.settings_form = None;
+                        }
+                        Err(e) => {
+                            if let Some(ref mut f) = self.settings_form {
+                                f.status = Some(format!("Error: {}", e));
+                            }
+                        }
+                    }
+                }
             }
 
             Message::SyncNow => {
@@ -533,6 +595,14 @@ impl App {
 
                 let confirm = delete_confirm_modal(issue_title);
                 iced::widget::stack![base, confirm].into()
+            }
+            Modal::Settings => {
+                if let Some(ref form) = self.settings_form {
+                    let modal = settings::view(form);
+                    iced::widget::stack![base, modal].into()
+                } else {
+                    base
+                }
             }
             Modal::None => base,
         }
