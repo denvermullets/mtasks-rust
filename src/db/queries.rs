@@ -5,17 +5,11 @@ use super::models::{Issue, Lane, Team};
 // ── Teams ──
 
 pub fn all_teams(conn: &Connection) -> Result<Vec<Team>> {
-    let mut stmt = conn.prepare("SELECT id, name, identifier, remote_id, created_at, updated_at FROM teams ORDER BY name")?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Team {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            identifier: row.get(2)?,
-            remote_id: row.get(3)?,
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, identifier, remote_id, created_at, updated_at
+         FROM teams ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], Team::from_row)?;
     rows.collect()
 }
 
@@ -23,20 +17,10 @@ pub fn all_teams(conn: &Connection) -> Result<Vec<Team>> {
 
 pub fn lanes_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Lane>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at FROM lanes WHERE team_id = ?1 ORDER BY position",
+        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+         FROM lanes WHERE team_id = ?1 ORDER BY position",
     )?;
-    let rows = stmt.query_map(params![team_id], |row| {
-        Ok(Lane {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            color: row.get(2)?,
-            position: row.get(3)?,
-            team_id: row.get(4)?,
-            remote_id: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![team_id], Lane::from_row)?;
     rows.collect()
 }
 
@@ -44,28 +28,13 @@ pub fn lanes_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Lane>> {
 
 pub fn issues_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Issue>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, description, priority, team_number, due_date, estimate, started_at, completed_at, canceled_at, lane_id, team_id, remote_id, created_at, updated_at
+        "SELECT id, title, description, priority, team_number, due_date, estimate,
+                started_at, completed_at, canceled_at, lane_id, team_id,
+                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                remote_id, created_at, updated_at
          FROM issues WHERE team_id = ?1 ORDER BY priority, created_at",
     )?;
-    let rows = stmt.query_map(params![team_id], |row| {
-        Ok(Issue {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            description: row.get(2)?,
-            priority: row.get(3)?,
-            team_number: row.get(4)?,
-            due_date: row.get(5)?,
-            estimate: row.get(6)?,
-            started_at: row.get(7)?,
-            completed_at: row.get(8)?,
-            canceled_at: row.get(9)?,
-            lane_id: row.get(10)?,
-            team_id: row.get(11)?,
-            remote_id: row.get(12)?,
-            created_at: row.get(13)?,
-            updated_at: row.get(14)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![team_id], Issue::from_row)?;
     rows.collect()
 }
 
