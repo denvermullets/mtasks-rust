@@ -1,0 +1,422 @@
+use rusqlite::{Connection, Result};
+use std::collections::HashSet;
+
+struct Migration {
+    version: u32,
+    name: &'static str,
+    up: &'static str,
+}
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial_baseline",
+        up: "
+            CREATE TABLE IF NOT EXISTS teams (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                identifier TEXT NOT NULL,
+                remote_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS lanes (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                color TEXT,
+                position INTEGER NOT NULL,
+                team_id TEXT NOT NULL REFERENCES teams(id),
+                remote_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS issues (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                priority INTEGER NOT NULL DEFAULT 4,
+                team_number INTEGER,
+                due_date TEXT,
+                estimate REAL,
+                started_at TEXT,
+                completed_at TEXT,
+                canceled_at TEXT,
+                lane_id TEXT NOT NULL REFERENCES lanes(id),
+                team_id TEXT NOT NULL REFERENCES teams(id),
+                remote_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL,
+                synced_at TEXT
+            );
+        ",
+    },
+    Migration {
+        version: 2,
+        name: "expand_teams",
+        up: "
+            ALTER TABLE teams ADD COLUMN description TEXT;
+            ALTER TABLE teams ADD COLUMN archived_at TEXT;
+            ALTER TABLE teams ADD COLUMN issue_counter INTEGER NOT NULL DEFAULT 0;
+        ",
+    },
+    Migration {
+        version: 3,
+        name: "create_projects",
+        up: "
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                team_id TEXT NOT NULL REFERENCES teams(id),
+                name TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'backlog',
+                priority INTEGER NOT NULL DEFAULT 4,
+                lead_id TEXT REFERENCES members(id),
+                start_date TEXT,
+                due_date TEXT,
+                roadmap_commitment TEXT,
+                velocity_score INTEGER NOT NULL DEFAULT 0,
+                completed_issues_count INTEGER NOT NULL DEFAULT 0,
+                total_issues_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_projects_team_id ON projects(team_id);
+            CREATE INDEX IF NOT EXISTS idx_projects_lead_id ON projects(lead_id);
+            CREATE INDEX IF NOT EXISTS idx_projects_team_id_roadmap_commitment
+                ON projects(team_id, roadmap_commitment);
+        ",
+    },
+    Migration {
+        version: 4,
+        name: "create_labels",
+        up: "
+            CREATE TABLE IF NOT EXISTS labels (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                team_id TEXT NOT NULL REFERENCES teams(id),
+                name TEXT NOT NULL,
+                color TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(team_id, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_labels_team_id ON labels(team_id);
+
+            CREATE TABLE IF NOT EXISTS issue_labels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                label_id TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(issue_id, label_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_issue_labels_issue_id ON issue_labels(issue_id);
+            CREATE INDEX IF NOT EXISTS idx_issue_labels_label_id ON issue_labels(label_id);
+
+            CREATE TABLE IF NOT EXISTS project_labels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                label_id TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, label_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_labels_project_id ON project_labels(project_id);
+            CREATE INDEX IF NOT EXISTS idx_project_labels_label_id ON project_labels(label_id);
+        ",
+    },
+    Migration {
+        version: 5,
+        name: "create_members",
+        up: "
+            CREATE TABLE IF NOT EXISTS members (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                team_id TEXT NOT NULL REFERENCES teams(id),
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(team_id, email)
+            );
+            CREATE INDEX IF NOT EXISTS idx_members_team_id ON members(team_id);
+        ",
+    },
+    Migration {
+        version: 6,
+        name: "expand_issues",
+        up: "
+            ALTER TABLE issues ADD COLUMN project_id TEXT REFERENCES projects(id);
+            ALTER TABLE issues ADD COLUMN parent_issue_id TEXT REFERENCES issues(id);
+            ALTER TABLE issues ADD COLUMN assignee_id TEXT REFERENCES members(id);
+            ALTER TABLE issues ADD COLUMN creator_id TEXT REFERENCES members(id);
+            ALTER TABLE issues ADD COLUMN archived_at TEXT;
+
+            CREATE INDEX IF NOT EXISTS idx_issues_project_id ON issues(project_id);
+            CREATE INDEX IF NOT EXISTS idx_issues_parent_issue_id ON issues(parent_issue_id);
+            CREATE INDEX IF NOT EXISTS idx_issues_assignee_id ON issues(assignee_id);
+            CREATE INDEX IF NOT EXISTS idx_issues_creator_id ON issues(creator_id);
+        ",
+    },
+    Migration {
+        version: 7,
+        name: "create_issue_dependencies",
+        up: "
+            CREATE TABLE IF NOT EXISTS issue_dependencies (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                blocking_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                blocked_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(blocking_issue_id, blocked_issue_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_issue_dependencies_blocking
+                ON issue_dependencies(blocking_issue_id);
+            CREATE INDEX IF NOT EXISTS idx_issue_dependencies_blocked
+                ON issue_dependencies(blocked_issue_id);
+        ",
+    },
+];
+
+pub fn run(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );",
+    )?;
+
+    bootstrap_legacy(conn)?;
+
+    let applied: HashSet<u32> = {
+        let mut stmt = conn.prepare("SELECT version FROM schema_migrations")?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0).map(|v| v as u32))?;
+        rows.collect::<Result<_>>()?
+    };
+
+    for migration in MIGRATIONS {
+        if applied.contains(&migration.version) {
+            continue;
+        }
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(migration.up)?;
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+            rusqlite::params![migration.version as i64, &now],
+        )?;
+        tx.commit()?;
+        eprintln!("Applied migration v{} ({})", migration.version, migration.name);
+    }
+
+    Ok(())
+}
+
+fn bootstrap_legacy(conn: &Connection) -> Result<()> {
+    let migrations_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))?;
+    if migrations_count > 0 {
+        return Ok(());
+    }
+
+    let teams_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='teams'",
+        [],
+        |row| row.get(0),
+    )?;
+    if teams_exists == 0 {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    conn.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
+        rusqlite::params![&now],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn
+    }
+
+    fn table_exists(conn: &Connection, name: &str) -> bool {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        count > 0
+    }
+
+    fn applied_versions(conn: &Connection) -> Vec<u32> {
+        let mut stmt = conn
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, i64>(0).map(|v| v as u32))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn fresh_install_applies_all_migrations() {
+        let conn = open_mem();
+        run(&conn).unwrap();
+
+        for table in [
+            "schema_migrations",
+            "teams",
+            "lanes",
+            "issues",
+            "sync_queue",
+            "projects",
+            "labels",
+            "issue_labels",
+            "project_labels",
+            "members",
+            "issue_dependencies",
+        ] {
+            assert!(table_exists(&conn, table), "missing table: {}", table);
+        }
+
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn idempotent_when_run_twice() {
+        let conn = open_mem();
+        run(&conn).unwrap();
+        run(&conn).unwrap();
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn legacy_install_marks_v1_applied() {
+        let conn = open_mem();
+        // Simulate a pre-migration-runner DB by running v1 SQL only.
+        conn.execute_batch(MIGRATIONS[0].up).unwrap();
+        assert!(table_exists(&conn, "teams"));
+        assert!(!table_exists(&conn, "schema_migrations"));
+
+        run(&conn).unwrap();
+
+        // v1 should be marked applied without re-running, and v2..v7 newly applied.
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert!(table_exists(&conn, "projects"));
+        assert!(table_exists(&conn, "issue_dependencies"));
+    }
+
+    #[test]
+    fn legacy_data_preserved_through_upgrade() {
+        let conn = open_mem();
+        conn.execute_batch(MIGRATIONS[0].up).unwrap();
+
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t1', 'Old Team', 'OLD', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+             VALUES ('l1', 'Backlog', 0, 't1', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES ('i1', 'Old Issue', 2, 'l1', 't1', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let team_name: String = conn
+            .query_row("SELECT name FROM teams WHERE id='t1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(team_name, "Old Team");
+
+        let issue_title: String = conn
+            .query_row("SELECT title FROM issues WHERE id='i1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(issue_title, "Old Issue");
+
+        // New columns exist and default to NULL on legacy rows.
+        let archived: Option<String> = conn
+            .query_row("SELECT archived_at FROM issues WHERE id='i1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(archived.is_none());
+
+        let counter: i64 = conn
+            .query_row("SELECT issue_counter FROM teams WHERE id='t1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(counter, 0);
+    }
+
+    #[test]
+    fn issue_dependencies_unique_constraint() {
+        let conn = open_mem();
+        run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+             VALUES ('l1', 'B', 0, 't1', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        for id in ["a", "b"] {
+            conn.execute(
+                "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+                 VALUES (?1, 'i', 4, 'l1', 't1', ?2, ?2)",
+                rusqlite::params![id, now],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+             VALUES ('d1', 'a', 'b', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+             VALUES ('d2', 'a', 'b', ?1, ?1)",
+            rusqlite::params![now],
+        );
+        assert!(dup.is_err(), "expected UNIQUE violation on duplicate dependency");
+    }
+}
