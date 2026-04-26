@@ -1,6 +1,8 @@
 use rusqlite::{Connection, Result};
 use std::path::PathBuf;
 
+use super::migrations;
+
 pub fn db_path() -> PathBuf {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -13,63 +15,8 @@ pub fn open() -> Result<Connection> {
     let path = db_path();
     let conn = Connection::open(&path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    run_migrations(&conn)?;
+    migrations::run(&conn)?;
     Ok(conn)
-}
-
-fn run_migrations(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS teams (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            identifier TEXT NOT NULL,
-            remote_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS lanes (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            color TEXT,
-            position INTEGER NOT NULL,
-            team_id TEXT NOT NULL REFERENCES teams(id),
-            remote_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS issues (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT,
-            priority INTEGER NOT NULL DEFAULT 4,
-            team_number INTEGER,
-            due_date TEXT,
-            estimate REAL,
-            started_at TEXT,
-            completed_at TEXT,
-            canceled_at TEXT,
-            lane_id TEXT NOT NULL REFERENCES lanes(id),
-            team_id TEXT NOT NULL REFERENCES teams(id),
-            remote_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS sync_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entity_type TEXT NOT NULL,
-            entity_id TEXT NOT NULL,
-            action TEXT NOT NULL,
-            payload TEXT,
-            created_at TEXT NOT NULL,
-            synced_at TEXT
-        );
-        ",
-    )?;
-    Ok(())
 }
 
 pub fn seed_default_data(conn: &Connection) -> Result<()> {
