@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use super::{ApiClient, ApiError, IssueDto};
 
 #[derive(Debug, Default, Clone)]
@@ -32,6 +34,37 @@ impl IssueFilters {
     }
 }
 
+/// Body for create/update — fields match Rails `IssuesController` strong params.
+/// `priority` is a string ("urgent" | "high" | "medium" | "low" | "no_priority").
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct IssueParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_issue_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_ids: Option<Vec<i64>>,
+}
+
+#[derive(Debug, Serialize)]
+struct IssueWrap<'a> {
+    issue: &'a IssueParams,
+}
+
 pub async fn list(
     client: &ApiClient,
     team_id: i64,
@@ -47,6 +80,25 @@ pub async fn list(
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<IssueDto, ApiError> {
     let path = format!("api/v1/teams/{team_id}/issues/{id}");
     client.get(&path).await
+}
+
+pub async fn create(
+    client: &ApiClient,
+    team_id: i64,
+    params: &IssueParams,
+) -> Result<IssueDto, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/issues");
+    client.post(&path, &IssueWrap { issue: params }).await
+}
+
+pub async fn update(
+    client: &ApiClient,
+    team_id: i64,
+    id: i64,
+    params: &IssueParams,
+) -> Result<IssueDto, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/issues/{id}");
+    client.patch(&path, &IssueWrap { issue: params }).await
 }
 
 #[cfg(test)]
@@ -79,5 +131,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(f.query_string(), "?priority=urgent");
+    }
+
+    #[test]
+    fn issue_params_wrap_under_issue_key() {
+        let params = IssueParams {
+            title: Some("Bug".into()),
+            priority: Some("high".into()),
+            label_ids: Some(vec![1, 2]),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(IssueWrap { issue: &params }).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "issue": {
+                    "title": "Bug",
+                    "priority": "high",
+                    "label_ids": [1, 2]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn issue_params_skip_unset_fields() {
+        let params = IssueParams {
+            title: Some("Just a title".into()),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(IssueWrap { issue: &params }).unwrap();
+        assert_eq!(body, serde_json::json!({ "issue": { "title": "Just a title" } }));
     }
 }
