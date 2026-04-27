@@ -1,6 +1,6 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
-use super::models::{Issue, Lane, Team};
+use super::models::{Issue, IssueDependency, Label, Lane, Project, Team};
 
 // ── Teams ──
 
@@ -113,4 +113,100 @@ pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> R
         params![priority, now, issue_id],
     )?;
     Ok(())
+}
+
+pub fn get_issue(conn: &Connection, issue_id: &str) -> Result<Option<Issue>> {
+    conn.query_row(
+        "SELECT id, title, description, priority, team_number, due_date, estimate,
+                started_at, completed_at, canceled_at, lane_id, team_id,
+                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                remote_id, created_at, updated_at
+         FROM issues WHERE id = ?1",
+        params![issue_id],
+        Issue::from_row,
+    )
+    .optional()
+}
+
+pub fn get_project(conn: &Connection, project_id: &str) -> Result<Option<Project>> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, description, status, priority,
+                lead_id, start_date, due_date, roadmap_commitment,
+                velocity_score, completed_issues_count, total_issues_count,
+                created_at, updated_at
+         FROM projects WHERE id = ?1",
+        params![project_id],
+        Project::from_row,
+    )
+    .optional()
+}
+
+pub fn get_label(conn: &Connection, label_id: &str) -> Result<Option<Label>> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, color, created_at, updated_at
+         FROM labels WHERE id = ?1",
+        params![label_id],
+        Label::from_row,
+    )
+    .optional()
+}
+
+pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<IssueDependency>> {
+    conn.query_row(
+        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at
+         FROM issue_dependencies WHERE id = ?1",
+        params![dep_id],
+        IssueDependency::from_row,
+    )
+    .optional()
+}
+
+pub fn set_issue_remote_id(conn: &Connection, issue_id: &str, remote_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE issues SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, issue_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_project_remote_id(conn: &Connection, project_id: &str, remote_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, project_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_label_remote_id(conn: &Connection, label_id: &str, remote_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE labels SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, label_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_issue_dependency_remote_id(
+    conn: &Connection,
+    dep_id: &str,
+    remote_id: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE issue_dependencies SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, dep_id],
+    )?;
+    Ok(())
+}
+
+/// Resolve a local UUID to its Rails `remote_id`. Returns `Ok(None)` if the row
+/// exists but hasn't been synced yet, or if the row is missing entirely.
+pub fn remote_id_for(conn: &Connection, table: &str, id: &str) -> Result<Option<i64>> {
+    let allowed = ["teams", "lanes", "issues", "projects", "labels", "members"];
+    if !allowed.contains(&table) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let sql = format!("SELECT remote_id FROM {table} WHERE id = ?1");
+    let raw: Option<Option<i64>> = conn
+        .query_row(&sql, params![id], |row| row.get::<_, Option<i64>>(0))
+        .optional()?;
+    Ok(raw.flatten())
 }

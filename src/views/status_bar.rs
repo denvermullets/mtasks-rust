@@ -8,11 +8,19 @@ pub fn view<'a>(
     pending_sync_count: i32,
     show_help: bool,
     config_error: Option<&str>,
+    last_sync_error: Option<&str>,
 ) -> Element<'a, Message> {
-    let sync_text = if pending_sync_count > 0 {
+    let sync_text = if let Some(err) = last_sync_error {
+        format!("Sync error: {err}")
+    } else if pending_sync_count > 0 {
         format!("{} pending sync", pending_sync_count)
     } else {
         "Synced".to_string()
+    };
+    let sync_color = if last_sync_error.is_some() {
+        t::DANGER
+    } else {
+        t::TEXT_MUTED
     };
 
     let shortcuts = if show_help {
@@ -38,7 +46,7 @@ pub fn view<'a>(
         );
     }
 
-    let bar = bar.push(text(sync_text).size(12).color(t::TEXT_MUTED));
+    let bar = bar.push(text(sync_text).size(12).color(sync_color));
 
     container(bar)
         .padding([6, 14])

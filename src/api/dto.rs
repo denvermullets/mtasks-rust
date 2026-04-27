@@ -358,25 +358,41 @@ pub struct CommentDto {
 }
 
 // ── Flat DTOs (no Rails serializer; mirror default AR as_json output) ──
+//
+// Some Rails index serializers (teams, lanes, labels, members) omit
+// `created_at`/`updated_at` to keep list payloads small. The fields are
+// modeled as `Option<String>` with `#[serde(default)]` so deserialization
+// doesn't fail when the server elides them; conversions back to local models
+// fall back to `now()` if absent.
+
+fn now_iso8601() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TeamDto {
     pub id: i64,
     pub name: String,
     pub identifier: String,
-    pub created_at: String,
-    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 impl From<TeamDto> for Team {
     fn from(dto: TeamDto) -> Self {
+        let created_at = dto.created_at.unwrap_or_else(now_iso8601);
+        let updated_at = dto.updated_at.unwrap_or_else(|| created_at.clone());
         Team {
             id: Uuid::new_v4().to_string(),
             name: dto.name,
             identifier: dto.identifier,
             remote_id: Some(dto.id),
-            created_at: dto.created_at,
-            updated_at: dto.updated_at,
+            created_at,
+            updated_at,
         }
     }
 }
@@ -388,8 +404,8 @@ impl TryFrom<&Team> for TeamDto {
             id: require_remote(t.remote_id, "team")?,
             name: t.name.clone(),
             identifier: t.identifier.clone(),
-            created_at: t.created_at.clone(),
-            updated_at: t.updated_at.clone(),
+            created_at: Some(t.created_at.clone()),
+            updated_at: Some(t.updated_at.clone()),
         })
     }
 }
@@ -401,8 +417,10 @@ pub struct LaneDto {
     pub name: String,
     pub color: Option<String>,
     pub position: i32,
-    pub created_at: String,
-    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 impl LaneDto {
@@ -413,6 +431,8 @@ impl LaneDto {
         existing_uuid: Option<String>,
     ) -> Result<Lane, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
+        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Lane {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
             name: self.name,
@@ -420,8 +440,8 @@ impl LaneDto {
             position: self.position,
             team_id,
             remote_id: Some(self.id),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at,
+            updated_at,
         })
     }
 }
@@ -435,8 +455,8 @@ impl LaneDto {
             name: lane.name.clone(),
             color: lane.color.clone(),
             position: lane.position,
-            created_at: lane.created_at.clone(),
-            updated_at: lane.updated_at.clone(),
+            created_at: Some(lane.created_at.clone()),
+            updated_at: Some(lane.updated_at.clone()),
         })
     }
 }
@@ -447,8 +467,10 @@ pub struct LabelDto {
     pub team_id: i64,
     pub name: String,
     pub color: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 impl LabelDto {
@@ -458,14 +480,16 @@ impl LabelDto {
         existing_uuid: Option<String>,
     ) -> Result<Label, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
+        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Label {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
             remote_id: Some(self.id),
             team_id,
             name: self.name,
             color: self.color,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at,
+            updated_at,
         })
     }
 
@@ -476,8 +500,8 @@ impl LabelDto {
             team_id: require_remote(team.remote_id, "team")?,
             name: label.name.clone(),
             color: label.color.clone(),
-            created_at: label.created_at.clone(),
-            updated_at: label.updated_at.clone(),
+            created_at: Some(label.created_at.clone()),
+            updated_at: Some(label.updated_at.clone()),
         })
     }
 }
@@ -488,8 +512,10 @@ pub struct MemberDto {
     pub team_id: i64,
     pub name: String,
     pub email: String,
-    pub created_at: String,
-    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 impl MemberDto {
@@ -499,14 +525,16 @@ impl MemberDto {
         existing_uuid: Option<String>,
     ) -> Result<Member, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
+        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Member {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
             remote_id: Some(self.id),
             team_id,
             name: self.name,
             email: self.email,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at,
+            updated_at,
         })
     }
 
@@ -517,8 +545,8 @@ impl MemberDto {
             team_id: require_remote(team.remote_id, "team")?,
             name: member.name.clone(),
             email: member.email.clone(),
-            created_at: member.created_at.clone(),
-            updated_at: member.updated_at.clone(),
+            created_at: Some(member.created_at.clone()),
+            updated_at: Some(member.updated_at.clone()),
         })
     }
 }
