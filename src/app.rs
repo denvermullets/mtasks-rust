@@ -7,6 +7,7 @@ use crate::config::{self, Config};
 use crate::db::models::{Issue, Lane, Priority, Team};
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
+use crate::sync::engine::{SyncEngine, SyncReport};
 use crate::theme as t;
 use crate::views::{board, issue_form, settings, status_bar, team_list};
 
@@ -55,6 +56,7 @@ pub enum Message {
 
     // Sync
     SyncNow,
+    SyncCompleted(SyncReport),
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
@@ -82,6 +84,8 @@ pub struct App {
     pending_sync_count: i32,
     config: Config,
     config_error: Option<String>,
+    last_sync_error: Option<String>,
+    sync_in_progress: bool,
 }
 
 impl App {
@@ -188,6 +192,8 @@ impl App {
             pending_sync_count,
             config,
             config_error,
+            last_sync_error: None,
+            sync_in_progress: false,
         };
 
         (app, Task::none())
@@ -535,8 +541,40 @@ impl App {
             }
 
             Message::SyncNow => {
-                // Stubbed: just reload count
+                if self.sync_in_progress {
+                    return Task::none();
+                }
+                let base_url = self.config.api_base_url.trim().to_string();
+                let token = self
+                    .config
+                    .api_token
+                    .clone()
+                    .unwrap_or_default();
+                match ApiClient::new(base_url, token) {
+                    Ok(client) => {
+                        self.sync_in_progress = true;
+                        self.last_sync_error = None;
+                        return Task::perform(
+                            async move { SyncEngine::drain(&client).await },
+                            Message::SyncCompleted,
+                        );
+                    }
+                    Err(ApiError::MissingToken) => {
+                        self.last_sync_error =
+                            Some("set an API token in Settings".into());
+                    }
+                    Err(e) => {
+                        self.last_sync_error = Some(e.to_string());
+                    }
+                }
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
+            }
+
+            Message::SyncCompleted(report) => {
+                self.sync_in_progress = false;
+                self.last_sync_error = report.last_error;
+                self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
+                self.reload_data();
             }
         }
 
@@ -581,6 +619,7 @@ impl App {
             self.pending_sync_count,
             self.show_help,
             self.config_error.as_deref(),
+            self.last_sync_error.as_deref(),
         );
 
         let main_content = column![]
