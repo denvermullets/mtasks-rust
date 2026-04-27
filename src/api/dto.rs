@@ -1,7 +1,1271 @@
-use serde::Deserialize;
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct TeamDto {
-    #[allow(dead_code)]
+use crate::api::error::ApiError;
+use crate::db::models::{
+    Issue, IssueDependency, Label, Lane, Member, Project, ProjectStatus, RoadmapCommitment, Team,
+};
+
+// ── Priority string ↔ i32 mapping (Rails: urgent/high/medium/low/no_priority) ──
+
+pub fn priority_to_string(p: i32) -> &'static str {
+    match p {
+        0 => "urgent",
+        1 => "high",
+        2 => "medium",
+        3 => "low",
+        _ => "no_priority",
+    }
+}
+
+pub fn priority_from_string(s: &str) -> Result<i32, ApiError> {
+    match s {
+        "urgent" => Ok(0),
+        "high" => Ok(1),
+        "medium" => Ok(2),
+        "low" => Ok(3),
+        "no_priority" => Ok(4),
+        other => Err(ApiError::EnumMapping(format!(
+            "unknown priority: {other}"
+        ))),
+    }
+}
+
+// ── Reference shapes used inside Issue/Project/Comment serializers ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecordRef {
     pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabelRef {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParentIssueRef {
+    pub id: i64,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueRef {
+    pub id: i64,
+    pub identifier: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserRef {
+    pub id: i64,
+    pub name: String,
+    pub email: String,
+}
+
+// ── IssueDto (mirrors Api::V1::IssueSerializer) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IssueDto {
+    pub id: i64,
+    pub identifier: String,
+    pub title: String,
+    pub priority: String,
+    pub estimate: Option<i64>,
+    pub due_date: Option<String>,
+    pub lane: Option<RecordRef>,
+    pub assignee: Option<RecordRef>,
+    pub creator: Option<RecordRef>,
+    pub project: Option<RecordRef>,
+    #[serde(default)]
+    pub labels: Vec<LabelRef>,
+    pub created_at: String,
+    pub updated_at: String,
+
+    // detail-only (None when the Rails serializer ran with detailed: false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_issue: Option<ParentIssueRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_issues: Option<Vec<IssueRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_issues: Option<Vec<IssueRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canceled_at: Option<String>,
+}
+
+impl IssueDto {
+    /// Build a DTO from a local model. Hydrates nested {id, name} objects by
+    /// querying SQLite for the related records' remote_ids and names.
+    pub fn from_model(conn: &Connection, issue: &Issue) -> Result<Self, ApiError> {
+        let team = lookup_team_by_local_id(conn, &issue.team_id)?;
+        let team_number = issue
+            .team_number
+            .ok_or_else(|| ApiError::Decode("issue missing team_number".into()))?;
+        let identifier = format!("{}-{}", team.identifier, team_number);
+
+        let lane = lookup_lane_by_local_id(conn, &issue.lane_id)?;
+        let lane_ref = Some(RecordRef {
+            id: require_remote(lane.remote_id, "lane")?,
+            name: lane.name,
+        });
+
+        let assignee = match &issue.assignee_id {
+            Some(local) => Some(member_record_ref(conn, local)?),
+            None => None,
+        };
+        let creator = match &issue.creator_id {
+            Some(local) => Some(member_record_ref(conn, local)?),
+            None => None,
+        };
+        let project = match &issue.project_id {
+            Some(local) => Some(project_record_ref(conn, local)?),
+            None => None,
+        };
+        let parent_issue = match &issue.parent_issue_id {
+            Some(local) => Some(parent_issue_ref(conn, local)?),
+            None => None,
+        };
+        let labels = labels_for_issue(conn, &issue.id)?;
+        let blocking = blocking_issue_refs(conn, &issue.id)?;
+        let blocked = blocked_issue_refs(conn, &issue.id)?;
+
+        let id = require_remote(issue.remote_id, "issue")?;
+        Ok(IssueDto {
+            id,
+            identifier,
+            title: issue.title.clone(),
+            priority: priority_to_string(issue.priority).to_string(),
+            estimate: issue.estimate.map(|f| f as i64),
+            due_date: issue.due_date.clone(),
+            lane: lane_ref,
+            assignee,
+            creator,
+            project,
+            labels,
+            created_at: issue.created_at.clone(),
+            updated_at: issue.updated_at.clone(),
+            description: issue.description.clone(),
+            parent_issue,
+            blocking_issues: Some(blocking),
+            blocked_issues: Some(blocked),
+            started_at: issue.started_at.clone(),
+            completed_at: issue.completed_at.clone(),
+            canceled_at: issue.canceled_at.clone(),
+        })
+    }
+
+    /// Convert a DTO into a local Issue model. Resolves nested Rails ids to
+    /// local UUIDs by remote_id lookups. Caller supplies the team's local UUID
+    /// (the issue endpoint is scoped by team) and an existing local UUID when
+    /// updating; otherwise a fresh UUID is generated.
+    ///
+    /// Labels and blocking/blocked dependencies are not persisted to the Issue
+    /// struct itself — they live in join tables. Callers should read
+    /// `self.labels` and `self.blocking_issues` separately and write them to
+    /// the issue_labels / issue_dependencies tables.
+    pub fn into_model(
+        self,
+        conn: &Connection,
+        team_id: String,
+        existing_uuid: Option<String>,
+    ) -> Result<Issue, ApiError> {
+        let lane_remote = self
+            .lane
+            .as_ref()
+            .ok_or_else(|| ApiError::Decode("issue payload missing lane".into()))?
+            .id;
+        let lane_id = local_uuid_for(conn, "lanes", lane_remote)?;
+
+        let assignee_id = match &self.assignee {
+            Some(r) => Some(local_uuid_for(conn, "members", r.id)?),
+            None => None,
+        };
+        let creator_id = match &self.creator {
+            Some(r) => Some(local_uuid_for(conn, "members", r.id)?),
+            None => None,
+        };
+        let project_id = match &self.project {
+            Some(r) => Some(local_uuid_for(conn, "projects", r.id)?),
+            None => None,
+        };
+        let parent_issue_id = match &self.parent_issue {
+            Some(r) => Some(local_uuid_for(conn, "issues", r.id)?),
+            None => None,
+        };
+
+        // identifier ("PROJ-42") splits as "{team_identifier}-{team_number}".
+        // The team_identifier may itself contain hyphens? Unlikely in practice
+        // (Rails enforces 3-4 char alphanumeric), but split from the right to
+        // be safe.
+        let team_number = self
+            .identifier
+            .rsplit_once('-')
+            .and_then(|(_, n)| n.parse::<i32>().ok());
+
+        Ok(Issue {
+            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            title: self.title,
+            description: self.description,
+            priority: priority_from_string(&self.priority)?,
+            team_number,
+            due_date: self.due_date,
+            estimate: self.estimate.map(|i| i as f64),
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            canceled_at: self.canceled_at,
+            lane_id,
+            team_id,
+            project_id,
+            parent_issue_id,
+            assignee_id,
+            creator_id,
+            archived_at: None,
+            remote_id: Some(self.id),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+// ── ProjectDto (mirrors Api::V1::ProjectSerializer) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectDto {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: ProjectStatus,
+    pub priority: String,
+    pub lead: Option<RecordRef>,
+    pub start_date: Option<String>,
+    pub due_date: Option<String>,
+    pub velocity_score: i64,
+    pub completed_issues_count: i64,
+    pub total_issues_count: i64,
+    pub progress_percentage: i64,
+    pub behind_schedule: bool,
+    pub roadmap_commitment: Option<RoadmapCommitment>,
+    pub created_at: String,
+    pub updated_at: String,
+
+    // detail-only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<LabelRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issues_count: Option<i64>,
+}
+
+impl ProjectDto {
+    pub fn from_model(conn: &Connection, project: &Project) -> Result<Self, ApiError> {
+        let lead = match &project.lead_id {
+            Some(local) => Some(member_record_ref(conn, local)?),
+            None => None,
+        };
+        let labels = labels_for_project(conn, &project.id)?;
+
+        let progress_percentage = if project.total_issues_count == 0 {
+            0
+        } else {
+            (project.completed_issues_count as f64 / project.total_issues_count as f64 * 100.0)
+                .round() as i64
+        };
+
+        // behind_schedule on Rails depends on querying issues for the
+        // effective start date (project.rb:44). Replicating that here would
+        // cross out of the DTO module's responsibility; defer until a caller
+        // actually needs it locally and pass a conservative default.
+        let behind_schedule = false;
+
+        Ok(ProjectDto {
+            id: require_remote(project.remote_id, "project")?,
+            name: project.name.clone(),
+            description: project.description.clone(),
+            status: project.status,
+            priority: priority_to_string(project.priority).to_string(),
+            lead,
+            start_date: project.start_date.clone(),
+            due_date: project.due_date.clone(),
+            velocity_score: project.velocity_score,
+            completed_issues_count: project.completed_issues_count,
+            total_issues_count: project.total_issues_count,
+            progress_percentage,
+            behind_schedule,
+            roadmap_commitment: project.roadmap_commitment,
+            created_at: project.created_at.clone(),
+            updated_at: project.updated_at.clone(),
+            labels: Some(labels),
+            issues_count: None,
+        })
+    }
+
+    pub fn into_model(
+        self,
+        conn: &Connection,
+        team_id: String,
+        existing_uuid: Option<String>,
+    ) -> Result<Project, ApiError> {
+        let lead_id = match &self.lead {
+            Some(r) => Some(local_uuid_for(conn, "members", r.id)?),
+            None => None,
+        };
+
+        Ok(Project {
+            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            remote_id: Some(self.id),
+            team_id,
+            name: self.name,
+            description: self.description,
+            status: self.status,
+            priority: priority_from_string(&self.priority)?,
+            lead_id,
+            start_date: self.start_date,
+            due_date: self.due_date,
+            roadmap_commitment: self.roadmap_commitment,
+            velocity_score: self.velocity_score,
+            completed_issues_count: self.completed_issues_count,
+            total_issues_count: self.total_issues_count,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+// ── CommentDto (mirrors Api::V1::CommentSerializer) ──
+//
+// No local Comment model exists yet; conversion fns are deferred until the
+// SQLite schema gains a `comments` table. Struct ships now so DESK-08 can
+// parse comment endpoints.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CommentDto {
+    pub id: i64,
+    pub body: String,
+    pub parent_id: Option<i64>,
+    pub user: Option<UserRef>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replies: Option<Vec<CommentDto>>,
+}
+
+// ── Flat DTOs (no Rails serializer; mirror default AR as_json output) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamDto {
+    pub id: i64,
+    pub name: String,
+    pub identifier: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<TeamDto> for Team {
+    fn from(dto: TeamDto) -> Self {
+        Team {
+            id: Uuid::new_v4().to_string(),
+            name: dto.name,
+            identifier: dto.identifier,
+            remote_id: Some(dto.id),
+            created_at: dto.created_at,
+            updated_at: dto.updated_at,
+        }
+    }
+}
+
+impl TryFrom<&Team> for TeamDto {
+    type Error = ApiError;
+    fn try_from(t: &Team) -> Result<Self, Self::Error> {
+        Ok(TeamDto {
+            id: require_remote(t.remote_id, "team")?,
+            name: t.name.clone(),
+            identifier: t.identifier.clone(),
+            created_at: t.created_at.clone(),
+            updated_at: t.updated_at.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LaneDto {
+    pub id: i64,
+    pub team_id: i64,
+    pub name: String,
+    pub color: Option<String>,
+    pub position: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl LaneDto {
+    /// Resolve the Rails team_id to a local UUID and produce a Lane model.
+    pub fn into_model(
+        self,
+        conn: &Connection,
+        existing_uuid: Option<String>,
+    ) -> Result<Lane, ApiError> {
+        let team_id = local_uuid_for(conn, "teams", self.team_id)?;
+        Ok(Lane {
+            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            name: self.name,
+            color: self.color,
+            position: self.position,
+            team_id,
+            remote_id: Some(self.id),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+impl LaneDto {
+    pub fn from_model(conn: &Connection, lane: &Lane) -> Result<Self, ApiError> {
+        let team = lookup_team_by_local_id(conn, &lane.team_id)?;
+        Ok(LaneDto {
+            id: require_remote(lane.remote_id, "lane")?,
+            team_id: require_remote(team.remote_id, "team")?,
+            name: lane.name.clone(),
+            color: lane.color.clone(),
+            position: lane.position,
+            created_at: lane.created_at.clone(),
+            updated_at: lane.updated_at.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabelDto {
+    pub id: i64,
+    pub team_id: i64,
+    pub name: String,
+    pub color: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl LabelDto {
+    pub fn into_model(
+        self,
+        conn: &Connection,
+        existing_uuid: Option<String>,
+    ) -> Result<Label, ApiError> {
+        let team_id = local_uuid_for(conn, "teams", self.team_id)?;
+        Ok(Label {
+            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            remote_id: Some(self.id),
+            team_id,
+            name: self.name,
+            color: self.color,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+
+    pub fn from_model(conn: &Connection, label: &Label) -> Result<Self, ApiError> {
+        let team = lookup_team_by_local_id(conn, &label.team_id)?;
+        Ok(LabelDto {
+            id: require_remote(label.remote_id, "label")?,
+            team_id: require_remote(team.remote_id, "team")?,
+            name: label.name.clone(),
+            color: label.color.clone(),
+            created_at: label.created_at.clone(),
+            updated_at: label.updated_at.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemberDto {
+    pub id: i64,
+    pub team_id: i64,
+    pub name: String,
+    pub email: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl MemberDto {
+    pub fn into_model(
+        self,
+        conn: &Connection,
+        existing_uuid: Option<String>,
+    ) -> Result<Member, ApiError> {
+        let team_id = local_uuid_for(conn, "teams", self.team_id)?;
+        Ok(Member {
+            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            remote_id: Some(self.id),
+            team_id,
+            name: self.name,
+            email: self.email,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+
+    pub fn from_model(conn: &Connection, member: &Member) -> Result<Self, ApiError> {
+        let team = lookup_team_by_local_id(conn, &member.team_id)?;
+        Ok(MemberDto {
+            id: require_remote(member.remote_id, "member")?,
+            team_id: require_remote(team.remote_id, "team")?,
+            name: member.name.clone(),
+            email: member.email.clone(),
+            created_at: member.created_at.clone(),
+            updated_at: member.updated_at.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueDependencyDto {
+    pub id: i64,
+    pub blocking_issue_id: i64,
+    pub blocked_issue_id: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl IssueDependencyDto {
+    pub fn into_model(
+        self,
+        conn: &Connection,
+        existing_uuid: Option<String>,
+    ) -> Result<IssueDependency, ApiError> {
+        let blocking_issue_id = local_uuid_for(conn, "issues", self.blocking_issue_id)?;
+        let blocked_issue_id = local_uuid_for(conn, "issues", self.blocked_issue_id)?;
+        Ok(IssueDependency {
+            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            remote_id: Some(self.id),
+            blocking_issue_id,
+            blocked_issue_id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+
+    pub fn from_model(conn: &Connection, dep: &IssueDependency) -> Result<Self, ApiError> {
+        let blocking = lookup_issue_by_local_id(conn, &dep.blocking_issue_id)?;
+        let blocked = lookup_issue_by_local_id(conn, &dep.blocked_issue_id)?;
+        Ok(IssueDependencyDto {
+            id: require_remote(dep.remote_id, "issue_dependency")?,
+            blocking_issue_id: require_remote(blocking.remote_id, "issue")?,
+            blocked_issue_id: require_remote(blocked.remote_id, "issue")?,
+            created_at: dep.created_at.clone(),
+            updated_at: dep.updated_at.clone(),
+        })
+    }
+}
+
+// ── Internal lookup helpers ──
+
+fn require_remote(remote_id: Option<i64>, what: &str) -> Result<i64, ApiError> {
+    remote_id.ok_or_else(|| {
+        ApiError::Decode(format!(
+            "{what} has no remote_id; cannot serialize for API"
+        ))
+    })
+}
+
+fn local_uuid_for(conn: &Connection, table: &str, remote_id: i64) -> Result<String, ApiError> {
+    let sql = format!("SELECT id FROM {table} WHERE remote_id = ?1");
+    conn.query_row(&sql, params![remote_id], |r| r.get::<_, String>(0))
+        .map_err(|e| {
+            ApiError::Decode(format!(
+                "could not resolve {table} remote_id={remote_id}: {e}"
+            ))
+        })
+}
+
+fn lookup_team_by_local_id(conn: &Connection, id: &str) -> Result<Team, ApiError> {
+    conn.query_row(
+        "SELECT id, name, identifier, remote_id, created_at, updated_at
+         FROM teams WHERE id = ?1",
+        params![id],
+        Team::from_row,
+    )
+    .map_err(|e| ApiError::Decode(format!("team {id} not found: {e}")))
+}
+
+fn lookup_lane_by_local_id(conn: &Connection, id: &str) -> Result<Lane, ApiError> {
+    conn.query_row(
+        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+         FROM lanes WHERE id = ?1",
+        params![id],
+        Lane::from_row,
+    )
+    .map_err(|e| ApiError::Decode(format!("lane {id} not found: {e}")))
+}
+
+fn lookup_member_by_local_id(conn: &Connection, id: &str) -> Result<Member, ApiError> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, email, created_at, updated_at
+         FROM members WHERE id = ?1",
+        params![id],
+        Member::from_row,
+    )
+    .map_err(|e| ApiError::Decode(format!("member {id} not found: {e}")))
+}
+
+fn lookup_project_by_local_id(conn: &Connection, id: &str) -> Result<Project, ApiError> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, description, status, priority, lead_id,
+                start_date, due_date, roadmap_commitment, velocity_score,
+                completed_issues_count, total_issues_count, created_at, updated_at
+         FROM projects WHERE id = ?1",
+        params![id],
+        Project::from_row,
+    )
+    .map_err(|e| ApiError::Decode(format!("project {id} not found: {e}")))
+}
+
+fn lookup_issue_by_local_id(conn: &Connection, id: &str) -> Result<Issue, ApiError> {
+    conn.query_row(
+        "SELECT id, title, description, priority, team_number, due_date, estimate,
+                started_at, completed_at, canceled_at, lane_id, team_id,
+                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                remote_id, created_at, updated_at
+         FROM issues WHERE id = ?1",
+        params![id],
+        Issue::from_row,
+    )
+    .map_err(|e| ApiError::Decode(format!("issue {id} not found: {e}")))
+}
+
+fn member_record_ref(conn: &Connection, id: &str) -> Result<RecordRef, ApiError> {
+    let m = lookup_member_by_local_id(conn, id)?;
+    Ok(RecordRef {
+        id: require_remote(m.remote_id, "member")?,
+        name: m.name,
+    })
+}
+
+fn project_record_ref(conn: &Connection, id: &str) -> Result<RecordRef, ApiError> {
+    let p = lookup_project_by_local_id(conn, id)?;
+    Ok(RecordRef {
+        id: require_remote(p.remote_id, "project")?,
+        name: p.name,
+    })
+}
+
+fn parent_issue_ref(conn: &Connection, id: &str) -> Result<ParentIssueRef, ApiError> {
+    let parent = lookup_issue_by_local_id(conn, id)?;
+    let team = lookup_team_by_local_id(conn, &parent.team_id)?;
+    let team_number = parent
+        .team_number
+        .ok_or_else(|| ApiError::Decode("parent issue missing team_number".into()))?;
+    Ok(ParentIssueRef {
+        id: require_remote(parent.remote_id, "issue")?,
+        identifier: format!("{}-{}", team.identifier, team_number),
+    })
+}
+
+fn labels_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<LabelRef>, ApiError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT l.remote_id, l.name
+             FROM labels l
+             JOIN issue_labels il ON il.label_id = l.id
+             WHERE il.issue_id = ?1
+             ORDER BY l.name",
+        )
+        .map_err(|e| ApiError::Decode(format!("labels_for_issue prepare: {e}")))?;
+    let rows = stmt
+        .query_map(params![issue_id], |row| {
+            let remote: Option<i64> = row.get(0)?;
+            let name: String = row.get(1)?;
+            Ok((remote, name))
+        })
+        .map_err(|e| ApiError::Decode(format!("labels_for_issue query: {e}")))?;
+    rows.map(|r| {
+        let (remote, name) = r.map_err(|e| ApiError::Decode(format!("labels row: {e}")))?;
+        Ok(LabelRef {
+            id: require_remote(remote, "label")?,
+            name,
+        })
+    })
+    .collect()
+}
+
+fn labels_for_project(conn: &Connection, project_id: &str) -> Result<Vec<LabelRef>, ApiError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT l.remote_id, l.name
+             FROM labels l
+             JOIN project_labels pl ON pl.label_id = l.id
+             WHERE pl.project_id = ?1
+             ORDER BY l.name",
+        )
+        .map_err(|e| ApiError::Decode(format!("labels_for_project prepare: {e}")))?;
+    let rows = stmt
+        .query_map(params![project_id], |row| {
+            let remote: Option<i64> = row.get(0)?;
+            let name: String = row.get(1)?;
+            Ok((remote, name))
+        })
+        .map_err(|e| ApiError::Decode(format!("labels_for_project query: {e}")))?;
+    rows.map(|r| {
+        let (remote, name) = r.map_err(|e| ApiError::Decode(format!("labels row: {e}")))?;
+        Ok(LabelRef {
+            id: require_remote(remote, "label")?,
+            name,
+        })
+    })
+    .collect()
+}
+
+fn issue_ref_query(
+    conn: &Connection,
+    issue_id: &str,
+    join_column: &str,
+    return_column: &str,
+) -> Result<Vec<IssueRef>, ApiError> {
+    let sql = format!(
+        "SELECT i.remote_id, i.team_number, i.title, t.identifier
+         FROM issue_dependencies d
+         JOIN issues i ON i.id = d.{return_column}
+         JOIN teams t ON t.id = i.team_id
+         WHERE d.{join_column} = ?1
+         ORDER BY i.created_at"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| ApiError::Decode(format!("issue_ref_query prepare: {e}")))?;
+    let rows = stmt
+        .query_map(params![issue_id], |row| {
+            let remote: Option<i64> = row.get(0)?;
+            let team_number: Option<i32> = row.get(1)?;
+            let title: String = row.get(2)?;
+            let team_identifier: String = row.get(3)?;
+            Ok((remote, team_number, title, team_identifier))
+        })
+        .map_err(|e| ApiError::Decode(format!("issue_ref_query query: {e}")))?;
+    rows.map(|r| {
+        let (remote, team_number, title, team_identifier) =
+            r.map_err(|e| ApiError::Decode(format!("issue_ref row: {e}")))?;
+        let tn = team_number
+            .ok_or_else(|| ApiError::Decode("dependency issue missing team_number".into()))?;
+        Ok(IssueRef {
+            id: require_remote(remote, "issue")?,
+            identifier: format!("{team_identifier}-{tn}"),
+            title,
+        })
+    })
+    .collect()
+}
+
+fn blocking_issue_refs(conn: &Connection, issue_id: &str) -> Result<Vec<IssueRef>, ApiError> {
+    // Issues that are BLOCKING this issue: rows where this issue is blocked.
+    issue_ref_query(conn, issue_id, "blocked_issue_id", "blocking_issue_id")
+}
+
+fn blocked_issue_refs(conn: &Connection, issue_id: &str) -> Result<Vec<IssueRef>, ApiError> {
+    // Issues that this issue is BLOCKING: rows where this issue is blocking.
+    issue_ref_query(conn, issue_id, "blocking_issue_id", "blocked_issue_id")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrations;
+    use rusqlite::Connection;
+
+    fn fresh_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrations::run(&conn).unwrap();
+        // Migrations seed a default team + lanes; clear so tests start blank.
+        conn.execute_batch(
+            "DELETE FROM issue_labels;
+             DELETE FROM project_labels;
+             DELETE FROM issue_dependencies;
+             DELETE FROM issues;
+             DELETE FROM labels;
+             DELETE FROM members;
+             DELETE FROM projects;
+             DELETE FROM lanes;
+             DELETE FROM teams;",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn now() -> String {
+        "2026-04-27T12:00:00.000Z".to_string()
+    }
+
+    #[test]
+    fn priority_string_roundtrip() {
+        for p in 0..=4 {
+            let s = priority_to_string(p);
+            assert_eq!(priority_from_string(s).unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn priority_strings_match_rails() {
+        assert_eq!(priority_to_string(0), "urgent");
+        assert_eq!(priority_to_string(1), "high");
+        assert_eq!(priority_to_string(2), "medium");
+        assert_eq!(priority_to_string(3), "low");
+        assert_eq!(priority_to_string(4), "no_priority");
+    }
+
+    #[test]
+    fn priority_from_invalid_string() {
+        match priority_from_string("bogus") {
+            Err(ApiError::EnumMapping(msg)) => assert!(msg.contains("bogus")),
+            other => panic!("expected EnumMapping error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_status_serializes_lowercase() {
+        for (status, expected) in [
+            (ProjectStatus::Backlog, "backlog"),
+            (ProjectStatus::Started, "started"),
+            (ProjectStatus::Paused, "paused"),
+            (ProjectStatus::Completed, "completed"),
+            (ProjectStatus::Cancelled, "cancelled"),
+        ] {
+            let s = serde_json::to_string(&status).unwrap();
+            assert_eq!(s, format!("\"{expected}\""));
+            let parsed: ProjectStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn roadmap_commitment_serializes_lowercase() {
+        for (rc, expected) in [
+            (RoadmapCommitment::Now, "now"),
+            (RoadmapCommitment::Next, "next"),
+            (RoadmapCommitment::Later, "later"),
+        ] {
+            let s = serde_json::to_string(&rc).unwrap();
+            assert_eq!(s, format!("\"{expected}\""));
+        }
+    }
+
+    #[test]
+    fn flat_team_dto_roundtrip() {
+        let conn = fresh_conn();
+        let team = Team {
+            id: Uuid::new_v4().to_string(),
+            name: "Apollo".into(),
+            identifier: "APO".into(),
+            remote_id: Some(99),
+            created_at: now(),
+            updated_at: now(),
+        };
+        let dto = TeamDto::try_from(&team).unwrap();
+        let json = serde_json::to_string(&dto).unwrap();
+        let parsed: TeamDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, dto);
+        let model: Team = parsed.into();
+        assert_eq!(model.name, team.name);
+        assert_eq!(model.identifier, team.identifier);
+        assert_eq!(model.remote_id, Some(99));
+        // id is regenerated on the From path; just confirm it's a UUID
+        assert_eq!(model.id.len(), 36);
+        let _ = conn; // silence unused
+    }
+
+    #[test]
+    fn flat_dto_roundtrip_lane_label_member_dependency() {
+        let conn = fresh_conn();
+        // seed a team so foreign keys resolve when we round-trip through the DB
+        let team_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![team_uuid, "Apollo", "APO", 99i64, now(), now()],
+        )
+        .unwrap();
+
+        // Lane
+        let lane = Lane {
+            id: Uuid::new_v4().to_string(),
+            name: "Backlog".into(),
+            color: Some("#aaa".into()),
+            position: 0,
+            team_id: team_uuid.clone(),
+            remote_id: Some(11),
+            created_at: now(),
+            updated_at: now(),
+        };
+        conn.execute(
+            "INSERT INTO lanes (id, name, color, position, team_id, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![lane.id, lane.name, lane.color, lane.position, lane.team_id, lane.remote_id, lane.created_at, lane.updated_at],
+        ).unwrap();
+
+        let lane_dto = LaneDto::from_model(&conn, &lane).unwrap();
+        assert_eq!(lane_dto.id, 11);
+        assert_eq!(lane_dto.team_id, 99);
+        let lane_back = lane_dto
+            .clone()
+            .into_model(&conn, Some(lane.id.clone()))
+            .unwrap();
+        assert_eq!(lane_back.id, lane.id);
+        assert_eq!(lane_back.team_id, lane.team_id);
+        assert_eq!(lane_back.position, lane.position);
+
+        // Label
+        let label = Label {
+            id: Uuid::new_v4().to_string(),
+            remote_id: Some(22),
+            team_id: team_uuid.clone(),
+            name: "bug".into(),
+            color: Some("#f00".into()),
+            created_at: now(),
+            updated_at: now(),
+        };
+        conn.execute(
+            "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![label.id, label.remote_id, label.team_id, label.name, label.color, label.created_at, label.updated_at],
+        ).unwrap();
+        let label_dto = LabelDto::from_model(&conn, &label).unwrap();
+        assert_eq!(label_dto.id, 22);
+        assert_eq!(label_dto.team_id, 99);
+        let label_back = label_dto
+            .into_model(&conn, Some(label.id.clone()))
+            .unwrap();
+        assert_eq!(label_back.id, label.id);
+        assert_eq!(label_back.name, "bug");
+
+        // Member
+        let member = Member {
+            id: Uuid::new_v4().to_string(),
+            remote_id: Some(33),
+            team_id: team_uuid.clone(),
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        conn.execute(
+            "INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![member.id, member.remote_id, member.team_id, member.name, member.email, member.created_at, member.updated_at],
+        ).unwrap();
+        let member_dto = MemberDto::from_model(&conn, &member).unwrap();
+        assert_eq!(member_dto.email, "alice@example.com");
+        let member_back = member_dto
+            .into_model(&conn, Some(member.id.clone()))
+            .unwrap();
+        assert_eq!(member_back.id, member.id);
+
+        // IssueDependency requires two issues
+        let issue_a = insert_minimal_issue(&conn, &team_uuid, &lane.id, 101, 1);
+        let issue_b = insert_minimal_issue(&conn, &team_uuid, &lane.id, 102, 2);
+        let dep = IssueDependency {
+            id: Uuid::new_v4().to_string(),
+            remote_id: Some(44),
+            blocking_issue_id: issue_a.clone(),
+            blocked_issue_id: issue_b.clone(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        conn.execute(
+            "INSERT INTO issue_dependencies (id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![dep.id, dep.remote_id, dep.blocking_issue_id, dep.blocked_issue_id, dep.created_at, dep.updated_at],
+        ).unwrap();
+        let dep_dto = IssueDependencyDto::from_model(&conn, &dep).unwrap();
+        assert_eq!(dep_dto.id, 44);
+        assert_eq!(dep_dto.blocking_issue_id, 101);
+        assert_eq!(dep_dto.blocked_issue_id, 102);
+        let dep_back = dep_dto
+            .into_model(&conn, Some(dep.id.clone()))
+            .unwrap();
+        assert_eq!(dep_back.blocking_issue_id, issue_a);
+        assert_eq!(dep_back.blocked_issue_id, issue_b);
+    }
+
+    fn insert_minimal_issue(
+        conn: &Connection,
+        team_uuid: &str,
+        lane_uuid: &str,
+        remote_id: i64,
+        team_number: i32,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, team_number, lane_id, team_id, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, "minimal", 4, team_number, lane_uuid, team_uuid, remote_id, now(), now()],
+        ).unwrap();
+        id
+    }
+
+    #[test]
+    fn issue_identifier_computed_from_team_and_team_number() {
+        let conn = fresh_conn();
+        let team_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![team_uuid, "Project", "PROJ", 1i64, now(), now()],
+        )
+        .unwrap();
+        let lane_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![lane_uuid, "Backlog", 0, team_uuid, 10i64, now(), now()],
+        )
+        .unwrap();
+        let issue_uuid = insert_minimal_issue(&conn, &team_uuid, &lane_uuid, 555, 42);
+        let issue = lookup_issue_by_local_id(&conn, &issue_uuid).unwrap();
+        let dto = IssueDto::from_model(&conn, &issue).unwrap();
+        assert_eq!(dto.identifier, "PROJ-42");
+    }
+
+    const ISSUE_FIXTURE: &str = r#"{
+        "id": 7001,
+        "identifier": "APO-42",
+        "title": "Wire up auth",
+        "priority": "high",
+        "estimate": 3,
+        "due_date": "2026-05-01",
+        "lane": {"id": 11, "name": "In Progress"},
+        "assignee": {"id": 33, "name": "Alice"},
+        "creator": {"id": 34, "name": "Bob"},
+        "project": {"id": 55, "name": "Q2 Roadmap"},
+        "labels": [{"id": 22, "name": "bug"}],
+        "created_at": "2026-04-20T10:00:00.000Z",
+        "updated_at": "2026-04-26T12:00:00.000Z",
+        "description": "Implement OAuth flow",
+        "parent_issue": null,
+        "blocking_issues": [],
+        "blocked_issues": [],
+        "started_at": "2026-04-21T09:00:00.000Z",
+        "completed_at": null,
+        "canceled_at": null
+    }"#;
+
+    fn seed_issue_fixture_db(conn: &Connection) -> (String, String, String, String, String) {
+        let team_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![team_uuid, "Apollo", "APO", 99i64, now(), now()],
+        )
+        .unwrap();
+        let lane_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO lanes (id, name, color, position, team_id, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![lane_uuid, "In Progress", "#3B82F6", 1, team_uuid, 11i64, now(), now()],
+        ).unwrap();
+        let assignee_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![assignee_uuid, 33i64, team_uuid, "Alice", "a@x", now(), now()],
+        )
+        .unwrap();
+        let creator_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![creator_uuid, 34i64, team_uuid, "Bob", "b@x", now(), now()],
+        )
+        .unwrap();
+        let project_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO projects (id, remote_id, team_id, name, status, priority, velocity_score,
+                                   completed_issues_count, total_issues_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'backlog', 2, 0, 0, 0, ?5, ?6)",
+            params![project_uuid, 55i64, team_uuid, "Q2 Roadmap", now(), now()],
+        )
+        .unwrap();
+        let label_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![label_uuid, 22i64, team_uuid, "bug", "#f00", now(), now()],
+        )
+        .unwrap();
+        (team_uuid, lane_uuid, assignee_uuid, project_uuid, label_uuid)
+    }
+
+    #[test]
+    fn issue_dto_roundtrip_via_fixture() {
+        let conn = fresh_conn();
+        let (team_uuid, _lane_uuid, _assignee_uuid, _project_uuid, label_uuid) =
+            seed_issue_fixture_db(&conn);
+
+        let original: IssueDto = serde_json::from_str(ISSUE_FIXTURE).unwrap();
+        assert_eq!(original.identifier, "APO-42");
+        assert_eq!(original.priority, "high");
+        assert_eq!(original.labels.len(), 1);
+
+        // DTO → model
+        let issue = original
+            .clone()
+            .into_model(&conn, team_uuid.clone(), None)
+            .unwrap();
+        assert_eq!(issue.title, "Wire up auth");
+        assert_eq!(issue.priority, 1);
+        assert_eq!(issue.estimate, Some(3.0));
+        assert_eq!(issue.team_number, Some(42));
+        assert_eq!(issue.team_id, team_uuid);
+        assert_eq!(issue.remote_id, Some(7001));
+        // lane/assignee/creator/project resolved to local UUIDs:
+        assert!(!issue.lane_id.is_empty());
+        assert!(issue.assignee_id.is_some());
+        assert!(issue.creator_id.is_some());
+        assert!(issue.project_id.is_some());
+
+        // Insert the issue and its label join row, then go model → DTO.
+        conn.execute(
+            "INSERT INTO issues (id, title, description, priority, team_number, due_date, estimate,
+                                  started_at, completed_at, canceled_at, lane_id, team_id,
+                                  project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                                  remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            params![
+                issue.id, issue.title, issue.description, issue.priority, issue.team_number,
+                issue.due_date, issue.estimate, issue.started_at, issue.completed_at, issue.canceled_at,
+                issue.lane_id, issue.team_id, issue.project_id, issue.parent_issue_id,
+                issue.assignee_id, issue.creator_id, issue.archived_at, issue.remote_id,
+                issue.created_at, issue.updated_at,
+            ],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO issue_labels (issue_id, label_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![issue.id, label_uuid, now(), now()],
+        )
+        .unwrap();
+
+        let final_dto = IssueDto::from_model(&conn, &issue).unwrap();
+        assert_eq!(final_dto.id, original.id);
+        assert_eq!(final_dto.identifier, original.identifier);
+        assert_eq!(final_dto.title, original.title);
+        assert_eq!(final_dto.priority, original.priority);
+        assert_eq!(final_dto.estimate, original.estimate);
+        assert_eq!(final_dto.due_date, original.due_date);
+        assert_eq!(final_dto.lane, original.lane);
+        assert_eq!(final_dto.assignee, original.assignee);
+        assert_eq!(final_dto.creator, original.creator);
+        assert_eq!(final_dto.project, original.project);
+        assert_eq!(final_dto.labels, original.labels);
+        assert_eq!(final_dto.description, original.description);
+        assert_eq!(final_dto.started_at, original.started_at);
+        assert_eq!(final_dto.completed_at, original.completed_at);
+        assert_eq!(final_dto.canceled_at, original.canceled_at);
+        assert_eq!(final_dto.created_at, original.created_at);
+        assert_eq!(final_dto.updated_at, original.updated_at);
+    }
+
+    const PROJECT_FIXTURE: &str = r#"{
+        "id": 8001,
+        "name": "Q2 Roadmap",
+        "description": "Big features for Q2",
+        "status": "started",
+        "priority": "medium",
+        "lead": {"id": 33, "name": "Alice"},
+        "start_date": "2026-04-01",
+        "due_date": "2026-06-30",
+        "velocity_score": 7,
+        "completed_issues_count": 4,
+        "total_issues_count": 10,
+        "progress_percentage": 40,
+        "behind_schedule": false,
+        "roadmap_commitment": "now",
+        "created_at": "2026-03-25T08:00:00.000Z",
+        "updated_at": "2026-04-26T12:00:00.000Z",
+        "labels": [{"id": 22, "name": "bug"}]
+    }"#;
+
+    #[test]
+    fn project_dto_roundtrip_via_fixture() {
+        let conn = fresh_conn();
+        let team_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![team_uuid, "Apollo", "APO", 99i64, now(), now()],
+        )
+        .unwrap();
+        let lead_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![lead_uuid, 33i64, team_uuid, "Alice", "a@x", now(), now()],
+        )
+        .unwrap();
+        let label_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![label_uuid, 22i64, team_uuid, "bug", "#f00", now(), now()],
+        )
+        .unwrap();
+
+        let original: ProjectDto = serde_json::from_str(PROJECT_FIXTURE).unwrap();
+        assert_eq!(original.status, ProjectStatus::Started);
+        assert_eq!(original.priority, "medium");
+        assert_eq!(original.roadmap_commitment, Some(RoadmapCommitment::Now));
+
+        let project = original
+            .clone()
+            .into_model(&conn, team_uuid.clone(), None)
+            .unwrap();
+        assert_eq!(project.priority, 2);
+        assert_eq!(project.team_id, team_uuid);
+        assert_eq!(project.remote_id, Some(8001));
+        assert!(project.lead_id.is_some());
+
+        conn.execute(
+            "INSERT INTO projects (id, remote_id, team_id, name, description, status, priority,
+                                    lead_id, start_date, due_date, roadmap_commitment,
+                                    velocity_score, completed_issues_count, total_issues_count,
+                                    created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                project.id, project.remote_id, project.team_id, project.name, project.description,
+                project.status, project.priority, project.lead_id, project.start_date,
+                project.due_date, project.roadmap_commitment, project.velocity_score,
+                project.completed_issues_count, project.total_issues_count,
+                project.created_at, project.updated_at,
+            ],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO project_labels (project_id, label_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![project.id, label_uuid, now(), now()],
+        )
+        .unwrap();
+
+        let final_dto = ProjectDto::from_model(&conn, &project).unwrap();
+        assert_eq!(final_dto.id, original.id);
+        assert_eq!(final_dto.name, original.name);
+        assert_eq!(final_dto.description, original.description);
+        assert_eq!(final_dto.status, original.status);
+        assert_eq!(final_dto.priority, original.priority);
+        assert_eq!(final_dto.lead, original.lead);
+        assert_eq!(final_dto.start_date, original.start_date);
+        assert_eq!(final_dto.due_date, original.due_date);
+        assert_eq!(final_dto.velocity_score, original.velocity_score);
+        assert_eq!(
+            final_dto.completed_issues_count,
+            original.completed_issues_count
+        );
+        assert_eq!(final_dto.total_issues_count, original.total_issues_count);
+        assert_eq!(final_dto.progress_percentage, original.progress_percentage);
+        assert_eq!(final_dto.roadmap_commitment, original.roadmap_commitment);
+        assert_eq!(final_dto.labels, original.labels);
+        // behind_schedule is intentionally a conservative `false` on
+        // model→DTO; the fixture also has `false`, so they happen to match.
+        assert_eq!(final_dto.behind_schedule, original.behind_schedule);
+    }
 }
