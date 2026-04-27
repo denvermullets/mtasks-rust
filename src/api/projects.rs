@@ -1,4 +1,37 @@
+use serde::Serialize;
+
 use super::{ApiClient, ApiError, ProjectDto};
+
+/// Body for create/update — fields match Rails `ProjectsController` strong params.
+/// `priority` is a string ("urgent" | "high" | "medium" | "low" | "no_priority").
+/// `status` is a string ("backlog" | "started" | "paused" | "completed" | "cancelled").
+/// `roadmap_commitment` is a string ("now" | "next" | "later").
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct ProjectParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roadmap_commitment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_ids: Option<Vec<i64>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectWrap<'a> {
+    project: &'a ProjectParams,
+}
 
 pub async fn list(client: &ApiClient, team_id: i64) -> Result<Vec<ProjectDto>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/projects");
@@ -8,4 +41,54 @@ pub async fn list(client: &ApiClient, team_id: i64) -> Result<Vec<ProjectDto>, A
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<ProjectDto, ApiError> {
     let path = format!("api/v1/teams/{team_id}/projects/{id}");
     client.get(&path).await
+}
+
+pub async fn create(
+    client: &ApiClient,
+    team_id: i64,
+    params: &ProjectParams,
+) -> Result<ProjectDto, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/projects");
+    client.post(&path, &ProjectWrap { project: params }).await
+}
+
+pub async fn update(
+    client: &ApiClient,
+    team_id: i64,
+    id: i64,
+    params: &ProjectParams,
+) -> Result<ProjectDto, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/projects/{id}");
+    client.patch(&path, &ProjectWrap { project: params }).await
+}
+
+pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), ApiError> {
+    let path = format!("api/v1/teams/{team_id}/projects/{id}");
+    client.delete(&path).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_params_wrap_under_project_key() {
+        let params = ProjectParams {
+            name: Some("Q3 push".into()),
+            status: Some("started".into()),
+            label_ids: Some(vec![7]),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(ProjectWrap { project: &params }).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "project": {
+                    "name": "Q3 push",
+                    "status": "started",
+                    "label_ids": [7]
+                }
+            })
+        );
+    }
 }
