@@ -25,4 +25,7 @@ pub enum ApiError {
 
     #[error("decode error: {0}")]
     Decode(String),
+
+    #[error("enum mapping error: {0}")]
+    EnumMapping(String),
 }
