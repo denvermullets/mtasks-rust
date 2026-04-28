@@ -18,9 +18,10 @@
 
 use rusqlite::Connection;
 
+use crate::api::dto::IssueDto;
 use crate::api::{
-    dependencies, issues, labels, projects, ApiClient, ApiError, Direction, IssueParams,
-    LabelParams, ProjectParams,
+    dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient, ApiError,
+    Direction, IssueParams, LabelParams, ProjectParams,
 };
 use crate::db::models::{Issue, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -30,6 +31,29 @@ pub struct SyncReport {
     pub processed: usize,
     pub failed: usize,
     pub last_error: Option<String>,
+}
+
+/// Combined report for one full bidirectional sync (pull then push).
+#[derive(Debug, Default, Clone)]
+pub struct FullSyncReport {
+    pub pull: SyncReport,
+    pub push: SyncReport,
+    /// Local UUID of the orphan seed team that was cleaned up during this
+    /// pull, if any. The app uses this to repoint `selected_team_id` so the
+    /// board doesn't render against a row that no longer exists.
+    pub deleted_orphan_team: Option<String>,
+}
+
+impl FullSyncReport {
+    /// The most actionable error to surface to the user. Push errors take
+    /// precedence (they're active operations the user just initiated); pull
+    /// errors are reported only when push succeeded.
+    pub fn last_error(&self) -> Option<&str> {
+        self.push
+            .last_error
+            .as_deref()
+            .or(self.pull.last_error.as_deref())
+    }
 }
 
 #[derive(Debug)]
@@ -637,6 +661,493 @@ fn classify(err: &ApiError) -> Outcome {
     }
 }
 
+// ── Pull side ─────────────────────────────────────────────────────────────
+//
+// Walks resources in FK-dependency order and merges each row into local SQLite
+// using a last-write-wins policy keyed on `updated_at`.
+//
+// Order: teams → lanes / labels / members → projects → issues. Issue
+// dependencies are not pulled (Rails has no index endpoint for that resource).
+//
+// The merge rule per row (see `decide`):
+// - No local row with this `remote_id` → INSERT.
+// - Local row exists, no pending sync_queue entry → OVERWRITE from remote.
+// - Local row exists, pending entry, local.updated_at > remote.updated_at →
+//   keep local; the next push will overwrite Rails.
+// - Otherwise → OVERWRITE from remote.
+
+#[derive(Debug, PartialEq, Eq)]
+enum MergeDecision {
+    Overwrite,
+    KeepLocal,
+}
+
+fn decide(local_updated: &str, remote_updated: &str, has_pending: bool) -> MergeDecision {
+    if !has_pending {
+        return MergeDecision::Overwrite;
+    }
+    let l = chrono::DateTime::parse_from_rfc3339(local_updated);
+    let r = chrono::DateTime::parse_from_rfc3339(remote_updated);
+    match (l, r) {
+        (Ok(l), Ok(r)) if l > r => MergeDecision::KeepLocal,
+        // If either timestamp doesn't parse, treat remote as authoritative —
+        // the data store is the source of truth when local clocks are off.
+        _ => MergeDecision::Overwrite,
+    }
+}
+
+/// Result of a pull that includes optional bookkeeping outside the row counts.
+pub struct PullOutcome {
+    pub report: SyncReport,
+    pub deleted_orphan_team: Option<String>,
+}
+
+impl SyncEngine {
+    /// Pull all resources from Rails into the local DB. The set of teams to
+    /// fully sync is determined by the token's scope:
+    ///
+    /// - **User-scoped token** (`token.team_id == null` from `/me`) — pull
+    ///   every team the user is on, then for each team pull lanes/labels/
+    ///   members/projects/issues.
+    /// - **Team-scoped token** (`token.team_id == Some(t)`) — pull just that
+    ///   team's resources.
+    ///
+    /// Returns a [`PullOutcome`] summarizing row counts plus the local UUID of
+    /// the locally-seeded "My Project" team if pull determined it was redundant
+    /// (the caller uses this to repoint `selected_team_id`).
+    pub async fn pull(client: &ApiClient) -> PullOutcome {
+        let mut report = SyncReport::default();
+        let mut deleted_orphan_team = None;
+
+        // Phase 1: identify the token's scope.
+        let me = match users::me(client).await {
+            Ok(m) => m,
+            Err(e) => {
+                let msg = format!("/me: {e}");
+                eprintln!("[sync] outcome=fatal phase=pull reason=\"{msg}\"");
+                report.last_error = Some(msg);
+                report.failed += 1;
+                return PullOutcome { report, deleted_orphan_team };
+            }
+        };
+
+        // Phase 2: refresh teams (and discover any new ones the token can see).
+        match pull_teams(client).await {
+            Ok(orphan) => {
+                deleted_orphan_team = orphan;
+                report.processed += 1;
+            }
+            Err(msg) => {
+                report.last_error = Some(msg);
+                report.failed += 1;
+                return PullOutcome { report, deleted_orphan_team };
+            }
+        }
+
+        // Phase 3: figure out which teams to deeply sync.
+        let targets = match collect_pull_targets(me.token.team_id) {
+            Ok(t) => t,
+            Err(msg) => {
+                report.last_error = Some(msg);
+                report.failed += 1;
+                return PullOutcome { report, deleted_orphan_team };
+            }
+        };
+        if targets.is_empty() {
+            // Token has access but no teams visible (or team-scoped to a team
+            // we couldn't find locally after pull_teams — shouldn't happen).
+            return PullOutcome { report, deleted_orphan_team };
+        }
+
+        // Phase 4: per-team resources. Each helper logs and updates the report
+        // independently so one team's failure doesn't block the others.
+        for target in &targets {
+            for step in [
+                pull_lanes_step(client, target.remote_id, &target.local_id).await,
+                pull_labels_step(client, target.remote_id, &target.local_id).await,
+                pull_members_step(client, target.remote_id, &target.local_id).await,
+                pull_projects_step(client, target.remote_id, &target.local_id).await,
+                pull_issues_step(client, target.remote_id, &target.local_id).await,
+            ] {
+                match step {
+                    Ok(()) => report.processed += 1,
+                    Err(msg) => {
+                        report.failed += 1;
+                        report.last_error = Some(msg);
+                    }
+                }
+            }
+        }
+
+        PullOutcome { report, deleted_orphan_team }
+    }
+}
+
+struct PullTarget {
+    local_id: String,
+    remote_id: i64,
+}
+
+fn collect_pull_targets(token_team_id: Option<i64>) -> Result<Vec<PullTarget>, String> {
+    let conn = open()?;
+    match token_team_id {
+        Some(remote_id) => {
+            let local = queries::find_team_by_remote_id(&conn, remote_id)
+                .map_err(|e| format!("db (find team): {e}"))?;
+            match local {
+                Some(t) => Ok(vec![PullTarget {
+                    local_id: t.id,
+                    remote_id,
+                }]),
+                None => Err(format!(
+                    "token is scoped to team remote_id={remote_id}, but it wasn't returned by /api/v1/teams"
+                )),
+            }
+        }
+        None => {
+            // User-scoped token: fully sync every Rails-backed team we know
+            // about. all_teams returns the local rows; we need their remote_id.
+            let teams = queries::all_teams(&conn)
+                .map_err(|e| format!("db (all_teams): {e}"))?;
+            Ok(teams
+                .into_iter()
+                .filter_map(|t| {
+                    t.remote_id.map(|rid| PullTarget {
+                        local_id: t.id,
+                        remote_id: rid,
+                    })
+                })
+                .collect())
+        }
+    }
+}
+
+/// Returns the local UUID of the orphan seed team if one was cleaned up.
+async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
+    let dtos = teams::list(client)
+        .await
+        .map_err(|e| format!("teams: {e}"))?;
+
+    let active_ids: Vec<i64> = dtos.iter().map(|d| d.id).collect();
+    let inserted_any_remote_team = !dtos.is_empty();
+
+    let conn = open()?;
+    for dto in dtos {
+        let existing = queries::find_team_by_remote_id(&conn, dto.id)
+            .map_err(|e| format!("db (find team): {e}"))?;
+        let has_pending = match &existing {
+            Some(t) => sync_queue::has_pending_entry(&conn, "team", &t.id)
+                .map_err(|e| format!("db: {e}"))?,
+            None => false,
+        };
+
+        let remote_updated = dto.updated_at.clone().unwrap_or_default();
+
+        if let Some(local) = &existing {
+            if decide(&local.updated_at, &remote_updated, has_pending) == MergeDecision::KeepLocal {
+                continue;
+            }
+        }
+
+        let team = crate::db::models::Team::from(dto.clone());
+        let team = if let Some(local) = existing {
+            // Reuse the local UUID so foreign keys (lanes/issues/etc.) stay valid.
+            crate::db::models::Team {
+                id: local.id,
+                ..team
+            }
+        } else {
+            team
+        };
+        queries::upsert_team(&conn, &team).map_err(|e| format!("db (upsert team): {e}"))?;
+    }
+    drop(conn);
+
+    let conn = open()?;
+    let _ = queries::archive_missing_teams(&conn, &active_ids);
+
+    // Once we've confirmed Rails has at least one team for this token, the
+    // locally-seeded "My Project" placeholder is redundant. Cleanup is gated
+    // on "no issues attached" so we never destroy real local-only work.
+    let deleted_orphan = if inserted_any_remote_team {
+        match queries::cleanup_orphan_seed_team(&conn) {
+            Ok(opt) => opt,
+            Err(e) => {
+                eprintln!("[sync] phase=pull_teams cleanup_orphan reason=\"db: {e}\"");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(deleted_orphan)
+}
+
+async fn pull_lanes_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let dtos = lanes::list(client, team_remote_id)
+        .await
+        .map_err(|e| format!("lanes: {e}"))?;
+
+    let conn = open()?;
+    for mut dto in dtos {
+        // Rails omits team_id on the wire; inject from the URL path.
+        dto.team_id = team_remote_id;
+
+        let existing = queries::find_lane_by_remote_id(&conn, dto.id)
+            .map_err(|e| format!("db (find lane): {e}"))?;
+        let has_pending = match &existing {
+            Some(l) => sync_queue::has_pending_entry(&conn, "lane", &l.id)
+                .map_err(|e| format!("db: {e}"))?,
+            None => false,
+        };
+        let remote_updated = dto.updated_at.clone().unwrap_or_default();
+
+        if let Some(local) = &existing {
+            if decide(&local.updated_at, &remote_updated, has_pending) == MergeDecision::KeepLocal {
+                continue;
+            }
+        }
+
+        let existing_uuid = existing.as_ref().map(|l| l.id.clone());
+        let mut lane = dto
+            .into_model(&conn, existing_uuid)
+            .map_err(|e| format!("convert lane: {e}"))?;
+        // into_model resolves team via local_uuid_for on the dto's team_id;
+        // sanity-check we landed on the team we expected.
+        if lane.team_id != local_team_id {
+            lane.team_id = local_team_id.to_string();
+        }
+        queries::upsert_lane(&conn, &lane).map_err(|e| format!("db (upsert lane): {e}"))?;
+    }
+
+    // Lanes table has no archived_at column, so missing lanes are left in
+    // place. Hard-deleting would risk cascading FK violations on issues that
+    // still reference the lane locally. Revisit when the schema gains a
+    // soft-delete column.
+    Ok(())
+}
+
+async fn pull_labels_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let dtos = labels::list(client, team_remote_id)
+        .await
+        .map_err(|e| format!("labels: {e}"))?;
+
+    let conn = open()?;
+    for mut dto in dtos {
+        dto.team_id = team_remote_id;
+
+        let existing = queries::find_label_by_remote_id(&conn, dto.id)
+            .map_err(|e| format!("db (find label): {e}"))?;
+        let has_pending = match &existing {
+            Some(l) => sync_queue::has_pending_entry(&conn, "label", &l.id)
+                .map_err(|e| format!("db: {e}"))?,
+            None => false,
+        };
+        let remote_updated = dto.updated_at.clone().unwrap_or_default();
+
+        if let Some(local) = &existing {
+            if decide(&local.updated_at, &remote_updated, has_pending) == MergeDecision::KeepLocal {
+                continue;
+            }
+        }
+
+        let existing_uuid = existing.as_ref().map(|l| l.id.clone());
+        let mut label = dto
+            .into_model(&conn, existing_uuid)
+            .map_err(|e| format!("convert label: {e}"))?;
+        if label.team_id != local_team_id {
+            label.team_id = local_team_id.to_string();
+        }
+        queries::upsert_label(&conn, &label).map_err(|e| format!("db (upsert label): {e}"))?;
+    }
+    Ok(())
+}
+
+async fn pull_members_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let dtos = members::list(client, team_remote_id)
+        .await
+        .map_err(|e| format!("members: {e}"))?;
+
+    let conn = open()?;
+    for mut dto in dtos {
+        dto.team_id = team_remote_id;
+
+        let existing = queries::find_member_by_remote_id(&conn, dto.id)
+            .map_err(|e| format!("db (find member): {e}"))?;
+        let has_pending = match &existing {
+            Some(m) => sync_queue::has_pending_entry(&conn, "member", &m.id)
+                .map_err(|e| format!("db: {e}"))?,
+            None => false,
+        };
+        let remote_updated = dto.updated_at.clone().unwrap_or_default();
+
+        if let Some(local) = &existing {
+            if decide(&local.updated_at, &remote_updated, has_pending) == MergeDecision::KeepLocal {
+                continue;
+            }
+        }
+
+        let existing_uuid = existing.as_ref().map(|m| m.id.clone());
+        let mut member = dto
+            .into_model(&conn, existing_uuid)
+            .map_err(|e| format!("convert member: {e}"))?;
+        if member.team_id != local_team_id {
+            member.team_id = local_team_id.to_string();
+        }
+        queries::upsert_member(&conn, &member).map_err(|e| format!("db (upsert member): {e}"))?;
+    }
+    Ok(())
+}
+
+async fn pull_projects_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let dtos = projects::list(client, team_remote_id)
+        .await
+        .map_err(|e| format!("projects: {e}"))?;
+
+    let conn = open()?;
+    for dto in dtos {
+        let existing = queries::find_project_by_remote_id(&conn, dto.id)
+            .map_err(|e| format!("db (find project): {e}"))?;
+        let has_pending = match &existing {
+            Some(p) => sync_queue::has_pending_entry(&conn, "project", &p.id)
+                .map_err(|e| format!("db: {e}"))?,
+            None => false,
+        };
+
+        if let Some(local) = &existing {
+            if decide(&local.updated_at, &dto.updated_at, has_pending) == MergeDecision::KeepLocal {
+                continue;
+            }
+        }
+
+        let existing_uuid = existing.as_ref().map(|p| p.id.clone());
+        let project: Project = dto
+            .into_model(&conn, local_team_id.to_string(), existing_uuid)
+            .map_err(|e| format!("convert project: {e}"))?;
+        queries::upsert_project(&conn, &project)
+            .map_err(|e| format!("db (upsert project): {e}"))?;
+    }
+    // project_labels join not populated in this ticket; documented as TODO.
+    Ok(())
+}
+
+async fn pull_issues_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let dtos: Vec<IssueDto> = issues::list(client, team_remote_id, &Default::default())
+        .await
+        .map_err(|e| format!("issues: {e}"))?;
+
+    let active_ids: Vec<i64> = dtos.iter().map(|d| d.id).collect();
+    let total = dtos.len();
+
+    let conn = open()?;
+    let mut skipped = 0usize;
+    for dto in dtos {
+        let issue_remote_id = dto.id;
+        let dto = relax_issue_fks(&conn, dto);
+
+        let result = (|| -> Result<(), String> {
+            let existing = queries::find_issue_by_remote_id(&conn, dto.id)
+                .map_err(|e| format!("db (find issue): {e}"))?;
+            let has_pending = match &existing {
+                Some(i) => sync_queue::has_pending_entry(&conn, "issue", &i.id)
+                    .map_err(|e| format!("db: {e}"))?,
+                None => false,
+            };
+
+            if let Some(local) = &existing {
+                if decide(&local.updated_at, &dto.updated_at, has_pending)
+                    == MergeDecision::KeepLocal
+                {
+                    return Ok(());
+                }
+            }
+
+            let existing_uuid = existing.as_ref().map(|i| i.id.clone());
+            let issue: Issue = dto
+                .into_model(&conn, local_team_id.to_string(), existing_uuid)
+                .map_err(|e| format!("convert: {e}"))?;
+            queries::upsert_issue(&conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            // One bad issue shouldn't block the rest. Log and move on; the
+            // step's overall result reflects how many were skipped.
+            eprintln!(
+                "[sync] phase=pull_issues issue_remote_id={issue_remote_id} skipped reason=\"{e}\""
+            );
+            skipped += 1;
+        }
+        // issue_labels join intentionally not populated; the local board doesn't
+        // render labels yet. Wire this when the UI gains label rendering.
+    }
+    drop(conn);
+
+    let conn = open()?;
+    let _ = queries::archive_missing_issues(&conn, local_team_id, &active_ids);
+
+    if skipped > 0 {
+        Err(format!("issues: {skipped}/{total} skipped (see [sync] log)"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Null out optional FKs on an `IssueDto` whose referenced rows aren't present
+/// locally. Lane is intentionally NOT relaxed — an issue without a lane has
+/// nowhere to render, so the caller treats unresolvable lanes as a hard error.
+///
+/// This is needed because Rails returns issue creators / assignees that
+/// reference users who may not be members of this team (e.g. an admin who
+/// created the issue but isn't on the team's roster). Our local schema only
+/// stores team members, so resolving those FKs strictly would fail.
+fn relax_issue_fks(conn: &Connection, mut dto: IssueDto) -> IssueDto {
+    if let Some(r) = &dto.assignee {
+        if matches!(queries::find_member_by_remote_id(conn, r.id), Ok(None)) {
+            dto.assignee = None;
+        }
+    }
+    if let Some(r) = &dto.creator {
+        if matches!(queries::find_member_by_remote_id(conn, r.id), Ok(None)) {
+            dto.creator = None;
+        }
+    }
+    if let Some(r) = &dto.project {
+        if matches!(queries::find_project_by_remote_id(conn, r.id), Ok(None)) {
+            dto.project = None;
+        }
+    }
+    if let Some(r) = &dto.parent_issue {
+        if matches!(queries::find_issue_by_remote_id(conn, r.id), Ok(None)) {
+            dto.parent_issue = None;
+        }
+    }
+    dto
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +1198,60 @@ mod tests {
         // MissingToken is recoverable: user can fix the token in settings and
         // the next drain will pick up.
         assert!(is_retry(&classify(&ApiError::MissingToken)));
+    }
+
+    #[test]
+    fn decide_no_pending_overwrites() {
+        // Without a pending push, remote is always authoritative — even if
+        // local is newer (which means a previous push already drained).
+        assert_eq!(
+            decide(
+                "2026-04-27T12:00:00Z",
+                "2026-04-27T11:00:00Z",
+                false
+            ),
+            MergeDecision::Overwrite
+        );
+    }
+
+    #[test]
+    fn decide_pending_and_local_newer_keeps_local() {
+        assert_eq!(
+            decide(
+                "2026-04-27T12:00:00Z",
+                "2026-04-27T11:00:00Z",
+                true
+            ),
+            MergeDecision::KeepLocal
+        );
+    }
+
+    #[test]
+    fn decide_pending_but_remote_newer_overwrites() {
+        // Concurrent edit: someone updated remote AFTER our local edit. LWW
+        // means remote wins; the queued push will then overwrite again.
+        assert_eq!(
+            decide(
+                "2026-04-27T11:00:00Z",
+                "2026-04-27T12:00:00Z",
+                true
+            ),
+            MergeDecision::Overwrite
+        );
+    }
+
+    #[test]
+    fn decide_unparseable_timestamps_overwrites() {
+        // Defensive: if either timestamp is malformed, prefer remote rather
+        // than risk dropping a real update because a clock string was off.
+        assert_eq!(
+            decide("not-a-date", "2026-04-27T12:00:00Z", true),
+            MergeDecision::Overwrite
+        );
+        assert_eq!(
+            decide("2026-04-27T12:00:00Z", "not-a-date", true),
+            MergeDecision::Overwrite
+        );
     }
 
     #[test]

@@ -45,6 +45,20 @@ pub fn pending_count(conn: &Connection) -> Result<i32> {
     )
 }
 
+pub fn has_pending_entry(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sync_queue
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
+        params![entity_type, entity_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 pub fn mark_synced(conn: &Connection, entry_id: i64) -> Result<()> {
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")

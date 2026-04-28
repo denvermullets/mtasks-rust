@@ -7,7 +7,7 @@ use crate::config::{self, Config};
 use crate::db::models::{Issue, Lane, Priority, Team};
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
-use crate::sync::engine::{SyncEngine, SyncReport};
+use crate::sync::engine::{FullSyncReport, SyncEngine};
 use crate::theme as t;
 use crate::views::{board, issue_form, settings, status_bar, team_list};
 
@@ -56,7 +56,7 @@ pub enum Message {
 
     // Sync
     SyncNow,
-    SyncCompleted(SyncReport),
+    SyncCompleted(FullSyncReport),
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
@@ -162,7 +162,12 @@ impl App {
         let (config, config_error) = config::load();
 
         let conn = connection::open().expect("Failed to open database");
-        connection::seed_default_data(&conn).expect("Failed to seed data");
+        // Skip the local "My Project" seed when the user has configured an API
+        // token — the first sync will populate teams from Rails. Without a
+        // token we keep the seed so the app is usable purely offline.
+        if config.api_token.is_none() {
+            connection::seed_default_data(&conn).expect("Failed to seed data");
+        }
 
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let selected_team_id = teams.first().map(|t| t.id.clone());
@@ -555,7 +560,15 @@ impl App {
                         self.sync_in_progress = true;
                         self.last_sync_error = None;
                         return Task::perform(
-                            async move { SyncEngine::drain(&client).await },
+                            async move {
+                                let outcome = SyncEngine::pull(&client).await;
+                                let push = SyncEngine::drain(&client).await;
+                                FullSyncReport {
+                                    pull: outcome.report,
+                                    push,
+                                    deleted_orphan_team: outcome.deleted_orphan_team,
+                                }
+                            },
                             Message::SyncCompleted,
                         );
                     }
@@ -572,7 +585,23 @@ impl App {
 
             Message::SyncCompleted(report) => {
                 self.sync_in_progress = false;
-                self.last_sync_error = report.last_error;
+                self.last_sync_error = report.last_error().map(str::to_string);
+
+                // If pull deleted the orphan seed team and that's what was
+                // selected, drop the now-dangling selection. reload_data will
+                // pick the first available team (likely a Rails-backed one).
+                if let Some(deleted) = &report.deleted_orphan_team {
+                    if self.selected_team_id.as_deref() == Some(deleted.as_str()) {
+                        self.selected_team_id = None;
+                        self.focused_lane = 0;
+                        self.focused_issue = 0;
+                    }
+                }
+
+                if report.pull.failed == 0 {
+                    self.config.last_synced_at = Some(chrono::Utc::now());
+                    let _ = config::save(&self.config);
+                }
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
                 self.reload_data();
             }

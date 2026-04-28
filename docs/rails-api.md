@@ -16,6 +16,26 @@ Upstream source: **`/Users/denvermullets/Documents/dev/pers/mtasks`** (sibling r
 
 ## Endpoints
 
+### `GET /api/v1/me`
+
+Identifies the authenticated user and reveals the token's scope. The desktop client calls this at the start of every sync to decide whether to pull just one team or all visible teams.
+
+```json
+{
+  "id": 42,
+  "name": "...",
+  "email": "...",
+  "token": {
+    "name": "CLI Token",
+    "scopes": ["read", "write"],
+    "team_id": null
+  }
+}
+```
+
+`token.team_id`: `null` means the token is user-scoped (full access to all teams the user is on); a number means it's restricted to that team.
+`token.scopes`: typically `["read"]` or `["read", "write"]`. Mutating endpoints require `write`.
+
 ### `GET /api/v1/teams`
 
 List teams. No filters. Ordered by name.

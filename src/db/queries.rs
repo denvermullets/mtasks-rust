@@ -1,6 +1,6 @@
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
-use super::models::{Issue, IssueDependency, Label, Lane, Project, Team};
+use super::models::{Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
 
@@ -195,6 +195,311 @@ pub fn set_issue_dependency_remote_id(
         params![remote_id, dep_id],
     )?;
     Ok(())
+}
+
+// ── Find by remote_id (used by pull-side merge) ──
+
+pub fn find_team_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Team>> {
+    conn.query_row(
+        "SELECT id, name, identifier, remote_id, created_at, updated_at
+         FROM teams WHERE remote_id = ?1",
+        params![remote_id],
+        Team::from_row,
+    )
+    .optional()
+}
+
+pub fn find_lane_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Lane>> {
+    conn.query_row(
+        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+         FROM lanes WHERE remote_id = ?1",
+        params![remote_id],
+        Lane::from_row,
+    )
+    .optional()
+}
+
+pub fn find_label_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Label>> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, color, created_at, updated_at
+         FROM labels WHERE remote_id = ?1",
+        params![remote_id],
+        Label::from_row,
+    )
+    .optional()
+}
+
+pub fn find_member_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Member>> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, email, created_at, updated_at
+         FROM members WHERE remote_id = ?1",
+        params![remote_id],
+        Member::from_row,
+    )
+    .optional()
+}
+
+pub fn find_project_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Project>> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, description, status, priority,
+                lead_id, start_date, due_date, roadmap_commitment,
+                velocity_score, completed_issues_count, total_issues_count,
+                created_at, updated_at
+         FROM projects WHERE remote_id = ?1",
+        params![remote_id],
+        Project::from_row,
+    )
+    .optional()
+}
+
+pub fn find_issue_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Issue>> {
+    conn.query_row(
+        "SELECT id, title, description, priority, team_number, due_date, estimate,
+                started_at, completed_at, canceled_at, lane_id, team_id,
+                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                remote_id, created_at, updated_at
+         FROM issues WHERE remote_id = ?1",
+        params![remote_id],
+        Issue::from_row,
+    )
+    .optional()
+}
+
+// ── Upserts (used by pull-side merge) ──
+//
+// Each `upsert_*` is keyed on the local UUID `id`, so the caller is
+// responsible for resolving "this remote_id maps to local UUID X" via
+// `find_*_by_remote_id` before calling this. New rows pass a fresh UUID; merges
+// reuse the existing local UUID so foreign-key references stay stable.
+
+pub fn upsert_team(conn: &Connection, team: &Team) -> Result<()> {
+    conn.execute(
+        "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            identifier = excluded.identifier,
+            remote_id = excluded.remote_id,
+            updated_at = excluded.updated_at",
+        params![team.id, team.name, team.identifier, team.remote_id, team.created_at, team.updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_lane(conn: &Connection, lane: &Lane) -> Result<()> {
+    conn.execute(
+        "INSERT INTO lanes (id, name, color, position, team_id, remote_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            color = excluded.color,
+            position = excluded.position,
+            team_id = excluded.team_id,
+            remote_id = excluded.remote_id,
+            updated_at = excluded.updated_at",
+        params![lane.id, lane.name, lane.color, lane.position, lane.team_id, lane.remote_id, lane.created_at, lane.updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_label(conn: &Connection, label: &Label) -> Result<()> {
+    conn.execute(
+        "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+            remote_id = excluded.remote_id,
+            team_id = excluded.team_id,
+            name = excluded.name,
+            color = excluded.color,
+            updated_at = excluded.updated_at",
+        params![label.id, label.remote_id, label.team_id, label.name, label.color, label.created_at, label.updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_member(conn: &Connection, member: &Member) -> Result<()> {
+    conn.execute(
+        "INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+            remote_id = excluded.remote_id,
+            team_id = excluded.team_id,
+            name = excluded.name,
+            email = excluded.email,
+            updated_at = excluded.updated_at",
+        params![member.id, member.remote_id, member.team_id, member.name, member.email, member.created_at, member.updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
+    conn.execute(
+        "INSERT INTO projects
+            (id, remote_id, team_id, name, description, status, priority, lead_id,
+             start_date, due_date, roadmap_commitment, velocity_score,
+             completed_issues_count, total_issues_count, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+         ON CONFLICT(id) DO UPDATE SET
+            remote_id = excluded.remote_id,
+            team_id = excluded.team_id,
+            name = excluded.name,
+            description = excluded.description,
+            status = excluded.status,
+            priority = excluded.priority,
+            lead_id = excluded.lead_id,
+            start_date = excluded.start_date,
+            due_date = excluded.due_date,
+            roadmap_commitment = excluded.roadmap_commitment,
+            velocity_score = excluded.velocity_score,
+            completed_issues_count = excluded.completed_issues_count,
+            total_issues_count = excluded.total_issues_count,
+            updated_at = excluded.updated_at",
+        params![
+            project.id, project.remote_id, project.team_id, project.name, project.description,
+            project.status, project.priority, project.lead_id, project.start_date, project.due_date,
+            project.roadmap_commitment, project.velocity_score, project.completed_issues_count,
+            project.total_issues_count, project.created_at, project.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
+    conn.execute(
+        "INSERT INTO issues
+            (id, title, description, priority, team_number, due_date, estimate,
+             started_at, completed_at, canceled_at, lane_id, team_id, project_id,
+             parent_issue_id, assignee_id, creator_id, archived_at, remote_id,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                 ?15, ?16, ?17, ?18, ?19, ?20)
+         ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            description = excluded.description,
+            priority = excluded.priority,
+            team_number = excluded.team_number,
+            due_date = excluded.due_date,
+            estimate = excluded.estimate,
+            started_at = excluded.started_at,
+            completed_at = excluded.completed_at,
+            canceled_at = excluded.canceled_at,
+            lane_id = excluded.lane_id,
+            team_id = excluded.team_id,
+            project_id = excluded.project_id,
+            parent_issue_id = excluded.parent_issue_id,
+            assignee_id = excluded.assignee_id,
+            creator_id = excluded.creator_id,
+            archived_at = excluded.archived_at,
+            remote_id = excluded.remote_id,
+            updated_at = excluded.updated_at",
+        params![
+            issue.id, issue.title, issue.description, issue.priority, issue.team_number,
+            issue.due_date, issue.estimate, issue.started_at, issue.completed_at, issue.canceled_at,
+            issue.lane_id, issue.team_id, issue.project_id, issue.parent_issue_id,
+            issue.assignee_id, issue.creator_id, issue.archived_at, issue.remote_id,
+            issue.created_at, issue.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+// ── Archive missing (soft-delete on next pull when remote omits the row) ──
+
+/// Mark every issue whose `remote_id` is NOT in `active_remote_ids` (and isn't
+/// already archived) as archived. Scoped to a single team so we don't archive
+/// rows for teams that weren't part of this pull.
+pub fn archive_missing_issues(
+    conn: &Connection,
+    team_id: &str,
+    active_remote_ids: &[i64],
+) -> Result<usize> {
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    if active_remote_ids.is_empty() {
+        return conn.execute(
+            "UPDATE issues SET archived_at = ?1
+             WHERE team_id = ?2 AND remote_id IS NOT NULL AND archived_at IS NULL",
+            params![now, team_id],
+        );
+    }
+    let placeholders: Vec<String> = (0..active_remote_ids.len())
+        .map(|i| format!("?{}", i + 3))
+        .collect();
+    let sql = format!(
+        "UPDATE issues SET archived_at = ?1
+         WHERE team_id = ?2 AND remote_id IS NOT NULL
+           AND remote_id NOT IN ({}) AND archived_at IS NULL",
+        placeholders.join(",")
+    );
+    let mut bound: Vec<Value> = vec![now.into(), team_id.to_string().into()];
+    bound.extend(active_remote_ids.iter().map(|id| (*id).into()));
+    conn.execute(&sql, params_from_iter(bound))
+}
+
+/// Archive teams whose `remote_id` is NOT in `active_remote_ids`. Rails returns
+/// only teams the current token sees, so this is a per-token view of "active".
+/// Intentionally conservative: only flips `archived_at` when the column is NULL,
+/// never resurrects.
+pub fn archive_missing_teams(conn: &Connection, active_remote_ids: &[i64]) -> Result<usize> {
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    if active_remote_ids.is_empty() {
+        return conn.execute(
+            "UPDATE teams SET archived_at = ?1
+             WHERE remote_id IS NOT NULL AND archived_at IS NULL",
+            params![now],
+        );
+    }
+    let placeholders: Vec<String> = (0..active_remote_ids.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect();
+    let sql = format!(
+        "UPDATE teams SET archived_at = ?1
+         WHERE remote_id IS NOT NULL AND remote_id NOT IN ({}) AND archived_at IS NULL",
+        placeholders.join(",")
+    );
+    let mut bound: Vec<Value> = vec![now.into()];
+    bound.extend(active_remote_ids.iter().map(|id| (*id).into()));
+    conn.execute(&sql, params_from_iter(bound))
+}
+
+/// Detect and remove the locally-seeded "My Project" team if it still looks
+/// untouched: matches the seed signature (name="My Project", identifier="PROJ"),
+/// has no `remote_id`, and has zero issues attached. Returns the local UUID of
+/// the deleted team if cleanup ran, otherwise `None`.
+///
+/// Called after a successful pull that just added Rails-backed teams — the
+/// orphan seed is then redundant and would otherwise block sync if it remained
+/// the user's selected team.
+pub fn cleanup_orphan_seed_team(conn: &Connection) -> Result<Option<String>> {
+    let team_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM teams
+             WHERE remote_id IS NULL
+               AND name = 'My Project'
+               AND identifier = 'PROJ'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let Some(team_id) = team_id else { return Ok(None) };
+
+    let issue_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issues WHERE team_id = ?1",
+        params![team_id],
+        |row| row.get(0),
+    )?;
+    if issue_count > 0 {
+        // User has actual data on the orphan team — leave it alone.
+        return Ok(None);
+    }
+
+    conn.execute("DELETE FROM lanes WHERE team_id = ?1", params![team_id])?;
+    conn.execute("DELETE FROM teams WHERE id = ?1", params![team_id])?;
+    Ok(Some(team_id))
 }
 
 /// Resolve a local UUID to its Rails `remote_id`. Returns `Ok(None)` if the row
