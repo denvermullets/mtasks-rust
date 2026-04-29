@@ -1053,20 +1053,22 @@ async fn pull_issues_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos: Vec<IssueDto> = issues::list(client, team_remote_id, &Default::default())
+    // Rails' issue *index* serializer omits detail-only fields like
+    // `description`, `parent_issue`, `blocking_issues`, `blocked_issues`, and
+    // the lifecycle timestamps. We use the index to discover which issues
+    // changed (cheap) and then only fetch full detail for the ones we'll
+    // actually write — steady-state pulls don't refetch unchanged rows.
+    let listings: Vec<IssueDto> = issues::list(client, team_remote_id, &Default::default())
         .await
         .map_err(|e| format!("issues: {e}"))?;
 
-    let active_ids: Vec<i64> = dtos.iter().map(|d| d.id).collect();
-    let total = dtos.len();
+    let active_ids: Vec<i64> = listings.iter().map(|d| d.id).collect();
 
-    let conn = open()?;
-    let mut skipped = 0usize;
-    for dto in dtos {
-        let issue_remote_id = dto.id;
-        let dto = relax_issue_fks(&conn, dto);
-
-        let result = (|| -> Result<(), String> {
+    // Phase 1 (sync): decide which remote_ids need a full detail fetch.
+    let to_fetch: Vec<i64> = {
+        let conn = open()?;
+        let mut ids = Vec::new();
+        for dto in &listings {
             let existing = queries::find_issue_by_remote_id(&conn, dto.id)
                 .map_err(|e| format!("db (find issue): {e}"))?;
             let has_pending = match &existing {
@@ -1074,41 +1076,74 @@ async fn pull_issues_step(
                     .map_err(|e| format!("db: {e}"))?,
                 None => false,
             };
-
-            if let Some(local) = &existing {
-                if decide(&local.updated_at, &dto.updated_at, has_pending)
-                    == MergeDecision::KeepLocal
-                {
-                    return Ok(());
+            let should_fetch = match &existing {
+                Some(local) => {
+                    decide(&local.updated_at, &dto.updated_at, has_pending)
+                        != MergeDecision::KeepLocal
                 }
+                None => true, // new issue → always fetch
+            };
+            if should_fetch {
+                ids.push(dto.id);
             }
-
-            let existing_uuid = existing.as_ref().map(|i| i.id.clone());
-            let issue: Issue = dto
-                .into_model(&conn, local_team_id.to_string(), existing_uuid)
-                .map_err(|e| format!("convert: {e}"))?;
-            queries::upsert_issue(&conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            // One bad issue shouldn't block the rest. Log and move on; the
-            // step's overall result reflects how many were skipped.
-            eprintln!(
-                "[sync] phase=pull_issues issue_remote_id={issue_remote_id} skipped reason=\"{e}\""
-            );
-            skipped += 1;
         }
-        // issue_labels join intentionally not populated; the local board doesn't
-        // render labels yet. Wire this when the UI gains label rendering.
+        ids
+    };
+    let total_to_fetch = to_fetch.len();
+
+    // Phase 2 (async): fetch detail for each. Errors per-issue are logged and
+    // counted; one failure doesn't block the rest.
+    let mut details: Vec<IssueDto> = Vec::with_capacity(total_to_fetch);
+    let mut skipped = 0usize;
+    for issue_remote_id in to_fetch {
+        match issues::get(client, team_remote_id, issue_remote_id).await {
+            Ok(d) => details.push(d),
+            Err(e) => {
+                eprintln!(
+                    "[sync] phase=pull_issues issue_remote_id={issue_remote_id} fetch_failed reason=\"{e}\""
+                );
+                skipped += 1;
+            }
+        }
     }
-    drop(conn);
+
+    // Phase 3 (sync): write each detail to the local DB.
+    {
+        let conn = open()?;
+        for dto in details {
+            let issue_remote_id = dto.id;
+            let dto = relax_issue_fks(&conn, dto);
+
+            let result = (|| -> Result<(), String> {
+                let existing = queries::find_issue_by_remote_id(&conn, dto.id)
+                    .map_err(|e| format!("db (find issue): {e}"))?;
+                let existing_uuid = existing.as_ref().map(|i| i.id.clone());
+                let issue: Issue = dto
+                    .into_model(&conn, local_team_id.to_string(), existing_uuid)
+                    .map_err(|e| format!("convert: {e}"))?;
+                queries::upsert_issue(&conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                eprintln!(
+                    "[sync] phase=pull_issues issue_remote_id={issue_remote_id} skipped reason=\"{e}\""
+                );
+                skipped += 1;
+            }
+            // issue_labels join intentionally not populated; the local board
+            // doesn't render labels yet. Wire this when the UI gains label
+            // rendering.
+        }
+    }
 
     let conn = open()?;
     let _ = queries::archive_missing_issues(&conn, local_team_id, &active_ids);
 
     if skipped > 0 {
-        Err(format!("issues: {skipped}/{total} skipped (see [sync] log)"))
+        Err(format!(
+            "issues: {skipped}/{total_to_fetch} skipped (see [sync] log)"
+        ))
     } else {
         Ok(())
     }

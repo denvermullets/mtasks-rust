@@ -1,4 +1,4 @@
-use iced::widget::{column, container, horizontal_rule, row, scrollable, text, Column};
+use iced::widget::{column, container, horizontal_rule, mouse_area, row, scrollable, text, Column};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
@@ -65,7 +65,7 @@ pub fn view<'a>(
 
         for (issue_idx, issue) in lane_issues.iter().enumerate() {
             let is_focused = is_focused_lane && issue_idx == focused_issue;
-            let card = issue_card(issue, team_identifier, is_focused);
+            let card = issue_card(issue, team_identifier, is_focused, lane_idx, issue_idx);
             issue_cards = issue_cards.push(card);
         }
 
@@ -114,6 +114,8 @@ fn issue_card<'a>(
     issue: &'a Issue,
     team_identifier: &'a str,
     focused: bool,
+    lane_idx: usize,
+    issue_idx: usize,
 ) -> Element<'a, Message> {
     let priority_color = t::priority_color(issue.priority);
 
@@ -152,7 +154,7 @@ fn issue_card<'a>(
         t::BORDER
     };
 
-    container(card_content)
+    let card = container(card_content)
         .padding([10, 12])
         .width(Length::Fill)
         .style(move |_theme: &Theme| container::Style {
@@ -163,6 +165,9 @@ fn issue_card<'a>(
                 radius: 6.0.into(),
             },
             ..Default::default()
-        })
+        });
+
+    mouse_area(card)
+        .on_press(Message::CardPressed(lane_idx, issue_idx))
         .into()
 }

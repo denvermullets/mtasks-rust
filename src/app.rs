@@ -25,7 +25,7 @@ pub enum Message {
 
     // Issue form fields
     IssueTitleChanged(String),
-    IssueDescriptionChanged(String),
+    IssueDescriptionChanged(iced::widget::text_editor::Action),
     IssuePriorityChanged(Priority),
     IssueLaneChanged(String),
 
@@ -41,6 +41,9 @@ pub enum Message {
     FocusPrevIssue,
     FocusNextLane,
     FocusPrevLane,
+    /// A click on a board card at (lane_idx, issue_idx). The handler decides
+    /// whether to treat as a single-click (focus) or double-click (open edit).
+    CardPressed(usize, usize),
 
     // UI
     CloseModal,
@@ -86,6 +89,9 @@ pub struct App {
     config_error: Option<String>,
     last_sync_error: Option<String>,
     sync_in_progress: bool,
+    /// Tracks the most recent card click for manual double-click detection
+    /// (iced 0.13's `mouse_area` exposes only `on_press`, not `on_double_click`).
+    last_card_click: Option<(usize, usize, std::time::Instant)>,
 }
 
 impl App {
@@ -199,6 +205,7 @@ impl App {
             config_error,
             last_sync_error: None,
             sync_in_progress: false,
+            last_card_click: None,
         };
 
         (app, Task::none())
@@ -253,9 +260,10 @@ impl App {
 
             Message::EditFocusedIssue => {
                 if let Some(issue) = self.focused_issue().cloned() {
-                    let mut form = issue_form::IssueFormState::new(issue.lane_id.clone());
+                    let body = issue.description.clone().unwrap_or_default();
+                    let mut form = issue_form::IssueFormState::new(issue.lane_id.clone())
+                        .with_description(&body);
                     form.title = issue.title.clone();
-                    form.description = issue.description.clone().unwrap_or_default();
                     form.priority = Priority::from_i32(issue.priority);
                     form.lane_id = issue.lane_id.clone();
                     form.editing_issue_id = Some(issue.id.clone());
@@ -269,9 +277,9 @@ impl App {
                     form.title = v;
                 }
             }
-            Message::IssueDescriptionChanged(v) => {
+            Message::IssueDescriptionChanged(action) => {
                 if let Some(ref mut form) = self.issue_form {
-                    form.description = v;
+                    form.description.perform(action);
                 }
             }
             Message::IssuePriorityChanged(p) => {
@@ -295,6 +303,13 @@ impl App {
                         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
                         .to_string();
 
+                    let description_body = form.description_text();
+                    let description = if description_body.trim().is_empty() {
+                        None
+                    } else {
+                        Some(description_body.trim_end().to_string())
+                    };
+
                     if let Some(ref issue_id) = form.editing_issue_id {
                         // Update existing
                         if let Some(mut issue) = self
@@ -304,11 +319,7 @@ impl App {
                             .cloned()
                         {
                             issue.title = form.title.trim().to_string();
-                            issue.description = if form.description.trim().is_empty() {
-                                None
-                            } else {
-                                Some(form.description.trim().to_string())
-                            };
+                            issue.description = description.clone();
                             issue.priority = form.priority as i32;
                             issue.lane_id = form.lane_id.clone();
                             issue.updated_at = now;
@@ -327,11 +338,7 @@ impl App {
                         let issue = Issue {
                             id: uuid::Uuid::new_v4().to_string(),
                             title: form.title.trim().to_string(),
-                            description: if form.description.trim().is_empty() {
-                                None
-                            } else {
-                                Some(form.description.trim().to_string())
-                            },
+                            description: description.clone(),
                             priority: form.priority as i32,
                             team_number: Some(team_number),
                             due_date: None,
@@ -445,6 +452,29 @@ impl App {
                     self.focused_lane -= 1;
                     self.focused_issue = 0;
                     self.clamp_focus();
+                }
+            }
+
+            Message::CardPressed(lane_idx, issue_idx) => {
+                let now = std::time::Instant::now();
+                let is_double_click = self
+                    .last_card_click
+                    .map(|(l, i, t)| {
+                        l == lane_idx
+                            && i == issue_idx
+                            && now.duration_since(t).as_millis() < 500
+                    })
+                    .unwrap_or(false);
+
+                self.focused_lane = lane_idx;
+                self.focused_issue = issue_idx;
+                self.clamp_focus();
+
+                if is_double_click {
+                    self.last_card_click = None;
+                    return self.update(Message::EditFocusedIssue);
+                } else {
+                    self.last_card_click = Some((lane_idx, issue_idx, now));
                 }
             }
 
