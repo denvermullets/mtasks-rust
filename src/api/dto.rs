@@ -413,6 +413,10 @@ impl TryFrom<&Team> for TeamDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaneDto {
     pub id: i64,
+    /// Rails index responses omit `team_id` (the URL path scopes the request).
+    /// Default to 0 on deserialize; pull-side callers should overwrite this
+    /// with the team_id they used in the URL before calling [`Self::into_model`].
+    #[serde(default)]
     pub team_id: i64,
     pub name: String,
     pub color: Option<String>,
@@ -464,6 +468,8 @@ impl LaneDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LabelDto {
     pub id: i64,
+    /// See note on [`LaneDto::team_id`] — Rails index responses omit this.
+    #[serde(default)]
     pub team_id: i64,
     pub name: String,
     pub color: Option<String>,
@@ -509,6 +515,8 @@ impl LabelDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemberDto {
     pub id: i64,
+    /// See note on [`LaneDto::team_id`] — Rails index responses omit this.
+    #[serde(default)]
     pub team_id: i64,
     pub name: String,
     pub email: String,

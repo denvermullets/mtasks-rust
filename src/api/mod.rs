@@ -9,6 +9,7 @@ pub mod lanes;
 pub mod members;
 pub mod projects;
 pub mod teams;
+pub mod users;
 
 pub use client::ApiClient;
 pub use dto::{
@@ -20,3 +21,4 @@ pub use error::ApiError;
 pub use issues::{IssueFilters, IssueParams};
 pub use labels::LabelParams;
 pub use projects::ProjectParams;
+pub use users::{MeDto, MeTokenDto};

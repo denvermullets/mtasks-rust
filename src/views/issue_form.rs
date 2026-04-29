@@ -1,14 +1,13 @@
-use iced::widget::{button, column, container, pick_list, row, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, text, text_editor, text_input};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Lane, Priority};
 use crate::theme as t;
 
-#[derive(Debug, Clone)]
 pub struct IssueFormState {
     pub title: String,
-    pub description: String,
+    pub description: text_editor::Content,
     pub priority: Priority,
     pub lane_id: String,
     pub editing_issue_id: Option<String>,
@@ -18,11 +17,20 @@ impl IssueFormState {
     pub fn new(default_lane_id: String) -> Self {
         Self {
             title: String::new(),
-            description: String::new(),
+            description: text_editor::Content::new(),
             priority: Priority::None,
             lane_id: default_lane_id,
             editing_issue_id: None,
         }
+    }
+
+    pub fn with_description(mut self, body: &str) -> Self {
+        self.description = text_editor::Content::with_text(body);
+        self
+    }
+
+    pub fn description_text(&self) -> String {
+        self.description.text()
     }
 }
 
@@ -73,10 +81,12 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
                 .size(14),
         )
         .push(
-            text_input("Description", &form.description)
-                .on_input(Message::IssueDescriptionChanged)
+            text_editor(&form.description)
+                .placeholder("Description")
+                .on_action(Message::IssueDescriptionChanged)
                 .padding(10)
-                .size(14),
+                .size(14)
+                .height(Length::Fixed(160.0)),
         )
         .push(
             row![]
@@ -89,7 +99,7 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
                         .push(pick_list(
                             PRIORITIES.as_slice(),
                             Some(form.priority),
-                            |p| Message::IssuePriorityChanged(p),
+                            Message::IssuePriorityChanged,
                         )),
                 )
                 .push(
