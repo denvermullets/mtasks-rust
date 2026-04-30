@@ -11,10 +11,16 @@ pub struct Config {
     pub api_token: Option<String>,
     #[serde(default)]
     pub last_synced_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_sync_interval_secs")]
+    pub sync_interval_secs: u64,
 }
 
 fn default_api_base_url() -> String {
     "http://localhost:3005".to_string()
+}
+
+fn default_sync_interval_secs() -> u64 {
+    60
 }
 
 impl Default for Config {
@@ -23,6 +29,7 @@ impl Default for Config {
             api_base_url: default_api_base_url(),
             api_token: None,
             last_synced_at: None,
+            sync_interval_secs: default_sync_interval_secs(),
         }
     }
 }

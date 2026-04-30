@@ -110,7 +110,7 @@ async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
     match (entry.entity_type.as_str(), entry.action.as_str()) {
         ("issue", "create") => issue_create(client, &entry.entity_id).await,
         ("issue", "update") => issue_update(client, &entry.entity_id).await,
-        ("issue", "delete") => issue_delete(&entry.entity_id),
+        ("issue", "delete") => issue_delete(client, entry.payload.as_deref()).await,
         ("project", "create") => project_create(client, &entry.entity_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(&entry.entity_id),
@@ -291,14 +291,28 @@ async fn issue_update(client: &ApiClient, entity_id: &str) -> Outcome {
     }
 }
 
-fn issue_delete(_entity_id: &str) -> Outcome {
-    // Local row is gone by the time delete drains. Today's enqueue sites
-    // don't capture the pre-deletion remote_id in the payload, so we can't
-    // hit Rails with the right id. Drop with a log; revisit when DESK-12
-    // captures remote_id at enqueue time.
-    Outcome::DropAndLog(
-        "issue delete unsupported: pre-deletion remote_id not captured in payload".into(),
-    )
+async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let raw = match payload {
+        Some(s) => s,
+        None => return Outcome::DropAndLog("issue delete: no payload (legacy entry)".into()),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => return Outcome::DropAndLog(format!("issue delete: bad payload: {e}")),
+    };
+    let remote_id = match parsed.get("remote_id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return Outcome::DropAndLog("issue delete: missing remote_id in payload".into()),
+    };
+    let team_remote_id = match parsed.get("team_remote_id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return Outcome::DropAndLog("issue delete: missing team_remote_id in payload".into()),
+    };
+    match issues::delete(client, team_remote_id, remote_id).await {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(_)) => Outcome::Success,
+        Err(e) => classify(&e),
+    }
 }
 
 fn write_issue_remote_id(local_id: &str, remote_id: i64) -> Outcome {
