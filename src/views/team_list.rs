@@ -80,7 +80,6 @@ pub fn view<'a>(teams: &'a [Team], selected_team_id: Option<&'a str>) -> Element
     container(col)
         .padding(0)
         .width(Length::Fill)
-        .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::BG_MENU)),
             ..Default::default()

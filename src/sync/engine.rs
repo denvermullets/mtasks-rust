@@ -113,7 +113,7 @@ async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
         ("issue", "delete") => issue_delete(client, entry.payload.as_deref()).await,
         ("project", "create") => project_create(client, &entry.entity_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
-        ("project", "delete") => project_delete(&entry.entity_id),
+        ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id).await,
         ("dependency", "delete") => dependency_delete(&entry.entity_id),
@@ -406,9 +406,13 @@ fn prep_project_create(entity_id: &str) -> Prep<ProjectCreatePrep> {
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
+    let params = match build_project_params(&conn, &project) {
+        Ok(p) => p,
+        Err(o) => return Prep::Done(o),
+    };
     Prep::Ready(ProjectCreatePrep {
         team_remote_id,
-        params: build_project_params(&project),
+        params,
         local_id: project.id,
     })
 }
@@ -436,10 +440,14 @@ fn prep_project_update(entity_id: &str) -> Prep<ProjectUpdatePrep> {
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
+    let params = match build_project_params(&conn, &project) {
+        Ok(p) => p,
+        Err(o) => return Prep::Done(o),
+    };
     Prep::Ready(ProjectUpdatePrep {
         team_remote_id,
         remote_id,
-        params: build_project_params(&project),
+        params,
     })
 }
 
@@ -474,21 +482,53 @@ async fn project_update(client: &ApiClient, entity_id: &str) -> Outcome {
     }
 }
 
-fn project_delete(_entity_id: &str) -> Outcome {
-    Outcome::DropAndLog(
-        "project delete unsupported: pre-deletion remote_id not captured in payload".into(),
-    )
+async fn project_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let raw = match payload {
+        Some(s) => s,
+        None => return Outcome::DropAndLog("project delete: no payload (legacy entry)".into()),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => return Outcome::DropAndLog(format!("project delete: bad payload: {e}")),
+    };
+    let remote_id = match parsed.get("remote_id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return Outcome::DropAndLog("project delete: missing remote_id in payload".into()),
+    };
+    let team_remote_id = match parsed.get("team_remote_id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => {
+            return Outcome::DropAndLog(
+                "project delete: missing team_remote_id in payload".into(),
+            )
+        }
+    };
+    match projects::delete(client, team_remote_id, remote_id).await {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(_)) => Outcome::Success,
+        Err(e) => classify(&e),
+    }
 }
 
-fn build_project_params(project: &Project) -> ProjectParams {
-    ProjectParams {
+fn build_project_params(conn: &Connection, project: &Project) -> Result<ProjectParams, Outcome> {
+    let lead_remote_id = match &project.lead_id {
+        Some(uuid) => match queries::remote_id_for(conn, "members", uuid) {
+            Ok(Some(id)) => Some(id),
+            Ok(None) => {
+                return Err(Outcome::LeavePending(format!(
+                    "project lead member {uuid} not synced yet"
+                )))
+            }
+            Err(e) => return Err(Outcome::LeavePending(format!("db: {e}"))),
+        },
+        None => None,
+    };
+    Ok(ProjectParams {
         name: Some(project.name.clone()),
         description: project.description.clone(),
         priority: Some(crate::api::dto::priority_to_string(project.priority).to_string()),
         status: Some(project.status.as_str().to_string()),
-        // lead_id (member uuid → remote_id) deferred until projects are
-        // creatable from the UI.
-        lead_id: None,
+        lead_id: lead_remote_id,
         start_date: project.start_date.clone(),
         due_date: project.due_date.clone(),
         roadmap_commitment: project
@@ -496,7 +536,7 @@ fn build_project_params(project: &Project) -> ProjectParams {
             .as_ref()
             .map(|c| c.as_str().to_string()),
         label_ids: None,
-    }
+    })
 }
 
 // ── Labels ────────────────────────────────────────────────────────────────

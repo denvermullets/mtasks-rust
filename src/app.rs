@@ -4,12 +4,12 @@ use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, TeamDto};
 use crate::config::{self, Config};
-use crate::db::models::{Issue, Lane, Priority, Team};
+use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, RoadmapCommitment, Team};
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
 use crate::sync::engine::{FullSyncReport, SyncEngine};
 use crate::theme as t;
-use crate::views::{board, issue_form, settings, status_bar, team_list};
+use crate::views::{board, issue_form, projects as projects_view, settings, status_bar, team_list};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -62,6 +62,23 @@ pub enum Message {
     SyncTick,
     SyncCompleted(FullSyncReport),
 
+    // Project CRUD
+    CreateProject,
+    EditProject(String),
+    SaveProject,
+    ConfirmDeleteProject,
+    DeleteProjectConfirmed,
+
+    // Project form fields
+    ProjectNameChanged(String),
+    ProjectDescriptionChanged(iced::widget::text_editor::Action),
+    ProjectStatusChanged(ProjectStatus),
+    ProjectPriorityChanged(Priority),
+    ProjectLeadChanged(Option<String>),
+    ProjectStartDateChanged(String),
+    ProjectDueDateChanged(String),
+    ProjectRoadmapCommitmentChanged(Option<RoadmapCommitment>),
+
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
 }
@@ -72,6 +89,8 @@ pub enum Modal {
     IssueForm,
     DeleteConfirm(String),
     Settings,
+    ProjectForm,
+    DeleteProjectConfirm(String),
 }
 
 pub struct App {
@@ -79,10 +98,13 @@ pub struct App {
     selected_team_id: Option<String>,
     lanes: Vec<Lane>,
     issues: Vec<Issue>,
+    projects: Vec<Project>,
+    members: Vec<Member>,
     focused_lane: usize,
     focused_issue: usize,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
+    project_form: Option<projects_view::ProjectFormState>,
     settings_form: Option<settings::SettingsFormState>,
     show_help: bool,
     pending_sync_count: i32,
@@ -113,6 +135,11 @@ impl App {
         if let Some(ref team_id) = self.selected_team_id {
             self.lanes = queries::lanes_for_team(&conn, team_id).unwrap_or_default();
             self.issues = queries::issues_for_team(&conn, team_id).unwrap_or_default();
+            self.projects = queries::projects_for_team(&conn, team_id).unwrap_or_default();
+            self.members = queries::members_for_team(&conn, team_id).unwrap_or_default();
+        } else {
+            self.projects.clear();
+            self.members.clear();
         }
 
         self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
@@ -179,13 +206,15 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let selected_team_id = teams.first().map(|t| t.id.clone());
 
-        let (lanes, issues) = if let Some(ref tid) = selected_team_id {
+        let (lanes, issues, projects, members) = if let Some(ref tid) = selected_team_id {
             (
                 queries::lanes_for_team(&conn, tid).unwrap_or_default(),
                 queries::issues_for_team(&conn, tid).unwrap_or_default(),
+                queries::projects_for_team(&conn, tid).unwrap_or_default(),
+                queries::members_for_team(&conn, tid).unwrap_or_default(),
             )
         } else {
-            (vec![], vec![])
+            (vec![], vec![], vec![], vec![])
         };
 
         let pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
@@ -195,10 +224,13 @@ impl App {
             selected_team_id,
             lanes,
             issues,
+            projects,
+            members,
             focused_lane: 0,
             focused_issue: 0,
             modal: Modal::None,
             issue_form: None,
+            project_form: None,
             settings_form: None,
             show_help: false,
             pending_sync_count,
@@ -506,6 +538,7 @@ impl App {
                 self.modal = Modal::None;
                 self.issue_form = None;
                 self.settings_form = None;
+                self.project_form = None;
             }
 
             Message::ToggleHelp => {
@@ -675,6 +708,187 @@ impl App {
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
                 self.reload_data();
             }
+
+            Message::CreateProject => {
+                if self.selected_team_id.is_none() {
+                    return Task::none();
+                }
+                self.project_form = Some(projects_view::ProjectFormState::new());
+                self.modal = Modal::ProjectForm;
+            }
+
+            Message::EditProject(project_id) => {
+                let conn = self.db();
+                if let Ok(Some(project)) = queries::get_project(&conn, &project_id) {
+                    self.project_form =
+                        Some(projects_view::ProjectFormState::from_project(&project));
+                    self.modal = Modal::ProjectForm;
+                }
+            }
+
+            Message::ProjectNameChanged(v) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.name = v;
+                }
+            }
+            Message::ProjectDescriptionChanged(action) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.description.perform(action);
+                }
+            }
+            Message::ProjectStatusChanged(s) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.status = s;
+                }
+            }
+            Message::ProjectPriorityChanged(p) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.priority = p;
+                }
+            }
+            Message::ProjectLeadChanged(id) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.lead_id = id;
+                }
+            }
+            Message::ProjectStartDateChanged(v) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.start_date = v;
+                }
+            }
+            Message::ProjectDueDateChanged(v) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.due_date = v;
+                }
+            }
+            Message::ProjectRoadmapCommitmentChanged(c) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.roadmap_commitment = c;
+                }
+            }
+
+            Message::SaveProject => {
+                if let Some(ref form) = self.project_form {
+                    if form.name.trim().is_empty() {
+                        return Task::none();
+                    }
+                    let conn = self.db();
+                    let now = chrono::Utc::now()
+                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                        .to_string();
+
+                    let description_body = form.description_text();
+                    let description = if description_body.trim().is_empty() {
+                        None
+                    } else {
+                        Some(description_body.trim_end().to_string())
+                    };
+                    let start_date = if form.start_date.trim().is_empty() {
+                        None
+                    } else {
+                        Some(form.start_date.trim().to_string())
+                    };
+                    let due_date = if form.due_date.trim().is_empty() {
+                        None
+                    } else {
+                        Some(form.due_date.trim().to_string())
+                    };
+
+                    if let Some(ref project_id) = form.editing_project_id {
+                        if let Ok(Some(mut project)) = queries::get_project(&conn, project_id) {
+                            project.name = form.name.trim().to_string();
+                            project.description = description.clone();
+                            project.status = form.status;
+                            project.priority = form.priority as i32;
+                            project.lead_id = form.lead_id.clone();
+                            project.start_date = start_date;
+                            project.due_date = due_date;
+                            project.roadmap_commitment = form.roadmap_commitment;
+                            project.updated_at = now;
+                            let _ = queries::update_project(&conn, &project);
+
+                            let payload = serde_json::to_string(&project).ok();
+                            self.enqueue_sync(
+                                "project",
+                                &project.id,
+                                "update",
+                                payload.as_deref(),
+                            );
+                        }
+                    } else {
+                        let team_id = self.selected_team_id.clone().unwrap_or_default();
+                        let project = Project {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            remote_id: None,
+                            team_id,
+                            name: form.name.trim().to_string(),
+                            description: description.clone(),
+                            status: form.status,
+                            priority: form.priority as i32,
+                            lead_id: form.lead_id.clone(),
+                            start_date,
+                            due_date,
+                            roadmap_commitment: form.roadmap_commitment,
+                            velocity_score: 0,
+                            completed_issues_count: 0,
+                            total_issues_count: 0,
+                            created_at: now.clone(),
+                            updated_at: now,
+                        };
+                        let _ = queries::insert_project(&conn, &project);
+
+                        let payload = serde_json::to_string(&project).ok();
+                        self.enqueue_sync(
+                            "project",
+                            &project.id,
+                            "create",
+                            payload.as_deref(),
+                        );
+                    }
+                }
+                self.modal = Modal::None;
+                self.project_form = None;
+                self.reload_data();
+            }
+
+            Message::ConfirmDeleteProject => {
+                if let Some(ref form) = self.project_form {
+                    if let Some(ref id) = form.editing_project_id {
+                        self.modal = Modal::DeleteProjectConfirm(id.clone());
+                    }
+                }
+            }
+
+            Message::DeleteProjectConfirmed => {
+                if let Modal::DeleteProjectConfirm(ref project_id) = self.modal {
+                    let conn = self.db();
+                    let payload = match queries::get_project(&conn, project_id) {
+                        Ok(Some(project)) => match project.remote_id {
+                            Some(remote_id) => {
+                                queries::remote_id_for(&conn, "teams", &project.team_id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|team_remote_id| {
+                                        serde_json::json!({
+                                            "remote_id": remote_id,
+                                            "team_remote_id": team_remote_id,
+                                        })
+                                        .to_string()
+                                    })
+                            }
+                            None => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(p) = &payload {
+                        self.enqueue_sync("project", project_id, "delete", Some(p.as_str()));
+                    }
+                    let _ = queries::delete_project(&conn, project_id);
+                }
+                self.modal = Modal::None;
+                self.project_form = None;
+                self.reload_data();
+            }
         }
 
         Task::none()
@@ -682,6 +896,22 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let team_sidebar = team_list::view(&self.teams, self.selected_team_id.as_deref());
+        let projects_section = projects_view::sidebar_section(&self.projects);
+        let divider = container(text(""))
+            .height(Length::Fixed(1.0))
+            .width(Length::Fill)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::BORDER)),
+                ..Default::default()
+            });
+        let sidebar_column = iced::widget::scrollable(
+            column![]
+                .push(team_sidebar)
+                .push(divider)
+                .push(projects_section)
+                .width(Length::Fill),
+        )
+        .height(Length::Fill);
 
         let header_content: Element<'_, Message> = match self.selected_team() {
             Some(team) => row![]
@@ -739,8 +969,8 @@ impl App {
 
         let layout = row![]
             .push(
-                container(team_sidebar)
-                    .width(Length::Fixed(190.0))
+                container(sidebar_column)
+                    .width(Length::Fixed(220.0))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| iced::widget::container::Style {
                         background: Some(iced::Background::Color(t::BG_MENU)),
@@ -794,6 +1024,24 @@ impl App {
                     base
                 }
             }
+            Modal::ProjectForm => {
+                if let Some(ref form) = self.project_form {
+                    let modal = projects_view::modal_view(form, &self.members);
+                    iced::widget::stack![base, modal].into()
+                } else {
+                    base
+                }
+            }
+            Modal::DeleteProjectConfirm(project_id) => {
+                let project_name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == *project_id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("this project");
+                let confirm = delete_project_confirm_modal(project_name);
+                iced::widget::stack![base, confirm].into()
+            }
             Modal::None => base,
         }
     }
@@ -820,6 +1068,72 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
                 .push(
                     button(text("Delete").size(14).color(iced::Color::WHITE))
                         .on_press(Message::DeleteConfirmed)
+                        .padding([8, 24])
+                        .style(move |_theme: &Theme, _status| button::Style {
+                            background: Some(iced::Background::Color(t::DANGER)),
+                            text_color: iced::Color::WHITE,
+                            border: Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                )
+                .push(
+                    button(text("Cancel").size(14))
+                        .on_press(Message::CloseModal)
+                        .padding([8, 24])
+                        .style(button::secondary),
+                ),
+        );
+
+    let modal = container(content)
+        .padding(28)
+        .style(|_theme: &Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(t::BG_MODAL)),
+            border: iced::Border {
+                color: t::BORDER,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        });
+
+    container(modal)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                0.0, 0.0, 0.0, 0.7,
+            ))),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
+    use iced::widget::{button, column, container, row, text};
+    use iced::Border;
+
+    let content = column![]
+        .spacing(16)
+        .push(text("Delete Project?").size(18).color(t::TEXT_PRIMARY))
+        .push(
+            text(format!(
+                "Are you sure you want to delete \"{}\"?",
+                project_name
+            ))
+            .size(14)
+            .color(t::TEXT_SECONDARY),
+        )
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text("Delete").size(14).color(iced::Color::WHITE))
+                        .on_press(Message::DeleteProjectConfirmed)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
                             background: Some(iced::Background::Color(t::DANGER)),
