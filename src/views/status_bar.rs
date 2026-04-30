@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use iced::widget::{container, row, text};
 use iced::{Border, Element, Length, Theme};
 
@@ -9,18 +10,31 @@ pub fn view<'a>(
     show_help: bool,
     config_error: Option<&str>,
     last_sync_error: Option<&str>,
+    sync_in_progress: bool,
+    last_synced_at: Option<DateTime<Utc>>,
+    token_configured: bool,
 ) -> Element<'a, Message> {
-    let sync_text = if let Some(err) = last_sync_error {
-        format!("Sync error: {err}")
+    let (sync_text, sync_color) = if let Some(err) = last_sync_error {
+        (format!("Sync error: {err}"), t::DANGER)
+    } else if sync_in_progress {
+        ("Syncing\u{2026}".to_string(), t::TEXT_MUTED)
+    } else if !token_configured {
+        ("Sync paused \u{2014} set API token".to_string(), t::TEXT_MUTED)
+    } else if let Some(at) = last_synced_at {
+        let base = format!("Synced {}", format_age(at));
+        let full = if pending_sync_count > 0 {
+            format!("{base} \u{00B7} {pending_sync_count} pending")
+        } else {
+            base
+        };
+        (full, t::TEXT_MUTED)
     } else if pending_sync_count > 0 {
-        format!("{} pending sync", pending_sync_count)
+        (
+            format!("Not synced yet \u{00B7} {pending_sync_count} pending"),
+            t::TEXT_MUTED,
+        )
     } else {
-        "Synced".to_string()
-    };
-    let sync_color = if last_sync_error.is_some() {
-        t::DANGER
-    } else {
-        t::TEXT_MUTED
+        ("Not synced yet".to_string(), t::TEXT_MUTED)
     };
 
     let shortcuts = if show_help {
@@ -61,4 +75,17 @@ pub fn view<'a>(
             ..Default::default()
         })
         .into()
+}
+
+fn format_age(then: DateTime<Utc>) -> String {
+    let secs = (Utc::now() - then).num_seconds().max(0);
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
 }

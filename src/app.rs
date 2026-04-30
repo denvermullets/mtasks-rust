@@ -59,6 +59,7 @@ pub enum Message {
 
     // Sync
     SyncNow,
+    SyncTick,
     SyncCompleted(FullSyncReport),
 
     // Keyboard event
@@ -220,7 +221,7 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        event::listen_with(|event, _status, _id| {
+        let keys = event::listen_with(|event, _status, _id| {
             if let iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key, modifiers, ..
             }) = event
@@ -229,7 +230,12 @@ impl App {
             } else {
                 None
             }
-        })
+        });
+        let tick = iced::time::every(std::time::Duration::from_secs(
+            self.config.sync_interval_secs.max(1),
+        ))
+        .map(|_| Message::SyncTick);
+        Subscription::batch([keys, tick])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -377,7 +383,25 @@ impl App {
             Message::DeleteConfirmed => {
                 if let Modal::DeleteConfirm(ref issue_id) = self.modal {
                     let conn = self.db();
-                    self.enqueue_sync("issue", issue_id, "delete", None);
+                    let payload = match queries::get_issue(&conn, issue_id) {
+                        Ok(Some(issue)) => match issue.remote_id {
+                            Some(remote_id) => queries::remote_id_for(&conn, "teams", &issue.team_id)
+                                .ok()
+                                .flatten()
+                                .map(|team_remote_id| {
+                                    serde_json::json!({
+                                        "remote_id": remote_id,
+                                        "team_remote_id": team_remote_id,
+                                    })
+                                    .to_string()
+                                }),
+                            None => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(p) = &payload {
+                        self.enqueue_sync("issue", issue_id, "delete", Some(p.as_str()));
+                    }
                     let _ = queries::delete_issue(&conn, issue_id);
                 }
                 self.modal = Modal::None;
@@ -575,6 +599,22 @@ impl App {
                 }
             }
 
+            Message::SyncTick => {
+                if self.sync_in_progress {
+                    return Task::none();
+                }
+                let has_token = self
+                    .config
+                    .api_token
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false);
+                if !has_token {
+                    return Task::none();
+                }
+                return self.update(Message::SyncNow);
+            }
+
             Message::SyncNow => {
                 if self.sync_in_progress {
                     return Task::none();
@@ -674,11 +714,20 @@ impl App {
             self.focused_issue,
         );
 
+        let token_configured = self
+            .config
+            .api_token
+            .as_deref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
         let status = status_bar::view(
             self.pending_sync_count,
             self.show_help,
             self.config_error.as_deref(),
             self.last_sync_error.as_deref(),
+            self.sync_in_progress,
+            self.config.last_synced_at,
+            token_configured,
         );
 
         let main_content = column![]
