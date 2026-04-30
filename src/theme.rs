@@ -1,5 +1,7 @@
 use iced::Color;
 
+use crate::db::models::ProjectStatus;
+
 /// Convert u8 hex to f32 for Color::from_rgb (which is const)
 const fn c(r: u8, g: u8, b: u8) -> Color {
     Color::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
@@ -41,6 +43,16 @@ pub const PRIORITY_LOW: Color = Color::from_rgb(0.23, 0.73, 0.53);
 pub const PRIORITY_NONE: Color = Color::from_rgb(0.42, 0.42, 0.48);
 
 pub const DANGER: Color = Color::from_rgb(0.94, 0.27, 0.27);
+
+pub fn project_status_color(status: ProjectStatus) -> Color {
+    match status {
+        ProjectStatus::Backlog => TEXT_MUTED,
+        ProjectStatus::Started => ACCENT,
+        ProjectStatus::Paused => PRIORITY_HIGH,
+        ProjectStatus::Completed => PRIORITY_LOW,
+        ProjectStatus::Cancelled => DANGER,
+    }
+}
 
 pub fn priority_color(priority: i32) -> Color {
     match priority {

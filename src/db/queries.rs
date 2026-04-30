@@ -141,6 +141,64 @@ pub fn get_project(conn: &Connection, project_id: &str) -> Result<Option<Project
     .optional()
 }
 
+pub fn projects_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Project>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, team_id, name, description, status, priority,
+                lead_id, start_date, due_date, roadmap_commitment,
+                velocity_score, completed_issues_count, total_issues_count,
+                created_at, updated_at
+         FROM projects WHERE team_id = ?1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map(params![team_id], Project::from_row)?;
+    rows.collect()
+}
+
+pub fn members_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Member>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, team_id, name, email, created_at, updated_at
+         FROM members WHERE team_id = ?1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map(params![team_id], Member::from_row)?;
+    rows.collect()
+}
+
+pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
+    conn.execute(
+        "INSERT INTO projects
+            (id, remote_id, team_id, name, description, status, priority, lead_id,
+             start_date, due_date, roadmap_commitment, velocity_score,
+             completed_issues_count, total_issues_count, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            project.id, project.remote_id, project.team_id, project.name, project.description,
+            project.status, project.priority, project.lead_id, project.start_date, project.due_date,
+            project.roadmap_commitment, project.velocity_score, project.completed_issues_count,
+            project.total_issues_count, project.created_at, project.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_project(conn: &Connection, project: &Project) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET
+            name = ?1, description = ?2, status = ?3, priority = ?4, lead_id = ?5,
+            start_date = ?6, due_date = ?7, roadmap_commitment = ?8, updated_at = ?9
+         WHERE id = ?10",
+        params![
+            project.name, project.description, project.status, project.priority, project.lead_id,
+            project.start_date, project.due_date, project.roadmap_commitment, project.updated_at,
+            project.id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_project(conn: &Connection, project_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+    Ok(())
+}
+
 pub fn get_label(conn: &Connection, label_id: &str) -> Result<Option<Label>> {
     conn.query_row(
         "SELECT id, remote_id, team_id, name, color, created_at, updated_at
