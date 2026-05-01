@@ -23,7 +23,7 @@ use crate::api::{
     dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient, ApiError,
     Direction, IssueParams, LabelParams, ProjectParams,
 };
-use crate::db::models::{Issue, Project, SyncQueueEntry};
+use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
 
 #[derive(Debug, Default, Clone)]
@@ -336,7 +336,7 @@ fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, O
         title: Some(issue.title.clone()),
         description: issue.description.clone(),
         lane_id: Some(lane_id),
-        priority: Some(crate::api::dto::priority_to_string(issue.priority).to_string()),
+        priority: Some(Priority::from_i32(issue.priority).as_rails_str().to_string()),
         estimate: issue.estimate.map(|e| e as i64),
         due_date: issue.due_date.clone(),
         assignee_id,
@@ -526,7 +526,7 @@ fn build_project_params(conn: &Connection, project: &Project) -> Result<ProjectP
     Ok(ProjectParams {
         name: Some(project.name.clone()),
         description: project.description.clone(),
-        priority: Some(crate::api::dto::priority_to_string(project.priority).to_string()),
+        priority: Some(Priority::from_i32(project.priority).as_rails_str().to_string()),
         status: Some(project.status.as_str().to_string()),
         lead_id: lead_remote_id,
         start_date: project.start_date.clone(),

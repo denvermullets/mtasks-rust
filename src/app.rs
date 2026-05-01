@@ -358,7 +358,7 @@ impl App {
                         {
                             issue.title = form.title.trim().to_string();
                             issue.description = description.clone();
-                            issue.priority = form.priority as i32;
+                            issue.priority = form.priority.to_i32();
                             issue.lane_id = form.lane_id.clone();
                             issue.updated_at = now;
                             let _ = queries::update_issue(&conn, &issue);
@@ -377,7 +377,7 @@ impl App {
                             id: uuid::Uuid::new_v4().to_string(),
                             title: form.title.trim().to_string(),
                             description: description.clone(),
-                            priority: form.priority as i32,
+                            priority: form.priority.to_i32(),
                             team_number: Some(team_number),
                             due_date: None,
                             estimate: None,
@@ -799,7 +799,7 @@ impl App {
                             project.name = form.name.trim().to_string();
                             project.description = description.clone();
                             project.status = form.status;
-                            project.priority = form.priority as i32;
+                            project.priority = form.priority.to_i32();
                             project.lead_id = form.lead_id.clone();
                             project.start_date = start_date;
                             project.due_date = due_date;
@@ -824,7 +824,7 @@ impl App {
                             name: form.name.trim().to_string(),
                             description: description.clone(),
                             status: form.status,
-                            priority: form.priority as i32,
+                            priority: form.priority.to_i32(),
                             lead_id: form.lead_id.clone(),
                             start_date,
                             due_date,

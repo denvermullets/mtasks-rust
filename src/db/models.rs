@@ -2,6 +2,8 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use rusqlite::{Result as SqlResult, Row};
 use serde::{Deserialize, Serialize};
 
+use crate::api::error::ApiError;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Team {
     pub id: String,
@@ -72,20 +74,37 @@ impl Priority {
         }
     }
 
-    pub fn label(&self) -> &'static str {
+    pub fn to_i32(self) -> i32 {
+        self as i32
+    }
+
+    pub fn as_rails_str(&self) -> &'static str {
         match self {
             Priority::Urgent => "urgent",
             Priority::High => "high",
             Priority::Medium => "medium",
             Priority::Low => "low",
-            Priority::None => "none",
+            Priority::None => "no_priority",
+        }
+    }
+
+    pub fn from_rails_str(s: &str) -> Result<Self, ApiError> {
+        match s {
+            "urgent" => Ok(Priority::Urgent),
+            "high" => Ok(Priority::High),
+            "medium" => Ok(Priority::Medium),
+            "low" => Ok(Priority::Low),
+            "no_priority" => Ok(Priority::None),
+            other => Err(ApiError::EnumMapping(format!(
+                "unknown priority: {other}"
+            ))),
         }
     }
 }
 
 impl std::fmt::Display for Priority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.label())
+        f.write_str(self.as_rails_str())
     }
 }
 
@@ -379,6 +398,45 @@ pub struct SyncQueueEntry {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    const ALL_PRIORITIES: [Priority; 5] = [
+        Priority::Urgent,
+        Priority::High,
+        Priority::Medium,
+        Priority::Low,
+        Priority::None,
+    ];
+
+    #[test]
+    fn priority_rails_str_roundtrip() {
+        for p in ALL_PRIORITIES {
+            assert_eq!(Priority::from_rails_str(p.as_rails_str()).unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn priority_rails_strings_exact() {
+        assert_eq!(Priority::Urgent.as_rails_str(), "urgent");
+        assert_eq!(Priority::High.as_rails_str(), "high");
+        assert_eq!(Priority::Medium.as_rails_str(), "medium");
+        assert_eq!(Priority::Low.as_rails_str(), "low");
+        assert_eq!(Priority::None.as_rails_str(), "no_priority");
+    }
+
+    #[test]
+    fn priority_i32_roundtrip() {
+        for i in 0..=4 {
+            assert_eq!(Priority::from_i32(i).to_i32(), i);
+        }
+    }
+
+    #[test]
+    fn priority_from_rails_str_invalid() {
+        match Priority::from_rails_str("bogus") {
+            Err(ApiError::EnumMapping(msg)) => assert!(msg.contains("bogus")),
+            other => panic!("expected EnumMapping error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn project_status_serde_roundtrip() {

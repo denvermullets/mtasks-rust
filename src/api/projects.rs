@@ -3,7 +3,7 @@ use serde::Serialize;
 use super::{ApiClient, ApiError, ProjectDto};
 
 /// Body for create/update — fields match Rails `ProjectsController` strong params.
-/// `priority` is a string ("urgent" | "high" | "medium" | "low" | "no_priority").
+/// Use [`crate::db::models::Priority::as_rails_str`] to populate `priority`.
 /// `status` is a string ("backlog" | "started" | "paused" | "completed" | "cancelled").
 /// `roadmap_commitment` is a string ("now" | "next" | "later").
 #[derive(Debug, Default, Clone, Serialize)]

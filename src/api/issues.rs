@@ -7,7 +7,7 @@ pub struct IssueFilters {
     pub lane_id: Option<i64>,
     pub assignee_id: Option<i64>,
     pub project_id: Option<i64>,
-    /// One of: "urgent" | "high" | "medium" | "low" | "no_priority".
+    /// Use [`crate::db::models::Priority::as_rails_str`] for valid values.
     pub priority: Option<String>,
 }
 
@@ -35,7 +35,7 @@ impl IssueFilters {
 }
 
 /// Body for create/update — fields match Rails `IssuesController` strong params.
-/// `priority` is a string ("urgent" | "high" | "medium" | "low" | "no_priority").
+/// Use [`crate::db::models::Priority::as_rails_str`] to populate `priority`.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct IssueParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +109,7 @@ pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), Api
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::Priority;
 
     #[test]
     fn empty_filters_produce_no_query_string() {
@@ -121,7 +122,7 @@ mod tests {
             lane_id: Some(1),
             assignee_id: Some(2),
             project_id: Some(3),
-            priority: Some("high".into()),
+            priority: Some(Priority::High.as_rails_str().into()),
         };
         assert_eq!(
             f.query_string(),
@@ -132,17 +133,20 @@ mod tests {
     #[test]
     fn partial_filters_only_emit_set_keys() {
         let f = IssueFilters {
-            priority: Some("urgent".into()),
+            priority: Some(Priority::Urgent.as_rails_str().into()),
             ..Default::default()
         };
-        assert_eq!(f.query_string(), "?priority=urgent");
+        assert_eq!(
+            f.query_string(),
+            format!("?priority={}", Priority::Urgent.as_rails_str())
+        );
     }
 
     #[test]
     fn issue_params_wrap_under_issue_key() {
         let params = IssueParams {
             title: Some("Bug".into()),
-            priority: Some("high".into()),
+            priority: Some(Priority::High.as_rails_str().into()),
             label_ids: Some(vec![1, 2]),
             ..Default::default()
         };
