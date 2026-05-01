@@ -117,7 +117,7 @@ fn issue_card<'a>(
     lane_idx: usize,
     issue_idx: usize,
 ) -> Element<'a, Message> {
-    let priority_color = t::priority_color(issue.priority);
+    let priority_color = t::priority_color(issue.priority_enum());
 
     let tag = issue
         .team_number

@@ -4,33 +4,9 @@ use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::db::models::{
-    Issue, IssueDependency, Label, Lane, Member, Project, ProjectStatus, RoadmapCommitment, Team,
+    Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
+    RoadmapCommitment, Team,
 };
-
-// ── Priority string ↔ i32 mapping (Rails: urgent/high/medium/low/no_priority) ──
-
-pub fn priority_to_string(p: i32) -> &'static str {
-    match p {
-        0 => "urgent",
-        1 => "high",
-        2 => "medium",
-        3 => "low",
-        _ => "no_priority",
-    }
-}
-
-pub fn priority_from_string(s: &str) -> Result<i32, ApiError> {
-    match s {
-        "urgent" => Ok(0),
-        "high" => Ok(1),
-        "medium" => Ok(2),
-        "low" => Ok(3),
-        "no_priority" => Ok(4),
-        other => Err(ApiError::EnumMapping(format!(
-            "unknown priority: {other}"
-        ))),
-    }
-}
 
 // ── Reference shapes used inside Issue/Project/Comment serializers ──
 
@@ -143,7 +119,7 @@ impl IssueDto {
             id,
             identifier,
             title: issue.title.clone(),
-            priority: priority_to_string(issue.priority).to_string(),
+            priority: Priority::from_i32(issue.priority).as_rails_str().to_string(),
             estimate: issue.estimate.map(|f| f as i64),
             due_date: issue.due_date.clone(),
             lane: lane_ref,
@@ -215,7 +191,7 @@ impl IssueDto {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
             title: self.title,
             description: self.description,
-            priority: priority_from_string(&self.priority)?,
+            priority: Priority::from_rails_str(&self.priority)?.to_i32(),
             team_number,
             due_date: self.due_date,
             estimate: self.estimate.map(|i| i as f64),
@@ -290,7 +266,7 @@ impl ProjectDto {
             name: project.name.clone(),
             description: project.description.clone(),
             status: project.status,
-            priority: priority_to_string(project.priority).to_string(),
+            priority: Priority::from_i32(project.priority).as_rails_str().to_string(),
             lead,
             start_date: project.start_date.clone(),
             due_date: project.due_date.clone(),
@@ -325,7 +301,7 @@ impl ProjectDto {
             name: self.name,
             description: self.description,
             status: self.status,
-            priority: priority_from_string(&self.priority)?,
+            priority: Priority::from_rails_str(&self.priority)?.to_i32(),
             lead_id,
             start_date: self.start_date,
             due_date: self.due_date,
@@ -834,31 +810,6 @@ mod tests {
 
     fn now() -> String {
         "2026-04-27T12:00:00.000Z".to_string()
-    }
-
-    #[test]
-    fn priority_string_roundtrip() {
-        for p in 0..=4 {
-            let s = priority_to_string(p);
-            assert_eq!(priority_from_string(s).unwrap(), p);
-        }
-    }
-
-    #[test]
-    fn priority_strings_match_rails() {
-        assert_eq!(priority_to_string(0), "urgent");
-        assert_eq!(priority_to_string(1), "high");
-        assert_eq!(priority_to_string(2), "medium");
-        assert_eq!(priority_to_string(3), "low");
-        assert_eq!(priority_to_string(4), "no_priority");
-    }
-
-    #[test]
-    fn priority_from_invalid_string() {
-        match priority_from_string("bogus") {
-            Err(ApiError::EnumMapping(msg)) => assert!(msg.contains("bogus")),
-            other => panic!("expected EnumMapping error, got {other:?}"),
-        }
     }
 
     #[test]
