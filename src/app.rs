@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::keyboard;
 use iced::widget::{column, container, row, text};
@@ -14,14 +14,19 @@ use crate::keys;
 use crate::sync::engine::{FullSyncReport, SyncEngine};
 use crate::theme as t;
 use crate::views::{
-    board, issue_form, labels as labels_view, projects as projects_view, settings, status_bar,
-    team_list,
+    board, issue_form, labels as labels_view, placeholder, projects as projects_view, settings,
+    status_bar, team_list,
 };
 
 #[derive(Debug, Clone)]
 pub enum Message {
     // Navigation
-    SelectTeam(String),
+    /// Toggle a team's sidebar expansion (chevron / team-header click).
+    ToggleTeamExpanded(String),
+    /// Select a team and switch the right pane to `view` (team sub-row click).
+    SelectTeamView(String, View),
+    /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
+    NavigateToView(View),
 
     // Issue CRUD
     CreateIssue,
@@ -112,9 +117,26 @@ pub enum Modal {
     Labels,
 }
 
+/// Which screen the right-hand pane renders. Only `Board` is implemented today;
+/// the rest render titled "Coming soon" placeholders until their tickets land
+/// (JAIT-181 projects, JAIT-182 issue detail, JAIT-183 roadmap, JAIT-186 my issues).
+#[derive(Debug, Clone, PartialEq)]
+pub enum View {
+    Board,
+    IssueDetail(String),
+    ProjectList,
+    ProjectDetail(String),
+    Roadmap,
+    MyIssues,
+}
+
 pub struct App {
     teams: Vec<Team>,
     selected_team_id: Option<String>,
+    /// Current right-pane screen.
+    view: View,
+    /// Teams whose sidebar sub-rows are expanded. Session-only (not persisted).
+    expanded_teams: HashSet<String>,
     lanes: Vec<Lane>,
     issues: Vec<Issue>,
     projects: Vec<Project>,
@@ -250,9 +272,14 @@ impl App {
 
         let pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
 
+        // Expand the boot-selected team so its sub-rows are visible on first paint.
+        let expanded_teams = selected_team_id.iter().cloned().collect();
+
         let app = Self {
             teams,
             selected_team_id,
+            view: View::Board,
+            expanded_teams,
             lanes,
             issues,
             projects,
@@ -308,16 +335,30 @@ impl App {
         match message {
             Message::KeyPressed(key, modifiers) => {
                 let modal_open = self.modal != Modal::None;
-                if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open) {
+                let on_board = self.view == View::Board;
+                if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
                     return self.update(msg);
                 }
             }
 
-            Message::SelectTeam(team_id) => {
-                self.selected_team_id = Some(team_id);
-                self.focused_lane = 0;
-                self.focused_issue = 0;
-                self.reload_data();
+            Message::ToggleTeamExpanded(team_id) => {
+                if !self.expanded_teams.remove(&team_id) {
+                    self.expanded_teams.insert(team_id);
+                }
+            }
+
+            Message::SelectTeamView(team_id, view) => {
+                if self.selected_team_id.as_deref() != Some(team_id.as_str()) {
+                    self.selected_team_id = Some(team_id);
+                    self.focused_lane = 0;
+                    self.focused_issue = 0;
+                    self.reload_data();
+                }
+                self.view = view;
+            }
+
+            Message::NavigateToView(view) => {
+                self.view = view;
             }
 
             Message::CreateIssue => {
@@ -1035,23 +1076,13 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let team_sidebar = team_list::view(&self.teams, self.selected_team_id.as_deref());
-        let projects_section = projects_view::sidebar_section(&self.projects);
-        let divider = container(text(""))
-            .height(Length::Fixed(1.0))
-            .width(Length::Fill)
-            .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BORDER)),
-                ..Default::default()
-            });
-        let sidebar_column = iced::widget::scrollable(
-            column![]
-                .push(team_sidebar)
-                .push(divider)
-                .push(projects_section)
-                .width(Length::Fill),
-        )
-        .height(Length::Fill);
+        let team_sidebar = team_list::view(
+            &self.teams,
+            self.selected_team_id.as_deref(),
+            &self.expanded_teams,
+            &self.view,
+        );
+        let sidebar_column = iced::widget::scrollable(team_sidebar).height(Length::Fill);
 
         let header_content: Element<'_, Message> = match self.selected_team() {
             Some(team) => row![]
@@ -1076,14 +1107,21 @@ impl App {
                 ..Default::default()
             });
 
-        let board_view = board::view(
-            self.selected_team(),
-            &self.lanes,
-            &self.issues,
-            &self.issue_labels,
-            self.focused_lane,
-            self.focused_issue,
-        );
+        let main_pane: Element<'_, Message> = match self.view {
+            View::Board => board::view(
+                self.selected_team(),
+                &self.lanes,
+                &self.issues,
+                &self.issue_labels,
+                self.focused_lane,
+                self.focused_issue,
+            ),
+            View::ProjectList => placeholder::view("Projects"),
+            View::ProjectDetail(_) => placeholder::view("Project"),
+            View::IssueDetail(_) => placeholder::view("Issue"),
+            View::Roadmap => placeholder::view("Roadmap"),
+            View::MyIssues => placeholder::view("My Issues"),
+        };
 
         let token_configured = self
             .config
@@ -1103,7 +1141,7 @@ impl App {
 
         let main_content = column![]
             .push(header)
-            .push(board_view)
+            .push(main_pane)
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);
