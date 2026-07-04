@@ -1,14 +1,18 @@
-use iced::widget::{column, container, horizontal_rule, mouse_area, row, scrollable, text, Column};
+use std::collections::HashMap;
+
+use iced::widget::{column, container, horizontal_rule, mouse_area, row, scrollable, text, Column, Row};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::models::{Issue, Lane, Team};
+use crate::db::models::{Issue, Label, Lane, Team};
 use crate::theme as t;
+use crate::views::labels as labels_view;
 
 pub fn view<'a>(
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     issues: &'a [Issue],
+    issue_labels: &'a HashMap<String, Vec<Label>>,
     focused_lane: usize,
     focused_issue: usize,
 ) -> Element<'a, Message> {
@@ -65,7 +69,15 @@ pub fn view<'a>(
 
         for (issue_idx, issue) in lane_issues.iter().enumerate() {
             let is_focused = is_focused_lane && issue_idx == focused_issue;
-            let card = issue_card(issue, team_identifier, is_focused, lane_idx, issue_idx);
+            let card_labels = issue_labels.get(&issue.id).map(|v| v.as_slice()).unwrap_or(&[]);
+            let card = issue_card(
+                issue,
+                team_identifier,
+                card_labels,
+                is_focused,
+                lane_idx,
+                issue_idx,
+            );
             issue_cards = issue_cards.push(card);
         }
 
@@ -113,6 +125,7 @@ pub fn view<'a>(
 fn issue_card<'a>(
     issue: &'a Issue,
     team_identifier: &'a str,
+    labels: &'a [Label],
     focused: bool,
     lane_idx: usize,
     issue_idx: usize,
@@ -132,15 +145,24 @@ fn issue_card<'a>(
         .push(text("\u{25B3}").size(11).color(priority_color))
         .push(text(format!("{}", priority_val)).size(11).color(t::TEXT_MUTED));
 
-    let card_content = column![]
+    let mut card_content = column![]
         .spacing(4)
         .push(text(tag).size(12).color(t::TEXT_MUTED))
         .push(
             text(&issue.title)
                 .size(14)
                 .color(t::TEXT_PRIMARY),
-        )
-        .push(priority_indicator);
+        );
+
+    if !labels.is_empty() {
+        let mut chips: Row<'a, Message> = row![].spacing(4);
+        for label in labels {
+            chips = chips.push(labels_view::static_chip(label));
+        }
+        card_content = card_content.push(chips);
+    }
+
+    let card_content = card_content.push(priority_indicator);
 
     let bg = if focused {
         t::BG_CARD_FOCUSED
