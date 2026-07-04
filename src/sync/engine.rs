@@ -331,6 +331,7 @@ fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, O
     let project_id = optional_remote_id(conn, "projects", issue.project_id.as_deref())?;
     let assignee_id = optional_remote_id(conn, "members", issue.assignee_id.as_deref())?;
     let parent_issue_id = optional_remote_id(conn, "issues", issue.parent_issue_id.as_deref())?;
+    let label_ids = build_label_ids(conn, &issue.id)?;
 
     Ok(IssueParams {
         title: Some(issue.title.clone()),
@@ -342,11 +343,25 @@ fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, O
         assignee_id,
         project_id,
         parent_issue_id,
-        // The issue_labels join table isn't wired into the local UI yet; once
-        // labels are settable on local issues, populate this with resolved
-        // remote ids.
-        label_ids: None,
+        label_ids,
     })
+}
+
+/// Resolve the issue's locally-attached labels to their Rails remote ids.
+///
+/// Always returns `Some(..)` (possibly empty) so the push asserts the full
+/// label set — Rails' `label_ids=` setter treats `[]` as "detach all", which is
+/// exactly what we want when the user clears an issue's labels locally. If any
+/// attached label hasn't been pushed yet (no `remote_id`), we leave the entry
+/// pending so the label create drains first and ordering is preserved.
+fn build_label_ids(conn: &Connection, issue_id: &str) -> Result<Option<Vec<i64>>, Outcome> {
+    let local_ids = queries::label_ids_for_issue(conn, issue_id)
+        .map_err(|e| Outcome::LeavePending(format!("db (issue labels): {e}")))?;
+    let mut remote_ids = Vec::with_capacity(local_ids.len());
+    for local in &local_ids {
+        remote_ids.push(require_remote_id(conn, "labels", local)?);
+    }
+    Ok(Some(remote_ids))
 }
 
 fn require_remote_id(conn: &Connection, table: &str, id: &str) -> Result<i64, Outcome> {
@@ -1172,10 +1187,18 @@ async fn pull_issues_step(
                 let existing = queries::find_issue_by_remote_id(&conn, dto.id)
                     .map_err(|e| format!("db (find issue): {e}"))?;
                 let existing_uuid = existing.as_ref().map(|i| i.id.clone());
+                // Capture the remote label ids before `into_model` consumes dto.
+                let label_remote_ids: Vec<i64> = dto.labels.iter().map(|l| l.id).collect();
                 let issue: Issue = dto
                     .into_model(&conn, local_team_id.to_string(), existing_uuid)
                     .map_err(|e| format!("convert: {e}"))?;
                 queries::upsert_issue(&conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
+                // Reflect the remote label set into the issue_labels join. Labels
+                // are pulled before issues, so their local rows already exist; any
+                // remote id we can't resolve locally is skipped defensively.
+                let local_label_ids = resolve_local_label_ids(&conn, &label_remote_ids)?;
+                queries::set_issue_labels(&conn, &issue.id, &local_label_ids)
+                    .map_err(|e| format!("db (set issue labels): {e}"))?;
                 Ok(())
             })();
 
@@ -1185,9 +1208,6 @@ async fn pull_issues_step(
                 );
                 skipped += 1;
             }
-            // issue_labels join intentionally not populated; the local board
-            // doesn't render labels yet. Wire this when the UI gains label
-            // rendering.
         }
     }
 
@@ -1211,6 +1231,27 @@ async fn pull_issues_step(
 /// reference users who may not be members of this team (e.g. an admin who
 /// created the issue but isn't on the team's roster). Our local schema only
 /// stores team members, so resolving those FKs strictly would fail.
+/// Map a list of remote label ids to their local UUIDs, skipping any that have
+/// no local row yet (labels are pulled before issues, so this should be rare).
+fn resolve_local_label_ids(
+    conn: &Connection,
+    remote_ids: &[i64],
+) -> Result<Vec<String>, String> {
+    let mut local = Vec::with_capacity(remote_ids.len());
+    for remote_id in remote_ids {
+        match queries::find_label_by_remote_id(conn, *remote_id) {
+            Ok(Some(label)) => local.push(label.id),
+            Ok(None) => {
+                eprintln!(
+                    "[sync] phase=pull_issues label remote_id={remote_id} not found locally; skipping"
+                );
+            }
+            Err(e) => return Err(format!("db (find label): {e}")),
+        }
+    }
+    Ok(local)
+}
+
 fn relax_issue_fks(conn: &Connection, mut dto: IssueDto) -> IssueDto {
     if let Some(r) = &dto.assignee {
         if matches!(queries::find_member_by_remote_id(conn, r.id), Ok(None)) {
@@ -1341,6 +1382,74 @@ mod tests {
             decide("2026-04-27T12:00:00Z", "not-a-date", true),
             MergeDecision::Overwrite
         );
+    }
+
+    fn setup_labels_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', 700, ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+             VALUES ('l1', 'B', 0, 't1', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES ('i1', 'Issue', 4, 'l1', 't1', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_test_label(conn: &Connection, id: &str, remote_id: Option<i64>) {
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
+             VALUES (?1, ?2, 't1', ?1, '#ef4444', ?3, ?3)",
+            rusqlite::params![id, remote_id, now],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn build_label_ids_resolves_remote_ids() {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", Some(11));
+        insert_test_label(&conn, "lab2", Some(22));
+        queries::set_issue_labels(&conn, "i1", &["lab1".into(), "lab2".into()]).unwrap();
+
+        let mut ids = build_label_ids(&conn, "i1").unwrap().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![11, 22]);
+    }
+
+    #[test]
+    fn build_label_ids_empty_when_no_labels() {
+        let conn = setup_labels_db();
+        // No labels attached → assert an empty set (Rails detaches all).
+        assert_eq!(build_label_ids(&conn, "i1").unwrap(), Some(vec![]));
+    }
+
+    #[test]
+    fn build_label_ids_leaves_pending_for_unsynced_label() {
+        let conn = setup_labels_db();
+        // Label exists locally but hasn't been pushed yet (no remote_id).
+        insert_test_label(&conn, "lab1", None);
+        queries::set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
+
+        match build_label_ids(&conn, "i1") {
+            Err(Outcome::LeavePending(msg)) => assert!(msg.contains("labels lab1")),
+            other => panic!("expected LeavePending, got {other:?}"),
+        }
     }
 
     #[test]

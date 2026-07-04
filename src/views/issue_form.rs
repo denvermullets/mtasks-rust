@@ -2,8 +2,9 @@ use iced::widget::{button, column, container, pick_list, row, text, text_editor,
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::models::{Lane, Priority};
+use crate::db::models::{Label, Lane, Priority};
 use crate::theme as t;
+use crate::views::labels as labels_view;
 
 pub struct IssueFormState {
     pub title: String,
@@ -11,6 +12,8 @@ pub struct IssueFormState {
     pub priority: Priority,
     pub lane_id: String,
     pub editing_issue_id: Option<String>,
+    /// Local UUIDs of labels attached to this issue, toggled via the chip grid.
+    pub selected_label_ids: Vec<String>,
 }
 
 impl IssueFormState {
@@ -21,6 +24,16 @@ impl IssueFormState {
             priority: Priority::None,
             lane_id: default_lane_id,
             editing_issue_id: None,
+            selected_label_ids: Vec::new(),
+        }
+    }
+
+    /// Toggle a label's presence in the selected set.
+    pub fn toggle_label(&mut self, label_id: &str) {
+        if let Some(pos) = self.selected_label_ids.iter().position(|id| id == label_id) {
+            self.selected_label_ids.remove(pos);
+        } else {
+            self.selected_label_ids.push(label_id.to_string());
         }
     }
 
@@ -54,7 +67,11 @@ const PRIORITIES: [Priority; 5] = [
     Priority::None,
 ];
 
-pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Message> {
+pub fn view<'a>(
+    form: &'a IssueFormState,
+    lanes: &'a [Lane],
+    labels: &'a [Label],
+) -> Element<'a, Message> {
     let title = if form.editing_issue_id.is_some() {
         "Edit Issue"
     } else {
@@ -112,6 +129,7 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
                         })),
                 ),
         )
+        .push(labels_section(form, labels))
         .push(
             row![]
                 .spacing(8)
@@ -160,5 +178,27 @@ pub fn view<'a>(form: &'a IssueFormState, lanes: &'a [Lane]) -> Element<'a, Mess
             ))),
             ..Default::default()
         })
+        .into()
+}
+
+fn labels_section<'a>(form: &'a IssueFormState, labels: &'a [Label]) -> Element<'a, Message> {
+    let content: Element<'a, Message> = if labels.is_empty() {
+        text("No labels yet — press L on a card to create one.")
+            .size(12)
+            .color(t::TEXT_MUTED)
+            .into()
+    } else {
+        labels_view::chip_grid(
+            labels,
+            |l| form.selected_label_ids.contains(&l.id),
+            |l| Message::IssueLabelToggled(l.id.clone()),
+            4,
+        )
+    };
+
+    column![]
+        .spacing(6)
+        .push(text("Labels").size(12).color(t::TEXT_MUTED))
+        .push(content)
         .into()
 }

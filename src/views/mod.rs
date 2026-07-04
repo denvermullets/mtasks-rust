@@ -1,5 +1,6 @@
 pub mod board;
 pub mod issue_form;
+pub mod labels;
 pub mod projects;
 pub mod settings;
 pub mod status_bar;

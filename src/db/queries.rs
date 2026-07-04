@@ -209,6 +209,87 @@ pub fn get_label(conn: &Connection, label_id: &str) -> Result<Option<Label>> {
     .optional()
 }
 
+pub fn labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Label>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, team_id, name, color, created_at, updated_at
+         FROM labels WHERE team_id = ?1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map(params![team_id], Label::from_row)?;
+    rows.collect()
+}
+
+pub fn insert_label(conn: &Connection, label: &Label) -> Result<()> {
+    conn.execute(
+        "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            label.id,
+            label.remote_id,
+            label.team_id,
+            label.name,
+            label.color,
+            label.created_at,
+            label.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Local UUIDs of the labels currently attached to `issue_id`. Used to preload
+/// the multi-select when editing an issue.
+pub fn label_ids_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT label_id FROM issue_labels WHERE issue_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![issue_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Every (issue_id, Label) pair for a team's issues, so the board can render
+/// label chips without a query per card. One join keeps reloads cheap.
+pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(String, Label)>> {
+    let mut stmt = conn.prepare(
+        "SELECT il.issue_id,
+                l.id, l.remote_id, l.team_id, l.name, l.color, l.created_at, l.updated_at
+         FROM issue_labels il
+         JOIN labels l ON l.id = il.label_id
+         JOIN issues i ON i.id = il.issue_id
+         WHERE i.team_id = ?1
+         ORDER BY l.name",
+    )?;
+    let rows = stmt.query_map(params![team_id], |row| {
+        let issue_id: String = row.get(0)?;
+        let label = Label {
+            id: row.get(1)?,
+            remote_id: row.get(2)?,
+            team_id: row.get(3)?,
+            name: row.get(4)?,
+            color: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        };
+        Ok((issue_id, label))
+    })?;
+    rows.collect()
+}
+
+/// Replace the full set of labels attached to `issue_id` with `label_ids`.
+/// Mirrors Rails' `label_ids=` collection setter (delete + insert to match).
+pub fn set_issue_labels(conn: &Connection, issue_id: &str, label_ids: &[String]) -> Result<()> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_labels WHERE issue_id = ?1", params![issue_id])?;
+    for label_id in label_ids {
+        tx.execute(
+            "INSERT INTO issue_labels (issue_id, label_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)",
+            params![issue_id, label_id, now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<IssueDependency>> {
     conn.query_row(
         "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at
@@ -572,4 +653,108 @@ pub fn remote_id_for(conn: &Connection, table: &str, id: &str) -> Result<Option<
         .query_row(&sql, params![id], |row| row.get::<_, Option<i64>>(0))
         .optional()?;
     Ok(raw.flatten())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrations;
+
+    const NOW: &str = "2026-01-01T00:00:00.000Z";
+
+    fn setup() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrations::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+             VALUES ('l1', 'Backlog', 0, 't1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES ('i1', 'Issue', 4, 'l1', 't1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn make_label(id: &str, name: &str) -> Label {
+        Label {
+            id: id.to_string(),
+            remote_id: None,
+            team_id: "t1".to_string(),
+            name: name.to_string(),
+            color: Some("#ef4444".to_string()),
+            created_at: NOW.to_string(),
+            updated_at: NOW.to_string(),
+        }
+    }
+
+    #[test]
+    fn insert_and_list_labels_for_team() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        insert_label(&conn, &make_label("lab2", "ui")).unwrap();
+        let labels = labels_for_team(&conn, "t1").unwrap();
+        // Ordered by name: bug, ui
+        assert_eq!(
+            labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+            vec!["bug", "ui"]
+        );
+    }
+
+    #[test]
+    fn set_issue_labels_replaces_the_full_set() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        insert_label(&conn, &make_label("lab2", "ui")).unwrap();
+
+        // Attach both.
+        set_issue_labels(&conn, "i1", &["lab1".into(), "lab2".into()]).unwrap();
+        let mut ids = label_ids_for_issue(&conn, "i1").unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["lab1".to_string(), "lab2".to_string()]);
+
+        // Replacing with a subset drops the removed one (not additive).
+        set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
+        assert_eq!(label_ids_for_issue(&conn, "i1").unwrap(), vec!["lab1".to_string()]);
+
+        // Empty clears all.
+        set_issue_labels(&conn, "i1", &[]).unwrap();
+        assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn issue_labels_for_team_groups_by_issue() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        insert_label(&conn, &make_label("lab2", "ui")).unwrap();
+        set_issue_labels(&conn, "i1", &["lab1".into(), "lab2".into()]).unwrap();
+
+        let pairs = issue_labels_for_team(&conn, "t1").unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|(issue_id, _)| issue_id == "i1"));
+        let mut names: Vec<&str> = pairs.iter().map(|(_, l)| l.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["bug", "ui"]);
+    }
+
+    #[test]
+    fn deleting_a_label_cascades_to_issue_labels() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
+        // ON DELETE CASCADE on issue_labels.label_id should clean the join row.
+        conn.execute("DELETE FROM labels WHERE id = 'lab1'", []).unwrap();
+        assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+    }
 }

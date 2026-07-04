@@ -21,6 +21,7 @@ pub fn handle_key_press(key: Key, modifiers: Modifiers, modal_open: bool) -> Opt
             "l" if modifiers.is_empty() => Some(Message::FocusNextLane),
             "m" if modifiers.is_empty() => Some(Message::MoveIssueNextLane),
             "M" | "m" if modifiers.shift() => Some(Message::MoveIssuePrevLane),
+            "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
             "s" if modifiers.is_empty() => Some(Message::SyncNow),
             "," if modifiers.is_empty() => Some(Message::OpenSettings),

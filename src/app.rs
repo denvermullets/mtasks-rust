@@ -1,15 +1,22 @@
+use std::collections::HashMap;
+
 use iced::keyboard;
 use iced::widget::{column, container, row, text};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, TeamDto};
 use crate::config::{self, Config};
-use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, RoadmapCommitment, Team};
+use crate::db::models::{
+    Issue, Label, Lane, Member, Priority, Project, ProjectStatus, RoadmapCommitment, Team,
+};
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
 use crate::sync::engine::{FullSyncReport, SyncEngine};
 use crate::theme as t;
-use crate::views::{board, issue_form, projects as projects_view, settings, status_bar, team_list};
+use crate::views::{
+    board, issue_form, labels as labels_view, projects as projects_view, settings, status_bar,
+    team_list,
+};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -28,6 +35,17 @@ pub enum Message {
     IssueDescriptionChanged(iced::widget::text_editor::Action),
     IssuePriorityChanged(Priority),
     IssueLaneChanged(String),
+    /// Toggle a label in the issue form's multi-select (by local UUID).
+    IssueLabelToggled(String),
+
+    // Labels
+    OpenLabels,
+    LabelNameChanged(String),
+    LabelColorChanged(String),
+    CreateLabel,
+    /// Toggle a label on the issue targeted by the label modal (by local UUID).
+    ToggleIssueLabel(String),
+    SaveIssueLabels,
 
     // Move
     MoveIssueNextLane,
@@ -91,6 +109,7 @@ pub enum Modal {
     Settings,
     ProjectForm,
     DeleteProjectConfirm(String),
+    Labels,
 }
 
 pub struct App {
@@ -100,12 +119,17 @@ pub struct App {
     issues: Vec<Issue>,
     projects: Vec<Project>,
     members: Vec<Member>,
+    labels: Vec<Label>,
+    /// Labels attached to each issue, keyed by issue local UUID. Built once per
+    /// reload so board cards render chips without a query each.
+    issue_labels: HashMap<String, Vec<Label>>,
     focused_lane: usize,
     focused_issue: usize,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
     project_form: Option<projects_view::ProjectFormState>,
     settings_form: Option<settings::SettingsFormState>,
+    label_form: Option<labels_view::LabelFormState>,
     show_help: bool,
     pending_sync_count: i32,
     config: Config,
@@ -137,9 +161,13 @@ impl App {
             self.issues = queries::issues_for_team(&conn, team_id).unwrap_or_default();
             self.projects = queries::projects_for_team(&conn, team_id).unwrap_or_default();
             self.members = queries::members_for_team(&conn, team_id).unwrap_or_default();
+            self.labels = queries::labels_for_team(&conn, team_id).unwrap_or_default();
+            self.issue_labels = build_issue_labels_map(&conn, team_id);
         } else {
             self.projects.clear();
             self.members.clear();
+            self.labels.clear();
+            self.issue_labels.clear();
         }
 
         self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
@@ -206,16 +234,19 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let selected_team_id = teams.first().map(|t| t.id.clone());
 
-        let (lanes, issues, projects, members) = if let Some(ref tid) = selected_team_id {
-            (
-                queries::lanes_for_team(&conn, tid).unwrap_or_default(),
-                queries::issues_for_team(&conn, tid).unwrap_or_default(),
-                queries::projects_for_team(&conn, tid).unwrap_or_default(),
-                queries::members_for_team(&conn, tid).unwrap_or_default(),
-            )
-        } else {
-            (vec![], vec![], vec![], vec![])
-        };
+        let (lanes, issues, projects, members, labels, issue_labels) =
+            if let Some(ref tid) = selected_team_id {
+                (
+                    queries::lanes_for_team(&conn, tid).unwrap_or_default(),
+                    queries::issues_for_team(&conn, tid).unwrap_or_default(),
+                    queries::projects_for_team(&conn, tid).unwrap_or_default(),
+                    queries::members_for_team(&conn, tid).unwrap_or_default(),
+                    queries::labels_for_team(&conn, tid).unwrap_or_default(),
+                    build_issue_labels_map(&conn, tid),
+                )
+            } else {
+                (vec![], vec![], vec![], vec![], vec![], HashMap::new())
+            };
 
         let pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
 
@@ -226,12 +257,15 @@ impl App {
             issues,
             projects,
             members,
+            labels,
+            issue_labels,
             focused_lane: 0,
             focused_issue: 0,
             modal: Modal::None,
             issue_form: None,
             project_form: None,
             settings_form: None,
+            label_form: None,
             show_help: false,
             pending_sync_count,
             config,
@@ -305,8 +339,16 @@ impl App {
                     form.priority = Priority::from_i32(issue.priority);
                     form.lane_id = issue.lane_id.clone();
                     form.editing_issue_id = Some(issue.id.clone());
+                    form.selected_label_ids = queries::label_ids_for_issue(&self.db(), &issue.id)
+                        .unwrap_or_default();
                     self.issue_form = Some(form);
                     self.modal = Modal::IssueForm;
+                }
+            }
+
+            Message::IssueLabelToggled(label_id) => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.toggle_label(&label_id);
                 }
             }
 
@@ -362,6 +404,11 @@ impl App {
                             issue.lane_id = form.lane_id.clone();
                             issue.updated_at = now;
                             let _ = queries::update_issue(&conn, &issue);
+                            let _ = queries::set_issue_labels(
+                                &conn,
+                                &issue.id,
+                                &form.selected_label_ids,
+                            );
 
                             let payload = serde_json::to_string(&issue).ok();
                             self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
@@ -396,6 +443,11 @@ impl App {
                             updated_at: now,
                         };
                         let _ = queries::insert_issue(&conn, &issue);
+                        let _ = queries::set_issue_labels(
+                            &conn,
+                            &issue.id,
+                            &form.selected_label_ids,
+                        );
 
                         let payload = serde_json::to_string(&issue).ok();
                         self.enqueue_sync("issue", &issue.id, "create", payload.as_deref());
@@ -539,6 +591,7 @@ impl App {
                 self.issue_form = None;
                 self.settings_form = None;
                 self.project_form = None;
+                self.label_form = None;
             }
 
             Message::ToggleHelp => {
@@ -889,6 +942,93 @@ impl App {
                 self.project_form = None;
                 self.reload_data();
             }
+
+            Message::OpenLabels => {
+                // Scope the modal to the focused issue when there is one, so its
+                // labels can be toggled; otherwise open as a team-label browser.
+                let (issue_id, selected) = match self.focused_issue() {
+                    Some(issue) => {
+                        let ids = queries::label_ids_for_issue(&self.db(), &issue.id)
+                            .unwrap_or_default();
+                        (Some(issue.id.clone()), ids)
+                    }
+                    None => (None, Vec::new()),
+                };
+                self.label_form = Some(labels_view::LabelFormState::new(issue_id, selected));
+                self.modal = Modal::Labels;
+            }
+
+            Message::LabelNameChanged(v) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.name = v;
+                }
+            }
+
+            Message::LabelColorChanged(hex) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.color = hex;
+                }
+            }
+
+            Message::CreateLabel => {
+                if let Some(ref form) = self.label_form {
+                    let name = form.name.trim().to_string();
+                    if name.is_empty() {
+                        return Task::none();
+                    }
+                    let Some(team_id) = self.selected_team_id.clone() else {
+                        return Task::none();
+                    };
+                    let conn = self.db();
+                    let now = chrono::Utc::now()
+                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                        .to_string();
+                    let label = Label {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        remote_id: None,
+                        team_id,
+                        name,
+                        color: Some(form.color.clone()),
+                        created_at: now.clone(),
+                        updated_at: now,
+                    };
+                    if queries::insert_label(&conn, &label).is_ok() {
+                        self.enqueue_sync("label", &label.id, "create", None);
+                        // Clear the name for the next entry but keep the modal
+                        // open and the color choice sticky.
+                        if let Some(ref mut form) = self.label_form {
+                            form.name.clear();
+                        }
+                        self.reload_data();
+                    }
+                }
+            }
+
+            Message::ToggleIssueLabel(label_id) => {
+                if let Some(ref mut form) = self.label_form {
+                    if let Some(pos) =
+                        form.selected_label_ids.iter().position(|id| *id == label_id)
+                    {
+                        form.selected_label_ids.remove(pos);
+                    } else {
+                        form.selected_label_ids.push(label_id);
+                    }
+                }
+            }
+
+            Message::SaveIssueLabels => {
+                if let Some(ref form) = self.label_form {
+                    if let Some(ref issue_id) = form.issue_id {
+                        let conn = self.db();
+                        let _ =
+                            queries::set_issue_labels(&conn, issue_id, &form.selected_label_ids);
+                        self.enqueue_sync("issue", issue_id, "update", None);
+                    }
+                }
+                self.modal = Modal::None;
+                self.label_form = None;
+                self.reload_data();
+            }
         }
 
         Task::none()
@@ -940,6 +1080,7 @@ impl App {
             self.selected_team(),
             &self.lanes,
             &self.issues,
+            &self.issue_labels,
             self.focused_lane,
             self.focused_issue,
         );
@@ -999,7 +1140,15 @@ impl App {
         match &self.modal {
             Modal::IssueForm => {
                 if let Some(ref form) = self.issue_form {
-                    let modal = issue_form::view(form, &self.lanes);
+                    let modal = issue_form::view(form, &self.lanes, &self.labels);
+                    iced::widget::stack![base, modal].into()
+                } else {
+                    base
+                }
+            }
+            Modal::Labels => {
+                if let Some(ref form) = self.label_form {
+                    let modal = labels_view::modal_view(form, &self.labels);
                     iced::widget::stack![base, modal].into()
                 } else {
                     base
@@ -1045,6 +1194,20 @@ impl App {
             Modal::None => base,
         }
     }
+}
+
+/// Group the team's issue↔label join rows into a per-issue map for the board.
+fn build_issue_labels_map(
+    conn: &rusqlite::Connection,
+    team_id: &str,
+) -> HashMap<String, Vec<Label>> {
+    let mut map: HashMap<String, Vec<Label>> = HashMap::new();
+    if let Ok(pairs) = queries::issue_labels_for_team(conn, team_id) {
+        for (issue_id, label) in pairs {
+            map.entry(issue_id).or_default().push(label);
+        }
+    }
+    map
 }
 
 fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
