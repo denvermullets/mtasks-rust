@@ -31,6 +31,64 @@ pub struct SyncReport {
     pub processed: usize,
     pub failed: usize,
     pub last_error: Option<String>,
+    /// User-actionable API failures encountered this sync (auth/validation/etc.),
+    /// carrying enough structure for the UI to route them (reprompt, reopen the
+    /// offending form, …). Local/transient failures (db errors, ordering waits)
+    /// are intentionally omitted — they only populate `last_error`.
+    pub failures: Vec<SyncFailure>,
+}
+
+/// A classified, user-actionable sync failure surfaced back to the UI layer.
+#[derive(Debug, Clone)]
+pub struct SyncFailure {
+    /// Entity type of the offending queue entry (`"issue"`, `"project"`, …),
+    /// or `"auth"` for a pull-side authentication failure not tied to an entity.
+    pub entity_type: String,
+    pub entity_id: String,
+    pub kind: SyncErrorKind,
+    pub message: String,
+}
+
+/// Coarse classification the UI routes on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncErrorKind {
+    /// 401 — expired/revoked/missing token. Triggers the re-auth prompt.
+    Auth,
+    /// 403 — token lacks the required scope.
+    Forbidden,
+    /// 422 — server-side validation errors (full messages).
+    Validation(Vec<String>),
+    /// Transient connectivity failure — surfaced in the status bar, not a toast.
+    Network,
+    /// Any other server-side error.
+    Other,
+}
+
+impl SyncErrorKind {
+    /// Classify a push failure `reason` string (as produced by [`classify`])
+    /// into a structured kind. Returns `None` for local/transient reasons
+    /// (db errors, ordering waits) that shouldn't surface as API failures.
+    fn from_push_reason(reason: &str) -> Option<SyncErrorKind> {
+        if reason.starts_with("unauthorized:") {
+            Some(SyncErrorKind::Auth)
+        } else if reason.starts_with("forbidden:") {
+            Some(SyncErrorKind::Forbidden)
+        } else if let Some(rest) = reason.strip_prefix("validation: ") {
+            Some(SyncErrorKind::Validation(
+                rest.split("; ").map(str::to_string).collect(),
+            ))
+        } else if reason.starts_with("network:") {
+            Some(SyncErrorKind::Network)
+        } else if reason.starts_with("server ")
+            || reason.starts_with("not found:")
+            || reason.starts_with("decode:")
+            || reason.starts_with("enum:")
+        {
+            Some(SyncErrorKind::Other)
+        } else {
+            None
+        }
+    }
 }
 
 /// Combined report for one full bidirectional sync (pull then push).
@@ -53,6 +111,16 @@ impl FullSyncReport {
             .last_error
             .as_deref()
             .or(self.pull.last_error.as_deref())
+    }
+
+    /// All structured failures from both sides of the sync.
+    pub fn failures(&self) -> impl Iterator<Item = &SyncFailure> {
+        self.pull.failures.iter().chain(self.push.failures.iter())
+    }
+
+    /// True if either side hit a 401 — the trigger for the re-auth prompt.
+    pub fn auth_failed(&self) -> bool {
+        self.failures().any(|f| f.kind == SyncErrorKind::Auth)
     }
 }
 
@@ -139,6 +207,7 @@ fn record(report: &mut SyncReport, entry: &SyncQueueEntry, entry_id: i64, outcom
             );
             let _ = mark_synced(entry_id);
             report.failed += 1;
+            record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
         }
         Outcome::LeavePending(reason) => {
@@ -147,8 +216,40 @@ fn record(report: &mut SyncReport, entry: &SyncQueueEntry, entry_id: i64, outcom
                 entry.entity_type, entry.action
             );
             report.failed += 1;
+            record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
         }
+    }
+}
+
+/// Record an auth failure from a stringified pull error, if present. Pull is
+/// read-only (all GETs), so the only user-actionable error we route is a 401 —
+/// `ApiError::Unauthorized`'s Display always contains `"unauthorized:"`, which
+/// pull helpers embed verbatim (e.g. `"/me: unauthorized: …"`). A revoked token
+/// trips the first call (`/me`), but scanning every pull error also catches a
+/// mid-sync revoke.
+fn note_pull_failure(report: &mut SyncReport, msg: &str) {
+    if msg.contains("unauthorized:") {
+        report.failures.push(SyncFailure {
+            entity_type: "auth".into(),
+            entity_id: String::new(),
+            kind: SyncErrorKind::Auth,
+            message: msg.to_string(),
+        });
+    }
+}
+
+/// Push a structured [`SyncFailure`] onto the report when `reason` carries a
+/// user-actionable API error (auth/validation/forbidden/server). No-op for
+/// local/transient reasons.
+fn record_push_failure(report: &mut SyncReport, entry: &SyncQueueEntry, reason: &str) {
+    if let Some(kind) = SyncErrorKind::from_push_reason(reason) {
+        report.failures.push(SyncFailure {
+            entity_type: entry.entity_type.clone(),
+            entity_id: entry.entity_id.clone(),
+            kind,
+            message: reason.to_string(),
+        });
     }
 }
 
@@ -722,7 +823,10 @@ fn classify(err: &ApiError) -> Outcome {
         ApiError::Validation { errors } => {
             Outcome::DropAndLog(format!("validation: {}", errors.join("; ")))
         }
-        ApiError::Unauthorized(m) => Outcome::DropAndLog(format!("unauthorized: {m}")),
+        // Keep the entry pending: an expired/revoked token is recoverable — the
+        // user re-enters one in Settings (sync pauses meanwhile) and the next
+        // drain pushes the still-queued edit rather than silently losing it.
+        ApiError::Unauthorized(m) => Outcome::LeavePending(format!("unauthorized: {m}")),
         ApiError::Forbidden(m) => Outcome::DropAndLog(format!("forbidden: {m}")),
         ApiError::NotFound(m) => Outcome::DropAndLog(format!("not found: {m}")),
         ApiError::Decode(m) => Outcome::DropAndLog(format!("decode: {m}")),
@@ -794,8 +898,9 @@ impl SyncEngine {
             Err(e) => {
                 let msg = format!("/me: {e}");
                 eprintln!("[sync] outcome=fatal phase=pull reason=\"{msg}\"");
-                report.last_error = Some(msg);
                 report.failed += 1;
+                note_pull_failure(&mut report, &msg);
+                report.last_error = Some(msg);
                 return PullOutcome { report, deleted_orphan_team };
             }
         };
@@ -807,8 +912,9 @@ impl SyncEngine {
                 report.processed += 1;
             }
             Err(msg) => {
-                report.last_error = Some(msg);
                 report.failed += 1;
+                note_pull_failure(&mut report, &msg);
+                report.last_error = Some(msg);
                 return PullOutcome { report, deleted_orphan_team };
             }
         }
@@ -842,6 +948,7 @@ impl SyncEngine {
                     Ok(()) => report.processed += 1,
                     Err(msg) => {
                         report.failed += 1;
+                        note_pull_failure(&mut report, &msg);
                         report.last_error = Some(msg);
                     }
                 }
@@ -1309,7 +1416,31 @@ mod tests {
         })));
         assert!(is_drop(&classify(&ApiError::NotFound("gone".into()))));
         assert!(is_drop(&classify(&ApiError::Forbidden("nope".into()))));
-        assert!(is_drop(&classify(&ApiError::Unauthorized("nope".into()))));
+    }
+
+    #[test]
+    fn classify_unauthorized_is_retry() {
+        // A 401 is recoverable: the user re-enters a token in Settings and the
+        // still-pending entry drains on the next sync, so we must not drop it.
+        assert!(is_retry(&classify(&ApiError::Unauthorized("nope".into()))));
+    }
+
+    #[test]
+    fn push_reason_classifies_auth_and_validation() {
+        assert_eq!(
+            SyncErrorKind::from_push_reason("unauthorized: bad token"),
+            Some(SyncErrorKind::Auth)
+        );
+        assert_eq!(
+            SyncErrorKind::from_push_reason("validation: Title can't be blank; Priority invalid"),
+            Some(SyncErrorKind::Validation(vec![
+                "Title can't be blank".into(),
+                "Priority invalid".into(),
+            ]))
+        );
+        // Local/transient reasons carry no structured failure.
+        assert_eq!(SyncErrorKind::from_push_reason("team not synced yet"), None);
+        assert_eq!(SyncErrorKind::from_push_reason("db: locked"), None);
     }
 
     #[test]

@@ -15,6 +15,8 @@ pub struct ProjectFormState {
     pub due_date: String,
     pub roadmap_commitment: Option<RoadmapCommitment>,
     pub editing_project_id: Option<String>,
+    /// Inline validation message shown under the name field. `None` = valid.
+    pub error: Option<String>,
 }
 
 impl ProjectFormState {
@@ -29,6 +31,7 @@ impl ProjectFormState {
             due_date: String::new(),
             roadmap_commitment: None,
             editing_project_id: None,
+            error: None,
         }
     }
 
@@ -46,6 +49,7 @@ impl ProjectFormState {
             due_date: p.due_date.clone().unwrap_or_default(),
             roadmap_commitment: p.roadmap_commitment,
             editing_project_id: Some(p.id.clone()),
+            error: None,
         }
     }
 
@@ -136,6 +140,11 @@ pub fn modal_view<'a>(
                 .on_input(Message::ProjectNameChanged)
                 .padding(10)
                 .size(14),
+        )
+        .push_maybe(
+            form.error
+                .as_deref()
+                .map(|e| text(e).size(12).color(t::DANGER)),
         )
         .push(
             text_editor(&form.description)

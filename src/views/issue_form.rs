@@ -2,7 +2,7 @@ use iced::widget::{button, column, container, pick_list, row, text, text_editor,
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::models::{Label, Lane, Priority};
+use crate::db::models::{Issue, Label, Lane, Priority};
 use crate::theme as t;
 use crate::views::labels as labels_view;
 
@@ -14,6 +14,9 @@ pub struct IssueFormState {
     pub editing_issue_id: Option<String>,
     /// Local UUIDs of labels attached to this issue, toggled via the chip grid.
     pub selected_label_ids: Vec<String>,
+    /// Inline validation message shown under the title (client-side on Save, or
+    /// a server 422 routed back after a failed background push). `None` = valid.
+    pub error: Option<String>,
 }
 
 impl IssueFormState {
@@ -25,6 +28,22 @@ impl IssueFormState {
             lane_id: default_lane_id,
             editing_issue_id: None,
             selected_label_ids: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// Build an edit form pre-filled from an existing issue and its attached
+    /// label UUIDs. Shared by the edit shortcut and the 422-reopen path.
+    pub fn from_issue(issue: &Issue, label_ids: Vec<String>) -> Self {
+        let body = issue.description.clone().unwrap_or_default();
+        Self {
+            title: issue.title.clone(),
+            description: text_editor::Content::with_text(&body),
+            priority: Priority::from_i32(issue.priority),
+            lane_id: issue.lane_id.clone(),
+            editing_issue_id: Some(issue.id.clone()),
+            selected_label_ids: label_ids,
+            error: None,
         }
     }
 
@@ -35,11 +54,6 @@ impl IssueFormState {
         } else {
             self.selected_label_ids.push(label_id.to_string());
         }
-    }
-
-    pub fn with_description(mut self, body: &str) -> Self {
-        self.description = text_editor::Content::with_text(body);
-        self
     }
 
     pub fn description_text(&self) -> String {
@@ -96,6 +110,11 @@ pub fn view<'a>(
                 .on_input(Message::IssueTitleChanged)
                 .padding(10)
                 .size(14),
+        )
+        .push_maybe(
+            form.error
+                .as_deref()
+                .map(|e| text(e).size(12).color(t::DANGER)),
         )
         .push(
             text_editor(&form.description)

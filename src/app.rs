@@ -11,11 +11,12 @@ use crate::db::models::{
 };
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
-use crate::sync::engine::{FullSyncReport, SyncEngine};
+use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
+use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
     board, issue_form, labels as labels_view, placeholder, projects as projects_view, settings,
-    status_bar, team_list,
+    status_bar, team_list, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -84,6 +85,14 @@ pub enum Message {
     SyncNow,
     SyncTick,
     SyncCompleted(FullSyncReport),
+
+    // Toasts
+    /// Dismiss a toast by id (× button).
+    DismissToast(u64),
+    /// Timer tick that expires aged-out non-error toasts.
+    ToastTick,
+    /// "Retry now" on a toast: dismiss it and trigger an immediate sync.
+    RetrySyncFromToast(u64),
 
     // Project CRUD
     CreateProject,
@@ -158,6 +167,13 @@ pub struct App {
     config_error: Option<String>,
     last_sync_error: Option<String>,
     sync_in_progress: bool,
+    /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
+    toasts: Vec<Toast>,
+    /// Monotonic id source for toasts (so dismiss/retry target the right one).
+    next_toast_id: u64,
+    /// Set when sync hit a 401; pauses the sync timer until the user saves a
+    /// fresh token in Settings, so we don't hammer the API with a dead token.
+    sync_paused_auth: bool,
     /// Tracks the most recent card click for manual double-click detection
     /// (iced 0.13's `mouse_area` exposes only `on_press`, not `on_double_click`).
     last_card_click: Option<(usize, usize, std::time::Instant)>,
@@ -166,6 +182,24 @@ pub struct App {
 impl App {
     fn db(&self) -> rusqlite::Connection {
         connection::open().expect("Failed to open database")
+    }
+
+    /// Queue a toast for display. Error messages are de-duped so a repeatedly
+    /// failing sync tick doesn't stack identical cards.
+    fn push_toast(&mut self, message: impl Into<String>, kind: ToastKind, retry: bool) {
+        let message = message.into();
+        if kind == ToastKind::Error && self.toasts.iter().any(|t| t.message == message) {
+            return;
+        }
+        let id = self.next_toast_id;
+        self.next_toast_id += 1;
+        self.toasts.push(Toast {
+            id,
+            message,
+            kind,
+            retry,
+            created: std::time::Instant::now(),
+        });
     }
 
     fn reload_data(&mut self) {
@@ -299,6 +333,9 @@ impl App {
             config_error,
             last_sync_error: None,
             sync_in_progress: false,
+            toasts: Vec::new(),
+            next_toast_id: 0,
+            sync_paused_auth: false,
             last_card_click: None,
         };
 
@@ -328,7 +365,15 @@ impl App {
             self.config.sync_interval_secs.max(1),
         ))
         .map(|_| Message::SyncTick);
-        Subscription::batch([keys, tick])
+
+        let mut subs = vec![keys, tick];
+        // Only run the 1s toast-expiry timer while toasts are on screen.
+        if !self.toasts.is_empty() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::ToastTick),
+            );
+        }
+        Subscription::batch(subs)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -373,16 +418,9 @@ impl App {
 
             Message::EditFocusedIssue => {
                 if let Some(issue) = self.focused_issue().cloned() {
-                    let body = issue.description.clone().unwrap_or_default();
-                    let mut form = issue_form::IssueFormState::new(issue.lane_id.clone())
-                        .with_description(&body);
-                    form.title = issue.title.clone();
-                    form.priority = Priority::from_i32(issue.priority);
-                    form.lane_id = issue.lane_id.clone();
-                    form.editing_issue_id = Some(issue.id.clone());
-                    form.selected_label_ids = queries::label_ids_for_issue(&self.db(), &issue.id)
-                        .unwrap_or_default();
-                    self.issue_form = Some(form);
+                    let label_ids =
+                        queries::label_ids_for_issue(&self.db(), &issue.id).unwrap_or_default();
+                    self.issue_form = Some(issue_form::IssueFormState::from_issue(&issue, label_ids));
                     self.modal = Modal::IssueForm;
                 }
             }
@@ -415,10 +453,20 @@ impl App {
             }
 
             Message::SaveIssue => {
-                if let Some(ref form) = self.issue_form {
+                // Client-side validation (mirrors Rails' rules) — show inline
+                // and keep the modal open rather than failing silently.
+                if let Some(ref mut form) = self.issue_form {
                     if form.title.trim().is_empty() {
+                        form.error = Some("Title can't be blank".into());
                         return Task::none();
                     }
+                    if form.lane_id.trim().is_empty() {
+                        form.error = Some("Pick a lane".into());
+                        return Task::none();
+                    }
+                    form.error = None;
+                }
+                if let Some(ref form) = self.issue_form {
                     let conn = self.db();
                     let now = chrono::Utc::now()
                         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
@@ -716,6 +764,11 @@ impl App {
                             self.config_error = None;
                             self.modal = Modal::None;
                             self.settings_form = None;
+                            // Resume sync: a fresh token clears the auth pause and
+                            // any stale error so the next tick pushes queued edits.
+                            self.sync_paused_auth = false;
+                            self.last_sync_error = None;
+                            self.push_toast("Settings saved", ToastKind::Info, false);
                         }
                         Err(e) => {
                             if let Some(ref mut f) = self.settings_form {
@@ -727,7 +780,7 @@ impl App {
             }
 
             Message::SyncTick => {
-                if self.sync_in_progress {
+                if self.sync_in_progress || self.sync_paused_auth {
                     return Task::none();
                 }
                 let has_token = self
@@ -795,12 +848,92 @@ impl App {
                     }
                 }
 
+                // Classify failures before touching UI state (ends the borrow of
+                // `report` before we mutate `self`). A 401 outranks everything:
+                // sync is paused, so we surface only the re-auth prompt. Network
+                // failures stay in the status bar (no toast). A 422 on an issue
+                // reopens that form; other server errors become error toasts.
+                let auth_failed = report.auth_failed();
+                let mut validation_issue: Option<(String, Vec<String>)> = None;
+                let mut error_toasts: Vec<(String, bool)> = Vec::new();
+                if !auth_failed {
+                    for f in report.failures() {
+                        match &f.kind {
+                            SyncErrorKind::Auth | SyncErrorKind::Network => {}
+                            SyncErrorKind::Validation(errs) if f.entity_type == "issue" => {
+                                validation_issue = Some((f.entity_id.clone(), errs.clone()));
+                            }
+                            SyncErrorKind::Validation(errs) => {
+                                error_toasts.push((format!("Sync rejected: {}", errs.join("; ")), false));
+                            }
+                            SyncErrorKind::Forbidden => {
+                                error_toasts.push((format!("Sync blocked: {}", f.message), false));
+                            }
+                            SyncErrorKind::Other => {
+                                error_toasts.push((format!("Sync error: {}", f.message), true));
+                            }
+                        }
+                    }
+                }
+                let clean = report.pull.failed == 0 && report.push.failed == 0;
+
                 if report.pull.failed == 0 {
                     self.config.last_synced_at = Some(chrono::Utc::now());
                     let _ = config::save(&self.config);
                 }
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
                 self.reload_data();
+
+                if auth_failed {
+                    self.sync_paused_auth = true;
+                    let msg = "Token expired or revoked — please re-enter";
+                    if self.settings_form.is_none() {
+                        self.settings_form =
+                            Some(settings::SettingsFormState::from_config(&self.config));
+                    }
+                    if let Some(ref mut f) = self.settings_form {
+                        f.status = Some(format!("Error: {msg}"));
+                    }
+                    self.modal = Modal::Settings;
+                    self.push_toast(msg, ToastKind::Error, false);
+                } else {
+                    if clean {
+                        self.sync_paused_auth = false;
+                    }
+                    // Reopen the offending issue form with the server's messages.
+                    if let Some((issue_id, errs)) = validation_issue {
+                        let conn = self.db();
+                        if let Ok(Some(issue)) = queries::get_issue(&conn, &issue_id) {
+                            let label_ids =
+                                queries::label_ids_for_issue(&conn, &issue_id).unwrap_or_default();
+                            let mut form =
+                                issue_form::IssueFormState::from_issue(&issue, label_ids);
+                            form.error = Some(errs.join("; "));
+                            self.issue_form = Some(form);
+                            self.modal = Modal::IssueForm;
+                        }
+                    }
+                    for (msg, retry) in error_toasts {
+                        self.push_toast(msg, ToastKind::Error, retry);
+                    }
+                }
+            }
+
+            Message::DismissToast(id) => {
+                self.toasts.retain(|t| t.id != id);
+            }
+
+            Message::ToastTick => {
+                // Expire non-error toasts after ~4s; errors persist until the
+                // user dismisses or retries them.
+                self.toasts.retain(|t| {
+                    t.kind == ToastKind::Error || t.created.elapsed().as_secs() < 4
+                });
+            }
+
+            Message::RetrySyncFromToast(id) => {
+                self.toasts.retain(|t| t.id != id);
+                return self.update(Message::SyncNow);
             }
 
             Message::CreateProject => {
@@ -862,10 +995,14 @@ impl App {
             }
 
             Message::SaveProject => {
-                if let Some(ref form) = self.project_form {
+                if let Some(ref mut form) = self.project_form {
                     if form.name.trim().is_empty() {
+                        form.error = Some("Name can't be blank".into());
                         return Task::none();
                     }
+                    form.error = None;
+                }
+                if let Some(ref form) = self.project_form {
                     let conn = self.db();
                     let now = chrono::Utc::now()
                         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
@@ -1012,11 +1149,15 @@ impl App {
             }
 
             Message::CreateLabel => {
-                if let Some(ref form) = self.label_form {
-                    let name = form.name.trim().to_string();
-                    if name.is_empty() {
+                if let Some(ref mut form) = self.label_form {
+                    if form.name.trim().is_empty() {
+                        form.error = Some("Name can't be blank".into());
                         return Task::none();
                     }
+                    form.error = None;
+                }
+                if let Some(ref form) = self.label_form {
+                    let name = form.name.trim().to_string();
                     let Some(team_id) = self.selected_team_id.clone() else {
                         return Task::none();
                     };
@@ -1175,7 +1316,7 @@ impl App {
             .into();
 
         // Overlay modals
-        match &self.modal {
+        let content: Element<'_, Message> = match &self.modal {
             Modal::IssueForm => {
                 if let Some(ref form) = self.issue_form {
                     let modal = issue_form::view(form, &self.lanes, &self.labels);
@@ -1230,6 +1371,13 @@ impl App {
                 iced::widget::stack![base, confirm].into()
             }
             Modal::None => base,
+        };
+
+        // Toasts sit above everything, including any open modal.
+        if self.toasts.is_empty() {
+            content
+        } else {
+            iced::widget::stack![content, toast::overlay(&self.toasts)].into()
         }
     }
 }

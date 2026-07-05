@@ -23,6 +23,8 @@ pub struct LabelFormState {
     pub issue_id: Option<String>,
     /// Working set of attached label UUIDs, toggled in the UI, applied on save.
     pub selected_label_ids: Vec<String>,
+    /// Inline validation message shown under the name input. `None` = valid.
+    pub error: Option<String>,
 }
 
 impl LabelFormState {
@@ -32,6 +34,7 @@ impl LabelFormState {
             color: PALETTE[0].to_string(),
             issue_id,
             selected_label_ids,
+            error: None,
         }
     }
 }
@@ -224,7 +227,12 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                 }),
         )
         .push(text("Create a new label").size(12).color(t::TEXT_MUTED))
-        .push(create_row);
+        .push(create_row)
+        .push_maybe(
+            form.error
+                .as_deref()
+                .map(|e| text(e).size(12).color(t::DANGER)),
+        );
 
     // Footer: Done applies the working set to the issue; Close just dismisses.
     let done_label = if has_issue { "Done" } else { "Close" };

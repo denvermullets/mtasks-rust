@@ -43,6 +43,8 @@ pub const PRIORITY_LOW: Color = Color::from_rgb(0.23, 0.73, 0.53);
 pub const PRIORITY_NONE: Color = Color::from_rgb(0.42, 0.42, 0.48);
 
 pub const DANGER: Color = Color::from_rgb(0.94, 0.27, 0.27);
+// Amber — non-blocking warnings (e.g. transient network sync failures).
+pub const WARNING: Color = Color::from_rgb(0.90, 0.62, 0.22);
 
 pub fn project_status_color(status: ProjectStatus) -> Color {
     match status {

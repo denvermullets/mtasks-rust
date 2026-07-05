@@ -15,7 +15,13 @@ pub fn view<'a>(
     token_configured: bool,
 ) -> Element<'a, Message> {
     let (sync_text, sync_color) = if let Some(err) = last_sync_error {
-        (format!("Sync error: {err}"), t::DANGER)
+        // Transient network failures are non-fatal (sync retries) — surface them
+        // as an amber warning rather than a hard red error.
+        if err.contains("network") {
+            (format!("Sync warning: {err}"), t::WARNING)
+        } else {
+            (format!("Sync error: {err}"), t::DANGER)
+        }
     } else if sync_in_progress {
         ("Syncing\u{2026}".to_string(), t::TEXT_MUTED)
     } else if !token_configured {
