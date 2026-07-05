@@ -12,11 +12,11 @@ pub mod teams;
 pub mod users;
 
 pub use client::ApiClient;
+pub use dependencies::{Direction, IssueDependencyResponse};
 pub use dto::{
     CommentDto, IssueDependencyDto, IssueDto, IssueRef, LabelDto, LabelRef, LaneDto, MemberDto,
     ParentIssueRef, ProjectDto, RecordRef, TeamDto, UserRef,
 };
-pub use dependencies::{Direction, IssueDependencyResponse};
 pub use error::ApiError;
 pub use issues::{IssueFilters, IssueParams};
 pub use labels::LabelParams;

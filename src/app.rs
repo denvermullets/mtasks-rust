@@ -269,7 +269,13 @@ impl App {
         }
     }
 
-    fn enqueue_sync(&self, entity_type: &str, entity_id: &str, action: &str, payload: Option<&str>) {
+    fn enqueue_sync(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+        payload: Option<&str>,
+    ) {
         let conn = self.db();
         let _ = sync_queue::enqueue(&conn, entity_type, entity_id, action, payload);
     }
@@ -352,9 +358,7 @@ impl App {
 
     pub fn subscription(&self) -> Subscription<Message> {
         let keys = event::listen_with(|event, _status, _id| {
-            if let iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                key, modifiers, ..
-            }) = event
+            if let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
             {
                 Some(Message::KeyPressed(key, modifiers))
             } else {
@@ -407,11 +411,7 @@ impl App {
             }
 
             Message::CreateIssue => {
-                let default_lane = self
-                    .lanes
-                    .first()
-                    .map(|l| l.id.clone())
-                    .unwrap_or_default();
+                let default_lane = self.lanes.first().map(|l| l.id.clone()).unwrap_or_default();
                 self.issue_form = Some(issue_form::IssueFormState::new(default_lane));
                 self.modal = Modal::IssueForm;
             }
@@ -420,7 +420,8 @@ impl App {
                 if let Some(issue) = self.focused_issue().cloned() {
                     let label_ids =
                         queries::label_ids_for_issue(&self.db(), &issue.id).unwrap_or_default();
-                    self.issue_form = Some(issue_form::IssueFormState::from_issue(&issue, label_ids));
+                    self.issue_form =
+                        Some(issue_form::IssueFormState::from_issue(&issue, label_ids));
                     self.modal = Modal::IssueForm;
                 }
             }
@@ -481,11 +482,8 @@ impl App {
 
                     if let Some(ref issue_id) = form.editing_issue_id {
                         // Update existing
-                        if let Some(mut issue) = self
-                            .issues
-                            .iter()
-                            .find(|i| i.id == *issue_id)
-                            .cloned()
+                        if let Some(mut issue) =
+                            self.issues.iter().find(|i| i.id == *issue_id).cloned()
                         {
                             issue.title = form.title.trim().to_string();
                             issue.description = description.clone();
@@ -504,10 +502,7 @@ impl App {
                         }
                     } else {
                         // Create new
-                        let team_id = self
-                            .selected_team_id
-                            .clone()
-                            .unwrap_or_default();
+                        let team_id = self.selected_team_id.clone().unwrap_or_default();
                         let team_number = queries::next_team_number(&conn, &team_id).unwrap_or(1);
                         let issue = Issue {
                             id: uuid::Uuid::new_v4().to_string(),
@@ -532,11 +527,8 @@ impl App {
                             updated_at: now,
                         };
                         let _ = queries::insert_issue(&conn, &issue);
-                        let _ = queries::set_issue_labels(
-                            &conn,
-                            &issue.id,
-                            &form.selected_label_ids,
-                        );
+                        let _ =
+                            queries::set_issue_labels(&conn, &issue.id, &form.selected_label_ids);
 
                         let payload = serde_json::to_string(&issue).ok();
                         self.enqueue_sync("issue", &issue.id, "create", payload.as_deref());
@@ -558,16 +550,18 @@ impl App {
                     let conn = self.db();
                     let payload = match queries::get_issue(&conn, issue_id) {
                         Ok(Some(issue)) => match issue.remote_id {
-                            Some(remote_id) => queries::remote_id_for(&conn, "teams", &issue.team_id)
-                                .ok()
-                                .flatten()
-                                .map(|team_remote_id| {
-                                    serde_json::json!({
-                                        "remote_id": remote_id,
-                                        "team_remote_id": team_remote_id,
+                            Some(remote_id) => {
+                                queries::remote_id_for(&conn, "teams", &issue.team_id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|team_remote_id| {
+                                        serde_json::json!({
+                                            "remote_id": remote_id,
+                                            "team_remote_id": team_remote_id,
+                                        })
+                                        .to_string()
                                     })
-                                    .to_string()
-                                }),
+                            }
                             None => None,
                         },
                         _ => None,
@@ -657,9 +651,7 @@ impl App {
                 let is_double_click = self
                     .last_card_click
                     .map(|(l, i, t)| {
-                        l == lane_idx
-                            && i == issue_idx
-                            && now.duration_since(t).as_millis() < 500
+                        l == lane_idx && i == issue_idx && now.duration_since(t).as_millis() < 500
                     })
                     .unwrap_or(false);
 
@@ -800,11 +792,7 @@ impl App {
                     return Task::none();
                 }
                 let base_url = self.config.api_base_url.trim().to_string();
-                let token = self
-                    .config
-                    .api_token
-                    .clone()
-                    .unwrap_or_default();
+                let token = self.config.api_token.clone().unwrap_or_default();
                 match ApiClient::new(base_url, token) {
                     Ok(client) => {
                         self.sync_in_progress = true;
@@ -823,8 +811,7 @@ impl App {
                         );
                     }
                     Err(ApiError::MissingToken) => {
-                        self.last_sync_error =
-                            Some("set an API token in Settings".into());
+                        self.last_sync_error = Some("set an API token in Settings".into());
                     }
                     Err(e) => {
                         self.last_sync_error = Some(e.to_string());
@@ -864,7 +851,8 @@ impl App {
                                 validation_issue = Some((f.entity_id.clone(), errs.clone()));
                             }
                             SyncErrorKind::Validation(errs) => {
-                                error_toasts.push((format!("Sync rejected: {}", errs.join("; ")), false));
+                                error_toasts
+                                    .push((format!("Sync rejected: {}", errs.join("; ")), false));
                             }
                             SyncErrorKind::Forbidden => {
                                 error_toasts.push((format!("Sync blocked: {}", f.message), false));
@@ -926,9 +914,8 @@ impl App {
             Message::ToastTick => {
                 // Expire non-error toasts after ~4s; errors persist until the
                 // user dismisses or retries them.
-                self.toasts.retain(|t| {
-                    t.kind == ToastKind::Error || t.created.elapsed().as_secs() < 4
-                });
+                self.toasts
+                    .retain(|t| t.kind == ToastKind::Error || t.created.elapsed().as_secs() < 4);
             }
 
             Message::RetrySyncFromToast(id) => {
@@ -1039,12 +1026,7 @@ impl App {
                             let _ = queries::update_project(&conn, &project);
 
                             let payload = serde_json::to_string(&project).ok();
-                            self.enqueue_sync(
-                                "project",
-                                &project.id,
-                                "update",
-                                payload.as_deref(),
-                            );
+                            self.enqueue_sync("project", &project.id, "update", payload.as_deref());
                         }
                     } else {
                         let team_id = self.selected_team_id.clone().unwrap_or_default();
@@ -1069,12 +1051,7 @@ impl App {
                         let _ = queries::insert_project(&conn, &project);
 
                         let payload = serde_json::to_string(&project).ok();
-                        self.enqueue_sync(
-                            "project",
-                            &project.id,
-                            "create",
-                            payload.as_deref(),
-                        );
+                        self.enqueue_sync("project", &project.id, "create", payload.as_deref());
                     }
                 }
                 self.modal = Modal::None;
@@ -1126,8 +1103,8 @@ impl App {
                 // labels can be toggled; otherwise open as a team-label browser.
                 let (issue_id, selected) = match self.focused_issue() {
                     Some(issue) => {
-                        let ids = queries::label_ids_for_issue(&self.db(), &issue.id)
-                            .unwrap_or_default();
+                        let ids =
+                            queries::label_ids_for_issue(&self.db(), &issue.id).unwrap_or_default();
                         (Some(issue.id.clone()), ids)
                     }
                     None => (None, Vec::new()),
@@ -1188,8 +1165,10 @@ impl App {
 
             Message::ToggleIssueLabel(label_id) => {
                 if let Some(ref mut form) = self.label_form {
-                    if let Some(pos) =
-                        form.selected_label_ids.iter().position(|id| *id == label_id)
+                    if let Some(pos) = form
+                        .selected_label_ids
+                        .iter()
+                        .position(|id| *id == label_id)
                     {
                         form.selected_label_ids.remove(pos);
                     } else {
@@ -1436,17 +1415,18 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
                 ),
         );
 
-    let modal = container(content)
-        .padding(28)
-        .style(|_theme: &Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
-            border: iced::Border {
-                color: t::BORDER,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        });
+    let modal =
+        container(content)
+            .padding(28)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::BG_MODAL)),
+                border: iced::Border {
+                    color: t::BORDER,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            });
 
     container(modal)
         .center_x(Length::Fill)
@@ -1502,17 +1482,18 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
                 ),
         );
 
-    let modal = container(content)
-        .padding(28)
-        .style(|_theme: &Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
-            border: iced::Border {
-                color: t::BORDER,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        });
+    let modal =
+        container(content)
+            .padding(28)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::BG_MODAL)),
+                border: iced::Border {
+                    color: t::BORDER,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            });
 
     container(modal)
         .center_x(Length::Fill)

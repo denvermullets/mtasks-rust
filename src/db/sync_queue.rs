@@ -45,11 +45,7 @@ pub fn pending_count(conn: &Connection) -> Result<i32> {
     )
 }
 
-pub fn has_pending_entry(
-    conn: &Connection,
-    entity_type: &str,
-    entity_id: &str,
-) -> Result<bool> {
+pub fn has_pending_entry(conn: &Connection, entity_type: &str, entity_id: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sync_queue
          WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",

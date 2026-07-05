@@ -59,7 +59,12 @@ pub fn load() -> (Config, Option<String>) {
 
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(e) => return (Config::default(), Some(format!("read {}: {}", path.display(), e))),
+        Err(e) => {
+            return (
+                Config::default(),
+                Some(format!("read {}: {}", path.display(), e)),
+            )
+        }
     };
 
     match toml::from_str::<Config>(&raw) {

@@ -98,7 +98,9 @@ pub fn delete_issue(conn: &Connection, issue_id: &str) -> Result<()> {
 }
 
 pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> Result<()> {
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     conn.execute(
         "UPDATE issues SET lane_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![lane_id, now, issue_id],
@@ -107,7 +109,9 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
 }
 
 pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> Result<()> {
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     conn.execute(
         "UPDATE issues SET priority = ?1, updated_at = ?2 WHERE id = ?3",
         params![priority, now, issue_id],
@@ -170,10 +174,22 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
              completed_issues_count, total_issues_count, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
-            project.id, project.remote_id, project.team_id, project.name, project.description,
-            project.status, project.priority, project.lead_id, project.start_date, project.due_date,
-            project.roadmap_commitment, project.velocity_score, project.completed_issues_count,
-            project.total_issues_count, project.created_at, project.updated_at,
+            project.id,
+            project.remote_id,
+            project.team_id,
+            project.name,
+            project.description,
+            project.status,
+            project.priority,
+            project.lead_id,
+            project.start_date,
+            project.due_date,
+            project.roadmap_commitment,
+            project.velocity_score,
+            project.completed_issues_count,
+            project.total_issues_count,
+            project.created_at,
+            project.updated_at,
         ],
     )?;
     Ok(())
@@ -186,8 +202,15 @@ pub fn update_project(conn: &Connection, project: &Project) -> Result<()> {
             start_date = ?6, due_date = ?7, roadmap_commitment = ?8, updated_at = ?9
          WHERE id = ?10",
         params![
-            project.name, project.description, project.status, project.priority, project.lead_id,
-            project.start_date, project.due_date, project.roadmap_commitment, project.updated_at,
+            project.name,
+            project.description,
+            project.status,
+            project.priority,
+            project.lead_id,
+            project.start_date,
+            project.due_date,
+            project.roadmap_commitment,
+            project.updated_at,
             project.id,
         ],
     )?;
@@ -238,9 +261,7 @@ pub fn insert_label(conn: &Connection, label: &Label) -> Result<()> {
 /// Local UUIDs of the labels currently attached to `issue_id`. Used to preload
 /// the multi-select when editing an issue.
 pub fn label_ids_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT label_id FROM issue_labels WHERE issue_id = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT label_id FROM issue_labels WHERE issue_id = ?1")?;
     let rows = stmt.query_map(params![issue_id], |row| row.get::<_, String>(0))?;
     rows.collect()
 }
@@ -276,9 +297,14 @@ pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(St
 /// Replace the full set of labels attached to `issue_id` with `label_ids`.
 /// Mirrors Rails' `label_ids=` collection setter (delete + insert to match).
 pub fn set_issue_labels(conn: &Connection, issue_id: &str, label_ids: &[String]) -> Result<()> {
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM issue_labels WHERE issue_id = ?1", params![issue_id])?;
+    tx.execute(
+        "DELETE FROM issue_labels WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
     for label_id in label_ids {
         tx.execute(
             "INSERT INTO issue_labels (issue_id, label_id, created_at, updated_at)
@@ -420,7 +446,14 @@ pub fn upsert_team(conn: &Connection, team: &Team) -> Result<()> {
             identifier = excluded.identifier,
             remote_id = excluded.remote_id,
             updated_at = excluded.updated_at",
-        params![team.id, team.name, team.identifier, team.remote_id, team.created_at, team.updated_at],
+        params![
+            team.id,
+            team.name,
+            team.identifier,
+            team.remote_id,
+            team.created_at,
+            team.updated_at
+        ],
     )?;
     Ok(())
 }
@@ -436,7 +469,16 @@ pub fn upsert_lane(conn: &Connection, lane: &Lane) -> Result<()> {
             team_id = excluded.team_id,
             remote_id = excluded.remote_id,
             updated_at = excluded.updated_at",
-        params![lane.id, lane.name, lane.color, lane.position, lane.team_id, lane.remote_id, lane.created_at, lane.updated_at],
+        params![
+            lane.id,
+            lane.name,
+            lane.color,
+            lane.position,
+            lane.team_id,
+            lane.remote_id,
+            lane.created_at,
+            lane.updated_at
+        ],
     )?;
     Ok(())
 }
@@ -451,7 +493,15 @@ pub fn upsert_label(conn: &Connection, label: &Label) -> Result<()> {
             name = excluded.name,
             color = excluded.color,
             updated_at = excluded.updated_at",
-        params![label.id, label.remote_id, label.team_id, label.name, label.color, label.created_at, label.updated_at],
+        params![
+            label.id,
+            label.remote_id,
+            label.team_id,
+            label.name,
+            label.color,
+            label.created_at,
+            label.updated_at
+        ],
     )?;
     Ok(())
 }
@@ -466,7 +516,15 @@ pub fn upsert_member(conn: &Connection, member: &Member) -> Result<()> {
             name = excluded.name,
             email = excluded.email,
             updated_at = excluded.updated_at",
-        params![member.id, member.remote_id, member.team_id, member.name, member.email, member.created_at, member.updated_at],
+        params![
+            member.id,
+            member.remote_id,
+            member.team_id,
+            member.name,
+            member.email,
+            member.created_at,
+            member.updated_at
+        ],
     )?;
     Ok(())
 }
@@ -494,10 +552,22 @@ pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
             total_issues_count = excluded.total_issues_count,
             updated_at = excluded.updated_at",
         params![
-            project.id, project.remote_id, project.team_id, project.name, project.description,
-            project.status, project.priority, project.lead_id, project.start_date, project.due_date,
-            project.roadmap_commitment, project.velocity_score, project.completed_issues_count,
-            project.total_issues_count, project.created_at, project.updated_at,
+            project.id,
+            project.remote_id,
+            project.team_id,
+            project.name,
+            project.description,
+            project.status,
+            project.priority,
+            project.lead_id,
+            project.start_date,
+            project.due_date,
+            project.roadmap_commitment,
+            project.velocity_score,
+            project.completed_issues_count,
+            project.total_issues_count,
+            project.created_at,
+            project.updated_at,
         ],
     )?;
     Ok(())
@@ -532,11 +602,26 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             remote_id = excluded.remote_id,
             updated_at = excluded.updated_at",
         params![
-            issue.id, issue.title, issue.description, issue.priority, issue.team_number,
-            issue.due_date, issue.estimate, issue.started_at, issue.completed_at, issue.canceled_at,
-            issue.lane_id, issue.team_id, issue.project_id, issue.parent_issue_id,
-            issue.assignee_id, issue.creator_id, issue.archived_at, issue.remote_id,
-            issue.created_at, issue.updated_at,
+            issue.id,
+            issue.title,
+            issue.description,
+            issue.priority,
+            issue.team_number,
+            issue.due_date,
+            issue.estimate,
+            issue.started_at,
+            issue.completed_at,
+            issue.canceled_at,
+            issue.lane_id,
+            issue.team_id,
+            issue.project_id,
+            issue.parent_issue_id,
+            issue.assignee_id,
+            issue.creator_id,
+            issue.archived_at,
+            issue.remote_id,
+            issue.created_at,
+            issue.updated_at,
         ],
     )?;
     Ok(())
@@ -624,7 +709,9 @@ pub fn cleanup_orphan_seed_team(conn: &Connection) -> Result<Option<String>> {
         )
         .optional()?;
 
-    let Some(team_id) = team_id else { return Ok(None) };
+    let Some(team_id) = team_id else {
+        return Ok(None);
+    };
 
     let issue_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM issues WHERE team_id = ?1",
@@ -726,7 +813,10 @@ mod tests {
 
         // Replacing with a subset drops the removed one (not additive).
         set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
-        assert_eq!(label_ids_for_issue(&conn, "i1").unwrap(), vec!["lab1".to_string()]);
+        assert_eq!(
+            label_ids_for_issue(&conn, "i1").unwrap(),
+            vec!["lab1".to_string()]
+        );
 
         // Empty clears all.
         set_issue_labels(&conn, "i1", &[]).unwrap();
@@ -754,7 +844,8 @@ mod tests {
         insert_label(&conn, &make_label("lab1", "bug")).unwrap();
         set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
         // ON DELETE CASCADE on issue_labels.label_id should clean the join row.
-        conn.execute("DELETE FROM labels WHERE id = 'lab1'", []).unwrap();
+        conn.execute("DELETE FROM labels WHERE id = 'lab1'", [])
+            .unwrap();
         assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
     }
 }

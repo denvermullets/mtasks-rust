@@ -31,11 +31,12 @@ impl ApiClient {
             return Err(ApiError::MissingToken);
         }
         let http = reqwest::Client::builder().build()?;
-        let base_url = base_url
-            .into()
-            .trim_end_matches('/')
-            .to_string();
-        Ok(Self { http, base_url, token })
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        Ok(Self {
+            http,
+            base_url,
+            token,
+        })
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {

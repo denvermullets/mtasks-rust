@@ -40,11 +40,11 @@ pub fn view<'a>(
         .size(10)
         .color(t::TEXT_MUTED);
 
-        let identifier_badge = container(
-            text(&team.identifier)
-                .size(11)
-                .color(if is_selected { t::ACCENT } else { t::TEXT_MUTED }),
-        )
+        let identifier_badge = container(text(&team.identifier).size(11).color(if is_selected {
+            t::ACCENT
+        } else {
+            t::TEXT_MUTED
+        }))
         .padding([2, 4]);
 
         let name_text = text(&team.name).size(14).color(if is_selected {
@@ -133,7 +133,11 @@ fn selected_row_style(active: bool) -> button::Style {
         })),
         text_color: t::TEXT_PRIMARY,
         border: Border {
-            color: if active { t::ACCENT } else { iced::Color::TRANSPARENT },
+            color: if active {
+                t::ACCENT
+            } else {
+                iced::Color::TRANSPARENT
+            },
             width: if active { 2.0 } else { 0.0 },
             radius: 0.0.into(),
         },

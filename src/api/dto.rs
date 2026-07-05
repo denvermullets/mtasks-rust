@@ -119,7 +119,9 @@ impl IssueDto {
             id,
             identifier,
             title: issue.title.clone(),
-            priority: Priority::from_i32(issue.priority).as_rails_str().to_string(),
+            priority: Priority::from_i32(issue.priority)
+                .as_rails_str()
+                .to_string(),
             estimate: issue.estimate.map(|f| f as i64),
             due_date: issue.due_date.clone(),
             lane: lane_ref,
@@ -266,7 +268,9 @@ impl ProjectDto {
             name: project.name.clone(),
             description: project.description.clone(),
             status: project.status,
-            priority: Priority::from_i32(project.priority).as_rails_str().to_string(),
+            priority: Priority::from_i32(project.priority)
+                .as_rails_str()
+                .to_string(),
             lead,
             start_date: project.start_date.clone(),
             due_date: project.due_date.clone(),
@@ -579,9 +583,7 @@ impl IssueDependencyDto {
 
 fn require_remote(remote_id: Option<i64>, what: &str) -> Result<i64, ApiError> {
     remote_id.ok_or_else(|| {
-        ApiError::Decode(format!(
-            "{what} has no remote_id; cannot serialize for API"
-        ))
+        ApiError::Decode(format!("{what} has no remote_id; cannot serialize for API"))
     })
 }
 
@@ -917,14 +919,21 @@ mod tests {
         conn.execute(
             "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![label.id, label.remote_id, label.team_id, label.name, label.color, label.created_at, label.updated_at],
-        ).unwrap();
+            params![
+                label.id,
+                label.remote_id,
+                label.team_id,
+                label.name,
+                label.color,
+                label.created_at,
+                label.updated_at
+            ],
+        )
+        .unwrap();
         let label_dto = LabelDto::from_model(&conn, &label).unwrap();
         assert_eq!(label_dto.id, 22);
         assert_eq!(label_dto.team_id, 99);
-        let label_back = label_dto
-            .into_model(&conn, Some(label.id.clone()))
-            .unwrap();
+        let label_back = label_dto.into_model(&conn, Some(label.id.clone())).unwrap();
         assert_eq!(label_back.id, label.id);
         assert_eq!(label_back.name, "bug");
 
@@ -941,8 +950,17 @@ mod tests {
         conn.execute(
             "INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![member.id, member.remote_id, member.team_id, member.name, member.email, member.created_at, member.updated_at],
-        ).unwrap();
+            params![
+                member.id,
+                member.remote_id,
+                member.team_id,
+                member.name,
+                member.email,
+                member.created_at,
+                member.updated_at
+            ],
+        )
+        .unwrap();
         let member_dto = MemberDto::from_model(&conn, &member).unwrap();
         assert_eq!(member_dto.email, "alice@example.com");
         let member_back = member_dto
@@ -970,9 +988,7 @@ mod tests {
         assert_eq!(dep_dto.id, 44);
         assert_eq!(dep_dto.blocking_issue_id, 101);
         assert_eq!(dep_dto.blocked_issue_id, 102);
-        let dep_back = dep_dto
-            .into_model(&conn, Some(dep.id.clone()))
-            .unwrap();
+        let dep_back = dep_dto.into_model(&conn, Some(dep.id.clone())).unwrap();
         assert_eq!(dep_back.blocking_issue_id, issue_a);
         assert_eq!(dep_back.blocked_issue_id, issue_b);
     }
@@ -1057,7 +1073,15 @@ mod tests {
         conn.execute(
             "INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![assignee_uuid, 33i64, team_uuid, "Alice", "a@x", now(), now()],
+            params![
+                assignee_uuid,
+                33i64,
+                team_uuid,
+                "Alice",
+                "a@x",
+                now(),
+                now()
+            ],
         )
         .unwrap();
         let creator_uuid = Uuid::new_v4().to_string();
@@ -1082,7 +1106,13 @@ mod tests {
             params![label_uuid, 22i64, team_uuid, "bug", "#f00", now(), now()],
         )
         .unwrap();
-        (team_uuid, lane_uuid, assignee_uuid, project_uuid, label_uuid)
+        (
+            team_uuid,
+            lane_uuid,
+            assignee_uuid,
+            project_uuid,
+            label_uuid,
+        )
     }
 
     #[test]
@@ -1220,13 +1250,25 @@ mod tests {
                                     created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
-                project.id, project.remote_id, project.team_id, project.name, project.description,
-                project.status, project.priority, project.lead_id, project.start_date,
-                project.due_date, project.roadmap_commitment, project.velocity_score,
-                project.completed_issues_count, project.total_issues_count,
-                project.created_at, project.updated_at,
+                project.id,
+                project.remote_id,
+                project.team_id,
+                project.name,
+                project.description,
+                project.status,
+                project.priority,
+                project.lead_id,
+                project.start_date,
+                project.due_date,
+                project.roadmap_commitment,
+                project.velocity_score,
+                project.completed_issues_count,
+                project.total_issues_count,
+                project.created_at,
+                project.updated_at,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO project_labels (project_id, label_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
             params![project.id, label_uuid, now(), now()],

@@ -118,7 +118,11 @@ fn color_swatches<'a>(selected_hex: &str) -> Element<'a, Message> {
     for hex in PALETTE {
         let color = t::hex_to_color(hex).unwrap_or(t::PRIORITY_NONE);
         let is_selected = selected_hex.eq_ignore_ascii_case(hex);
-        let border_color = if is_selected { t::TEXT_PRIMARY } else { t::BORDER };
+        let border_color = if is_selected {
+            t::TEXT_PRIMARY
+        } else {
+            t::BORDER
+        };
         let swatch = container(text(" ").size(10))
             .width(Length::Fixed(20.0))
             .height(Length::Fixed(20.0))

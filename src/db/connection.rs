@@ -25,7 +25,9 @@ pub fn seed_default_data(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     let team_id = uuid::Uuid::new_v4().to_string();
 
     conn.execute(

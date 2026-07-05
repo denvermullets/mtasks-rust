@@ -25,7 +25,10 @@ pub fn view<'a>(
     } else if sync_in_progress {
         ("Syncing\u{2026}".to_string(), t::TEXT_MUTED)
     } else if !token_configured {
-        ("Sync paused \u{2014} set API token".to_string(), t::TEXT_MUTED)
+        (
+            "Sync paused \u{2014} set API token".to_string(),
+            t::TEXT_MUTED,
+        )
     } else if let Some(at) = last_synced_at {
         let base = format!("Synced {}", format_age(at));
         let full = if pending_sync_count > 0 {
@@ -49,14 +52,12 @@ pub fn view<'a>(
         "[n]ew [e]dit [m]ove [d]elete [L]abels [s]ync [?]help"
     };
 
-    let mut bar = row![]
-        .spacing(16)
-        .push(
-            text(shortcuts)
-                .size(12)
-                .color(t::TEXT_MUTED)
-                .width(Length::Fill),
-        );
+    let mut bar = row![].spacing(16).push(
+        text(shortcuts)
+            .size(12)
+            .color(t::TEXT_MUTED)
+            .width(Length::Fill),
+    );
 
     if let Some(msg) = config_error {
         bar = bar.push(

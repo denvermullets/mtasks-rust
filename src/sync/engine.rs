@@ -184,7 +184,7 @@ async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id).await,
-        ("dependency", "delete") => dependency_delete(&entry.entity_id),
+        ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -407,7 +407,9 @@ async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
     };
     let team_remote_id = match parsed.get("team_remote_id").and_then(|v| v.as_i64()) {
         Some(v) => v,
-        None => return Outcome::DropAndLog("issue delete: missing team_remote_id in payload".into()),
+        None => {
+            return Outcome::DropAndLog("issue delete: missing team_remote_id in payload".into())
+        }
     };
     match issues::delete(client, team_remote_id, remote_id).await {
         Ok(_) => Outcome::Success,
@@ -438,7 +440,11 @@ fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, O
         title: Some(issue.title.clone()),
         description: issue.description.clone(),
         lane_id: Some(lane_id),
-        priority: Some(Priority::from_i32(issue.priority).as_rails_str().to_string()),
+        priority: Some(
+            Priority::from_i32(issue.priority)
+                .as_rails_str()
+                .to_string(),
+        ),
         estimate: issue.estimate.map(|e| e as i64),
         due_date: issue.due_date.clone(),
         assignee_id,
@@ -549,7 +555,11 @@ fn prep_project_update(entity_id: &str) -> Prep<ProjectUpdatePrep> {
     };
     let remote_id = match project.remote_id {
         Some(id) => id,
-        None => return Prep::Done(Outcome::LeavePending("project create not yet drained".into())),
+        None => {
+            return Prep::Done(Outcome::LeavePending(
+                "project create not yet drained".into(),
+            ))
+        }
     };
     let team_remote_id = match queries::remote_id_for(&conn, "teams", &project.team_id) {
         Ok(Some(id)) => id,
@@ -614,9 +624,7 @@ async fn project_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
     let team_remote_id = match parsed.get("team_remote_id").and_then(|v| v.as_i64()) {
         Some(v) => v,
         None => {
-            return Outcome::DropAndLog(
-                "project delete: missing team_remote_id in payload".into(),
-            )
+            return Outcome::DropAndLog("project delete: missing team_remote_id in payload".into())
         }
     };
     match projects::delete(client, team_remote_id, remote_id).await {
@@ -642,7 +650,11 @@ fn build_project_params(conn: &Connection, project: &Project) -> Result<ProjectP
     Ok(ProjectParams {
         name: Some(project.name.clone()),
         description: project.description.clone(),
-        priority: Some(Priority::from_i32(project.priority).as_rails_str().to_string()),
+        priority: Some(
+            Priority::from_i32(project.priority)
+                .as_rails_str()
+                .to_string(),
+        ),
         status: Some(project.status.as_str().to_string()),
         lead_id: lead_remote_id,
         start_date: project.start_date.clone(),
@@ -801,10 +813,52 @@ async fn dependency_create(client: &ApiClient, entity_id: &str) -> Outcome {
     }
 }
 
-fn dependency_delete(_entity_id: &str) -> Outcome {
-    Outcome::DropAndLog(
-        "dependency delete unsupported: pre-deletion remote_id not captured in payload".into(),
-    )
+/// Deletes a dependency's Rails record from the queue payload.
+///
+/// The local row (and its remote_id) is gone by drain time, so — like
+/// issue_delete / project_delete — this handler relies entirely on the payload,
+/// NOT on re-reading local state. The enqueue site (JAIT-114) must capture, before
+/// deleting the local row:
+///   { "team_remote_id":  <blocking issue's team remote_id>,
+///     "issue_remote_id": <blocking issue's remote_id>,
+///     "remote_id":       <dependency row's own remote_id / Rails dep id> }
+/// and must skip enqueueing entirely when the dependency has no remote_id.
+async fn dependency_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let raw = match payload {
+        Some(s) => s,
+        None => return Outcome::DropAndLog("dependency delete: no payload (legacy entry)".into()),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => return Outcome::DropAndLog(format!("dependency delete: bad payload: {e}")),
+    };
+    let team_remote_id = match parsed.get("team_remote_id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => {
+            return Outcome::DropAndLog(
+                "dependency delete: missing team_remote_id in payload".into(),
+            )
+        }
+    };
+    let issue_remote_id = match parsed.get("issue_remote_id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => {
+            return Outcome::DropAndLog(
+                "dependency delete: missing issue_remote_id in payload".into(),
+            )
+        }
+    };
+    let remote_id = match parsed.get("remote_id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => {
+            return Outcome::DropAndLog("dependency delete: missing remote_id in payload".into())
+        }
+    };
+    match dependencies::delete(client, team_remote_id, issue_remote_id, remote_id).await {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(_)) => Outcome::Success,
+        Err(e) => classify(&e),
+    }
 }
 
 // ── Error classification ──────────────────────────────────────────────────
@@ -901,7 +955,10 @@ impl SyncEngine {
                 report.failed += 1;
                 note_pull_failure(&mut report, &msg);
                 report.last_error = Some(msg);
-                return PullOutcome { report, deleted_orphan_team };
+                return PullOutcome {
+                    report,
+                    deleted_orphan_team,
+                };
             }
         };
 
@@ -915,7 +972,10 @@ impl SyncEngine {
                 report.failed += 1;
                 note_pull_failure(&mut report, &msg);
                 report.last_error = Some(msg);
-                return PullOutcome { report, deleted_orphan_team };
+                return PullOutcome {
+                    report,
+                    deleted_orphan_team,
+                };
             }
         }
 
@@ -925,13 +985,19 @@ impl SyncEngine {
             Err(msg) => {
                 report.last_error = Some(msg);
                 report.failed += 1;
-                return PullOutcome { report, deleted_orphan_team };
+                return PullOutcome {
+                    report,
+                    deleted_orphan_team,
+                };
             }
         };
         if targets.is_empty() {
             // Token has access but no teams visible (or team-scoped to a team
             // we couldn't find locally after pull_teams — shouldn't happen).
-            return PullOutcome { report, deleted_orphan_team };
+            return PullOutcome {
+                report,
+                deleted_orphan_team,
+            };
         }
 
         // Phase 4: per-team resources. Each helper logs and updates the report
@@ -955,7 +1021,10 @@ impl SyncEngine {
             }
         }
 
-        PullOutcome { report, deleted_orphan_team }
+        PullOutcome {
+            report,
+            deleted_orphan_team,
+        }
     }
 }
 
@@ -983,8 +1052,7 @@ fn collect_pull_targets(token_team_id: Option<i64>) -> Result<Vec<PullTarget>, S
         None => {
             // User-scoped token: fully sync every Rails-backed team we know
             // about. all_teams returns the local rows; we need their remote_id.
-            let teams = queries::all_teams(&conn)
-                .map_err(|e| format!("db (all_teams): {e}"))?;
+            let teams = queries::all_teams(&conn).map_err(|e| format!("db (all_teams): {e}"))?;
             Ok(teams
                 .into_iter()
                 .filter_map(|t| {
@@ -1340,10 +1408,7 @@ async fn pull_issues_step(
 /// stores team members, so resolving those FKs strictly would fail.
 /// Map a list of remote label ids to their local UUIDs, skipping any that have
 /// no local row yet (labels are pulled before issues, so this should be rare).
-fn resolve_local_label_ids(
-    conn: &Connection,
-    remote_ids: &[i64],
-) -> Result<Vec<String>, String> {
+fn resolve_local_label_ids(conn: &Connection, remote_ids: &[i64]) -> Result<Vec<String>, String> {
     let mut local = Vec::with_capacity(remote_ids.len());
     for remote_id in remote_ids {
         match queries::find_label_by_remote_id(conn, *remote_id) {
@@ -1466,11 +1531,7 @@ mod tests {
         // Without a pending push, remote is always authoritative — even if
         // local is newer (which means a previous push already drained).
         assert_eq!(
-            decide(
-                "2026-04-27T12:00:00Z",
-                "2026-04-27T11:00:00Z",
-                false
-            ),
+            decide("2026-04-27T12:00:00Z", "2026-04-27T11:00:00Z", false),
             MergeDecision::Overwrite
         );
     }
@@ -1478,11 +1539,7 @@ mod tests {
     #[test]
     fn decide_pending_and_local_newer_keeps_local() {
         assert_eq!(
-            decide(
-                "2026-04-27T12:00:00Z",
-                "2026-04-27T11:00:00Z",
-                true
-            ),
+            decide("2026-04-27T12:00:00Z", "2026-04-27T11:00:00Z", true),
             MergeDecision::KeepLocal
         );
     }
@@ -1492,11 +1549,7 @@ mod tests {
         // Concurrent edit: someone updated remote AFTER our local edit. LWW
         // means remote wins; the queued push will then overwrite again.
         assert_eq!(
-            decide(
-                "2026-04-27T11:00:00Z",
-                "2026-04-27T12:00:00Z",
-                true
-            ),
+            decide("2026-04-27T11:00:00Z", "2026-04-27T12:00:00Z", true),
             MergeDecision::Overwrite
         );
     }

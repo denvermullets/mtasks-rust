@@ -35,7 +35,10 @@ pub async fn create(
     direction: Direction,
 ) -> Result<IssueDependencyResponse, ApiError> {
     let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/dependencies");
-    let body = CreateBody { target_issue_id, direction };
+    let body = CreateBody {
+        target_issue_id,
+        direction,
+    };
     client.post(&path, &body).await
 }
 

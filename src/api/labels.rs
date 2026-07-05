@@ -47,7 +47,10 @@ mod tests {
 
     #[test]
     fn label_params_skip_color_when_none() {
-        let params = LabelParams { name: "bug".into(), color: None };
+        let params = LabelParams {
+            name: "bug".into(),
+            color: None,
+        };
         let body = serde_json::to_value(LabelWrap { label: &params }).unwrap();
         assert_eq!(body, serde_json::json!({ "label": { "name": "bug" } }));
     }

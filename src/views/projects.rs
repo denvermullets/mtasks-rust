@@ -105,10 +105,7 @@ const ROADMAPS: [RoadmapOption; 4] = [
     RoadmapOption(Some(RoadmapCommitment::Later)),
 ];
 
-pub fn modal_view<'a>(
-    form: &'a ProjectFormState,
-    members: &'a [Member],
-) -> Element<'a, Message> {
+pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Element<'a, Message> {
     let title = if form.editing_project_id.is_some() {
         "Edit Project"
     } else {

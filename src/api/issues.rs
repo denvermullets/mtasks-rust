@@ -70,10 +70,7 @@ pub async fn list(
     team_id: i64,
     filters: &IssueFilters,
 ) -> Result<Vec<IssueDto>, ApiError> {
-    let path = format!(
-        "api/v1/teams/{team_id}/issues{}",
-        filters.query_string()
-    );
+    let path = format!("api/v1/teams/{team_id}/issues{}", filters.query_string());
     client.get(&path).await
 }
 
@@ -170,6 +167,9 @@ mod tests {
             ..Default::default()
         };
         let body = serde_json::to_value(IssueWrap { issue: &params }).unwrap();
-        assert_eq!(body, serde_json::json!({ "issue": { "title": "Just a title" } }));
+        assert_eq!(
+            body,
+            serde_json::json!({ "issue": { "title": "Just a title" } })
+        );
     }
 }

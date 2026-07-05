@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use iced::widget::{column, container, horizontal_rule, mouse_area, row, scrollable, text, Column, Row};
+use iced::widget::{
+    column, container, horizontal_rule, mouse_area, row, scrollable, text, Column, Row,
+};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
@@ -50,9 +52,7 @@ pub fn view<'a>(
                     .color(t::TEXT_MUTED),
             );
 
-        let header_container = container(header)
-            .padding([10, 12])
-            .width(Length::Fill);
+        let header_container = container(header).padding([10, 12]).width(Length::Fill);
 
         header_row = header_row.push(header_container);
     }
@@ -69,7 +69,10 @@ pub fn view<'a>(
 
         for (issue_idx, issue) in lane_issues.iter().enumerate() {
             let is_focused = is_focused_lane && issue_idx == focused_issue;
-            let card_labels = issue_labels.get(&issue.id).map(|v| v.as_slice()).unwrap_or(&[]);
+            let card_labels = issue_labels
+                .get(&issue.id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let card = issue_card(
                 issue,
                 team_identifier,
@@ -102,11 +105,10 @@ pub fn view<'a>(
     let board = column![]
         .push(header_row)
         .push(
-            container(horizontal_rule(1))
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(t::BORDER)),
-                    ..Default::default()
-                }),
+            container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::BORDER)),
+                ..Default::default()
+            }),
         )
         .push(lane_columns)
         .width(Length::Fill)
@@ -143,16 +145,16 @@ fn issue_card<'a>(
         .spacing(4)
         .align_y(iced::Alignment::Center)
         .push(text("\u{25B3}").size(11).color(priority_color))
-        .push(text(format!("{}", priority_val)).size(11).color(t::TEXT_MUTED));
+        .push(
+            text(format!("{}", priority_val))
+                .size(11)
+                .color(t::TEXT_MUTED),
+        );
 
     let mut card_content = column![]
         .spacing(4)
         .push(text(tag).size(12).color(t::TEXT_MUTED))
-        .push(
-            text(&issue.title)
-                .size(14)
-                .color(t::TEXT_PRIMARY),
-        );
+        .push(text(&issue.title).size(14).color(t::TEXT_PRIMARY));
 
     if !labels.is_empty() {
         let mut chips: Row<'a, Message> = row![].spacing(4);
@@ -170,11 +172,7 @@ fn issue_card<'a>(
         t::BG_CARD
     };
 
-    let border_color = if focused {
-        t::ACCENT
-    } else {
-        t::BORDER
-    };
+    let border_color = if focused { t::ACCENT } else { t::BORDER };
 
     let card = container(card_content)
         .padding([10, 12])

@@ -95,9 +95,7 @@ impl Priority {
             "medium" => Ok(Priority::Medium),
             "low" => Ok(Priority::Low),
             "no_priority" => Ok(Priority::None),
-            other => Err(ApiError::EnumMapping(format!(
-                "unknown priority: {other}"
-            ))),
+            other => Err(ApiError::EnumMapping(format!("unknown priority: {other}"))),
         }
     }
 }
@@ -457,7 +455,8 @@ mod tests {
     #[test]
     fn project_status_sql_roundtrip() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE t (s TEXT NOT NULL)").unwrap();
+        conn.execute_batch("CREATE TABLE t (s TEXT NOT NULL)")
+            .unwrap();
         conn.execute(
             "INSERT INTO t (s) VALUES (?1)",
             rusqlite::params![ProjectStatus::Paused],
@@ -472,12 +471,10 @@ mod tests {
     #[test]
     fn project_status_sql_invalid_errors() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE t (s TEXT NOT NULL)").unwrap();
-        conn.execute(
-            "INSERT INTO t (s) VALUES ('bogus')",
-            rusqlite::params![],
-        )
-        .unwrap();
+        conn.execute_batch("CREATE TABLE t (s TEXT NOT NULL)")
+            .unwrap();
+        conn.execute("INSERT INTO t (s) VALUES ('bogus')", rusqlite::params![])
+            .unwrap();
         let got: rusqlite::Result<ProjectStatus> =
             conn.query_row("SELECT s FROM t", [], |row| row.get(0));
         assert!(got.is_err());

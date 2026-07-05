@@ -213,13 +213,18 @@ pub fn run(conn: &Connection) -> Result<()> {
         }
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(migration.up)?;
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
             rusqlite::params![migration.version as i64, &now],
         )?;
         tx.commit()?;
-        eprintln!("Applied migration v{} ({})", migration.version, migration.name);
+        eprintln!(
+            "Applied migration v{} ({})",
+            migration.version, migration.name
+        );
     }
 
     Ok(())
@@ -227,7 +232,9 @@ pub fn run(conn: &Connection) -> Result<()> {
 
 fn bootstrap_legacy(conn: &Connection) -> Result<()> {
     let migrations_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))?;
+        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
     if migrations_count > 0 {
         return Ok(());
     }
@@ -241,7 +248,9 @@ fn bootstrap_legacy(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     conn.execute(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
         rusqlite::params![&now],
@@ -361,7 +370,9 @@ mod tests {
         assert_eq!(team_name, "Old Team");
 
         let issue_title: String = conn
-            .query_row("SELECT title FROM issues WHERE id='i1'", [], |row| row.get(0))
+            .query_row("SELECT title FROM issues WHERE id='i1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(issue_title, "Old Issue");
 
@@ -417,6 +428,9 @@ mod tests {
              VALUES ('d2', 'a', 'b', ?1, ?1)",
             rusqlite::params![now],
         );
-        assert!(dup.is_err(), "expected UNIQUE violation on duplicate dependency");
+        assert!(
+            dup.is_err(),
+            "expected UNIQUE violation on duplicate dependency"
+        );
     }
 }
