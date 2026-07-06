@@ -189,6 +189,23 @@ const MIGRATIONS: &[Migration] = &[
                 ON issue_dependencies(blocked_issue_id);
         ",
     },
+    Migration {
+        version: 8,
+        name: "create_comments",
+        up: "
+            CREATE TABLE IF NOT EXISTS comments (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                author_id TEXT REFERENCES members(id),
+                body TEXT NOT NULL,
+                parent_id TEXT REFERENCES comments(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_comments_issue_id ON comments(issue_id);
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -306,11 +323,12 @@ mod tests {
             "project_labels",
             "members",
             "issue_dependencies",
+            "comments",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }
 
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -318,7 +336,7 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -331,10 +349,11 @@ mod tests {
 
         run(&conn).unwrap();
 
-        // v1 should be marked applied without re-running, and v2..v7 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        // v1 should be marked applied without re-running, and v2..v8 newly applied.
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
+        assert!(table_exists(&conn, "comments"));
     }
 
     #[test]

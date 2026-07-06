@@ -382,6 +382,33 @@ impl IssueDependency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Comment {
+    pub id: String,
+    pub remote_id: Option<i64>,
+    pub issue_id: String,
+    pub author_id: Option<String>,
+    pub body: String,
+    pub parent_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl Comment {
+    pub fn from_row(row: &Row<'_>) -> SqlResult<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            remote_id: row.get("remote_id")?,
+            issue_id: row.get("issue_id")?,
+            author_id: row.get("author_id")?,
+            body: row.get("body")?,
+            parent_id: row.get("parent_id")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncQueueEntry {
     pub id: Option<i64>,
     pub entity_type: String,

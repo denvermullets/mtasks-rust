@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::db::models::{
-    Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
+    Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
 
@@ -320,10 +320,6 @@ impl ProjectDto {
 }
 
 // ── CommentDto (mirrors Api::V1::CommentSerializer) ──
-//
-// No local Comment model exists yet; conversion fns are deferred until the
-// SQLite schema gains a `comments` table. Struct ships now so DESK-08 can
-// parse comment endpoints.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommentDto {
@@ -335,6 +331,35 @@ pub struct CommentDto {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replies: Option<Vec<CommentDto>>,
+}
+
+impl CommentDto {
+    /// Merge a fetched comment into a local `Comment`. `issue_local_uuid` is the
+    /// local UUID of the parent issue (already resolved by the caller). The
+    /// author is resolved to a local member by `user.id`; if that member isn't
+    /// known locally the author is left `None` (falls back to "Unknown" in the
+    /// UI). v1 is flat: `parent_id` is dropped.
+    pub fn into_model(
+        self,
+        conn: &Connection,
+        issue_local_uuid: String,
+        existing_uuid: Option<String>,
+    ) -> Comment {
+        let author_id = self
+            .user
+            .as_ref()
+            .and_then(|u| local_uuid_for(conn, "members", u.id).ok());
+        Comment {
+            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            remote_id: Some(self.id),
+            issue_id: issue_local_uuid,
+            author_id,
+            body: self.body,
+            parent_id: None,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
 }
 
 // ── Flat DTOs (no Rails serializer; mirror default AR as_json output) ──

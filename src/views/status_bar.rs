@@ -4,6 +4,7 @@ use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::theme as t;
+use crate::views::util::format_age;
 
 pub fn view<'a>(
     pending_sync_count: i32,
@@ -82,17 +83,4 @@ pub fn view<'a>(
             ..Default::default()
         })
         .into()
-}
-
-fn format_age(then: DateTime<Utc>) -> String {
-    let secs = (Utc::now() - then).num_seconds().max(0);
-    if secs < 60 {
-        format!("{}s ago", secs)
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
 }

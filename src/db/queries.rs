@@ -1,6 +1,6 @@
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
-use super::models::{Issue, IssueDependency, Label, Lane, Member, Project, Team};
+use super::models::{Comment, Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
 
@@ -168,6 +168,92 @@ pub fn members_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Member>>
     )?;
     let rows = stmt.query_map(params![team_id], Member::from_row)?;
     rows.collect()
+}
+
+// ── Comments ──
+
+/// Flat list of comments on an issue, oldest first. Nesting (parent_id) is not
+/// surfaced in v1 — replies are ignored on pull.
+pub fn comments_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
+         FROM comments WHERE issue_id = ?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![issue_id], Comment::from_row)?;
+    rows.collect()
+}
+
+pub fn get_comment(conn: &Connection, comment_id: &str) -> Result<Option<Comment>> {
+    conn.query_row(
+        "SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
+         FROM comments WHERE id = ?1",
+        params![comment_id],
+        Comment::from_row,
+    )
+    .optional()
+}
+
+pub fn insert_comment(conn: &Connection, comment: &Comment) -> Result<()> {
+    conn.execute(
+        "INSERT INTO comments
+            (id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            comment.id,
+            comment.remote_id,
+            comment.issue_id,
+            comment.author_id,
+            comment.body,
+            comment.parent_id,
+            comment.created_at,
+            comment.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn find_comment_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Comment>> {
+    conn.query_row(
+        "SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
+         FROM comments WHERE remote_id = ?1",
+        params![remote_id],
+        Comment::from_row,
+    )
+    .optional()
+}
+
+pub fn upsert_comment(conn: &Connection, comment: &Comment) -> Result<()> {
+    conn.execute(
+        "INSERT INTO comments
+            (id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+            remote_id = excluded.remote_id,
+            issue_id = excluded.issue_id,
+            author_id = excluded.author_id,
+            body = excluded.body,
+            parent_id = excluded.parent_id,
+            updated_at = excluded.updated_at",
+        params![
+            comment.id,
+            comment.remote_id,
+            comment.issue_id,
+            comment.author_id,
+            comment.body,
+            comment.parent_id,
+            comment.created_at,
+            comment.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn set_comment_remote_id(conn: &Connection, comment_id: &str, remote_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE comments SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, comment_id],
+    )?;
+    Ok(())
 }
 
 pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
@@ -817,7 +903,9 @@ pub fn cleanup_orphan_seed_team(conn: &Connection) -> Result<Option<String>> {
 /// Resolve a local UUID to its Rails `remote_id`. Returns `Ok(None)` if the row
 /// exists but hasn't been synced yet, or if the row is missing entirely.
 pub fn remote_id_for(conn: &Connection, table: &str, id: &str) -> Result<Option<i64>> {
-    let allowed = ["teams", "lanes", "issues", "projects", "labels", "members"];
+    let allowed = [
+        "teams", "lanes", "issues", "projects", "labels", "members", "comments",
+    ];
     if !allowed.contains(&table) {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -922,6 +1010,60 @@ mod tests {
         let mut names: Vec<&str> = pairs.iter().map(|(_, l)| l.name.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["bug", "ui"]);
+    }
+
+    fn make_comment(id: &str, remote_id: Option<i64>, body: &str, created_at: &str) -> Comment {
+        Comment {
+            id: id.to_string(),
+            remote_id,
+            issue_id: "i1".to_string(),
+            author_id: None,
+            body: body.to_string(),
+            parent_id: None,
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn insert_and_list_comments_ordered_oldest_first() {
+        let conn = setup();
+        insert_comment(&conn, &make_comment("c2", None, "second", "2026-01-02T00:00:00.000Z"))
+            .unwrap();
+        insert_comment(&conn, &make_comment("c1", None, "first", "2026-01-01T00:00:00.000Z"))
+            .unwrap();
+        let bodies: Vec<String> = comments_for_issue(&conn, "i1")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect();
+        assert_eq!(bodies, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn upsert_comment_sets_remote_id_and_is_idempotent() {
+        let conn = setup();
+        insert_comment(&conn, &make_comment("c1", None, "hi", NOW)).unwrap();
+        // Simulate a successful push stamping the remote id.
+        set_comment_remote_id(&conn, "c1", 42).unwrap();
+        assert_eq!(
+            find_comment_by_remote_id(&conn, 42).unwrap().unwrap().id,
+            "c1"
+        );
+        // Pull-side upsert of the same remote row (same local id) updates in place.
+        upsert_comment(&conn, &make_comment("c1", Some(42), "edited", NOW)).unwrap();
+        let all = comments_for_issue(&conn, "i1").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].body, "edited");
+        assert_eq!(all[0].remote_id, Some(42));
+    }
+
+    #[test]
+    fn deleting_an_issue_cascades_to_comments() {
+        let conn = setup();
+        insert_comment(&conn, &make_comment("c1", None, "hi", NOW)).unwrap();
+        conn.execute("DELETE FROM issues WHERE id = 'i1'", []).unwrap();
+        assert!(comments_for_issue(&conn, "i1").unwrap().is_empty());
     }
 
     fn make_member(id: &str, remote_id: i64, name: &str) -> Member {

@@ -4,10 +4,10 @@ use iced::keyboard;
 use iced::widget::{column, container, row, text};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
-use crate::api::{ApiClient, ApiError, TeamDto};
+use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
 use crate::config::{self, Config};
 use crate::db::models::{
-    Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
+    Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
 use crate::db::{connection, queries, sync_queue};
@@ -58,6 +58,14 @@ pub enum Message {
     IssueDetailProjectChanged(Option<String>),
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
+
+    // Issue detail — comments (flat thread, v1)
+    /// Composer text-editor action.
+    CommentComposerChanged(iced::widget::text_editor::Action),
+    /// "Comment" button pressed: persist the composer body locally + enqueue push.
+    SubmitComment,
+    /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
+    CommentsFetched(String, Result<Vec<CommentDto>, String>),
 
     // Issue detail — dependencies (blocking / blocked-by)
     /// Open the issue-detail view for another issue by its local UUID (e.g. a
@@ -198,6 +206,9 @@ pub struct App {
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_blocking: Vec<queries::DependencyLink>,
     detail_blocked_by: Vec<queries::DependencyLink>,
+    /// Comments on the open detail issue, oldest first. Repopulated each reload
+    /// only while `view` is `IssueDetail`.
+    detail_comments: Vec<Comment>,
     /// Search + direction state for the open issue-dependency picker modal.
     issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
@@ -285,9 +296,11 @@ impl App {
                 queries::blocking_links_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_blocked_by =
                 queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
+            self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
         } else {
             self.detail_blocking.clear();
             self.detail_blocked_by.clear();
+            self.detail_comments.clear();
         }
     }
 
@@ -342,13 +355,46 @@ impl App {
     }
 
     /// Switch the right pane to the detail view for `issue`, flushing any
-    /// currently-open detail buffer first so unsaved edits aren't lost.
-    fn open_issue_detail(&mut self, issue: &Issue) {
+    /// currently-open detail buffer first so unsaved edits aren't lost. Renders
+    /// comments from the local DB immediately and returns a background task that
+    /// refreshes them from Rails (no-op when offline or the issue isn't synced).
+    fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
         self.commit_issue_detail();
         self.issue_detail = Some(issue_detail::IssueDetailState::from_issue(issue));
         self.view = View::IssueDetail(issue.id.clone());
         let conn = self.db();
         self.load_detail_dependencies(&conn);
+        self.fetch_comments_task(&conn, issue)
+    }
+
+    /// Build the async task that pulls an issue's comments from Rails. Returns
+    /// `Task::none()` unless the issue + team are synced and a client can be
+    /// built from the configured token.
+    fn fetch_comments_task(&self, conn: &rusqlite::Connection, issue: &Issue) -> Task<Message> {
+        let issue_remote_id = match issue.remote_id {
+            Some(id) => id,
+            None => return Task::none(),
+        };
+        let team_remote_id = match queries::remote_id_for(conn, "teams", &issue.team_id) {
+            Ok(Some(id)) => id,
+            _ => return Task::none(),
+        };
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let client = match ApiClient::new(base_url, token) {
+            Ok(c) => c,
+            Err(_) => return Task::none(),
+        };
+        let issue_local_id = issue.id.clone();
+        Task::perform(
+            async move {
+                let result = crate::api::comments::list(&client, team_remote_id, issue_remote_id)
+                    .await
+                    .map_err(|e| e.to_string());
+                (issue_local_id, result)
+            },
+            |(id, result)| Message::CommentsFetched(id, result),
+        )
     }
 
     /// Apply a live sidebar change (Status/Priority/Project) to the issue behind
@@ -563,6 +609,7 @@ impl App {
             issue_labels,
             detail_blocking: Vec::new(),
             detail_blocked_by: Vec::new(),
+            detail_comments: Vec::new(),
             issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
@@ -658,7 +705,7 @@ impl App {
 
             Message::EditFocusedIssue => {
                 if let Some(issue) = self.focused_issue().cloned() {
-                    self.open_issue_detail(&issue);
+                    return self.open_issue_detail(&issue);
                 }
             }
 
@@ -795,6 +842,67 @@ impl App {
                     d.description.perform(action);
                 }
             }
+
+            // --- Issue detail: comments ---
+            Message::CommentComposerChanged(action) => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.comment_composer.perform(action);
+                }
+            }
+            Message::SubmitComment => {
+                let (issue_id, body) = match &self.issue_detail {
+                    Some(d) => (d.issue_id.clone(), d.comment_text().trim().to_string()),
+                    None => return Task::none(),
+                };
+                if body.is_empty() {
+                    return Task::none();
+                }
+                let conn = self.db();
+                // Stamp the signed-in user as author for immediate local display;
+                // Rails also forces the author server-side from the token.
+                let author_id = self.config.current_user_remote_id.and_then(|rid| {
+                    queries::find_member_by_remote_id(&conn, rid)
+                        .ok()
+                        .flatten()
+                        .map(|m| m.id)
+                });
+                let now = chrono::Utc::now()
+                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                    .to_string();
+                let comment = Comment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    remote_id: None,
+                    issue_id,
+                    author_id,
+                    body,
+                    parent_id: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                if queries::insert_comment(&conn, &comment).is_ok() {
+                    self.enqueue_sync("comment", &comment.id, "create", None);
+                    if let Some(d) = &mut self.issue_detail {
+                        d.comment_composer = iced::widget::text_editor::Content::new();
+                    }
+                    self.reload_data();
+                }
+            }
+            Message::CommentsFetched(issue_id, result) => {
+                if let Ok(dtos) = result {
+                    let conn = self.db();
+                    for dto in dtos {
+                        let existing = queries::find_comment_by_remote_id(&conn, dto.id)
+                            .ok()
+                            .flatten()
+                            .map(|c| c.id);
+                        let comment = dto.into_model(&conn, issue_id.clone(), existing);
+                        let _ = queries::upsert_comment(&conn, &comment);
+                    }
+                    drop(conn);
+                    // Refresh so the open detail's comment list reflects the merge.
+                    self.reload_data();
+                }
+            }
             Message::IssueDetailDueDateChanged(v) => {
                 if let Some(d) = &mut self.issue_detail {
                     d.due_date = v;
@@ -826,7 +934,7 @@ impl App {
             // --- Issue detail: dependencies (blocking / blocked-by) ---
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
-                    self.open_issue_detail(&issue);
+                    return self.open_issue_detail(&issue);
                 }
             }
             Message::OpenDependencyPicker(direction) => {
@@ -959,7 +1067,7 @@ impl App {
                 self.focused_issue = issue_idx;
                 self.clamp_focus();
                 if let Some(issue) = self.focused_issue().cloned() {
-                    self.open_issue_detail(&issue);
+                    return self.open_issue_detail(&issue);
                 }
             }
 
@@ -1571,6 +1679,7 @@ impl App {
                             project_name,
                             &self.detail_blocking,
                             &self.detail_blocked_by,
+                            &self.detail_comments,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.

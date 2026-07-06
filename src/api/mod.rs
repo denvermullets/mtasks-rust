@@ -2,6 +2,7 @@ pub mod client;
 pub mod dto;
 pub mod error;
 
+pub mod comments;
 pub mod dependencies;
 pub mod issues;
 pub mod labels;
@@ -12,6 +13,7 @@ pub mod teams;
 pub mod users;
 
 pub use client::ApiClient;
+pub use comments::CommentParams;
 pub use dependencies::{Direction, IssueDependencyResponse};
 pub use dto::{
     CommentDto, IssueDependencyDto, IssueDto, IssueRef, LabelDto, LabelRef, LaneDto, MemberDto,

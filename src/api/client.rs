@@ -53,6 +53,23 @@ impl ApiClient {
         self.send_json(req).await
     }
 
+    /// POST with an extra request header. Used to attach an `Idempotency-Key`
+    /// so a re-drained create doesn't produce a duplicate on the server.
+    pub async fn post_with_header<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        header_name: &'static str,
+        header_value: &str,
+    ) -> Result<T, ApiError> {
+        let req = self
+            .http
+            .post(self.url(path))
+            .header(header_name, header_value)
+            .json(body);
+        self.send_json(req).await
+    }
+
     pub async fn patch<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,

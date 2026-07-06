@@ -20,8 +20,8 @@ use rusqlite::Connection;
 
 use crate::api::dto::IssueDto;
 use crate::api::{
-    dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient, ApiError,
-    Direction, IssueParams, LabelParams, ProjectParams,
+    comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
+    ApiError, CommentParams, Direction, IssueParams, LabelParams, ProjectParams,
 };
 use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -186,6 +186,7 @@ async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id).await,
+        ("comment", "create") => comment_create(client, &entry.entity_id).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
@@ -722,6 +723,90 @@ async fn label_create(client: &ApiClient, entity_id: &str) -> Outcome {
                 Err(e) => return Outcome::LeavePending(e),
             };
             if let Err(e) = queries::set_label_remote_id(&conn, &prep.local_id, dto.id) {
+                return Outcome::LeavePending(format!("write remote_id: {e}"));
+            }
+            Outcome::Success
+        }
+        Err(e) => classify(&e),
+    }
+}
+
+// ── Comments ──────────────────────────────────────────────────────────────
+
+struct CommentCreatePrep {
+    team_remote_id: i64,
+    issue_remote_id: i64,
+    params: CommentParams,
+    local_id: String,
+}
+
+fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
+    let conn = match open() {
+        Ok(c) => c,
+        Err(e) => return Prep::Done(Outcome::LeavePending(e)),
+    };
+    let comment = match queries::get_comment(&conn, entity_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "comment {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    if comment.remote_id.is_some() {
+        return Prep::Done(Outcome::Success);
+    }
+    // The comment is nested under its issue; both the issue and its team must be
+    // synced before we can address the endpoint.
+    let issue = match queries::get_issue(&conn, &comment.issue_id) {
+        Ok(Some(i)) => i,
+        Ok(None) => return Prep::Done(Outcome::DropAndLog("comment's issue missing".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let issue_remote_id = match issue.remote_id {
+        Some(id) => id,
+        None => return Prep::Done(Outcome::LeavePending("issue not synced yet".into())),
+    };
+    let team_remote_id = match queries::remote_id_for(&conn, "teams", &issue.team_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    Prep::Ready(CommentCreatePrep {
+        team_remote_id,
+        issue_remote_id,
+        params: CommentParams {
+            body: comment.body,
+            parent_id: None,
+        },
+        local_id: comment.id,
+    })
+}
+
+async fn comment_create(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match prep_comment_create(entity_id) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    // Send the local UUID as the idempotency key so a re-drain (e.g. after a
+    // crash between POST and mark_synced) returns the existing comment instead
+    // of creating a duplicate.
+    match comments::create(
+        client,
+        prep.team_remote_id,
+        prep.issue_remote_id,
+        &prep.params,
+        &prep.local_id,
+    )
+    .await
+    {
+        Ok(dto) => {
+            let conn = match open() {
+                Ok(c) => c,
+                Err(e) => return Outcome::LeavePending(e),
+            };
+            if let Err(e) = queries::set_comment_remote_id(&conn, &prep.local_id, dto.id) {
                 return Outcome::LeavePending(format!("write remote_id: {e}"));
             }
             Outcome::Success

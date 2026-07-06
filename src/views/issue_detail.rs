@@ -4,11 +4,12 @@ use iced::widget::{
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
-use crate::db::models::{Issue, Lane, Member, Priority, Project, Team};
+use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::DependencyLink;
 use crate::theme as t;
 use crate::views::issue_form::LaneOption;
 use crate::views::projects::MemberOption;
+use crate::views::util::relative_time;
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
 /// estimate and due date live here and are committed (on Enter or on nav-away)
@@ -25,6 +26,8 @@ pub struct IssueDetailState {
     pub estimate: String,
     /// Inline validation message (blank title / non-numeric estimate). `None` = valid.
     pub error: Option<String>,
+    /// New-comment composer. Cleared on submit.
+    pub comment_composer: text_editor::Content,
 }
 
 impl IssueDetailState {
@@ -46,11 +49,16 @@ impl IssueDetailState {
                 })
                 .unwrap_or_default(),
             error: None,
+            comment_composer: text_editor::Content::new(),
         }
     }
 
     pub fn description_text(&self) -> String {
         self.description.text()
+    }
+
+    pub fn comment_text(&self) -> String {
+        self.comment_composer.text()
     }
 }
 
@@ -85,6 +93,7 @@ pub fn view<'a>(
     project_name: Option<&'a str>,
     blocking: &'a [DependencyLink],
     blocked_by: &'a [DependencyLink],
+    comments: &'a [Comment],
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = match team {
@@ -133,16 +142,7 @@ pub fn view<'a>(
                 .size(14)
                 .height(Length::Fixed(220.0)),
         )
-        .push(
-            column![]
-                .spacing(8)
-                .push(text("Activity").size(13).color(t::TEXT_SECONDARY))
-                .push(
-                    text("Activity feed coming soon")
-                        .size(12)
-                        .color(t::TEXT_MUTED),
-                ),
-        );
+        .push(comments_section(comments, members, detail));
 
     // ---- Right sidebar: properties ----
     let lane_options: Vec<LaneOption> = lanes
@@ -361,6 +361,72 @@ fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
                 .padding(0)
                 .style(button::text),
         )
+        .into()
+}
+
+/// Flat comment thread + composer, appended to the bottom of the left column.
+/// Nesting and delete are deferred to follow-up tickets (v1 is add + view only).
+fn comments_section<'a>(
+    comments: &'a [Comment],
+    members: &'a [Member],
+    detail: &'a IssueDetailState,
+) -> Element<'a, Message> {
+    let mut col = column![]
+        .spacing(12)
+        .push(text("Comments").size(13).color(t::TEXT_SECONDARY));
+
+    if comments.is_empty() {
+        col = col.push(text("No comments yet").size(12).color(t::TEXT_MUTED));
+    } else {
+        for comment in comments {
+            col = col.push(comment_row(comment, members));
+        }
+    }
+
+    // Composer: multiline editor + "Comment" button.
+    let composer = column![]
+        .spacing(8)
+        .push(
+            text_editor(&detail.comment_composer)
+                .placeholder("Leave a comment…")
+                .on_action(Message::CommentComposerChanged)
+                .padding(10)
+                .size(14)
+                .height(Length::Fixed(80.0)),
+        )
+        .push(
+            button(text("Comment").size(13))
+                .on_press(Message::SubmitComment)
+                .padding([6, 14])
+                .style(button::primary),
+        );
+
+    col.push(composer).into()
+}
+
+/// One comment: author name + relative timestamp on a header row, body below.
+fn comment_row<'a>(comment: &'a Comment, members: &'a [Member]) -> Element<'a, Message> {
+    let author = comment
+        .author_id
+        .as_ref()
+        .and_then(|aid| members.iter().find(|m| &m.id == aid))
+        .map(|m| m.name.as_str())
+        .unwrap_or("Unknown");
+
+    column![]
+        .spacing(4)
+        .push(
+            row![]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(text(author).size(12).color(t::TEXT_SECONDARY))
+                .push(
+                    text(relative_time(&comment.created_at))
+                        .size(11)
+                        .color(t::TEXT_MUTED),
+                ),
+        )
+        .push(text(&comment.body).size(13).color(t::TEXT_PRIMARY))
         .into()
 }
 
