@@ -15,8 +15,8 @@ use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, issue_form, labels as labels_view, placeholder, projects as projects_view, settings,
-    status_bar, team_list, toast,
+    board, issue_detail, issue_form, labels as labels_view, placeholder,
+    projects as projects_view, settings, status_bar, team_list, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -43,6 +43,18 @@ pub enum Message {
     IssueLaneChanged(String),
     /// Toggle a label in the issue form's multi-select (by local UUID).
     IssueLabelToggled(String),
+
+    // Issue detail — buffered text fields (committed on Enter / nav-away)
+    IssueDetailTitleChanged(String),
+    IssueDetailDescriptionChanged(iced::widget::text_editor::Action),
+    IssueDetailDueDateChanged(String),
+    IssueDetailEstimateChanged(String),
+    /// Flush buffered detail fields to the DB (text field `on_submit`).
+    CommitIssueDetail,
+    // Issue detail — live-apply sidebar pick_lists
+    IssueDetailStatusChanged(String),
+    IssueDetailPriorityChanged(Priority),
+    IssueDetailProjectChanged(Option<String>),
 
     // Labels
     OpenLabels,
@@ -158,6 +170,8 @@ pub struct App {
     focused_issue: usize,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
+    /// Buffered edit state while the right pane shows `View::IssueDetail`.
+    issue_detail: Option<issue_detail::IssueDetailState>,
     project_form: Option<projects_view::ProjectFormState>,
     settings_form: Option<settings::SettingsFormState>,
     label_form: Option<labels_view::LabelFormState>,
@@ -174,9 +188,6 @@ pub struct App {
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
     /// fresh token in Settings, so we don't hammer the API with a dead token.
     sync_paused_auth: bool,
-    /// Tracks the most recent card click for manual double-click detection
-    /// (iced 0.13's `mouse_area` exposes only `on_press`, not `on_double_click`).
-    last_card_click: Option<(usize, usize, std::time::Instant)>,
 }
 
 impl App {
@@ -279,6 +290,94 @@ impl App {
         let conn = self.db();
         let _ = sync_queue::enqueue(&conn, entity_type, entity_id, action, payload);
     }
+
+    /// Switch the right pane to the detail view for `issue`, flushing any
+    /// currently-open detail buffer first so unsaved edits aren't lost.
+    fn open_issue_detail(&mut self, issue: &Issue) {
+        self.commit_issue_detail();
+        self.issue_detail = Some(issue_detail::IssueDetailState::from_issue(issue));
+        self.view = View::IssueDetail(issue.id.clone());
+    }
+
+    /// Apply a live sidebar change (Status/Priority/Project) to the issue behind
+    /// the open detail view: mutate, persist, enqueue sync, and reload so the
+    /// pick_lists reflect DB truth. Buffered text fields are left untouched.
+    fn apply_issue_update(&mut self, mutate: impl FnOnce(&mut Issue)) {
+        let id = match &self.issue_detail {
+            Some(d) => d.issue_id.clone(),
+            None => return,
+        };
+        if let Some(mut issue) = self.issues.iter().find(|i| i.id == id).cloned() {
+            mutate(&mut issue);
+            issue.updated_at = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string();
+            let conn = self.db();
+            let _ = queries::update_issue(&conn, &issue);
+            let payload = serde_json::to_string(&issue).ok();
+            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
+            self.reload_data();
+        }
+    }
+
+    /// Flush the buffered detail fields (title/description/estimate/due date) to
+    /// the DB. Called on a text field's Enter and before navigating away. Blank
+    /// title or non-numeric estimate set an inline error and skip the write
+    /// rather than discard the user's text.
+    fn commit_issue_detail(&mut self) {
+        if !matches!(self.view, View::IssueDetail(_)) {
+            return;
+        }
+        let Some(detail) = self.issue_detail.as_mut() else {
+            return;
+        };
+
+        if detail.title.trim().is_empty() {
+            detail.error = Some("Title can't be blank".into());
+            return;
+        }
+        let estimate = if detail.estimate.trim().is_empty() {
+            None
+        } else {
+            match detail.estimate.trim().parse::<f64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    detail.error = Some("Estimate must be a number".into());
+                    return;
+                }
+            }
+        };
+        detail.error = None;
+
+        let id = detail.issue_id.clone();
+        let title = detail.title.trim().to_string();
+        let due_date = if detail.due_date.trim().is_empty() {
+            None
+        } else {
+            Some(detail.due_date.trim().to_string())
+        };
+        let body = detail.description_text();
+        let description = if body.trim().is_empty() {
+            None
+        } else {
+            Some(body.trim_end().to_string())
+        };
+
+        if let Some(mut issue) = self.issues.iter().find(|i| i.id == id).cloned() {
+            issue.title = title;
+            issue.description = description;
+            issue.estimate = estimate;
+            issue.due_date = due_date;
+            issue.updated_at = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string();
+            let conn = self.db();
+            let _ = queries::update_issue(&conn, &issue);
+            let payload = serde_json::to_string(&issue).ok();
+            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
+            self.reload_data();
+        }
+    }
 }
 
 impl App {
@@ -330,6 +429,7 @@ impl App {
             focused_issue: 0,
             modal: Modal::None,
             issue_form: None,
+            issue_detail: None,
             project_form: None,
             settings_form: None,
             label_form: None,
@@ -342,7 +442,6 @@ impl App {
             toasts: Vec::new(),
             next_toast_id: 0,
             sync_paused_auth: false,
-            last_card_click: None,
         };
 
         (app, Task::none())
@@ -397,6 +496,7 @@ impl App {
             }
 
             Message::SelectTeamView(team_id, view) => {
+                self.commit_issue_detail();
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) {
                     self.selected_team_id = Some(team_id);
                     self.focused_lane = 0;
@@ -407,6 +507,7 @@ impl App {
             }
 
             Message::NavigateToView(view) => {
+                self.commit_issue_detail();
                 self.view = view;
             }
 
@@ -418,11 +519,7 @@ impl App {
 
             Message::EditFocusedIssue => {
                 if let Some(issue) = self.focused_issue().cloned() {
-                    let label_ids =
-                        queries::label_ids_for_issue(&self.db(), &issue.id).unwrap_or_default();
-                    self.issue_form =
-                        Some(issue_form::IssueFormState::from_issue(&issue, label_ids));
-                    self.modal = Modal::IssueForm;
+                    self.open_issue_detail(&issue);
                 }
             }
 
@@ -539,6 +636,42 @@ impl App {
                 self.reload_data();
             }
 
+            // --- Issue detail: buffered fields ---
+            Message::IssueDetailTitleChanged(v) => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.title = v;
+                }
+            }
+            Message::IssueDetailDescriptionChanged(action) => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.description.perform(action);
+                }
+            }
+            Message::IssueDetailDueDateChanged(v) => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.due_date = v;
+                }
+            }
+            Message::IssueDetailEstimateChanged(v) => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.estimate = v;
+                }
+            }
+            Message::CommitIssueDetail => {
+                self.commit_issue_detail();
+            }
+
+            // --- Issue detail: live-apply pick_lists ---
+            Message::IssueDetailStatusChanged(lane_id) => {
+                self.apply_issue_update(|i| i.lane_id = lane_id);
+            }
+            Message::IssueDetailPriorityChanged(p) => {
+                self.apply_issue_update(|i| i.priority = p.to_i32());
+            }
+            Message::IssueDetailProjectChanged(pid) => {
+                self.apply_issue_update(|i| i.project_id = pid);
+            }
+
             Message::ConfirmDeleteFocusedIssue => {
                 if let Some(issue) = self.focused_issue() {
                     self.modal = Modal::DeleteConfirm(issue.id.clone());
@@ -647,23 +780,11 @@ impl App {
             }
 
             Message::CardPressed(lane_idx, issue_idx) => {
-                let now = std::time::Instant::now();
-                let is_double_click = self
-                    .last_card_click
-                    .map(|(l, i, t)| {
-                        l == lane_idx && i == issue_idx && now.duration_since(t).as_millis() < 500
-                    })
-                    .unwrap_or(false);
-
                 self.focused_lane = lane_idx;
                 self.focused_issue = issue_idx;
                 self.clamp_focus();
-
-                if is_double_click {
-                    self.last_card_click = None;
-                    return self.update(Message::EditFocusedIssue);
-                } else {
-                    self.last_card_click = Some((lane_idx, issue_idx, now));
+                if let Some(issue) = self.focused_issue().cloned() {
+                    self.open_issue_detail(&issue);
                 }
             }
 
@@ -1238,7 +1359,31 @@ impl App {
             ),
             View::ProjectList => placeholder::view("Projects"),
             View::ProjectDetail(_) => placeholder::view("Project"),
-            View::IssueDetail(_) => placeholder::view("Issue"),
+            View::IssueDetail(ref issue_id) => {
+                match (
+                    self.issues.iter().find(|i| i.id == *issue_id),
+                    &self.issue_detail,
+                ) {
+                    (Some(issue), Some(detail)) if detail.issue_id == *issue_id => {
+                        let project_name = issue
+                            .project_id
+                            .as_ref()
+                            .and_then(|pid| self.projects.iter().find(|p| p.id == *pid))
+                            .map(|p| p.name.as_str());
+                        issue_detail::view(
+                            issue,
+                            detail,
+                            self.selected_team(),
+                            &self.lanes,
+                            &self.projects,
+                            &self.members,
+                            project_name,
+                        )
+                    }
+                    // Issue removed by a background sync, or state desync → graceful fallback.
+                    _ => placeholder::view("Issue"),
+                }
+            }
             View::Roadmap => placeholder::view("Roadmap"),
             View::MyIssues => placeholder::view("My Issues"),
         };

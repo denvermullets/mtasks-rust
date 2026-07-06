@@ -74,7 +74,7 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
 
 pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     conn.execute(
-        "UPDATE issues SET title=?1, description=?2, priority=?3, due_date=?4, estimate=?5, started_at=?6, completed_at=?7, canceled_at=?8, lane_id=?9, updated_at=?10 WHERE id=?11",
+        "UPDATE issues SET title=?1, description=?2, priority=?3, due_date=?4, estimate=?5, started_at=?6, completed_at=?7, canceled_at=?8, lane_id=?9, project_id=?10, updated_at=?11 WHERE id=?12",
         params![
             issue.title,
             issue.description,
@@ -85,6 +85,7 @@ pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.completed_at,
             issue.canceled_at,
             issue.lane_id,
+            issue.project_id,
             issue.updated_at,
             issue.id,
         ],
