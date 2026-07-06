@@ -13,6 +13,14 @@ pub struct Config {
     pub last_synced_at: Option<DateTime<Utc>>,
     #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
+    /// Rails user id of the signed-in user, captured from `/me` on sync. Used to
+    /// stamp `creator_id` on locally-created issues (resolved to the local member
+    /// row via its `remote_id`).
+    #[serde(default)]
+    pub current_user_remote_id: Option<i64>,
+    /// Display name of the signed-in user, captured alongside the id.
+    #[serde(default)]
+    pub current_user_name: Option<String>,
 }
 
 fn default_api_base_url() -> String {
@@ -30,6 +38,8 @@ impl Default for Config {
             api_token: None,
             last_synced_at: None,
             sync_interval_secs: default_sync_interval_secs(),
+            current_user_remote_id: None,
+            current_user_name: None,
         }
     }
 }

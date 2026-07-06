@@ -100,6 +100,9 @@ pub struct FullSyncReport {
     /// pull, if any. The app uses this to repoint `selected_team_id` so the
     /// board doesn't render against a row that no longer exists.
     pub deleted_orphan_team: Option<String>,
+    /// Signed-in user's `(rails_id, name)` from the pull's `/me` call. The app
+    /// persists this to config for stamping `creator_id` on new issues.
+    pub current_user: Option<(i64, String)>,
 }
 
 impl FullSyncReport {
@@ -927,6 +930,9 @@ fn decide(local_updated: &str, remote_updated: &str, has_pending: bool) -> Merge
 pub struct PullOutcome {
     pub report: SyncReport,
     pub deleted_orphan_team: Option<String>,
+    /// Signed-in user's `(rails_id, name)` from `/me`, when the call succeeded.
+    /// The app persists this to config to stamp `creator_id` on new issues.
+    pub current_user: Option<(i64, String)>,
 }
 
 impl SyncEngine {
@@ -958,9 +964,11 @@ impl SyncEngine {
                 return PullOutcome {
                     report,
                     deleted_orphan_team,
+                    current_user: None,
                 };
             }
         };
+        let current_user = Some((me.id, me.name.clone()));
 
         // Phase 2: refresh teams (and discover any new ones the token can see).
         match pull_teams(client).await {
@@ -975,6 +983,7 @@ impl SyncEngine {
                 return PullOutcome {
                     report,
                     deleted_orphan_team,
+                    current_user,
                 };
             }
         }
@@ -988,6 +997,7 @@ impl SyncEngine {
                 return PullOutcome {
                     report,
                     deleted_orphan_team,
+                    current_user,
                 };
             }
         };
@@ -997,6 +1007,7 @@ impl SyncEngine {
             return PullOutcome {
                 report,
                 deleted_orphan_team,
+                current_user,
             };
         }
 
@@ -1024,6 +1035,7 @@ impl SyncEngine {
         PullOutcome {
             report,
             deleted_orphan_team,
+            current_user,
         }
     }
 }

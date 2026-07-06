@@ -7,6 +7,7 @@ use crate::app::{Message, View};
 use crate::db::models::{Issue, Lane, Member, Priority, Project, Team};
 use crate::theme as t;
 use crate::views::issue_form::LaneOption;
+use crate::views::projects::MemberOption;
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
 /// estimate and due date live here and are committed (on Enter or on nav-away)
@@ -79,7 +80,7 @@ pub fn view<'a>(
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     projects: &'a [Project],
-    _members: &'a [Member],
+    members: &'a [Member],
     project_name: Option<&'a str>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
@@ -164,6 +165,28 @@ pub fn view<'a>(
         .find(|o| o.id == issue.project_id)
         .cloned();
 
+    let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
+        id: None,
+        name: "Unassigned".to_string(),
+    })
+    .chain(members.iter().map(|m| MemberOption {
+        id: Some(m.id.clone()),
+        name: m.name.clone(),
+    }))
+    .collect();
+    let selected_assignee = member_options
+        .iter()
+        .find(|o| o.id == issue.assignee_id)
+        .cloned();
+
+    // Creator is read-only (set on create); resolve the local member's name.
+    let creator_name = issue.creator_id.as_ref().and_then(|cid| {
+        members
+            .iter()
+            .find(|m| &m.id == cid)
+            .map(|m| m.name.as_str())
+    });
+
     let sidebar = column![]
         .spacing(18)
         .padding(20)
@@ -185,7 +208,20 @@ pub fn view<'a>(
             )
             .width(Length::Fill),
         ))
-        .push(section("Assignee", placeholder_value()))
+        .push(section(
+            "Assignee",
+            pick_list(member_options, selected_assignee, |o: MemberOption| {
+                Message::IssueDetailAssigneeChanged(o.id)
+            })
+            .width(Length::Fill),
+        ))
+        .push(section(
+            "Creator",
+            match creator_name {
+                Some(name) => text(name).size(13).color(t::TEXT_SECONDARY).into(),
+                None => placeholder_value(),
+            },
+        ))
         .push(section(
             "Estimate",
             text_input("No estimate", &detail.estimate)

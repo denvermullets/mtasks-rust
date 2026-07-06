@@ -49,8 +49,8 @@ pub fn next_team_number(conn: &Connection, team_id: &str) -> Result<i32> {
 
 pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     conn.execute(
-        "INSERT INTO issues (id, title, description, priority, team_number, due_date, estimate, started_at, completed_at, canceled_at, lane_id, team_id, remote_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO issues (id, title, description, priority, team_number, due_date, estimate, started_at, completed_at, canceled_at, lane_id, team_id, assignee_id, creator_id, remote_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             issue.id,
             issue.title,
@@ -64,6 +64,8 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.canceled_at,
             issue.lane_id,
             issue.team_id,
+            issue.assignee_id,
+            issue.creator_id,
             issue.remote_id,
             issue.created_at,
             issue.updated_at,
@@ -74,7 +76,7 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
 
 pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     conn.execute(
-        "UPDATE issues SET title=?1, description=?2, priority=?3, due_date=?4, estimate=?5, started_at=?6, completed_at=?7, canceled_at=?8, lane_id=?9, project_id=?10, updated_at=?11 WHERE id=?12",
+        "UPDATE issues SET title=?1, description=?2, priority=?3, due_date=?4, estimate=?5, started_at=?6, completed_at=?7, canceled_at=?8, lane_id=?9, project_id=?10, assignee_id=?11, updated_at=?12 WHERE id=?13",
         params![
             issue.title,
             issue.description,
@@ -86,6 +88,7 @@ pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.canceled_at,
             issue.lane_id,
             issue.project_id,
+            issue.assignee_id,
             issue.updated_at,
             issue.id,
         ],
@@ -837,6 +840,87 @@ mod tests {
         let mut names: Vec<&str> = pairs.iter().map(|(_, l)| l.name.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["bug", "ui"]);
+    }
+
+    fn make_member(id: &str, remote_id: i64, name: &str) -> Member {
+        Member {
+            id: id.to_string(),
+            remote_id: Some(remote_id),
+            team_id: "t1".to_string(),
+            name: name.to_string(),
+            email: format!("{name}@example.com"),
+            created_at: NOW.to_string(),
+            updated_at: NOW.to_string(),
+        }
+    }
+
+    fn make_issue(id: &str, assignee_id: Option<&str>, creator_id: Option<&str>) -> Issue {
+        Issue {
+            id: id.to_string(),
+            title: "Issue".to_string(),
+            description: None,
+            priority: 4,
+            team_number: Some(1),
+            due_date: None,
+            estimate: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
+            lane_id: "l1".to_string(),
+            team_id: "t1".to_string(),
+            project_id: None,
+            parent_issue_id: None,
+            assignee_id: assignee_id.map(str::to_string),
+            creator_id: creator_id.map(str::to_string),
+            archived_at: None,
+            remote_id: None,
+            created_at: NOW.to_string(),
+            updated_at: NOW.to_string(),
+        }
+    }
+
+    #[test]
+    fn insert_issue_persists_assignee_and_creator() {
+        let conn = setup();
+        upsert_member(&conn, &make_member("m1", 3, "Ryan")).unwrap();
+        insert_issue(&conn, &make_issue("new1", Some("m1"), Some("m1"))).unwrap();
+
+        let stored = get_issue(&conn, "new1").unwrap().unwrap();
+        assert_eq!(stored.assignee_id.as_deref(), Some("m1"));
+        assert_eq!(stored.creator_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn update_issue_persists_and_clears_assignee() {
+        let conn = setup();
+        upsert_member(&conn, &make_member("m1", 3, "Ryan")).unwrap();
+        upsert_member(&conn, &make_member("m2", 6, "Andrew")).unwrap();
+        insert_issue(&conn, &make_issue("new1", None, None)).unwrap();
+
+        // Assign to m1.
+        let mut issue = get_issue(&conn, "new1").unwrap().unwrap();
+        issue.assignee_id = Some("m1".to_string());
+        update_issue(&conn, &issue).unwrap();
+        assert_eq!(
+            get_issue(&conn, "new1").unwrap().unwrap().assignee_id.as_deref(),
+            Some("m1")
+        );
+
+        // Reassign to m2.
+        issue.assignee_id = Some("m2".to_string());
+        update_issue(&conn, &issue).unwrap();
+        assert_eq!(
+            get_issue(&conn, "new1").unwrap().unwrap().assignee_id.as_deref(),
+            Some("m2")
+        );
+
+        // "Unassigned" clears it.
+        issue.assignee_id = None;
+        update_issue(&conn, &issue).unwrap();
+        assert_eq!(
+            get_issue(&conn, "new1").unwrap().unwrap().assignee_id,
+            None
+        );
     }
 
     #[test]

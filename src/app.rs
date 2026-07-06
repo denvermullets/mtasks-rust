@@ -55,6 +55,8 @@ pub enum Message {
     IssueDetailStatusChanged(String),
     IssueDetailPriorityChanged(Priority),
     IssueDetailProjectChanged(Option<String>),
+    /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
+    IssueDetailAssigneeChanged(Option<String>),
 
     // Labels
     OpenLabels,
@@ -601,6 +603,15 @@ impl App {
                         // Create new
                         let team_id = self.selected_team_id.clone().unwrap_or_default();
                         let team_number = queries::next_team_number(&conn, &team_id).unwrap_or(1);
+                        // Stamp the signed-in user as creator (local member UUID
+                        // resolved from their Rails id). Rails also forces the
+                        // creator server-side; this is for immediate local display.
+                        let creator_id = self.config.current_user_remote_id.and_then(|rid| {
+                            queries::find_member_by_remote_id(&conn, rid)
+                                .ok()
+                                .flatten()
+                                .map(|m| m.id)
+                        });
                         let issue = Issue {
                             id: uuid::Uuid::new_v4().to_string(),
                             title: form.title.trim().to_string(),
@@ -617,7 +628,7 @@ impl App {
                             project_id: None,
                             parent_issue_id: None,
                             assignee_id: None,
-                            creator_id: None,
+                            creator_id,
                             archived_at: None,
                             remote_id: None,
                             created_at: now.clone(),
@@ -670,6 +681,9 @@ impl App {
             }
             Message::IssueDetailProjectChanged(pid) => {
                 self.apply_issue_update(|i| i.project_id = pid);
+            }
+            Message::IssueDetailAssigneeChanged(member_id) => {
+                self.apply_issue_update(|i| i.assignee_id = member_id);
             }
 
             Message::ConfirmDeleteFocusedIssue => {
@@ -926,6 +940,7 @@ impl App {
                                     pull: outcome.report,
                                     push,
                                     deleted_orphan_team: outcome.deleted_orphan_team,
+                                    current_user: outcome.current_user,
                                 }
                             },
                             Message::SyncCompleted,
@@ -986,8 +1001,23 @@ impl App {
                 }
                 let clean = report.pull.failed == 0 && report.push.failed == 0;
 
+                // `/me` can succeed even when a later pull step fails, so persist
+                // the signed-in user's identity independently of the failed count.
+                let mut config_dirty = false;
+                if let Some((rid, name)) = &report.current_user {
+                    if self.config.current_user_remote_id != Some(*rid)
+                        || self.config.current_user_name.as_deref() != Some(name.as_str())
+                    {
+                        self.config.current_user_remote_id = Some(*rid);
+                        self.config.current_user_name = Some(name.clone());
+                        config_dirty = true;
+                    }
+                }
                 if report.pull.failed == 0 {
                     self.config.last_synced_at = Some(chrono::Utc::now());
+                    config_dirty = true;
+                }
+                if config_dirty {
                     let _ = config::save(&self.config);
                 }
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
