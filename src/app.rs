@@ -7,7 +7,8 @@ use iced::{event, Element, Length, Subscription, Task, Theme};
 use crate::api::{ApiClient, ApiError, TeamDto};
 use crate::config::{self, Config};
 use crate::db::models::{
-    Issue, Label, Lane, Member, Priority, Project, ProjectStatus, RoadmapCommitment, Team,
+    Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
+    RoadmapCommitment, Team,
 };
 use crate::db::{connection, queries, sync_queue};
 use crate::keys;
@@ -15,7 +16,7 @@ use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, issue_detail, issue_form, labels as labels_view, placeholder,
+    board, issue_detail, issue_form, issue_picker, labels as labels_view, placeholder,
     projects as projects_view, settings, status_bar, team_list, toast,
 };
 
@@ -57,6 +58,20 @@ pub enum Message {
     IssueDetailProjectChanged(Option<String>),
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
+
+    // Issue detail — dependencies (blocking / blocked-by)
+    /// Open the issue-detail view for another issue by its local UUID (e.g. a
+    /// click on a linked dependency row). Rebuilds the detail buffer, unlike
+    /// `NavigateToView(View::IssueDetail(_))` which only swaps the view.
+    OpenIssueDetail(String),
+    /// Open the searchable issue picker to add a dependency in `direction`.
+    OpenDependencyPicker(DepDirection),
+    /// The picker's search box changed.
+    DependencyPickerSearchChanged(String),
+    /// A target issue (local UUID) was chosen in the picker → create the edge.
+    DependencyPickerSelected(String),
+    /// Remove a dependency edge by its local dependency-row UUID.
+    RemoveDependency(String),
 
     // Labels
     OpenLabels,
@@ -138,6 +153,17 @@ pub enum Modal {
     ProjectForm,
     DeleteProjectConfirm(String),
     Labels,
+    /// Searchable picker for adding an issue dependency (see `issue_picker`).
+    IssuePicker,
+}
+
+/// Which dependency section a picker/add-action targets, relative to the open
+/// issue. `Blocking` = the open issue blocks the target; `BlockedBy` = the target
+/// blocks the open issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepDirection {
+    Blocking,
+    BlockedBy,
 }
 
 /// Which screen the right-hand pane renders. Only `Board` is implemented today;
@@ -168,6 +194,12 @@ pub struct App {
     /// Labels attached to each issue, keyed by issue local UUID. Built once per
     /// reload so board cards render chips without a query each.
     issue_labels: HashMap<String, Vec<Label>>,
+    /// Dependency edges for the open detail issue, resolved for the sidebar.
+    /// Repopulated each reload only while `view` is `IssueDetail`.
+    detail_blocking: Vec<queries::DependencyLink>,
+    detail_blocked_by: Vec<queries::DependencyLink>,
+    /// Search + direction state for the open issue-dependency picker modal.
+    issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
     focused_issue: usize,
     modal: Modal,
@@ -239,8 +271,24 @@ impl App {
             self.issue_labels.clear();
         }
 
+        self.load_detail_dependencies(&conn);
+
         self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
         self.clamp_focus();
+    }
+
+    /// Resolve dependency edges for the open detail issue so the sidebar can
+    /// render them; other views don't need this, so keep it cheap.
+    fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
+        if let View::IssueDetail(ref issue_id) = self.view {
+            self.detail_blocking =
+                queries::blocking_links_for_issue(conn, issue_id).unwrap_or_default();
+            self.detail_blocked_by =
+                queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
+        } else {
+            self.detail_blocking.clear();
+            self.detail_blocked_by.clear();
+        }
     }
 
     fn selected_team(&self) -> Option<&Team> {
@@ -299,6 +347,8 @@ impl App {
         self.commit_issue_detail();
         self.issue_detail = Some(issue_detail::IssueDetailState::from_issue(issue));
         self.view = View::IssueDetail(issue.id.clone());
+        let conn = self.db();
+        self.load_detail_dependencies(&conn);
     }
 
     /// Apply a live sidebar change (Status/Priority/Project) to the issue behind
@@ -320,6 +370,90 @@ impl App {
             self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
             self.reload_data();
         }
+    }
+
+    /// Create a dependency edge from the open detail issue to `target_id`, in the
+    /// active picker's direction. Persists locally, then enqueues a push (the
+    /// sync consumer re-reads the row, so no payload is needed). A self-link or a
+    /// duplicate edge (UNIQUE constraint) is surfaced as a toast, not a write.
+    fn add_dependency(&mut self, target_id: &str) {
+        let direction = match &self.issue_picker {
+            Some(p) => p.direction,
+            None => return,
+        };
+        let current_id = match &self.issue_detail {
+            Some(d) => d.issue_id.clone(),
+            None => return,
+        };
+        if current_id == target_id {
+            self.push_toast("An issue can't depend on itself", ToastKind::Error, false);
+            return;
+        }
+        // A row means `blocking_issue_id` blocks `blocked_issue_id`.
+        let (blocking_issue_id, blocked_issue_id) = match direction {
+            DepDirection::Blocking => (current_id, target_id.to_string()),
+            DepDirection::BlockedBy => (target_id.to_string(), current_id),
+        };
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        let dep = IssueDependency {
+            id: uuid::Uuid::new_v4().to_string(),
+            remote_id: None,
+            blocking_issue_id,
+            blocked_issue_id,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let conn = self.db();
+        match queries::insert_issue_dependency(&conn, &dep) {
+            Ok(()) => {
+                self.enqueue_sync("dependency", &dep.id, "create", None);
+                self.reload_data();
+            }
+            Err(_) => {
+                // Almost always the UNIQUE(blocking, blocked) constraint.
+                self.push_toast("Those issues are already linked", ToastKind::Error, false);
+            }
+        }
+    }
+
+    /// Remove a dependency edge. Captures the remote ids the sync delete needs
+    /// BEFORE dropping the local row (mirrors the issue-delete path). A
+    /// never-synced edge (no `remote_id`) is deleted locally with nothing
+    /// enqueued — there is nothing on the server to remove.
+    fn remove_dependency(&mut self, dep_id: &str) {
+        let conn = self.db();
+        let dep = match queries::get_issue_dependency(&conn, dep_id) {
+            Ok(Some(d)) => d,
+            _ => return,
+        };
+        if let Some(remote_id) = dep.remote_id {
+            // The Rails edge lives under the BLOCKING issue's endpoint.
+            let payload = queries::get_issue(&conn, &dep.blocking_issue_id)
+                .ok()
+                .flatten()
+                .and_then(|blocking| {
+                    let issue_remote_id = blocking.remote_id?;
+                    let team_remote_id =
+                        queries::remote_id_for(&conn, "teams", &blocking.team_id)
+                            .ok()
+                            .flatten()?;
+                    Some(
+                        serde_json::json!({
+                            "team_remote_id": team_remote_id,
+                            "issue_remote_id": issue_remote_id,
+                            "remote_id": remote_id,
+                        })
+                        .to_string(),
+                    )
+                });
+            if let Some(p) = &payload {
+                self.enqueue_sync("dependency", dep_id, "delete", Some(p.as_str()));
+            }
+        }
+        let _ = queries::delete_issue_dependency(&conn, dep_id);
+        self.reload_data();
     }
 
     /// Flush the buffered detail fields (title/description/estimate/due date) to
@@ -427,6 +561,9 @@ impl App {
             members,
             labels,
             issue_labels,
+            detail_blocking: Vec::new(),
+            detail_blocked_by: Vec::new(),
+            issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
             modal: Modal::None,
@@ -684,6 +821,30 @@ impl App {
             }
             Message::IssueDetailAssigneeChanged(member_id) => {
                 self.apply_issue_update(|i| i.assignee_id = member_id);
+            }
+
+            // --- Issue detail: dependencies (blocking / blocked-by) ---
+            Message::OpenIssueDetail(issue_id) => {
+                if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
+                    self.open_issue_detail(&issue);
+                }
+            }
+            Message::OpenDependencyPicker(direction) => {
+                self.issue_picker = Some(issue_picker::IssuePickerState::new(direction));
+                self.modal = Modal::IssuePicker;
+            }
+            Message::DependencyPickerSearchChanged(query) => {
+                if let Some(ref mut picker) = self.issue_picker {
+                    picker.query = query;
+                }
+            }
+            Message::DependencyPickerSelected(target_id) => {
+                self.add_dependency(&target_id);
+                self.issue_picker = None;
+                self.modal = Modal::None;
+            }
+            Message::RemoveDependency(dep_id) => {
+                self.remove_dependency(&dep_id);
             }
 
             Message::ConfirmDeleteFocusedIssue => {
@@ -1408,6 +1569,8 @@ impl App {
                             &self.projects,
                             &self.members,
                             project_name,
+                            &self.detail_blocking,
+                            &self.detail_blocked_by,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
@@ -1524,6 +1687,23 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::IssuePicker => match (&self.issue_picker, &self.issue_detail) {
+                (Some(picker), Some(detail)) => {
+                    // Exclude the open issue itself and any issue already linked
+                    // in this direction (a duplicate would hit the UNIQUE edge).
+                    let existing = match picker.direction {
+                        DepDirection::Blocking => &self.detail_blocking,
+                        DepDirection::BlockedBy => &self.detail_blocked_by,
+                    };
+                    let mut excluded: HashSet<&str> =
+                        existing.iter().map(|l| l.issue_id.as_str()).collect();
+                    excluded.insert(detail.issue_id.as_str());
+                    let modal =
+                        issue_picker::view(picker, &self.issues, self.selected_team(), &excluded);
+                    iced::widget::stack![base, modal].into()
+                }
+                _ => base,
+            },
             Modal::None => base,
         };
 

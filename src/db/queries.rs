@@ -330,6 +330,88 @@ pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<Is
     .optional()
 }
 
+/// Insert a new local dependency row. Errors on the `UNIQUE(blocking_issue_id,
+/// blocked_issue_id)` constraint when the edge already exists — callers surface
+/// that as a "already linked" toast rather than a hard failure.
+pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Result<()> {
+    conn.execute(
+        "INSERT INTO issue_dependencies
+            (id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            dep.id,
+            dep.remote_id,
+            dep.blocking_issue_id,
+            dep.blocked_issue_id,
+            dep.created_at,
+            dep.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_issue_dependency(conn: &Connection, dep_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM issue_dependencies WHERE id = ?1",
+        params![dep_id],
+    )?;
+    Ok(())
+}
+
+/// A resolved dependency edge for the issue-detail sidebar: the dependency row's
+/// own id/remote_id plus the issue on the far end (for display + navigation +
+/// removal).
+#[derive(Debug, Clone)]
+pub struct DependencyLink {
+    pub dep_id: String,
+    pub issue_id: String,
+    pub identifier: String,
+    pub title: String,
+}
+
+/// Resolve dependency edges touching `issue_id`. `join_column` selects the side
+/// `issue_id` sits on; `return_column` is the issue on the other end to display.
+fn dependency_links(
+    conn: &Connection,
+    issue_id: &str,
+    join_column: &str,
+    return_column: &str,
+) -> Result<Vec<DependencyLink>> {
+    let sql = format!(
+        "SELECT d.id, i.id, i.team_number, i.title, t.identifier
+         FROM issue_dependencies d
+         JOIN issues i ON i.id = d.{return_column}
+         JOIN teams t ON t.id = i.team_id
+         WHERE d.{join_column} = ?1
+         ORDER BY i.created_at"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![issue_id], |row| {
+        let dep_id: String = row.get(0)?;
+        let far_issue_id: String = row.get(1)?;
+        let team_number: Option<i32> = row.get(2)?;
+        let title: String = row.get(3)?;
+        let team_identifier: String = row.get(4)?;
+        Ok(DependencyLink {
+            dep_id,
+            issue_id: far_issue_id,
+            identifier: format!("{team_identifier}-{}", team_number.unwrap_or(0)),
+            title,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Issues that THIS issue blocks — the "Blocking" sidebar section.
+pub fn blocking_links_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<DependencyLink>> {
+    dependency_links(conn, issue_id, "blocking_issue_id", "blocked_issue_id")
+}
+
+/// Issues that block THIS issue — the "Blocked by" sidebar section.
+pub fn blocked_by_links_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<DependencyLink>> {
+    dependency_links(conn, issue_id, "blocked_issue_id", "blocking_issue_id")
+}
+
 pub fn set_issue_remote_id(conn: &Connection, issue_id: &str, remote_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE issues SET remote_id = ?1 WHERE id = ?2",
@@ -932,5 +1014,57 @@ mod tests {
         conn.execute("DELETE FROM labels WHERE id = 'lab1'", [])
             .unwrap();
         assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+
+    fn make_dependency(id: &str, blocking: &str, blocked: &str) -> IssueDependency {
+        IssueDependency {
+            id: id.to_string(),
+            remote_id: None,
+            blocking_issue_id: blocking.to_string(),
+            blocked_issue_id: blocked.to_string(),
+            created_at: NOW.to_string(),
+            updated_at: NOW.to_string(),
+        }
+    }
+
+    #[test]
+    fn dependency_links_render_both_directions() {
+        let conn = setup();
+        // i1 blocks i2.
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
+
+        // From i1's perspective: it blocks i2, and is blocked by nothing.
+        let blocking = blocking_links_for_issue(&conn, "i1").unwrap();
+        assert_eq!(blocking.len(), 1);
+        assert_eq!(blocking[0].issue_id, "i2");
+        assert_eq!(blocking[0].identifier, "T-1");
+        assert!(blocked_by_links_for_issue(&conn, "i1").unwrap().is_empty());
+
+        // From i2's perspective the same row is an inverse "blocked by" edge.
+        let blocked_by = blocked_by_links_for_issue(&conn, "i2").unwrap();
+        assert_eq!(blocked_by.len(), 1);
+        assert_eq!(blocked_by[0].issue_id, "i1");
+        assert_eq!(blocked_by[0].dep_id, "d1");
+        assert!(blocking_links_for_issue(&conn, "i2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicate_dependency_edge_is_rejected() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
+        // Same ordered (blocking, blocked) pair violates the UNIQUE constraint.
+        assert!(insert_issue_dependency(&conn, &make_dependency("d2", "i1", "i2")).is_err());
+    }
+
+    #[test]
+    fn delete_issue_dependency_removes_the_edge() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
+        delete_issue_dependency(&conn, "d1").unwrap();
+        assert!(blocking_links_for_issue(&conn, "i1").unwrap().is_empty());
+        assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
     }
 }

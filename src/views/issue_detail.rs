@@ -3,8 +3,9 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length, Theme};
 
-use crate::app::{Message, View};
+use crate::app::{DepDirection, Message, View};
 use crate::db::models::{Issue, Lane, Member, Priority, Project, Team};
+use crate::db::queries::DependencyLink;
 use crate::theme as t;
 use crate::views::issue_form::LaneOption;
 use crate::views::projects::MemberOption;
@@ -82,6 +83,8 @@ pub fn view<'a>(
     projects: &'a [Project],
     members: &'a [Member],
     project_name: Option<&'a str>,
+    blocking: &'a [DependencyLink],
+    blocked_by: &'a [DependencyLink],
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = match team {
@@ -246,8 +249,18 @@ pub fn view<'a>(
             .width(Length::Fill),
         ))
         .push(section("Labels", placeholder_value()))
-        .push(section("Blocking", placeholder_value()))
-        .push(section("Blocked by", placeholder_value()))
+        .push(section(
+            "Blocking",
+            dependency_section(blocking, "+ Add blocking issue…", DepDirection::Blocking),
+        ))
+        .push(section(
+            "Blocked by",
+            dependency_section(
+                blocked_by,
+                "+ Add blocked by issue…",
+                DepDirection::BlockedBy,
+            ),
+        ))
         .push(
             column![]
                 .spacing(2)
@@ -299,9 +312,56 @@ fn section<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 }
 
 /// Em-dash placeholder for sidebar sections filled in by later tickets
-/// (Assignee JAIT-113, Labels JAIT-112, Blocking/Blocked-by JAIT-114).
+/// (Assignee JAIT-113, Labels JAIT-112).
 fn placeholder_value<'a>() -> Element<'a, Message> {
     text("—").size(13).color(t::TEXT_MUTED).into()
+}
+
+/// A dependency sidebar section: the linked issues as clickable rows, followed
+/// by a text "+ Add …" button that opens the picker for `direction`.
+fn dependency_section<'a>(
+    links: &'a [DependencyLink],
+    add_label: &'a str,
+    direction: DepDirection,
+) -> Element<'a, Message> {
+    let mut col = column![].spacing(6);
+    for link in links {
+        col = col.push(dependency_row(link));
+    }
+    col.push(
+        button(text(add_label).size(12).color(t::ACCENT))
+            .on_press(Message::OpenDependencyPicker(direction))
+            .padding(0)
+            .style(button::text),
+    )
+    .into()
+}
+
+/// One dependency edge: a clickable `IDENT — title` that navigates to that
+/// issue, plus a trailing `×` that removes the relationship.
+fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
+    row![]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(
+            button(
+                row![]
+                    .spacing(6)
+                    .push(text(&link.identifier).size(12).color(t::TEXT_MUTED))
+                    .push(text(&link.title).size(12).color(t::TEXT_SECONDARY)),
+            )
+            .on_press(Message::OpenIssueDetail(link.issue_id.clone()))
+            .padding(0)
+            .width(Length::Fill)
+            .style(button::text),
+        )
+        .push(
+            button(text("×").size(14).color(t::TEXT_MUTED))
+                .on_press(Message::RemoveDependency(link.dep_id.clone()))
+                .padding(0)
+                .style(button::text),
+        )
+        .into()
 }
 
 /// Borderless, transparent style so the title input reads as an inline heading.
