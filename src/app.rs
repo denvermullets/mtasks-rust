@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use iced::keyboard;
@@ -17,7 +18,7 @@ use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
     board, issue_detail, issue_form, issue_picker, labels as labels_view, placeholder,
-    projects as projects_view, settings, status_bar, team_list, toast,
+    project_detail, projects as projects_view, settings, status_bar, team_list, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -148,6 +149,26 @@ pub enum Message {
     ProjectDueDateChanged(String),
     ProjectRoadmapCommitmentChanged(Option<RoadmapCommitment>),
 
+    // Projects table (list view)
+    /// Open the project detail view for a local project UUID (row click).
+    OpenProjectDetail(String),
+    /// Change the table sort key; re-selecting the active key flips direction.
+    ProjectSortChanged(ProjectSort),
+    /// Toggle the "Hide completed" filter.
+    ToggleHideCompletedProjects,
+
+    // Project detail — buffered text fields (committed on Enter / nav-away)
+    ProjectDetailNameChanged(String),
+    ProjectDetailDescriptionChanged(iced::widget::text_editor::Action),
+    ProjectDetailStartDateChanged(String),
+    ProjectDetailDueDateChanged(String),
+    /// Flush buffered detail fields to the DB (text field `on_submit`).
+    CommitProjectDetail,
+    // Project detail — live-apply sidebar pick_lists
+    ProjectDetailStatusChanged(ProjectStatus),
+    ProjectDetailPriorityChanged(Priority),
+    ProjectDetailLeadChanged(Option<String>),
+
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
 }
@@ -174,9 +195,9 @@ pub enum DepDirection {
     BlockedBy,
 }
 
-/// Which screen the right-hand pane renders. Only `Board` is implemented today;
-/// the rest render titled "Coming soon" placeholders until their tickets land
-/// (JAIT-181 projects, JAIT-182 issue detail, JAIT-183 roadmap, JAIT-186 my issues).
+/// Which screen the right-hand pane renders. `Roadmap` and `MyIssues` still render
+/// titled "Coming soon" placeholders until their tickets land (JAIT-183 roadmap,
+/// JAIT-186 my issues).
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
     Board,
@@ -185,6 +206,59 @@ pub enum View {
     ProjectDetail(String),
     Roadmap,
     MyIssues,
+}
+
+/// Sort key for the Projects table (mirrors the Rails index sort options).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSort {
+    Created,
+    Name,
+    Priority,
+    DueDate,
+    Velocity,
+}
+
+impl ProjectSort {
+    pub const ALL: [ProjectSort; 5] = [
+        ProjectSort::Created,
+        ProjectSort::Name,
+        ProjectSort::Priority,
+        ProjectSort::DueDate,
+        ProjectSort::Velocity,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProjectSort::Created => "Created",
+            ProjectSort::Name => "Name",
+            ProjectSort::Priority => "Priority",
+            ProjectSort::DueDate => "Due date",
+            ProjectSort::Velocity => "Velocity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+impl SortDir {
+    pub fn toggled(self) -> SortDir {
+        match self {
+            SortDir::Asc => SortDir::Desc,
+            SortDir::Desc => SortDir::Asc,
+        }
+    }
+
+    /// The little arrow rendered next to the active sort button.
+    pub fn arrow(self) -> &'static str {
+        match self {
+            SortDir::Asc => "\u{25B2}",  // ▲
+            SortDir::Desc => "\u{25BC}", // ▼
+        }
+    }
 }
 
 pub struct App {
@@ -217,6 +291,13 @@ pub struct App {
     issue_form: Option<issue_form::IssueFormState>,
     /// Buffered edit state while the right pane shows `View::IssueDetail`.
     issue_detail: Option<issue_detail::IssueDetailState>,
+    /// Buffered edit state while the right pane shows `View::ProjectDetail`.
+    project_detail: Option<project_detail::ProjectDetailState>,
+    /// Projects table sort key + direction (session-only).
+    project_sort: ProjectSort,
+    project_sort_dir: SortDir,
+    /// "Hide completed" filter for the Projects table; defaults on, matching Rails.
+    hide_completed_projects: bool,
     project_form: Option<projects_view::ProjectFormState>,
     settings_form: Option<settings::SettingsFormState>,
     label_form: Option<labels_view::LabelFormState>,
@@ -360,6 +441,7 @@ impl App {
     /// refreshes them from Rails (no-op when offline or the issue isn't synced).
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
         self.commit_issue_detail();
+        self.commit_project_detail();
         self.issue_detail = Some(issue_detail::IssueDetailState::from_issue(issue));
         self.view = View::IssueDetail(issue.id.clone());
         let conn = self.db();
@@ -560,6 +642,90 @@ impl App {
             self.reload_data();
         }
     }
+
+    /// Switch the right pane to the detail view for `project`, flushing any open
+    /// detail buffers first so unsaved edits aren't lost. The project's issues
+    /// are already loaded for the selected team by `reload_data`, so there's no
+    /// background fetch to kick off.
+    fn open_project_detail(&mut self, project: &Project) -> Task<Message> {
+        self.commit_issue_detail();
+        self.commit_project_detail();
+        self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
+        self.view = View::ProjectDetail(project.id.clone());
+        Task::none()
+    }
+
+    /// Apply a live sidebar change (Status/Priority/Lead) to the project behind
+    /// the open detail view: mutate, persist, enqueue sync, and reload so the
+    /// pick_lists reflect DB truth. Buffered text fields are left untouched.
+    fn apply_project_update(&mut self, mutate: impl FnOnce(&mut Project)) {
+        let id = match &self.project_detail {
+            Some(d) => d.project_id.clone(),
+            None => return,
+        };
+        let conn = self.db();
+        if let Ok(Some(mut project)) = queries::get_project(&conn, &id) {
+            mutate(&mut project);
+            project.updated_at = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string();
+            let _ = queries::update_project(&conn, &project);
+            let payload = serde_json::to_string(&project).ok();
+            self.enqueue_sync("project", &project.id, "update", payload.as_deref());
+            self.reload_data();
+        }
+    }
+
+    /// Flush the buffered project-detail fields (name/description/dates) to the
+    /// DB. Called on a text field's Enter and before navigating away. A blank
+    /// name sets an inline error and skips the write rather than discarding text.
+    fn commit_project_detail(&mut self) {
+        if !matches!(self.view, View::ProjectDetail(_)) {
+            return;
+        }
+        let Some(detail) = self.project_detail.as_mut() else {
+            return;
+        };
+        if detail.name.trim().is_empty() {
+            detail.error = Some("Name can't be blank".into());
+            return;
+        }
+        detail.error = None;
+
+        let id = detail.project_id.clone();
+        let name = detail.name.trim().to_string();
+        let start_date = if detail.start_date.trim().is_empty() {
+            None
+        } else {
+            Some(detail.start_date.trim().to_string())
+        };
+        let due_date = if detail.due_date.trim().is_empty() {
+            None
+        } else {
+            Some(detail.due_date.trim().to_string())
+        };
+        let body = detail.description_text();
+        let description = if body.trim().is_empty() {
+            None
+        } else {
+            Some(body.trim_end().to_string())
+        };
+
+        let conn = self.db();
+        if let Ok(Some(mut project)) = queries::get_project(&conn, &id) {
+            project.name = name;
+            project.description = description;
+            project.start_date = start_date;
+            project.due_date = due_date;
+            project.updated_at = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string();
+            let _ = queries::update_project(&conn, &project);
+            let payload = serde_json::to_string(&project).ok();
+            self.enqueue_sync("project", &project.id, "update", payload.as_deref());
+            self.reload_data();
+        }
+    }
 }
 
 impl App {
@@ -616,6 +782,10 @@ impl App {
             modal: Modal::None,
             issue_form: None,
             issue_detail: None,
+            project_detail: None,
+            project_sort: ProjectSort::Created,
+            project_sort_dir: SortDir::Asc,
+            hide_completed_projects: true,
             project_form: None,
             settings_form: None,
             label_form: None,
@@ -683,6 +853,7 @@ impl App {
 
             Message::SelectTeamView(team_id, view) => {
                 self.commit_issue_detail();
+                self.commit_project_detail();
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) {
                     self.selected_team_id = Some(team_id);
                     self.focused_lane = 0;
@@ -694,6 +865,7 @@ impl App {
 
             Message::NavigateToView(view) => {
                 self.commit_issue_detail();
+                self.commit_project_detail();
                 self.view = view;
             }
 
@@ -1401,6 +1573,60 @@ impl App {
                 }
             }
 
+            // --- Projects table (list view) ---
+            Message::OpenProjectDetail(project_id) => {
+                if let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() {
+                    return self.open_project_detail(&project);
+                }
+            }
+            Message::ProjectSortChanged(sort) => {
+                if self.project_sort == sort {
+                    self.project_sort_dir = self.project_sort_dir.toggled();
+                } else {
+                    self.project_sort = sort;
+                    self.project_sort_dir = SortDir::Asc;
+                }
+            }
+            Message::ToggleHideCompletedProjects => {
+                self.hide_completed_projects = !self.hide_completed_projects;
+            }
+
+            // --- Project detail: buffered text fields ---
+            Message::ProjectDetailNameChanged(v) => {
+                if let Some(detail) = self.project_detail.as_mut() {
+                    detail.name = v;
+                }
+            }
+            Message::ProjectDetailDescriptionChanged(action) => {
+                if let Some(detail) = self.project_detail.as_mut() {
+                    detail.description.perform(action);
+                }
+            }
+            Message::ProjectDetailStartDateChanged(v) => {
+                if let Some(detail) = self.project_detail.as_mut() {
+                    detail.start_date = v;
+                }
+            }
+            Message::ProjectDetailDueDateChanged(v) => {
+                if let Some(detail) = self.project_detail.as_mut() {
+                    detail.due_date = v;
+                }
+            }
+            Message::CommitProjectDetail => {
+                self.commit_project_detail();
+            }
+
+            // --- Project detail: live-apply pick_lists ---
+            Message::ProjectDetailStatusChanged(s) => {
+                self.apply_project_update(|p| p.status = s);
+            }
+            Message::ProjectDetailPriorityChanged(p) => {
+                self.apply_project_update(|proj| proj.priority = p.to_i32());
+            }
+            Message::ProjectDetailLeadChanged(lead_id) => {
+                self.apply_project_update(|p| p.lead_id = lead_id);
+            }
+
             Message::SaveProject => {
                 if let Some(ref mut form) = self.project_form {
                     if form.name.trim().is_empty() {
@@ -1465,6 +1691,8 @@ impl App {
                             velocity_score: 0,
                             completed_issues_count: 0,
                             total_issues_count: 0,
+                            progress_percentage: 0,
+                            behind_schedule: false,
                             created_at: now.clone(),
                             updated_at: now,
                         };
@@ -1656,8 +1884,46 @@ impl App {
                 self.focused_lane,
                 self.focused_issue,
             ),
-            View::ProjectList => placeholder::view("Projects"),
-            View::ProjectDetail(_) => placeholder::view("Project"),
+            View::ProjectList => {
+                let mut list: Vec<&Project> = self
+                    .projects
+                    .iter()
+                    .filter(|p| {
+                        !self.hide_completed_projects
+                            || !matches!(
+                                p.status,
+                                ProjectStatus::Completed | ProjectStatus::Cancelled
+                            )
+                    })
+                    .collect();
+                sort_projects(&mut list, self.project_sort, self.project_sort_dir);
+                projects_view::list_view(
+                    &list,
+                    &self.members,
+                    self.project_sort,
+                    self.project_sort_dir,
+                    self.hide_completed_projects,
+                )
+            }
+            View::ProjectDetail(ref project_id) => {
+                match (
+                    self.projects.iter().find(|p| p.id == *project_id),
+                    &self.project_detail,
+                ) {
+                    (Some(project), Some(detail)) if detail.project_id == *project_id => {
+                        project_detail::view(
+                            project,
+                            detail,
+                            self.selected_team(),
+                            &self.members,
+                            &self.issues,
+                            &self.lanes,
+                        )
+                    }
+                    // Project removed by a background sync, or state desync → fallback.
+                    _ => placeholder::view("Project"),
+                }
+            }
             View::IssueDetail(ref issue_id) => {
                 match (
                     self.issues.iter().find(|i| i.id == *issue_id),
@@ -1837,6 +2103,43 @@ fn build_issue_labels_map(
         }
     }
     map
+}
+
+/// Order the Projects table in place per the active sort key + direction.
+/// Missing due dates always sort last (mirrors the Rails `due_date IS NULL`
+/// clause), regardless of direction.
+fn sort_projects(list: &mut [&Project], sort: ProjectSort, dir: SortDir) {
+    list.sort_by(|a, b| {
+        if let ProjectSort::DueDate = sort {
+            return cmp_option_nulls_last(&a.due_date, &b.due_date, dir);
+        }
+        let ord = match sort {
+            ProjectSort::Created => a.created_at.cmp(&b.created_at),
+            ProjectSort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            ProjectSort::Priority => a.priority.cmp(&b.priority),
+            ProjectSort::Velocity => a.velocity_score.cmp(&b.velocity_score),
+            ProjectSort::DueDate => Ordering::Equal, // handled above
+        };
+        match dir {
+            SortDir::Asc => ord,
+            SortDir::Desc => ord.reverse(),
+        }
+    });
+}
+
+fn cmp_option_nulls_last(a: &Option<String>, b: &Option<String>, dir: SortDir) -> Ordering {
+    match (a.as_deref().filter(|s| !s.is_empty()), b.as_deref().filter(|s| !s.is_empty())) {
+        (Some(x), Some(y)) => {
+            let o = x.cmp(y);
+            match dir {
+                SortDir::Asc => o,
+                SortDir::Desc => o.reverse(),
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {

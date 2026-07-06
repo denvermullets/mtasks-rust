@@ -1,7 +1,12 @@
-use iced::widget::{button, column, container, pick_list, row, text, text_editor, text_input};
-use iced::{Border, Element, Length, Theme};
+use iced::widget::{
+    button, column, container, horizontal_rule, mouse_area, pick_list, row, scrollable, text,
+    text_editor, text_input,
+};
+use iced::{Alignment, Border, Color, Element, Length, Theme};
 
-use crate::app::Message;
+use chrono::Datelike;
+
+use crate::app::{Message, ProjectSort, SortDir};
 use crate::db::models::{Member, Priority, Project, ProjectStatus, RoadmapCommitment};
 use crate::theme as t;
 
@@ -284,4 +289,377 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
             ..Default::default()
         })
         .into()
+}
+
+// ── Projects table (JAIT-181) ──
+
+const COL_HEALTH: f32 = 150.0;
+const COL_PRIORITY: f32 = 100.0;
+const COL_LEAD: f32 = 56.0;
+const COL_TARGET: f32 = 120.0;
+const COL_STATUS: f32 = 130.0;
+
+/// Full-pane Projects table: a controls row (sort + hide-completed + new), a
+/// column header, then one clickable row per project. `projects` arrives already
+/// filtered + sorted by the caller (`App::view`) so "Hide completed" and sorting
+/// never re-query.
+pub fn list_view<'a>(
+    projects: &[&'a Project],
+    members: &'a [Member],
+    sort: ProjectSort,
+    dir: SortDir,
+    hide_completed: bool,
+) -> Element<'a, Message> {
+    // ---- Controls row: Sort by … | Hide completed | + New Project ----
+    let mut sort_row = row![]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(text("Sort by").size(12).color(t::TEXT_MUTED));
+    for option in ProjectSort::ALL {
+        let active = option == sort;
+        let mut label = row![]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .push(text(option.label()).size(12).color(if active {
+                t::TEXT_PRIMARY
+            } else {
+                t::TEXT_SECONDARY
+            }));
+        if active {
+            label = label.push(text(dir.arrow()).size(9).color(t::TEXT_SECONDARY));
+        }
+        sort_row = sort_row.push(
+            button(label)
+                .on_press(Message::ProjectSortChanged(option))
+                .padding([4, 8])
+                .style(move |_theme: &Theme, _status| button::Style {
+                    background: active
+                        .then_some(iced::Background::Color(t::BG_CARD_FOCUSED)),
+                    text_color: t::TEXT_PRIMARY,
+                    border: Border {
+                        color: if active { t::BORDER } else { Color::TRANSPARENT },
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
+
+    let hide_label = if hide_completed {
+        "Show completed"
+    } else {
+        "Hide completed"
+    };
+    let controls = row![]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(sort_row)
+        .push(iced::widget::horizontal_space())
+        .push(
+            button(text(hide_label).size(12).color(t::TEXT_SECONDARY))
+                .on_press(Message::ToggleHideCompletedProjects)
+                .padding([6, 10])
+                .style(button::text),
+        )
+        .push(
+            text(format!(
+                "{} project{}",
+                projects.len(),
+                if projects.len() == 1 { "" } else { "s" }
+            ))
+            .size(12)
+            .color(t::TEXT_MUTED),
+        )
+        .push(
+            button(text("+ New Project").size(13).color(t::BG_PRIMARY))
+                .on_press(Message::CreateProject)
+                .padding([6, 14])
+                .style(move |_theme: &Theme, _status| button::Style {
+                    background: Some(iced::Background::Color(t::ACCENT)),
+                    text_color: t::BG_PRIMARY,
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        );
+
+    // ---- Column header ----
+    let header = row![]
+        .spacing(12)
+        .padding([8, 16])
+        .align_y(Alignment::Center)
+        .push(header_cell("Name", Length::Fill))
+        .push(header_cell("Health", Length::Fixed(COL_HEALTH)))
+        .push(header_cell("Priority", Length::Fixed(COL_PRIORITY)))
+        .push(header_cell("Lead", Length::Fixed(COL_LEAD)))
+        .push(header_cell("Target", Length::Fixed(COL_TARGET)))
+        .push(header_cell("Status", Length::Fixed(COL_STATUS)));
+
+    // ---- Rows ----
+    let mut rows = column![].width(Length::Fill);
+    if projects.is_empty() {
+        rows = rows.push(
+            container(
+                column![]
+                    .spacing(10)
+                    .align_x(Alignment::Center)
+                    .push(text("No projects yet").size(14).color(t::TEXT_MUTED))
+                    .push(
+                        button(text("Create your first project").size(13).color(t::ACCENT))
+                            .on_press(Message::CreateProject)
+                            .padding(0)
+                            .style(button::text),
+                    ),
+            )
+            .center_x(Length::Fill)
+            .padding(40),
+        );
+    } else {
+        for &project in projects {
+            rows = rows.push(project_row(project, members));
+            rows = rows.push(
+                container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(t::BORDER)),
+                    ..Default::default()
+                }),
+            );
+        }
+    }
+
+    let body = column![]
+        .spacing(0)
+        .width(Length::Fill)
+        .push(container(controls).padding([10, 16]))
+        .push(
+            container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::BORDER)),
+                ..Default::default()
+            }),
+        )
+        .push(header)
+        .push(
+            container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::BORDER)),
+                ..Default::default()
+            }),
+        )
+        .push(scrollable(rows).height(Length::Fill));
+
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::BG_PRIMARY)),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn header_cell<'a>(label: &'a str, width: Length) -> Element<'a, Message> {
+    container(text(label).size(11).color(t::TEXT_MUTED))
+        .width(width)
+        .into()
+}
+
+fn project_row<'a>(project: &'a Project, members: &'a [Member]) -> Element<'a, Message> {
+    let (health_color, health_label) = project_health(project);
+    let priority = project.priority_enum();
+
+    let name_cell = container(
+        text(&project.name)
+            .size(14)
+            .color(t::TEXT_PRIMARY)
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fill);
+
+    let health_cell = container(
+        row![]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(text("\u{25CF}").size(9).color(health_color))
+            .push(text(health_label).size(12).color(t::TEXT_SECONDARY)),
+    )
+    .width(Length::Fixed(COL_HEALTH));
+
+    let priority_cell = container(
+        row![]
+            .spacing(5)
+            .align_y(Alignment::Center)
+            .push(text("\u{25B3}").size(10).color(t::priority_color(priority)))
+            .push(text(format!("{priority}")).size(12).color(t::TEXT_SECONDARY)),
+    )
+    .width(Length::Fixed(COL_PRIORITY));
+
+    let lead_cell = container(lead_avatar(project.lead_id.as_deref(), members))
+        .width(Length::Fixed(COL_LEAD));
+
+    let target_color = if project.behind_schedule {
+        t::DANGER
+    } else {
+        t::TEXT_SECONDARY
+    };
+    let target_cell = container(match project.due_date.as_deref() {
+        Some(d) if !d.is_empty() => {
+            text(format_target_date(d)).size(12).color(target_color)
+        }
+        _ => text("\u{2014}").size(12).color(t::TEXT_MUTED),
+    })
+    .width(Length::Fixed(COL_TARGET));
+
+    let status_cell = container(progress_status(project.progress_percentage))
+        .width(Length::Fixed(COL_STATUS));
+
+    let row_content = row![]
+        .spacing(12)
+        .padding([10, 16])
+        .align_y(Alignment::Center)
+        .push(name_cell)
+        .push(health_cell)
+        .push(priority_cell)
+        .push(lead_cell)
+        .push(target_cell)
+        .push(status_cell);
+
+    mouse_area(container(row_content).width(Length::Fill))
+        .on_press(Message::OpenProjectDetail(project.id.clone()))
+        .into()
+}
+
+/// Health dot color + label, mirroring Rails `project_health_state`.
+fn project_health(project: &Project) -> (Color, String) {
+    match project.status {
+        ProjectStatus::Completed => (t::PRIORITY_LOW, "Complete".to_string()),
+        ProjectStatus::Cancelled => (t::TEXT_MUTED, "Cancelled".to_string()),
+        ProjectStatus::Paused => (t::PRIORITY_HIGH, "Paused".to_string()),
+        ProjectStatus::Started => {
+            if project.progress_percentage >= 100 {
+                (t::PRIORITY_LOW, "Complete".to_string())
+            } else if project.behind_schedule {
+                (t::DANGER, "At risk".to_string())
+            } else {
+                (t::PRIORITY_LOW, "On track".to_string())
+            }
+        }
+        ProjectStatus::Backlog => {
+            if project
+                .due_date
+                .as_deref()
+                .map(is_past_date)
+                .unwrap_or(false)
+            {
+                (t::DANGER, "Overdue".to_string())
+            } else {
+                (t::TEXT_MUTED, "No updates".to_string())
+            }
+        }
+    }
+}
+
+/// A small circular avatar showing the lead's initials, or an empty ring.
+fn lead_avatar<'a>(lead_id: Option<&str>, members: &'a [Member]) -> Element<'a, Message> {
+    let name = lead_id.and_then(|id| members.iter().find(|m| m.id == id).map(|m| m.name.as_str()));
+    let (initials, border, txt) = match name {
+        Some(n) => (lead_initials(n), t::ACCENT, t::TEXT_PRIMARY),
+        None => (String::new(), t::BORDER, t::TEXT_MUTED),
+    };
+    container(text(initials).size(10).color(txt))
+        .center_x(Length::Fixed(24.0))
+        .center_y(Length::Fixed(24.0))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::BG_CARD)),
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Status column: "NN%" over a thin progress bar filled to that percentage.
+fn progress_status<'a>(pct: i64) -> Element<'a, Message> {
+    let pct = pct.clamp(0, 100);
+    let filled = pct as u16;
+    let empty = (100 - pct) as u16;
+    let bar_color = if pct >= 100 {
+        t::PRIORITY_LOW
+    } else if pct > 0 {
+        t::PRIORITY_MEDIUM
+    } else {
+        t::TEXT_MUTED
+    };
+
+    let bar = row![]
+        .height(Length::Fixed(4.0))
+        .push(
+            container(text(""))
+                .width(Length::FillPortion(filled.max(1)))
+                .height(Length::Fixed(4.0))
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(bar_color)),
+                    border: Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        )
+        .push(
+            container(text(""))
+                .width(Length::FillPortion(empty.max(1)))
+                .height(Length::Fixed(4.0))
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(t::BG_CARD_FOCUSED)),
+                    border: Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        );
+
+    column![]
+        .spacing(4)
+        .push(text(format!("{pct}%")).size(12).color(t::TEXT_SECONDARY))
+        .push(bar)
+        .into()
+}
+
+/// First letter of up to the first two words, uppercased (e.g. "Ryan Vaznis" → "RV").
+pub fn lead_initials(name: &str) -> String {
+    name.split_whitespace()
+        .take(2)
+        .filter_map(|w| w.chars().next())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// "YYYY-MM-DD" → "Jul 6" (or "Jul 6, 2027" if not the current year). Falls back
+/// to the raw string when it can't be parsed.
+pub fn format_target_date(date: &str) -> String {
+    match chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(d) => {
+            let now_year = chrono::Utc::now().format("%Y").to_string();
+            let base = format!("{} {}", d.format("%b"), d.day());
+            if d.format("%Y").to_string() != now_year {
+                format!("{}, {}", base, d.format("%Y"))
+            } else {
+                base
+            }
+        }
+        Err(_) => date.to_string(),
+    }
+}
+
+/// True when `date` ("YYYY-MM-DD") is strictly before today (UTC).
+fn is_past_date(date: &str) -> bool {
+    match chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(d) => d < chrono::Utc::now().date_naive(),
+        Err(_) => false,
+    }
 }

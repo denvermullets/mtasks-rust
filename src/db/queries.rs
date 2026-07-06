@@ -38,6 +38,18 @@ pub fn issues_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Issue>> {
     rows.collect()
 }
 
+pub fn issues_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Issue>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, description, priority, team_number, due_date, estimate,
+                started_at, completed_at, canceled_at, lane_id, team_id,
+                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                remote_id, created_at, updated_at
+         FROM issues WHERE project_id = ?1 ORDER BY priority, created_at",
+    )?;
+    let rows = stmt.query_map(params![project_id], Issue::from_row)?;
+    rows.collect()
+}
+
 pub fn next_team_number(conn: &Connection, team_id: &str) -> Result<i32> {
     let max: Option<i32> = conn.query_row(
         "SELECT MAX(team_number) FROM issues WHERE team_id = ?1",
@@ -141,6 +153,7 @@ pub fn get_project(conn: &Connection, project_id: &str) -> Result<Option<Project
         "SELECT id, remote_id, team_id, name, description, status, priority,
                 lead_id, start_date, due_date, roadmap_commitment,
                 velocity_score, completed_issues_count, total_issues_count,
+                progress_percentage, behind_schedule,
                 created_at, updated_at
          FROM projects WHERE id = ?1",
         params![project_id],
@@ -154,6 +167,7 @@ pub fn projects_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Project
         "SELECT id, remote_id, team_id, name, description, status, priority,
                 lead_id, start_date, due_date, roadmap_commitment,
                 velocity_score, completed_issues_count, total_issues_count,
+                progress_percentage, behind_schedule,
                 created_at, updated_at
          FROM projects WHERE team_id = ?1 ORDER BY name",
     )?;
@@ -261,8 +275,9 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
         "INSERT INTO projects
             (id, remote_id, team_id, name, description, status, priority, lead_id,
              start_date, due_date, roadmap_commitment, velocity_score,
-             completed_issues_count, total_issues_count, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             completed_issues_count, total_issues_count, progress_percentage,
+             behind_schedule, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             project.id,
             project.remote_id,
@@ -278,6 +293,8 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
             project.velocity_score,
             project.completed_issues_count,
             project.total_issues_count,
+            project.progress_percentage,
+            project.behind_schedule,
             project.created_at,
             project.updated_at,
         ],
@@ -581,7 +598,7 @@ pub fn find_project_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Op
         "SELECT id, remote_id, team_id, name, description, status, priority,
                 lead_id, start_date, due_date, roadmap_commitment,
                 velocity_score, completed_issues_count, total_issues_count,
-                created_at, updated_at
+                progress_percentage, behind_schedule, created_at, updated_at
          FROM projects WHERE remote_id = ?1",
         params![remote_id],
         Project::from_row,
@@ -706,8 +723,9 @@ pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
         "INSERT INTO projects
             (id, remote_id, team_id, name, description, status, priority, lead_id,
              start_date, due_date, roadmap_commitment, velocity_score,
-             completed_issues_count, total_issues_count, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             completed_issues_count, total_issues_count, progress_percentage,
+             behind_schedule, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(id) DO UPDATE SET
             remote_id = excluded.remote_id,
             team_id = excluded.team_id,
@@ -722,6 +740,8 @@ pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
             velocity_score = excluded.velocity_score,
             completed_issues_count = excluded.completed_issues_count,
             total_issues_count = excluded.total_issues_count,
+            progress_percentage = excluded.progress_percentage,
+            behind_schedule = excluded.behind_schedule,
             updated_at = excluded.updated_at",
         params![
             project.id,
@@ -738,6 +758,8 @@ pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
             project.velocity_score,
             project.completed_issues_count,
             project.total_issues_count,
+            project.progress_percentage,
+            project.behind_schedule,
             project.created_at,
             project.updated_at,
         ],

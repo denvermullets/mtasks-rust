@@ -277,6 +277,11 @@ pub struct Project {
     pub velocity_score: i64,
     pub completed_issues_count: i64,
     pub total_issues_count: i64,
+    /// Server-computed % complete (round(completed/total*100)). Owned by Rails;
+    /// only written on pull (see `queries::upsert_project`).
+    pub progress_percentage: i64,
+    /// Server-computed health signal driving the "At risk" flag. Owned by Rails.
+    pub behind_schedule: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -302,6 +307,8 @@ impl Project {
             velocity_score: row.get("velocity_score")?,
             completed_issues_count: row.get("completed_issues_count")?,
             total_issues_count: row.get("total_issues_count")?,
+            progress_percentage: row.get("progress_percentage")?,
+            behind_schedule: row.get("behind_schedule")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })

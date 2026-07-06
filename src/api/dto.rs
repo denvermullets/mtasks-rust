@@ -313,6 +313,8 @@ impl ProjectDto {
             velocity_score: self.velocity_score,
             completed_issues_count: self.completed_issues_count,
             total_issues_count: self.total_issues_count,
+            progress_percentage: self.progress_percentage,
+            behind_schedule: self.behind_schedule,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -656,7 +658,8 @@ fn lookup_project_by_local_id(conn: &Connection, id: &str) -> Result<Project, Ap
     conn.query_row(
         "SELECT id, remote_id, team_id, name, description, status, priority, lead_id,
                 start_date, due_date, roadmap_commitment, velocity_score,
-                completed_issues_count, total_issues_count, created_at, updated_at
+                completed_issues_count, total_issues_count, progress_percentage,
+                behind_schedule, created_at, updated_at
          FROM projects WHERE id = ?1",
         params![id],
         Project::from_row,
