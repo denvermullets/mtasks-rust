@@ -18,7 +18,8 @@ use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
     board, issue_detail, issue_form, issue_picker, labels as labels_view, placeholder,
-    project_detail, projects as projects_view, settings, status_bar, team_list, toast,
+    project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
+    team_list, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,14 @@ pub enum Message {
     /// Toggle the "Hide completed" filter.
     ToggleHideCompletedProjects,
 
+    // Roadmap
+    /// Open the "Add project to roadmap" picker preset to `commitment`.
+    OpenRoadmapAdd(RoadmapCommitment),
+    /// Switch which lane a picked project will land in (chip selector).
+    RoadmapAddLaneChanged(RoadmapCommitment),
+    /// Assign an off-roadmap project (local UUID) to the picker's current lane.
+    RoadmapAssignProject(String),
+
     // Project detail — buffered text fields (committed on Enter / nav-away)
     ProjectDetailNameChanged(String),
     ProjectDetailDescriptionChanged(iced::widget::text_editor::Action),
@@ -184,6 +193,8 @@ pub enum Modal {
     Labels,
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
+    /// "Add project to roadmap" picker; carries the lane a chosen project lands in.
+    RoadmapAdd(RoadmapCommitment),
 }
 
 /// Which dependency section a picker/add-action targets, relative to the open
@@ -1591,6 +1602,32 @@ impl App {
                 self.hide_completed_projects = !self.hide_completed_projects;
             }
 
+            // --- Roadmap ---
+            Message::OpenRoadmapAdd(commitment) => {
+                self.modal = Modal::RoadmapAdd(commitment);
+            }
+            Message::RoadmapAddLaneChanged(commitment) => {
+                if matches!(self.modal, Modal::RoadmapAdd(_)) {
+                    self.modal = Modal::RoadmapAdd(commitment);
+                }
+            }
+            Message::RoadmapAssignProject(project_id) => {
+                if let Modal::RoadmapAdd(commitment) = self.modal {
+                    let conn = self.db();
+                    if let Ok(Some(mut project)) = queries::get_project(&conn, &project_id) {
+                        project.roadmap_commitment = Some(commitment);
+                        project.updated_at = chrono::Utc::now()
+                            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                            .to_string();
+                        let _ = queries::update_project(&conn, &project);
+                        let payload = serde_json::to_string(&project).ok();
+                        self.enqueue_sync("project", &project.id, "update", payload.as_deref());
+                    }
+                }
+                self.modal = Modal::None;
+                self.reload_data();
+            }
+
             // --- Project detail: buffered text fields ---
             Message::ProjectDetailNameChanged(v) => {
                 if let Some(detail) = self.project_detail.as_mut() {
@@ -1952,7 +1989,7 @@ impl App {
                     _ => placeholder::view("Issue"),
                 }
             }
-            View::Roadmap => placeholder::view("Roadmap"),
+            View::Roadmap => roadmap_view::view(&self.projects, self.selected_team()),
             View::MyIssues => placeholder::view("My Issues"),
         };
 
@@ -2079,6 +2116,11 @@ impl App {
                 }
                 _ => base,
             },
+            Modal::RoadmapAdd(commitment) => {
+                let modal =
+                    roadmap_view::add_modal_view(*commitment, &self.projects, self.selected_team());
+                iced::widget::stack![base, modal].into()
+            }
             Modal::None => base,
         };
 

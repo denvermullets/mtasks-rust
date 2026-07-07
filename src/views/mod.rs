@@ -6,6 +6,7 @@ pub mod labels;
 pub mod placeholder;
 pub mod project_detail;
 pub mod projects;
+pub mod roadmap;
 pub mod settings;
 pub mod status_bar;
 pub mod team_list;
