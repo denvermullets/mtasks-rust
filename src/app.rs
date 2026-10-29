@@ -297,8 +297,10 @@ pub enum DepDirection {
     BlockedBy,
 }
 
-/// Which screen the right-hand pane renders. `MyIssues` still renders a titled
-/// "Coming soon" placeholder until its ticket lands (JAIT-186).
+/// Which screen the right-hand pane renders. `MyIssues` is the board across
+/// all teams, restricted to issues assigned to the current user. While it is
+/// the active view, `App::issues`/`lanes`/`members`/... hold cross-team data
+/// (see `reload_data`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
     Board,
@@ -462,7 +464,9 @@ impl App {
             self.selected_team_id = default_team_id(&self.teams);
         }
 
-        if let Some(ref team_id) = self.selected_team_id {
+        if self.view == View::MyIssues {
+            self.load_cross_team(&conn);
+        } else if let Some(ref team_id) = self.selected_team_id {
             self.lanes = queries::lanes_for_team(&conn, team_id).unwrap_or_default();
             self.issues = queries::issues_for_team(&conn, team_id).unwrap_or_default();
             self.projects = queries::projects_for_team(&conn, team_id).unwrap_or_default();
@@ -480,6 +484,43 @@ impl App {
 
         self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
         self.clamp_focus();
+    }
+
+    /// Load every active team's lanes/issues/members/projects/labels into the
+    /// shared fields, for the cross-team My Issues view.
+    fn load_cross_team(&mut self, conn: &rusqlite::Connection) {
+        self.lanes.clear();
+        self.issues.clear();
+        self.projects.clear();
+        self.members.clear();
+        self.labels.clear();
+        self.issue_labels.clear();
+        for team in self.teams.iter().filter(|t| t.archived_at.is_none()) {
+            let id = &team.id;
+            self.lanes
+                .extend(queries::lanes_for_team(conn, id).unwrap_or_default());
+            self.issues
+                .extend(queries::issues_for_team(conn, id).unwrap_or_default());
+            self.projects
+                .extend(queries::projects_for_team(conn, id).unwrap_or_default());
+            self.members
+                .extend(queries::members_for_team(conn, id).unwrap_or_default());
+            self.labels
+                .extend(queries::labels_for_team(conn, id).unwrap_or_default());
+            self.issue_labels.extend(build_issue_labels_map(conn, id));
+        }
+    }
+
+    /// Switch to `view`, reloading data when crossing in or out of the
+    /// cross-team My Issues view (its data replaces the per-team data).
+    fn switch_view(&mut self, view: View) {
+        let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
+        self.view = view;
+        if crossing {
+            self.focused_lane = 0;
+            self.focused_issue = 0;
+            self.reload_data();
+        }
     }
 
     /// Resolve dependency edges for the open detail issue so the sidebar can
@@ -528,7 +569,11 @@ impl App {
     fn search_enabled(&self) -> bool {
         matches!(
             self.view,
-            View::Board | View::ProjectList | View::ProjectDetail(_) | View::Roadmap
+            View::Board
+                | View::MyIssues
+                | View::ProjectList
+                | View::ProjectDetail(_)
+                | View::Roadmap
         )
     }
 
@@ -546,8 +591,11 @@ impl App {
     /// Board columns for the current display options, filters and search.
     /// Focus indices (`focused_lane`/`focused_issue`) index into these.
     fn board_columns(&self) -> Vec<display::Column<'_>> {
+        let my = self.view == View::MyIssues;
         let data = display::Data {
-            team: self.selected_team(),
+            team: if my { None } else { self.selected_team() },
+            teams: &self.teams,
+            merge_lanes_by_name: my,
             lanes: &self.lanes,
             issues: &self.issues,
             members: &self.members,
@@ -556,6 +604,11 @@ impl App {
             issue_labels: &self.issue_labels,
         };
         let needle = header::needle(self.active_search());
+        if my {
+            let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
+            let filters = display::my_issues_filters(&self.config.filters, &ids);
+            return display::build_columns(&data, &self.config.display, &filters, &needle);
+        }
         display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
     }
 
@@ -625,6 +678,18 @@ impl App {
     /// currently-open detail buffer first so unsaved edits aren't lost. Renders
     /// comments from the local DB immediately and returns a background task that
     /// refreshes them from Rails (no-op when offline or the issue isn't synced).
+    /// Open `issue` from the board. From My Issues, first select the issue's
+    /// own team and restore per-team data so the detail view (lanes, members,
+    /// projects) is that team's.
+    fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
+        if self.view == View::MyIssues {
+            self.selected_team_id = Some(issue.team_id.clone());
+            self.view = View::Board;
+            self.reload_data();
+        }
+        self.open_issue_detail(&issue)
+    }
+
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
         self.commit_issue_detail();
         self.commit_project_detail();
@@ -1086,10 +1151,24 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // My Issues is a read/navigate view over several teams: board shortcuts
+        // that mutate or create need a single team's lanes, so they're no-ops here.
+        if self.view == View::MyIssues
+            && matches!(
+                message,
+                Message::CreateIssue
+                    | Message::ConfirmDeleteFocusedIssue
+                    | Message::MoveIssueNextLane
+                    | Message::MoveIssuePrevLane
+                    | Message::SetFocusedPriority(_)
+            )
+        {
+            return Task::none();
+        }
         match message {
             Message::KeyPressed(key, modifiers) => {
                 let modal_open = self.modal != Modal::None;
-                let on_board = self.view == View::Board;
+                let on_board = matches!(self.view, View::Board | View::MyIssues);
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
                     return self.update(msg);
                 }
@@ -1109,10 +1188,12 @@ impl App {
             Message::SelectTeamView(team_id, view) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
-                if self.selected_team_id.as_deref() != Some(team_id.as_str()) {
+                let from_my = self.view == View::MyIssues;
+                if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
                     self.selected_team_id = Some(team_id);
                     self.focused_lane = 0;
                     self.focused_issue = 0;
+                    self.view = view.clone();
                     self.reload_data();
                 }
                 self.view = view;
@@ -1121,7 +1202,7 @@ impl App {
             Message::NavigateToView(view) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
-                self.view = view;
+                self.switch_view(view);
             }
 
             Message::ToggleTeamMenu(team_id) => {
@@ -1187,7 +1268,7 @@ impl App {
 
             Message::EditFocusedIssue => {
                 if let Some(issue) = self.focused_issue().cloned() {
-                    return self.open_issue_detail(&issue);
+                    return self.open_focused_issue(issue);
                 }
             }
 
@@ -1565,14 +1646,14 @@ impl App {
                 self.focused_issue = issue_idx;
                 self.clamp_focus();
                 if let Some(issue) = self.focused_issue().cloned() {
-                    return self.open_issue_detail(&issue);
+                    return self.open_focused_issue(issue);
                 }
             }
 
             Message::HeaderSearchChanged(query) => {
                 self.search_query = query;
                 self.search_view = self.view.clone();
-                if self.view == View::Board {
+                if matches!(self.view, View::Board | View::MyIssues) {
                     self.focused_issue = 0;
                     self.clamp_focus();
                 }
@@ -2404,24 +2485,21 @@ impl App {
             self.breadcrumb(),
             search,
             self.search_enabled(),
-            (self.view == View::Board).then(|| self.active_filter_count()),
+            matches!(self.view, View::Board | View::MyIssues).then(|| self.active_filter_count()),
             self.new_action(),
         );
 
-        let columns = if self.view == View::Board {
+        let columns = if matches!(self.view, View::Board | View::MyIssues) {
             self.board_columns()
         } else {
             Vec::new()
         };
 
         let main_pane: Element<'_, Message> = match self.view {
-            View::Board => board::view(
+            View::Board | View::MyIssues => board::view(
                 &columns,
                 board::CardData {
-                    team_identifier: self
-                        .selected_team()
-                        .map(|t| t.identifier.as_str())
-                        .unwrap_or("---"),
+                    teams: &self.teams,
                     lanes: &self.lanes,
                     members: &self.members,
                     projects: &self.projects,
@@ -2515,7 +2593,6 @@ impl App {
                 }
             }
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
-            View::MyIssues => placeholder::view("My Issues"),
         };
 
         let token_configured = self

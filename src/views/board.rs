@@ -6,14 +6,15 @@ use iced::widget::{
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::models::{Issue, Label, Lane, Member, Project};
+use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
 use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
 use crate::theme as t;
 use crate::views::labels as labels_view;
 
 /// Lookup data cards need for their optional properties.
 pub struct CardData<'a> {
-    pub team_identifier: &'a str,
+    /// Each card's identifier uses its own team (cross-team views mix teams).
+    pub teams: &'a [Team],
     pub lanes: &'a [Lane],
     pub members: &'a [Member],
     pub projects: &'a [Project],
@@ -149,9 +150,15 @@ fn issue_card<'a>(
     let mut card_content = column![].spacing(4);
 
     if d.shows(CardProperty::Id) {
+        let ident = data
+            .teams
+            .iter()
+            .find(|t| t.id == issue.team_id)
+            .map(|t| t.identifier.as_str())
+            .unwrap_or("---");
         let tag = issue
             .team_number
-            .map(|n| format!("{}-{}", data.team_identifier, n))
+            .map(|n| format!("{ident}-{n}"))
             .unwrap_or_default();
         card_content = card_content.push(text(tag).size(12).color(t::TEXT_MUTED));
     }
