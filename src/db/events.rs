@@ -18,6 +18,10 @@ pub enum EventKind {
     Parent,
     Title,
     Description,
+    /// This issue now blocks / no longer blocks another.
+    Blocking,
+    /// This issue is now / no longer blocked by another.
+    BlockedBy,
 }
 
 impl EventKind {
@@ -33,6 +37,8 @@ impl EventKind {
             EventKind::Parent => "parent",
             EventKind::Title => "title",
             EventKind::Description => "description",
+            EventKind::Blocking => "blocking",
+            EventKind::BlockedBy => "blocked_by",
         }
     }
 
@@ -48,6 +54,8 @@ impl EventKind {
             "parent" => EventKind::Parent,
             "title" => EventKind::Title,
             "description" => EventKind::Description,
+            "blocking" => EventKind::Blocking,
+            "blocked_by" => EventKind::BlockedBy,
             _ => return None,
         })
     }
@@ -80,7 +88,14 @@ pub struct IssueEvent {
     pub kind: String,
     pub old_value: Option<String>,
     pub new_value: Option<String>,
+    /// Ids behind `old_value`/`new_value` (lane/member/project/issue), so the
+    /// current name can be shown even after a rename. The values stay as the
+    /// frozen fallback.
+    pub old_ref: Option<String>,
+    pub new_ref: Option<String>,
     pub created_at: String,
+    /// Resolved actor name, filled by `resolve_events`.
+    pub actor_name: Option<String>,
 }
 
 impl IssueEvent {
@@ -93,7 +108,10 @@ impl IssueEvent {
             kind: row.get("kind")?,
             old_value: row.get("old_value")?,
             new_value: row.get("new_value")?,
+            old_ref: row.get("old_ref")?,
+            new_ref: row.get("new_ref")?,
             created_at: row.get("created_at")?,
+            actor_name: None,
         })
     }
 
@@ -120,6 +138,20 @@ pub struct Change {
     pub kind: EventKind,
     pub old: Option<String>,
     pub new: Option<String>,
+    pub old_ref: Option<String>,
+    pub new_ref: Option<String>,
+}
+
+impl Change {
+    fn plain(kind: EventKind, old: Option<String>, new: Option<String>) -> Self {
+        Self {
+            kind,
+            old,
+            new,
+            old_ref: None,
+            new_ref: None,
+        }
+    }
 }
 
 /// Which id space a lookup refers to.
@@ -128,6 +160,8 @@ pub enum Lookup {
     Lane,
     Member,
     Project,
+    /// Display form is the identifier, e.g. `PROJ-12`.
+    Issue,
 }
 
 fn priority_label(p: i32) -> String {
@@ -141,6 +175,27 @@ fn priority_label(p: i32) -> String {
     .to_string()
 }
 
+/// A change to a field that points at another entity: frozen display names
+/// plus the ids to re-resolve them at render time.
+fn ref_change(
+    kind: EventKind,
+    lookup: Lookup,
+    old: Option<&str>,
+    new: Option<&str>,
+    name: &dyn Fn(Lookup, &str) -> Option<String>,
+) -> Change {
+    let resolve = |id: Option<&str>| -> Option<String> {
+        id.map(|i| name(lookup, i).unwrap_or_else(|| "Unknown".to_string()))
+    };
+    Change {
+        kind,
+        old: resolve(old),
+        new: resolve(new),
+        old_ref: old.map(str::to_string),
+        new_ref: new.map(str::to_string),
+    }
+}
+
 /// Pure diff of the tracked fields (mirrors Rails' `TRACKED_ATTRIBUTES`).
 /// `name` resolves an id to a display name; ids it can't resolve show as
 /// "Unknown".
@@ -149,74 +204,75 @@ pub fn diff(
     new: &Issue,
     name: &dyn Fn(Lookup, &str) -> Option<String>,
 ) -> Vec<Change> {
-    let resolve = |lookup: Lookup, id: Option<&str>| -> Option<String> {
-        id.map(|i| name(lookup, i).unwrap_or_else(|| "Unknown".to_string()))
-    };
     let mut out = Vec::new();
     if old.lane_id != new.lane_id {
-        out.push(Change {
-            kind: EventKind::Status,
-            old: resolve(Lookup::Lane, Some(&old.lane_id)),
-            new: resolve(Lookup::Lane, Some(&new.lane_id)),
-        });
+        out.push(ref_change(
+            EventKind::Status,
+            Lookup::Lane,
+            Some(&old.lane_id),
+            Some(&new.lane_id),
+            name,
+        ));
     }
     if old.assignee_id != new.assignee_id {
-        out.push(Change {
-            kind: EventKind::Assignee,
-            old: resolve(Lookup::Member, old.assignee_id.as_deref()),
-            new: resolve(Lookup::Member, new.assignee_id.as_deref()),
-        });
+        out.push(ref_change(
+            EventKind::Assignee,
+            Lookup::Member,
+            old.assignee_id.as_deref(),
+            new.assignee_id.as_deref(),
+            name,
+        ));
     }
     if old.priority != new.priority {
-        out.push(Change {
-            kind: EventKind::Priority,
-            old: Some(priority_label(old.priority)),
-            new: Some(priority_label(new.priority)),
-        });
+        out.push(Change::plain(
+            EventKind::Priority,
+            Some(priority_label(old.priority)),
+            Some(priority_label(new.priority)),
+        ));
     }
     if old.title != new.title {
-        out.push(Change {
-            kind: EventKind::Title,
-            old: Some(old.title.clone()),
-            new: Some(new.title.clone()),
-        });
+        out.push(Change::plain(
+            EventKind::Title,
+            Some(old.title.clone()),
+            Some(new.title.clone()),
+        ));
     }
     // Treat None and "" as the same so a blank description edit isn't noise.
     let desc = |i: &Issue| i.description.clone().filter(|d| !d.is_empty());
     if desc(old) != desc(new) {
-        out.push(Change {
-            kind: EventKind::Description,
-            old: None,
-            new: None,
-        });
+        out.push(Change::plain(EventKind::Description, None, None));
     }
     if old.estimate != new.estimate {
-        out.push(Change {
-            kind: EventKind::Estimate,
-            old: old.estimate.map(|e| e.to_string()),
-            new: new.estimate.map(|e| e.to_string()),
-        });
+        out.push(Change::plain(
+            EventKind::Estimate,
+            old.estimate.map(|e| e.to_string()),
+            new.estimate.map(|e| e.to_string()),
+        ));
     }
     if old.due_date != new.due_date {
-        out.push(Change {
-            kind: EventKind::DueDate,
-            old: old.due_date.clone(),
-            new: new.due_date.clone(),
-        });
+        out.push(Change::plain(
+            EventKind::DueDate,
+            old.due_date.clone(),
+            new.due_date.clone(),
+        ));
     }
     if old.project_id != new.project_id {
-        out.push(Change {
-            kind: EventKind::Project,
-            old: resolve(Lookup::Project, old.project_id.as_deref()),
-            new: resolve(Lookup::Project, new.project_id.as_deref()),
-        });
+        out.push(ref_change(
+            EventKind::Project,
+            Lookup::Project,
+            old.project_id.as_deref(),
+            new.project_id.as_deref(),
+            name,
+        ));
     }
     if old.parent_issue_id != new.parent_issue_id {
-        out.push(Change {
-            kind: EventKind::Parent,
-            old: None,
-            new: None,
-        });
+        out.push(ref_change(
+            EventKind::Parent,
+            Lookup::Issue,
+            old.parent_issue_id.as_deref(),
+            new.parent_issue_id.as_deref(),
+            name,
+        ));
     }
     out
 }
@@ -253,7 +309,22 @@ pub fn describe(kind: EventKind, old: Option<&str>, new: Option<&str>) -> String
             or(new, "none")
         ),
         EventKind::Project => format!("moved to project {}", or(new, "None")),
-        EventKind::Parent => "changed parent issue".to_string(),
+        EventKind::Parent => match (old, new) {
+            (Some(o), None) => format!("removed parent {o}"),
+            (None, Some(n)) => format!("set parent to {n}"),
+            (Some(o), Some(n)) => format!("changed parent from {o} to {n}"),
+            (None, None) => "changed parent issue".to_string(),
+        },
+        EventKind::Blocking => match (old, new) {
+            (Some(o), None) => format!("no longer blocks {o}"),
+            (_, Some(n)) => format!("now blocks {n}"),
+            (None, None) => "changed blocking issues".to_string(),
+        },
+        EventKind::BlockedBy => match (old, new) {
+            (Some(o), None) => format!("no longer blocked by {o}"),
+            (_, Some(n)) => format!("now blocked by {n}"),
+            (None, None) => "changed blocked-by issues".to_string(),
+        },
         EventKind::Title => "changed the title".to_string(),
         EventKind::Description => "updated the description".to_string(),
     }
@@ -264,6 +335,10 @@ fn lookup_name(conn: &Connection, lookup: Lookup, id: &str) -> Option<String> {
         Lookup::Lane => "SELECT name FROM lanes WHERE id = ?1",
         Lookup::Member => "SELECT name FROM members WHERE id = ?1",
         Lookup::Project => "SELECT name FROM projects WHERE id = ?1",
+        Lookup::Issue => {
+            "SELECT t.identifier || '-' || i.team_number FROM issues i
+             JOIN teams t ON t.id = i.team_id WHERE i.id = ?1"
+        }
     };
     conn.query_row(sql, params![id], |r| r.get(0))
         .optional()
@@ -280,8 +355,9 @@ fn insert_event(
     created_at: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO issue_events (issue_id, actor_id, source, kind, old_value, new_value, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO issue_events
+            (issue_id, actor_id, source, kind, old_value, new_value, old_ref, new_ref, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             issue_id,
             actor_id,
@@ -289,6 +365,8 @@ fn insert_event(
             change.kind.as_str(),
             change.old,
             change.new,
+            change.old_ref,
+            change.new_ref,
             created_at
         ],
     )?;
@@ -302,13 +380,47 @@ pub fn record_created(conn: &Connection, issue: &Issue, source: Source) -> Resul
         &issue.id,
         issue.creator_id.as_deref(),
         source,
-        &Change {
-            kind: EventKind::Created,
-            old: None,
-            new: None,
-        },
+        &Change::plain(EventKind::Created, None, None),
         &issue.created_at,
-    )
+    )?;
+    // Born with a parent (sub-issue created from the form).
+    if let Some(parent) = &issue.parent_issue_id {
+        let change = ref_change(
+            EventKind::Parent,
+            Lookup::Issue,
+            None,
+            Some(parent),
+            &|l, id| lookup_name(conn, l, id),
+        );
+        insert_event(conn, &issue.id, None, source, &change, &issue.created_at)?;
+    }
+    Ok(())
+}
+
+/// Record a dependency edge being added/removed on both issues it touches.
+/// `blocking` blocks `blocked`; each side gets its own wording.
+pub fn record_dependency(
+    conn: &Connection,
+    blocking: &str,
+    blocked: &str,
+    added: bool,
+    source: Source,
+    created_at: &str,
+) -> Result<()> {
+    let name = |l: Lookup, id: &str| lookup_name(conn, l, id);
+    let side = |kind: EventKind, other: &str| {
+        let (old, new) = if added {
+            (None, Some(other))
+        } else {
+            (Some(other), None)
+        };
+        ref_change(kind, Lookup::Issue, old, new, &name)
+    };
+    let c = side(EventKind::Blocking, blocked);
+    insert_event(conn, blocking, None, source, &c, created_at)?;
+    let c = side(EventKind::BlockedBy, blocking);
+    insert_event(conn, blocked, None, source, &c, created_at)?;
+    Ok(())
 }
 
 /// Diff `old` against `new` and record one event per changed tracked field.
@@ -329,11 +441,64 @@ pub fn record_changes(
 
 pub fn events_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<IssueEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT id, issue_id, actor_id, source, kind, old_value, new_value, created_at
+        "SELECT id, issue_id, actor_id, source, kind, old_value, new_value, old_ref, new_ref,
+                created_at
          FROM issue_events WHERE issue_id = ?1 ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map(params![issue_id], IssueEvent::from_row)?;
     rows.collect()
+}
+
+/// Swap frozen names for current ones where the referenced entity still
+/// exists (falls back to the frozen string otherwise), and resolve actors:
+/// a recorded member, else for local changes the signed-in user.
+pub fn resolve_events(
+    conn: &Connection,
+    events: &mut [IssueEvent],
+    current_user_remote_id: Option<i64>,
+) {
+    let me = current_user_remote_id
+        .and_then(|rid| {
+            super::queries::find_member_by_remote_id(conn, rid)
+                .ok()
+                .flatten()
+        })
+        .map(|m| m.name);
+    for e in events {
+        let lookup = match EventKind::parse(&e.kind) {
+            Some(EventKind::Status) => Some(Lookup::Lane),
+            Some(EventKind::Assignee) => Some(Lookup::Member),
+            Some(EventKind::Project) => Some(Lookup::Project),
+            Some(EventKind::Parent | EventKind::Blocking | EventKind::BlockedBy) => {
+                Some(Lookup::Issue)
+            }
+            _ => None,
+        };
+        if let Some(l) = lookup {
+            if let Some(n) = e.old_ref.as_deref().and_then(|id| lookup_name(conn, l, id)) {
+                e.old_value = Some(n);
+            }
+            if let Some(n) = e.new_ref.as_deref().and_then(|id| lookup_name(conn, l, id)) {
+                e.new_value = Some(n);
+            }
+        }
+        e.actor_name = match &e.actor_id {
+            Some(aid) => lookup_name(conn, Lookup::Member, aid),
+            None if e.source == "local" => me.clone(),
+            None => None,
+        };
+    }
+}
+
+/// `events_for_issue` with names/actors resolved for display.
+pub fn events_for_issue_resolved(
+    conn: &Connection,
+    issue_id: &str,
+    current_user_remote_id: Option<i64>,
+) -> Result<Vec<IssueEvent>> {
+    let mut evs = events_for_issue(conn, issue_id)?;
+    resolve_events(conn, &mut evs, current_user_remote_id);
+    Ok(evs)
 }
 
 /// One entry of the merged activity stream.
@@ -407,6 +572,7 @@ mod tests {
             (Lookup::Lane, "l2") => Some("In Progress".into()),
             (Lookup::Member, "m1") => Some("Ann".into()),
             (Lookup::Project, "p1") => Some("Proj".into()),
+            (Lookup::Issue, "i0") => Some("T-1".into()),
             _ => None,
         }
     }
@@ -447,7 +613,7 @@ mod tests {
                 "changed estimate from none to 3",
                 "changed due date from none to 2026-02-01",
                 "moved to project Proj",
-                "changed parent issue",
+                "set parent to T-1",
             ]
         );
     }
@@ -486,7 +652,10 @@ mod tests {
             kind: "created".into(),
             old_value: None,
             new_value: None,
+            old_ref: None,
+            new_ref: None,
             created_at: at.into(),
+            actor_name: None,
         }
     }
 

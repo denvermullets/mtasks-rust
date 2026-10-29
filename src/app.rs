@@ -543,7 +543,7 @@ impl App {
             self.detail_blocked_by =
                 queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
-            self.detail_events = events::events_for_issue(conn, issue_id).unwrap_or_default();
+            self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
         } else {
             self.detail_references.clear();

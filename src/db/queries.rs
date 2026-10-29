@@ -62,8 +62,8 @@ pub fn next_team_number(conn: &Connection, team_id: &str) -> Result<i32> {
 
 pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     conn.execute(
-        "INSERT INTO issues (id, title, description, priority, team_number, due_date, estimate, started_at, completed_at, canceled_at, lane_id, team_id, assignee_id, creator_id, remote_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO issues (id, title, description, priority, team_number, due_date, estimate, started_at, completed_at, canceled_at, lane_id, team_id, project_id, parent_issue_id, assignee_id, creator_id, remote_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             issue.id,
             issue.title,
@@ -77,6 +77,8 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.canceled_at,
             issue.lane_id,
             issue.team_id,
+            issue.project_id,
+            issue.parent_issue_id,
             issue.assignee_id,
             issue.creator_id,
             issue.remote_id,
@@ -484,10 +486,28 @@ pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Resu
             dep.updated_at,
         ],
     )?;
+    events::record_dependency(
+        conn,
+        &dep.blocking_issue_id,
+        &dep.blocked_issue_id,
+        true,
+        Source::Local,
+        &now_ts(),
+    )?;
     Ok(())
 }
 
 pub fn delete_issue_dependency(conn: &Connection, dep_id: &str) -> Result<()> {
+    if let Some(dep) = get_issue_dependency(conn, dep_id)? {
+        events::record_dependency(
+            conn,
+            &dep.blocking_issue_id,
+            &dep.blocked_issue_id,
+            false,
+            Source::Local,
+            &now_ts(),
+        )?;
+    }
     conn.execute(
         "DELETE FROM issue_dependencies WHERE id = ?1",
         params![dep_id],
@@ -545,7 +565,10 @@ pub fn blocking_links_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec
 }
 
 /// Issues that block THIS issue — the "Blocked by" sidebar section.
-pub fn blocked_by_links_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<DependencyLink>> {
+pub fn blocked_by_links_for_issue(
+    conn: &Connection,
+    issue_id: &str,
+) -> Result<Vec<DependencyLink>> {
     dependency_links(conn, issue_id, "blocked_issue_id", "blocking_issue_id")
 }
 
@@ -1093,10 +1116,16 @@ mod tests {
     #[test]
     fn insert_and_list_comments_ordered_oldest_first() {
         let conn = setup();
-        insert_comment(&conn, &make_comment("c2", None, "second", "2026-01-02T00:00:00.000Z"))
-            .unwrap();
-        insert_comment(&conn, &make_comment("c1", None, "first", "2026-01-01T00:00:00.000Z"))
-            .unwrap();
+        insert_comment(
+            &conn,
+            &make_comment("c2", None, "second", "2026-01-02T00:00:00.000Z"),
+        )
+        .unwrap();
+        insert_comment(
+            &conn,
+            &make_comment("c1", None, "first", "2026-01-01T00:00:00.000Z"),
+        )
+        .unwrap();
         let bodies: Vec<String> = comments_for_issue(&conn, "i1")
             .unwrap()
             .into_iter()
@@ -1127,7 +1156,8 @@ mod tests {
     fn deleting_an_issue_cascades_to_comments() {
         let conn = setup();
         insert_comment(&conn, &make_comment("c1", None, "hi", NOW)).unwrap();
-        conn.execute("DELETE FROM issues WHERE id = 'i1'", []).unwrap();
+        conn.execute("DELETE FROM issues WHERE id = 'i1'", [])
+            .unwrap();
         assert!(comments_for_issue(&conn, "i1").unwrap().is_empty());
     }
 
@@ -1191,7 +1221,11 @@ mod tests {
         issue.assignee_id = Some("m1".to_string());
         update_issue(&conn, &issue).unwrap();
         assert_eq!(
-            get_issue(&conn, "new1").unwrap().unwrap().assignee_id.as_deref(),
+            get_issue(&conn, "new1")
+                .unwrap()
+                .unwrap()
+                .assignee_id
+                .as_deref(),
             Some("m1")
         );
 
@@ -1199,17 +1233,18 @@ mod tests {
         issue.assignee_id = Some("m2".to_string());
         update_issue(&conn, &issue).unwrap();
         assert_eq!(
-            get_issue(&conn, "new1").unwrap().unwrap().assignee_id.as_deref(),
+            get_issue(&conn, "new1")
+                .unwrap()
+                .unwrap()
+                .assignee_id
+                .as_deref(),
             Some("m2")
         );
 
         // "Unassigned" clears it.
         issue.assignee_id = None;
         update_issue(&conn, &issue).unwrap();
-        assert_eq!(
-            get_issue(&conn, "new1").unwrap().unwrap().assignee_id,
-            None
-        );
+        assert_eq!(get_issue(&conn, "new1").unwrap().unwrap().assignee_id, None);
     }
 
     #[test]
@@ -1337,5 +1372,41 @@ mod tests {
         assert_eq!(evs[1].description(), "changed priority from None to Urgent");
         assert_eq!(evs[1].created_at, "2026-03-02T00:00:00.000Z");
         assert_eq!(evs[1].default_actor(), "Someone");
+    }
+
+    #[test]
+    fn dependency_and_parent_events_resolve_current_names() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
+        delete_issue_dependency(&conn, "d1").unwrap();
+        let i1 = event_lines(&conn, "i1");
+        let i2 = event_lines(&conn, "i2");
+        assert!(i1[i1.len() - 2].starts_with("now blocks "));
+        assert!(i1[i1.len() - 1].starts_with("no longer blocks "));
+        assert!(i2[1].starts_with("now blocked by "));
+        assert!(i2[2].starts_with("no longer blocked by "));
+
+        // Born with a parent -> parent event, and the column is persisted.
+        let mut child = make_issue("c1", None, None);
+        child.parent_issue_id = Some("i1".into());
+        insert_issue(&conn, &child).unwrap();
+        let stored = get_issue(&conn, "c1").unwrap().unwrap();
+        assert_eq!(stored.parent_issue_id.as_deref(), Some("i1"));
+        assert!(event_lines(&conn, "c1")[1].starts_with("set parent to "));
+
+        // Renamed lanes show their current name when resolved.
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+             VALUES ('l2', 'Doing', 1, 't1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        move_issue_to_lane(&conn, "c1", "l2").unwrap();
+        conn.execute("UPDATE lanes SET name = 'Active' WHERE id = 'l2'", [])
+            .unwrap();
+        let evs = events::events_for_issue_resolved(&conn, "c1", None).unwrap();
+        assert!(evs[2].description().ends_with("to Active"));
+        assert_eq!(evs[2].actor_name, None);
     }
 }
