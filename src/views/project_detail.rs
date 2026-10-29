@@ -6,7 +6,8 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::{Message, View};
 use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme as t;
-use crate::views::header;
+use crate::display::{CardProperty, DisplayOptions};
+use crate::views::util;
 use crate::views::progress_chart;
 use crate::views::projects::MemberOption;
 
@@ -60,14 +61,16 @@ const PRIORITIES: [Priority; 5] = [
     Priority::None,
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     project: &'a Project,
     detail: &'a ProjectDetailState,
     team: Option<&'a Team>,
     members: &'a [Member],
     issues: &'a [Issue],
+    visible: Vec<&'a Issue>,
+    display: &'a DisplayOptions,
     lanes: &'a [Lane],
-    needle: &str,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -130,9 +133,7 @@ pub fn view<'a>(
                 .height(Length::Fixed(160.0)),
         )
         .push(burndown(project, issues))
-        .push(issues_section(
-            project, issues, team, lanes, members, needle,
-        ));
+        .push(issues_section(visible, display, team, lanes, members));
 
     // ---- Right sidebar: properties ----
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
@@ -308,21 +309,15 @@ fn legend_item<'a>(label: &'a str, color: iced::Color) -> Element<'a, Message> {
         .into()
 }
 
-/// Issues scoped to this project, each a clickable row that opens issue detail.
+/// This project's issues (already scoped, filtered and ordered by the caller
+/// with the board's display options), each a clickable row that opens detail.
 fn issues_section<'a>(
-    project: &'a Project,
-    issues: &'a [Issue],
+    scoped: Vec<&'a Issue>,
+    display: &'a DisplayOptions,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     members: &'a [Member],
-    needle: &str,
 ) -> Element<'a, Message> {
-    let scoped: Vec<&Issue> = issues
-        .iter()
-        .filter(|i| i.project_id.as_deref() == Some(project.id.as_str()))
-        .filter(|i| header::issue_matches(i, team, needle))
-        .collect();
-
     let mut col = column![].spacing(8).push(
         text(format!("Issues ({})", scoped.len()))
             .size(13)
@@ -330,14 +325,10 @@ fn issues_section<'a>(
     );
 
     if scoped.is_empty() {
-        col = col.push(
-            text("No issues in this project")
-                .size(12)
-                .color(t::TEXT_MUTED),
-        );
+        col = col.push(text("No issues to show").size(12).color(t::TEXT_MUTED));
     } else {
         for issue in scoped {
-            col = col.push(issue_row(issue, team, lanes, members));
+            col = col.push(issue_row(issue, display, team, lanes, members));
         }
     }
 
@@ -346,38 +337,73 @@ fn issues_section<'a>(
 
 fn issue_row<'a>(
     issue: &'a Issue,
+    d: &DisplayOptions,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     members: &'a [Member],
 ) -> Element<'a, Message> {
-    let identifier = match team {
-        Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
-        None => format!("#{}", issue.team_number.unwrap_or(0)),
-    };
-    let lane_name = lanes
-        .iter()
-        .find(|l| l.id == issue.lane_id)
-        .map(|l| l.name.as_str())
-        .unwrap_or("");
-    let assignee = issue
-        .assignee_id
-        .as_ref()
-        .and_then(|aid| members.iter().find(|m| &m.id == aid))
-        .map(|m| m.name.as_str())
-        .unwrap_or("Unassigned");
-
-    let content = row![]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .push(text(identifier).size(12).color(t::TEXT_MUTED).width(Length::Fixed(90.0)))
-        .push(
-            text(&issue.title)
-                .size(13)
-                .color(t::TEXT_PRIMARY)
-                .width(Length::Fill),
-        )
-        .push(text(lane_name).size(12).color(t::TEXT_SECONDARY))
-        .push(text(assignee).size(12).color(t::TEXT_MUTED));
+    let mut content = row![].spacing(10).align_y(Alignment::Center);
+    if d.shows(CardProperty::Id) {
+        let identifier = match team {
+            Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
+            None => format!("#{}", issue.team_number.unwrap_or(0)),
+        };
+        content = content.push(
+            text(identifier)
+                .size(12)
+                .color(t::TEXT_MUTED)
+                .width(Length::Fixed(90.0)),
+        );
+    }
+    if d.shows(CardProperty::Priority) {
+        content = content.push(
+            text(format!("\u{25B3} {}", issue.priority))
+                .size(12)
+                .color(t::priority_color(Priority::from_i32(issue.priority))),
+        );
+    }
+    content = content.push(
+        text(&issue.title)
+            .size(13)
+            .color(t::TEXT_PRIMARY)
+            .width(Length::Fill),
+    );
+    // Right-hand facts, only the enabled ones.
+    let mut facts: Vec<String> = Vec::new();
+    if d.shows(CardProperty::Status) {
+        if let Some(l) = lanes.iter().find(|l| l.id == issue.lane_id) {
+            facts.push(l.name.clone());
+        }
+    }
+    if d.shows(CardProperty::Assignee) {
+        facts.push(
+            issue
+                .assignee_id
+                .as_ref()
+                .and_then(|aid| members.iter().find(|m| &m.id == aid))
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "Unassigned".to_string()),
+        );
+    }
+    if d.shows(CardProperty::DueDate) {
+        if let Some(due) = issue.due_date.as_deref() {
+            facts.push(format!("Due {}", due.get(..10).unwrap_or(due)));
+        }
+    }
+    if d.shows(CardProperty::Estimate) {
+        if let Some(e) = issue.estimate {
+            facts.push(util::format_estimate(e));
+        }
+    }
+    if d.shows(CardProperty::Created) {
+        facts.push(format!("Created {}", util::short_date(&issue.created_at)));
+    }
+    if d.shows(CardProperty::Updated) {
+        facts.push(format!("Updated {}", util::short_date(&issue.updated_at)));
+    }
+    for f in facts {
+        content = content.push(text(f).size(12).color(t::TEXT_SECONDARY));
+    }
 
     button(content)
         .on_press(Message::OpenIssueDetail(issue.id.clone()))

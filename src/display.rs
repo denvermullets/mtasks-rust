@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
@@ -100,6 +101,50 @@ impl OrderBy {
     ];
 }
 
+/// What to show of completed/canceled issues: Rails' "Completed issues"
+/// dropdown. `Hide` hides all of them; the windows keep those completed or
+/// canceled recently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletedFilter {
+    Hide,
+    PastDay,
+    PastWeek,
+    PastMonth,
+    #[default]
+    All,
+}
+
+impl CompletedFilter {
+    pub const ALL: [(CompletedFilter, &'static str); 5] = [
+        (CompletedFilter::Hide, "Hide"),
+        (CompletedFilter::PastDay, "Past day"),
+        (CompletedFilter::PastWeek, "Past week"),
+        (CompletedFilter::PastMonth, "Past month"),
+        (CompletedFilter::All, "All"),
+    ];
+
+    fn window(self) -> Option<chrono::Duration> {
+        match self {
+            CompletedFilter::PastDay => Some(chrono::Duration::days(1)),
+            CompletedFilter::PastWeek => Some(chrono::Duration::weeks(1)),
+            CompletedFilter::PastMonth => Some(chrono::Duration::days(30)),
+            _ => None,
+        }
+    }
+}
+
+/// Window within which a completed issue still shows while `show_completed`
+/// is off (kept separate so older configs with only `show_completed` load).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletedWithin {
+    #[default]
+    Nothing,
+    Day,
+    Week,
+    Month,
+}
+
 /// Optional pieces of a board card (title is always shown).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,6 +204,17 @@ pub struct DisplayOptions {
     /// Whether completed/canceled issues are shown.
     #[serde(default = "default_true")]
     pub show_completed: bool,
+    /// When `show_completed` is off, completed issues newer than this still show.
+    #[serde(default)]
+    pub completed_within: CompletedWithin,
+    /// Whether issues with a parent are listed (off = top-level issues only).
+    #[serde(default = "default_true")]
+    pub show_sub_issues: bool,
+    /// Whether every bucket is shown even when empty. Status and priority
+    /// grouping always keep their empty buckets (so lanes stay visible);
+    /// this extends that to the other group-by axes.
+    #[serde(default)]
+    pub show_empty_groups: bool,
     #[serde(default = "default_properties")]
     pub properties: Vec<CardProperty>,
 }
@@ -191,6 +247,9 @@ impl Default for DisplayOptions {
             sub_group: default_sub_group(),
             order_by: default_order_by(),
             show_completed: true,
+            completed_within: CompletedWithin::Nothing,
+            show_sub_issues: true,
+            show_empty_groups: false,
             properties: default_properties(),
         }
     }
@@ -201,6 +260,34 @@ impl DisplayOptions {
         self.properties.contains(&p)
     }
 
+    pub fn completed_filter(&self) -> CompletedFilter {
+        if self.show_completed {
+            return CompletedFilter::All;
+        }
+        match self.completed_within {
+            CompletedWithin::Nothing => CompletedFilter::Hide,
+            CompletedWithin::Day => CompletedFilter::PastDay,
+            CompletedWithin::Week => CompletedFilter::PastWeek,
+            CompletedWithin::Month => CompletedFilter::PastMonth,
+        }
+    }
+
+    pub fn set_completed_filter(&mut self, f: CompletedFilter) {
+        self.show_completed = f == CompletedFilter::All;
+        self.completed_within = match f {
+            CompletedFilter::PastDay => CompletedWithin::Day,
+            CompletedFilter::PastWeek => CompletedWithin::Week,
+            CompletedFilter::PastMonth => CompletedWithin::Month,
+            _ => CompletedWithin::Nothing,
+        };
+    }
+
+    /// Whether `sub` would repeat the current group-by axis (pointless, so the
+    /// panel disables it).
+    pub fn sub_group_conflicts(&self, sub: SubGroup) -> bool {
+        sub_group_conflicts(self.group_by, sub)
+    }
+
     pub fn toggle_property(&mut self, p: CardProperty) {
         if let Some(pos) = self.properties.iter().position(|x| *x == p) {
             self.properties.remove(pos);
@@ -208,6 +295,17 @@ impl DisplayOptions {
             self.properties.push(p);
         }
     }
+}
+
+/// Whether sub-group `sub` is the same axis as group-by `group`.
+pub fn sub_group_conflicts(group: GroupBy, sub: SubGroup) -> bool {
+    matches!(
+        (group, sub),
+        (GroupBy::Priority, SubGroup::Priority)
+            | (GroupBy::Assignee, SubGroup::Assignee)
+            | (GroupBy::Project, SubGroup::Project)
+            | (GroupBy::Status, SubGroup::Status)
+    )
 }
 
 /// List-mode j/k: move the (column, issue) focus one row (`delta` >= 0 is
@@ -318,6 +416,40 @@ impl Filters {
         *self = Filters::default();
     }
 
+    /// Drop selected ids that no longer exist in the loaded data (filters are
+    /// global but ids are per-team, so they go stale on a team switch).
+    /// Priorities and the "none" values (empty string) are always valid.
+    /// Returns whether anything was removed.
+    pub fn prune(
+        &mut self,
+        members: &[Member],
+        labels: &[Label],
+        lanes: &[Lane],
+        projects: &[Project],
+    ) -> bool {
+        let before = self.count();
+        let keep = |list: &mut Vec<String>, valid: HashSet<&str>| {
+            list.retain(|v| v.is_empty() || valid.contains(v.as_str()));
+        };
+        keep(
+            &mut self.assignees,
+            members.iter().map(|m| m.id.as_str()).collect(),
+        );
+        keep(
+            &mut self.labels,
+            labels.iter().map(|l| l.id.as_str()).collect(),
+        );
+        keep(
+            &mut self.statuses,
+            lanes.iter().map(|l| l.id.as_str()).collect(),
+        );
+        keep(
+            &mut self.projects,
+            projects.iter().map(|p| p.id.as_str()).collect(),
+        );
+        self.count() != before
+    }
+
     /// Whether `issue` passes every non-empty field.
     pub fn matches(&self, issue: &Issue, issue_labels: &[Label]) -> bool {
         let one = |list: &[String], key: &str| list.is_empty() || list.iter().any(|v| v == key);
@@ -337,6 +469,33 @@ impl Filters {
 /// Whether an issue counts as completed (done or canceled).
 pub fn is_completed(issue: &Issue) -> bool {
     issue.completed_at.is_some() || issue.canceled_at.is_some()
+}
+
+/// Whether `issue` survives the completed-issues setting at time `now`.
+/// Unparseable timestamps count as recent.
+pub fn passes_completed(issue: &Issue, opts: &DisplayOptions, now: DateTime<Utc>) -> bool {
+    if !is_completed(issue) {
+        return true;
+    }
+    let filter = opts.completed_filter();
+    match filter {
+        CompletedFilter::All => true,
+        CompletedFilter::Hide => false,
+        _ => {
+            let Some(window) = filter.window() else {
+                return true;
+            };
+            let cutoff = now - window;
+            [&issue.completed_at, &issue.canceled_at]
+                .into_iter()
+                .flatten()
+                .any(|ts| {
+                    DateTime::parse_from_rfc3339(ts)
+                        .map(|d| d.with_timezone(&Utc) >= cutoff)
+                        .unwrap_or(true)
+                })
+        }
+    }
 }
 
 /// Sort `issues` in place by `order`. Stable, so `Manual` keeps source order.
@@ -498,18 +657,29 @@ pub fn my_issues_empty_message(
 
 pub const PRIORITY_TITLES: [&str; 5] = ["Urgent", "High", "Medium", "Low", "No priority"];
 
-/// Issues that survive completed-hiding, filters and the search needle,
-/// in the requested order.
+/// Issues that survive completed-hiding, sub-issue hiding, filters and the
+/// search needle, in the requested order.
 pub fn visible_issues<'a>(
     data: &Data<'a>,
     opts: &DisplayOptions,
     filters: &Filters,
     needle: &str,
 ) -> Vec<&'a Issue> {
-    let mut out: Vec<&Issue> = data
-        .issues
-        .iter()
-        .filter(|i| opts.show_completed || !is_completed(i))
+    visible_from(data.issues.iter(), data, opts, filters, needle)
+}
+
+/// `visible_issues` over an arbitrary candidate set (e.g. one project's issues).
+pub fn visible_from<'a>(
+    candidates: impl Iterator<Item = &'a Issue>,
+    data: &Data<'a>,
+    opts: &DisplayOptions,
+    filters: &Filters,
+    needle: &str,
+) -> Vec<&'a Issue> {
+    let now = Utc::now();
+    let mut out: Vec<&Issue> = candidates
+        .filter(|i| passes_completed(i, opts, now))
+        .filter(|i| opts.show_sub_issues || i.parent_issue_id.is_none())
         .filter(|i| {
             let labels = data
                 .issue_labels
@@ -685,7 +855,7 @@ pub fn build_columns<'a>(
         return vec![finish("All issues".to_string(), visible)];
     };
 
-    let keep_empty = matches!(axis, Axis::Status | Axis::Priority);
+    let keep_empty = opts.show_empty_groups || matches!(axis, Axis::Status | Axis::Priority);
     buckets(axis, data, &visible)
         .into_iter()
         .filter_map(|bk| {
@@ -703,7 +873,7 @@ pub fn build_columns<'a>(
 mod tests {
     use super::*;
 
-    fn issue(id: &str, lane: &str, priority: i32) -> Issue {
+    pub(super) fn issue(id: &str, lane: &str, priority: i32) -> Issue {
         Issue {
             id: id.into(),
             title: format!("Issue {id}"),
@@ -728,7 +898,7 @@ mod tests {
         }
     }
 
-    fn lane(id: &str, name: &str, pos: i32) -> Lane {
+    pub(super) fn lane(id: &str, name: &str, pos: i32) -> Lane {
         Lane {
             id: id.into(),
             name: name.into(),
@@ -753,7 +923,7 @@ mod tests {
         }
     }
 
-    fn data<'a>(
+    pub(super) fn data<'a>(
         lanes: &'a [Lane],
         issues: &'a [Issue],
         labels: &'a [Label],
@@ -913,7 +1083,7 @@ mod tests {
         assert!(o.shows(CardProperty::DueDate));
     }
 
-    fn member(id: &str, team: &str, remote: Option<i64>) -> Member {
+    pub(super) fn member(id: &str, team: &str, remote: Option<i64>) -> Member {
         Member {
             id: id.into(),
             remote_id: remote,
@@ -1098,6 +1268,7 @@ mod tests {
 
 #[cfg(test)]
 mod property_tests {
+    use super::tests::{data, issue, lane, member};
     use super::*;
 
     #[test]
@@ -1117,5 +1288,86 @@ mod property_tests {
         let back: DisplayOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(back, o);
         assert_eq!(CardProperty::ALL.len(), 10);
+    }
+
+    #[test]
+    fn prune_drops_foreign_ids_keeps_none_values() {
+        let mut f = Filters::default();
+        f.toggle(FilterField::Assignee, "");
+        f.toggle(FilterField::Assignee, "m1");
+        f.toggle(FilterField::Assignee, "other-team-m");
+        f.toggle(FilterField::Status, "a");
+        f.toggle(FilterField::Status, "gone");
+        f.toggle(FilterField::Label, "gone");
+        f.toggle(FilterField::Project, "");
+        f.toggle(FilterField::Priority, "1");
+        let lanes = [lane("a", "Todo", 0)];
+        let members = [member("m1", "t", None)];
+        assert!(f.prune(&members, &[], &lanes, &[]));
+        assert_eq!(f.assignees, vec!["".to_string(), "m1".to_string()]);
+        assert_eq!(f.statuses, vec!["a".to_string()]);
+        assert!(f.labels.is_empty());
+        assert_eq!(f.projects, vec!["".to_string()]);
+        assert_eq!(f.priorities, vec!["1".to_string()]);
+        assert!(!f.prune(&members, &[], &lanes, &[]));
+    }
+
+    #[test]
+    fn sub_group_conflict_matches_axis() {
+        assert!(sub_group_conflicts(GroupBy::Status, SubGroup::Status));
+        assert!(sub_group_conflicts(GroupBy::Priority, SubGroup::Priority));
+        assert!(!sub_group_conflicts(GroupBy::Status, SubGroup::Priority));
+        assert!(!sub_group_conflicts(GroupBy::Label, SubGroup::Project));
+        assert!(!sub_group_conflicts(GroupBy::None, SubGroup::None));
+    }
+
+    #[test]
+    fn completed_filter_round_trips_and_windows() {
+        let mut o = DisplayOptions::default();
+        assert_eq!(o.completed_filter(), CompletedFilter::All);
+        for (f, _) in CompletedFilter::ALL {
+            o.set_completed_filter(f);
+            assert_eq!(o.completed_filter(), f);
+        }
+        let now = DateTime::parse_from_rfc3339("2026-03-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut done = issue("1", "a", 2);
+        done.completed_at = Some("2026-03-09T12:00:00Z".into());
+        let mut old = issue("2", "a", 2);
+        old.canceled_at = Some("2026-01-01T00:00:00Z".into());
+        let open = issue("3", "a", 2);
+        o.set_completed_filter(CompletedFilter::Hide);
+        assert!(!passes_completed(&done, &o, now) && passes_completed(&open, &o, now));
+        o.set_completed_filter(CompletedFilter::PastDay);
+        assert!(passes_completed(&done, &o, now) && !passes_completed(&old, &o, now));
+        o.set_completed_filter(CompletedFilter::PastMonth);
+        assert!(passes_completed(&done, &o, now) && !passes_completed(&old, &o, now));
+        o.set_completed_filter(CompletedFilter::All);
+        assert!(passes_completed(&old, &o, now));
+    }
+
+    #[test]
+    fn hides_sub_issues_and_shows_empty_groups() {
+        let lanes = [lane("a", "Todo", 0)];
+        let mut child = issue("2", "a", 2);
+        child.parent_issue_id = Some("1".into());
+        let issues = [issue("1", "a", 2), child];
+        let il = HashMap::new();
+        let d = data(&lanes, &issues, &[], &il);
+        let mut o = DisplayOptions::default();
+        assert_eq!(visible_issues(&d, &o, &Filters::default(), "").len(), 2);
+        o.show_sub_issues = false;
+        assert_eq!(visible_issues(&d, &o, &Filters::default(), "").len(), 1);
+
+        let mut o = DisplayOptions {
+            group_by: GroupBy::Project,
+            ..Default::default()
+        };
+        let hidden = build_columns(&d, &o, &Filters::default(), "");
+        o.show_empty_groups = true;
+        let shown = build_columns(&d, &o, &Filters::default(), "");
+        assert_eq!(hidden.len(), 1); // only "No project"
+        assert!(shown.len() >= hidden.len());
     }
 }
