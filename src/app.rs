@@ -13,13 +13,14 @@ use crate::db::models::{
     RoadmapCommitment, Team,
 };
 use crate::db::{connection, queries, sync_queue};
+use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup};
 use crate::keys;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, csv_import, header, issue_detail, issue_form, issue_picker, labels as labels_view,
-    placeholder,
+    board, csv_import, display_panel, header, issue_detail, issue_form, issue_picker,
+    labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
     team_list, team_members, toast,
 };
@@ -141,8 +142,19 @@ pub enum Message {
     HeaderSearchChanged(String),
     /// Focus the header search box (Cmd+F).
     FocusSearch,
-    /// "Display" button. No-op until the display options panel (JAIT-185).
+    /// "Display" button: open the display-options popover.
     OpenDisplayOptions,
+    /// "Filter" button: open the filter popover.
+    OpenFilterPanel,
+    /// Inert click target (swallows clicks inside a popover).
+    Noop,
+    SetGroupBy(GroupBy),
+    SetSubGroup(SubGroup),
+    SetOrderBy(OrderBy),
+    SetShowCompleted(bool),
+    ToggleCardProperty(CardProperty),
+    ToggleFilter(FilterField, String),
+    ClearFilters,
 
     // Settings
     OpenSettings,
@@ -242,6 +254,10 @@ pub enum Modal {
     TeamMembers(String),
     /// Preview of a CSV import (see `csv_import`).
     CsvImport,
+    /// Display-options popover (group/sort/properties), anchored under the header.
+    DisplayOptions,
+    /// Filter popover, anchored under the header.
+    FilterPanel,
 }
 
 /// Sections of the Rails team settings page (`/teams/:id/edit?section=…`).
@@ -522,14 +538,27 @@ impl App {
         }
     }
 
+    /// Board columns for the current display options, filters and search.
+    /// Focus indices (`focused_lane`/`focused_issue`) index into these.
+    fn board_columns(&self) -> Vec<display::Column<'_>> {
+        let data = display::Data {
+            team: self.selected_team(),
+            lanes: &self.lanes,
+            issues: &self.issues,
+            members: &self.members,
+            projects: &self.projects,
+            labels: &self.labels,
+            issue_labels: &self.issue_labels,
+        };
+        let needle = header::needle(self.active_search());
+        display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
+    }
+
+    /// Issues in the focused column, in on-screen order (sub-groups flattened).
     fn issues_in_focused_lane(&self) -> Vec<&Issue> {
-        if let Some(lane) = self.lanes.get(self.focused_lane) {
-            let needle = header::needle(self.active_search());
-            let team = self.selected_team();
-            self.issues
-                .iter()
-                .filter(|i| i.lane_id == lane.id && header::issue_matches(i, team, &needle))
-                .collect()
+        let mut cols = self.board_columns();
+        if self.focused_lane < cols.len() {
+            cols.swap_remove(self.focused_lane).issues
         } else {
             vec![]
         }
@@ -541,20 +570,39 @@ impl App {
     }
 
     fn clamp_focus(&mut self) {
-        if self.lanes.is_empty() {
+        let counts: Vec<usize> = self
+            .board_columns()
+            .iter()
+            .map(|c| c.issues.len())
+            .collect();
+        if counts.is_empty() {
             self.focused_lane = 0;
             self.focused_issue = 0;
             return;
         }
-        if self.focused_lane >= self.lanes.len() {
-            self.focused_lane = self.lanes.len() - 1;
+        if self.focused_lane >= counts.len() {
+            self.focused_lane = counts.len() - 1;
         }
-        let count = self.issues_in_focused_lane().len();
+        let count = counts[self.focused_lane];
         if count == 0 {
             self.focused_issue = 0;
         } else if self.focused_issue >= count {
             self.focused_issue = count - 1;
         }
+    }
+
+    /// Persist the display/filter settings and re-validate board focus.
+    fn persist_display(&mut self) {
+        if let Err(e) = config::save(&self.config) {
+            self.config_error = Some(e);
+        }
+        self.clamp_focus();
+    }
+
+    /// Active-filter badge count: selected filter values plus a non-empty search.
+    fn active_filter_count(&self) -> usize {
+        self.config.filters.count()
+            + usize::from(!header::needle(self.active_search()).is_empty())
     }
 
     fn enqueue_sync(
@@ -1418,6 +1466,15 @@ impl App {
             }
 
             Message::MoveIssueNextLane => {
+                // Lanes are only columns when grouped by status.
+                if self.config.display.group_by != GroupBy::Status {
+                    self.push_toast(
+                        "Moving between lanes needs Display > Group by: Status",
+                        ToastKind::Info,
+                        false,
+                    );
+                    return Task::none();
+                }
                 if let Some(issue) = self.focused_issue().cloned() {
                     let current_lane_idx = self
                         .lanes
@@ -1436,6 +1493,15 @@ impl App {
             }
 
             Message::MoveIssuePrevLane => {
+                // Lanes are only columns when grouped by status.
+                if self.config.display.group_by != GroupBy::Status {
+                    self.push_toast(
+                        "Moving between lanes needs Display > Group by: Status",
+                        ToastKind::Info,
+                        false,
+                    );
+                    return Task::none();
+                }
                 if let Some(issue) = self.focused_issue().cloned() {
                     let current_lane_idx = self
                         .lanes
@@ -1474,7 +1540,7 @@ impl App {
                 }
             }
             Message::FocusNextLane => {
-                if self.focused_lane + 1 < self.lanes.len() {
+                if self.focused_lane + 1 < self.board_columns().len() {
                     self.focused_lane += 1;
                     self.focused_issue = 0;
                     self.clamp_focus();
@@ -1508,7 +1574,43 @@ impl App {
             Message::FocusSearch => {
                 return text_input::focus(header::search_input_id());
             }
-            Message::OpenDisplayOptions => {}
+            Message::OpenDisplayOptions => self.modal = Modal::DisplayOptions,
+            Message::OpenFilterPanel => self.modal = Modal::FilterPanel,
+            Message::Noop => {}
+            Message::SetGroupBy(g) => {
+                self.config.display.group_by = g;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+                self.persist_display();
+            }
+            Message::SetSubGroup(g) => {
+                self.config.display.sub_group = g;
+                self.persist_display();
+            }
+            Message::SetOrderBy(o) => {
+                self.config.display.order_by = o;
+                self.persist_display();
+            }
+            Message::SetShowCompleted(show) => {
+                self.config.display.show_completed = show;
+                self.persist_display();
+            }
+            Message::ToggleCardProperty(p) => {
+                self.config.display.toggle_property(p);
+                self.persist_display();
+            }
+            Message::ToggleFilter(field, value) => {
+                self.config.filters.toggle(field, &value);
+                self.focused_issue = 0;
+                self.persist_display();
+            }
+            Message::ClearFilters => {
+                self.config.filters.clear();
+                // The panel's search box mirrors the header search; clear it too.
+                self.search_query.clear();
+                self.focused_issue = 0;
+                self.persist_display();
+            }
 
             Message::CloseModal => {
                 self.modal = Modal::None;
@@ -2296,18 +2398,32 @@ impl App {
             self.breadcrumb(),
             search,
             self.search_enabled(),
+            (self.view == View::Board).then(|| self.active_filter_count()),
             self.new_action(),
         );
 
+        let columns = if self.view == View::Board {
+            self.board_columns()
+        } else {
+            Vec::new()
+        };
+
         let main_pane: Element<'_, Message> = match self.view {
             View::Board => board::view(
-                self.selected_team(),
-                &self.lanes,
-                &self.issues,
-                &self.issue_labels,
+                &columns,
+                board::CardData {
+                    team_identifier: self
+                        .selected_team()
+                        .map(|t| t.identifier.as_str())
+                        .unwrap_or("---"),
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    projects: &self.projects,
+                    issue_labels: &self.issue_labels,
+                    display: &self.config.display,
+                },
                 self.focused_lane,
                 self.focused_issue,
-                &needle,
             ),
             View::ProjectList => {
                 let mut list: Vec<&Project> = self
@@ -2448,6 +2564,23 @@ impl App {
 
         // Overlay modals
         let content: Element<'_, Message> = match &self.modal {
+            Modal::DisplayOptions => {
+                let panel = display_panel::display_view(&self.config.display);
+                iced::widget::stack![base, display_panel::popover(panel)].into()
+            }
+            Modal::FilterPanel => {
+                let panel = display_panel::filter_view(
+                    &self.config.filters,
+                    search,
+                    display_panel::FilterData {
+                        lanes: &self.lanes,
+                        members: &self.members,
+                        labels: &self.labels,
+                        projects: &self.projects,
+                    },
+                );
+                iced::widget::stack![base, display_panel::popover(panel)].into()
+            }
             Modal::IssueForm => {
                 if let Some(ref form) = self.issue_form {
                     let modal = issue_form::view(form, &self.lanes, &self.labels);

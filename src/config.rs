@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::display::{DisplayOptions, Filters};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_api_base_url")]
@@ -21,6 +23,12 @@ pub struct Config {
     /// Display name of the signed-in user, captured alongside the id.
     #[serde(default)]
     pub current_user_name: Option<String>,
+    /// Board display options (group/sub-group/order/completed/card properties).
+    #[serde(default)]
+    pub display: DisplayOptions,
+    /// Board issue filters. Global, not per team (v1).
+    #[serde(default)]
+    pub filters: Filters,
 }
 
 fn default_api_base_url() -> String {
@@ -40,6 +48,8 @@ impl Default for Config {
             sync_interval_secs: default_sync_interval_secs(),
             current_user_remote_id: None,
             current_user_name: None,
+            display: DisplayOptions::default(),
+            filters: Filters::default(),
         }
     }
 }
@@ -87,4 +97,33 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     let path = config_path();
     let body = toml::to_string_pretty(cfg).map_err(|e| format!("serialize config: {}", e))?;
     std::fs::write(&path, body).map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display::{CardProperty, FilterField, GroupBy, OrderBy, SubGroup};
+
+    #[test]
+    fn display_and_filters_round_trip() {
+        let mut cfg = Config::default();
+        cfg.display.group_by = GroupBy::Assignee;
+        cfg.display.sub_group = SubGroup::Priority;
+        cfg.display.order_by = OrderBy::DueDate;
+        cfg.display.show_completed = false;
+        cfg.display.toggle_property(CardProperty::Assignee);
+        cfg.filters.toggle(FilterField::Priority, "1");
+        cfg.filters.toggle(FilterField::Assignee, "");
+        let body = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&body).unwrap();
+        assert_eq!(back.display, cfg.display);
+        assert_eq!(back.filters, cfg.filters);
+    }
+
+    #[test]
+    fn old_config_without_display_uses_defaults() {
+        let cfg: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert_eq!(cfg.display, DisplayOptions::default());
+        assert_eq!(cfg.filters.count(), 0);
+    }
 }

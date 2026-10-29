@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod csv_io;
 mod db;
+mod display;
 mod keys;
 mod sync;
 mod theme;
