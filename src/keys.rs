@@ -26,6 +26,8 @@ pub fn handle_key_press(
             "?" | "/" if modifiers.shift() || modifiers.is_empty() => Some(Message::ToggleHelp),
 
             // Board-only shortcuts — ignored on other views.
+            "v" if on_board && modifiers.is_empty() => Some(Message::ToggleViewMode),
+            "c" if on_board && modifiers.is_empty() => Some(Message::ToggleFocusedSection),
             "n" if on_board && modifiers.is_empty() => Some(Message::CreateIssue),
             "e" if on_board && modifiers.is_empty() => Some(Message::EditFocusedIssue),
             "d" if on_board && modifiers.is_empty() => Some(Message::ConfirmDeleteFocusedIssue),

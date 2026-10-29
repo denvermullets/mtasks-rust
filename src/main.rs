@@ -6,6 +6,7 @@ mod db;
 mod display;
 mod keys;
 mod mentions;
+mod scroll;
 mod sync;
 mod theme;
 mod views;
