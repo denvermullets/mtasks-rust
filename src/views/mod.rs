@@ -9,6 +9,7 @@ pub mod issue_picker;
 pub mod labels;
 pub mod placeholder;
 pub mod progress_chart;
+pub mod prototype_switcher;
 pub mod project_detail;
 pub mod projects;
 pub mod roadmap;

@@ -8,8 +8,8 @@ use crate::theme as t;
 /// (Projects, Roadmap, My Issues, …). Filled in by their respective tickets.
 pub fn view<'a>(title: &'a str) -> Element<'a, Message> {
     let content = column![
-        text(title).size(20).color(t::TEXT_PRIMARY),
-        text("Coming soon").size(14).color(t::TEXT_MUTED),
+        text(title).size(20).color(t::TEXT_PRIMARY()),
+        text("Coming soon").size(14).color(t::TEXT_MUTED()),
     ]
     .spacing(8)
     .align_x(iced::Alignment::Center);

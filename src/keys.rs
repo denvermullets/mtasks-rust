@@ -23,6 +23,8 @@ pub fn handle_key_press(
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
             "s" if modifiers.is_empty() => Some(Message::SyncNow),
             "," if modifiers.is_empty() => Some(Message::OpenSettings),
+            "[" if modifiers.is_empty() => Some(Message::ProtoCycleTheme(-1)),
+            "]" if modifiers.is_empty() => Some(Message::ProtoCycleTheme(1)),
             "?" | "/" if modifiers.shift() || modifiers.is_empty() => Some(Message::ToggleHelp),
 
             // Board-only shortcuts — ignored on other views.

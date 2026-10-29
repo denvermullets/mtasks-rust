@@ -14,7 +14,16 @@ mod views;
 use iced::{window, Size};
 
 fn main() -> iced::Result {
+    // PROTOTYPE (JRST-4): JAIT_THEME picks the starting theme, JAIT_FONT the font.
+    if let Ok(key) = std::env::var("JAIT_THEME") {
+        theme::set_by_key(&key);
+    }
     iced::application(app::App::title, app::App::update, app::App::view)
+        .font(include_bytes!("../assets/prototype-fonts/Inter.ttf").as_slice())
+        .font(include_bytes!("../assets/prototype-fonts/JetBrainsMono.ttf").as_slice())
+        .font(include_bytes!("../assets/prototype-fonts/IBMPlexMono.ttf").as_slice())
+        .font(include_bytes!("../assets/prototype-fonts/SpaceGrotesk.ttf").as_slice())
+        .default_font(theme::startup_font().1)
         .subscription(app::App::subscription)
         .theme(app::App::theme)
         .window(window::Settings {

@@ -58,12 +58,12 @@ pub fn view<'a>(
     let last = crumbs.len().saturating_sub(1);
     for (i, crumb) in crumbs.into_iter().enumerate() {
         if i > 0 {
-            trail = trail.push(text("\u{203A}").size(14).color(t::TEXT_MUTED)); // ›
+            trail = trail.push(text("\u{203A}").size(14).color(t::TEXT_MUTED())); // ›
         }
         let color = if i == last {
-            t::TEXT_PRIMARY
+            t::TEXT_PRIMARY()
         } else {
-            t::TEXT_SECONDARY
+            t::TEXT_SECONDARY()
         };
         trail = trail.push(text(crumb).size(14).color(color));
     }
@@ -95,9 +95,9 @@ pub fn view<'a>(
         .style(move |theme: &Theme, status| {
             let mut style = button::secondary(theme, status);
             if filter_count > 0 {
-                style.text_color = t::ACCENT;
+                style.text_color = t::ACCENT();
                 style.border = Border {
-                    color: t::ACCENT,
+                    color: t::ACCENT(),
                     width: 1.0,
                     radius: 4.0.into(),
                 };
@@ -107,16 +107,16 @@ pub fn view<'a>(
 
     let enabled = new_action.is_some();
     let mut new_button = button(text("+ New").size(13).color(if enabled {
-        t::BG_PRIMARY
+        t::BG_PRIMARY()
     } else {
-        t::TEXT_MUTED
+        t::TEXT_MUTED()
     }))
     .padding([5, 12])
     .style(move |_theme: &Theme, _status| button::Style {
         background: Some(iced::Background::Color(if enabled {
-            t::ACCENT
+            t::ACCENT()
         } else {
-            t::BG_CARD
+            t::BG_CARD()
         })),
         border: Border {
             radius: 6.0.into(),
@@ -142,9 +142,9 @@ pub fn view<'a>(
         .padding([8, 16])
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_SECONDARY)),
+            background: Some(iced::Background::Color(t::BG_SECONDARY())),
             border: Border {
-                color: t::BORDER,
+                color: t::BORDER(),
                 width: 0.0,
                 radius: 0.0.into(),
             },

@@ -33,8 +33,8 @@ pub struct Toast {
 impl ToastKind {
     fn accent(&self) -> Color {
         match self {
-            ToastKind::Error => t::DANGER,
-            ToastKind::Info => t::ACCENT,
+            ToastKind::Error => t::DANGER(),
+            ToastKind::Info => t::ACCENT(),
         }
     }
 }
@@ -60,7 +60,7 @@ pub fn overlay(toasts: &[Toast]) -> Element<'_, Message> {
 fn card(toast: &Toast) -> Element<'_, Message> {
     let accent = toast.kind.accent();
 
-    let dismiss = button(text("×").size(16).color(t::TEXT_SECONDARY))
+    let dismiss = button(text("×").size(16).color(t::TEXT_SECONDARY()))
         .on_press(Message::DismissToast(toast.id))
         .padding([0, 6])
         .style(button::text);
@@ -71,7 +71,7 @@ fn card(toast: &Toast) -> Element<'_, Message> {
         .push(
             text(&toast.message)
                 .size(13)
-                .color(t::TEXT_PRIMARY)
+                .color(t::TEXT_PRIMARY())
                 .width(Length::Shrink),
         )
         .push(iced::widget::horizontal_space().width(Length::Fill))
@@ -96,7 +96,7 @@ fn card(toast: &Toast) -> Element<'_, Message> {
         .padding(12)
         .max_width(360.0)
         .style(move |_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::BG_MODAL())),
             border: Border {
                 color: accent,
                 width: 1.0,

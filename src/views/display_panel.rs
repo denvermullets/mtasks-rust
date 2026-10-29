@@ -42,9 +42,9 @@ pub fn popover<'a>(panel: Element<'a, Message>) -> Element<'a, Message> {
 
 fn panel_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(t::BG_MODAL)),
+        background: Some(iced::Background::Color(t::BG_MODAL())),
         border: Border {
-            color: t::BORDER,
+            color: t::BORDER(),
             width: 1.0,
             radius: 8.0.into(),
         },
@@ -53,7 +53,7 @@ fn panel_style(_theme: &Theme) -> container::Style {
 }
 
 fn heading<'a>(label: &'a str) -> Element<'a, Message> {
-    text(label).size(11).color(t::TEXT_MUTED).into()
+    text(label).size(11).color(t::TEXT_MUTED()).into()
 }
 
 /// A pill-style single-select: highlights `current`, emits `msg(value)`.
@@ -77,19 +77,19 @@ fn chips<'a, T: Copy + PartialEq + 'a>(
             r = r.push(
                 b.style(move |_theme: &Theme, _status| button::Style {
                         background: Some(iced::Background::Color(if active {
-                            t::BG_CARD_FOCUSED
+                            t::BG_CARD_FOCUSED()
                         } else {
-                            t::BG_CARD
+                            t::BG_CARD()
                         })),
                         text_color: if off {
-                            t::TEXT_MUTED
+                            t::TEXT_MUTED()
                         } else if active {
-                            t::ACCENT
+                            t::ACCENT()
                         } else {
-                            t::TEXT_SECONDARY
+                            t::TEXT_SECONDARY()
                         },
                         border: Border {
-                            color: if active { t::ACCENT } else { t::BORDER },
+                            color: if active { t::ACCENT() } else { t::BORDER() },
                             width: 1.0,
                             radius: 6.0.into(),
                         },
@@ -116,7 +116,7 @@ pub fn display_view<'a>(opts: &'a DisplayOptions) -> Element<'a, Message> {
 
     let body = column![]
         .spacing(12)
-        .push(text("Display").size(14).color(t::TEXT_PRIMARY))
+        .push(text("Display").size(14).color(t::TEXT_PRIMARY()))
         .push(heading("VIEW"))
         .push(chips(
             &ViewMode::ALL,
@@ -202,7 +202,7 @@ fn option_group<'a>(
 ) -> Element<'a, Message> {
     let mut col: Column<'a, Message> = column![].spacing(4).push(heading(title));
     if options.is_empty() {
-        col = col.push(text("None available").size(12).color(t::TEXT_MUTED));
+        col = col.push(text("None available").size(12).color(t::TEXT_MUTED()));
     }
     for (value, label) in options {
         let selected = filters.is_selected(field, &value);
@@ -271,7 +271,7 @@ pub fn filter_view<'a>(
 
     let top = row![]
         .align_y(Alignment::Center)
-        .push(text("Filters").size(14).color(t::TEXT_PRIMARY))
+        .push(text("Filters").size(14).color(t::TEXT_PRIMARY()))
         .push(horizontal_space())
         .push(clear.style(button::secondary));
 

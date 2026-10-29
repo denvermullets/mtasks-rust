@@ -42,7 +42,7 @@ impl LabelFormState {
 /// Resolve a label's stored hex to a color, falling back to a muted grey when
 /// the color is missing or unparseable so a chip always renders.
 pub fn chip_color(hex: Option<&str>) -> Color {
-    hex.and_then(t::hex_to_color).unwrap_or(t::PRIORITY_NONE)
+    hex.and_then(t::hex_to_color).unwrap_or(t::PRIORITY_NONE())
 }
 
 /// A filled colored pill used to render a label. `selected` controls whether it
@@ -52,9 +52,9 @@ fn pill<'a>(label: &'a Label, selected: bool) -> Element<'a, Message> {
     let (bg, text_color, border_w) = if selected {
         (Color { a: 0.22, ..color }, color, 1.0)
     } else {
-        (Color::TRANSPARENT, t::TEXT_MUTED, 1.0)
+        (Color::TRANSPARENT, t::TEXT_MUTED(), 1.0)
     };
-    let border_color = if selected { color } else { t::BORDER };
+    let border_color = if selected { color } else { t::BORDER() };
 
     container(text(&label.name).size(11).color(text_color))
         .padding([2, 8])
@@ -116,12 +116,12 @@ pub fn chip_grid<'a>(
 fn color_swatches<'a>(selected_hex: &str) -> Element<'a, Message> {
     let mut r = row![].spacing(6);
     for hex in PALETTE {
-        let color = t::hex_to_color(hex).unwrap_or(t::PRIORITY_NONE);
+        let color = t::hex_to_color(hex).unwrap_or(t::PRIORITY_NONE());
         let is_selected = selected_hex.eq_ignore_ascii_case(hex);
         let border_color = if is_selected {
-            t::TEXT_PRIMARY
+            t::TEXT_PRIMARY()
         } else {
-            t::BORDER
+            t::BORDER()
         };
         let swatch = container(text(" ").size(10))
             .width(Length::Fixed(20.0))
@@ -155,7 +155,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
     let attach_section: Element<'a, Message> = if labels.is_empty() {
         text("No labels yet — create one below.")
             .size(12)
-            .color(t::TEXT_MUTED)
+            .color(t::TEXT_MUTED())
             .into()
     } else if has_issue {
         chip_grid(
@@ -201,12 +201,12 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
         )
         .push(color_swatches(&form.color))
         .push(
-            button(text("Add").size(13).color(t::BG_PRIMARY))
+            button(text("Add").size(13).color(t::BG_PRIMARY()))
                 .on_press(Message::CreateLabel)
                 .padding([8, 16])
                 .style(move |_theme: &Theme, _status| button::Style {
-                    background: Some(iced::Background::Color(t::ACCENT)),
-                    text_color: t::BG_PRIMARY,
+                    background: Some(iced::Background::Color(t::ACCENT())),
+                    text_color: t::BG_PRIMARY(),
                     border: Border {
                         radius: 4.0.into(),
                         ..Default::default()
@@ -218,24 +218,24 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
     let mut form_content = column![]
         .spacing(14)
         .width(Length::Fixed(440.0))
-        .push(text("Labels").size(18).color(t::TEXT_PRIMARY))
-        .push(text(attach_header).size(12).color(t::TEXT_MUTED))
+        .push(text("Labels").size(18).color(t::TEXT_PRIMARY()))
+        .push(text(attach_header).size(12).color(t::TEXT_MUTED()))
         .push(attach_section)
         .push(
             container(text(""))
                 .height(Length::Fixed(1.0))
                 .width(Length::Fill)
                 .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(t::BORDER)),
+                    background: Some(iced::Background::Color(t::BORDER())),
                     ..Default::default()
                 }),
         )
-        .push(text("Create a new label").size(12).color(t::TEXT_MUTED))
+        .push(text("Create a new label").size(12).color(t::TEXT_MUTED()))
         .push(create_row)
         .push_maybe(
             form.error
                 .as_deref()
-                .map(|e| text(e).size(12).color(t::DANGER)),
+                .map(|e| text(e).size(12).color(t::DANGER())),
         );
 
     // Footer: Done applies the working set to the issue; Close just dismisses.
@@ -249,12 +249,12 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
         row![]
             .spacing(8)
             .push(
-                button(text(done_label).size(14).color(t::BG_PRIMARY))
+                button(text(done_label).size(14).color(t::BG_PRIMARY()))
                     .on_press(done_msg)
                     .padding([8, 24])
                     .style(move |_theme: &Theme, _status| button::Style {
-                        background: Some(iced::Background::Color(t::ACCENT)),
-                        text_color: t::BG_PRIMARY,
+                        background: Some(iced::Background::Color(t::ACCENT())),
+                        text_color: t::BG_PRIMARY(),
                         border: Border {
                             radius: 4.0.into(),
                             ..Default::default()
@@ -273,9 +273,9 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
     let modal = container(form_content)
         .padding(28)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::BG_MODAL())),
             border: Border {
-                color: t::BORDER,
+                color: t::BORDER(),
                 width: 1.0,
                 radius: 8.0.into(),
             },

@@ -28,9 +28,9 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
     let status_line: Element<'a, Message> = match form.status.as_deref() {
         Some(s) => {
             let color = if s.starts_with("Failed") || s.starts_with("Error") {
-                t::DANGER
+                t::DANGER()
             } else {
-                t::TEXT_MUTED
+                t::TEXT_MUTED()
             };
             text(s).size(12).color(color).into()
         }
@@ -40,11 +40,11 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
     let form_content = column![]
         .spacing(14)
         .width(Length::Fixed(460.0))
-        .push(text("Settings").size(18).color(t::TEXT_PRIMARY))
+        .push(text("Settings").size(18).color(t::TEXT_PRIMARY()))
         .push(
             column![]
                 .spacing(4)
-                .push(text("API base URL").size(12).color(t::TEXT_SECONDARY))
+                .push(text("API base URL").size(12).color(t::TEXT_SECONDARY()))
                 .push(
                     text_input("https://your-jait-instance.example.com", &form.api_base_url)
                         .on_input(Message::SettingsBaseUrlChanged)
@@ -55,7 +55,7 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
         .push(
             column![]
                 .spacing(4)
-                .push(text("API token").size(12).color(t::TEXT_SECONDARY))
+                .push(text("API token").size(12).color(t::TEXT_SECONDARY()))
                 .push(
                     text_input("Bearer token", &form.api_token)
                         .on_input(Message::SettingsTokenChanged)
@@ -89,12 +89,12 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                         .style(button::secondary),
                 )
                 .push(
-                    button(text("Save").size(14).color(t::BG_PRIMARY))
+                    button(text("Save").size(14).color(t::BG_PRIMARY()))
                         .on_press(Message::SaveSettings)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(t::ACCENT)),
-                            text_color: t::BG_PRIMARY,
+                            background: Some(iced::Background::Color(t::ACCENT())),
+                            text_color: t::BG_PRIMARY(),
                             border: Border {
                                 radius: 4.0.into(),
                                 ..Default::default()
@@ -107,9 +107,9 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
     let modal = container(form_content)
         .padding(28)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::BG_MODAL())),
             border: Border {
-                color: t::BORDER,
+                color: t::BORDER(),
                 width: 1.0,
                 radius: 8.0.into(),
             },

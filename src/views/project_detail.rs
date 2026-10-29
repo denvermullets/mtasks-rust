@@ -77,13 +77,13 @@ pub fn view<'a>(
         .spacing(6)
         .align_y(Alignment::Center)
         .push(
-            button(text("← Projects").size(13).color(t::TEXT_SECONDARY))
+            button(text("← Projects").size(13).color(t::TEXT_SECONDARY()))
                 .on_press(Message::NavigateToView(View::ProjectList))
                 .padding(0)
                 .style(button::text),
         )
-        .push(text("›").size(13).color(t::TEXT_MUTED))
-        .push(text(&project.name).size(13).color(t::TEXT_MUTED));
+        .push(text("›").size(13).color(t::TEXT_MUTED()))
+        .push(text(&project.name).size(13).color(t::TEXT_MUTED()));
 
     // ---- Header: status dot + buffered title ----
     let header = row![]
@@ -94,9 +94,9 @@ pub fn view<'a>(
                 .center_x(Length::Fixed(28.0))
                 .center_y(Length::Fixed(28.0))
                 .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(t::BG_CARD)),
+                    background: Some(iced::Background::Color(t::BG_CARD())),
                     border: Border {
-                        color: t::BORDER,
+                        color: t::BORDER(),
                         width: 1.0,
                         radius: 6.0.into(),
                     },
@@ -122,7 +122,7 @@ pub fn view<'a>(
             detail
                 .error
                 .as_deref()
-                .map(|e| text(e).size(12).color(t::DANGER)),
+                .map(|e| text(e).size(12).color(t::DANGER())),
         )
         .push(
             text_editor(&detail.description)
@@ -154,7 +154,7 @@ pub fn view<'a>(
         .spacing(18)
         .padding(20)
         .width(Length::Fill)
-        .push(text("Properties").size(11).color(t::TEXT_MUTED))
+        .push(text("Properties").size(11).color(t::TEXT_MUTED()))
         .push(section(
             "Status",
             pick_list(
@@ -205,12 +205,12 @@ pub fn view<'a>(
                 .push(
                     text(format!("Created {}", project.created_at))
                         .size(11)
-                        .color(t::TEXT_MUTED),
+                        .color(t::TEXT_MUTED()),
                 )
                 .push(
                     text(format!("Updated {}", project.updated_at))
                         .size(11)
-                        .color(t::TEXT_MUTED),
+                        .color(t::TEXT_MUTED()),
                 ),
         );
 
@@ -218,7 +218,7 @@ pub fn view<'a>(
         .width(Length::Fixed(300.0))
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_SECONDARY)),
+            background: Some(iced::Background::Color(t::BG_SECONDARY())),
             ..Default::default()
         });
 
@@ -226,7 +226,7 @@ pub fn view<'a>(
         .width(Length::Fixed(1.0))
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BORDER)),
+            background: Some(iced::Background::Color(t::BORDER())),
             ..Default::default()
         });
 
@@ -256,15 +256,15 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
     let data = progress_chart::compute(project, issues, progress_chart::today());
     let behind = data.behind;
     let body: Element<'a, Message> = if data.snapshots.is_empty() {
-        text("No data yet").size(12).color(t::TEXT_MUTED).into()
+        text("No data yet").size(12).color(t::TEXT_MUTED()).into()
     } else {
         let legend = row![]
             .spacing(14)
             .align_y(Alignment::Center)
-            .push(legend_item("Scope", t::CHART_SCOPE))
-            .push(legend_item("Started", t::CHART_STARTED))
-            .push(legend_item("Completed", t::CHART_COMPLETED))
-            .push(legend_item("Expected", t::DANGER));
+            .push(legend_item("Scope", t::CHART_SCOPE()))
+            .push(legend_item("Started", t::CHART_STARTED()))
+            .push(legend_item("Completed", t::CHART_COMPLETED()))
+            .push(legend_item("Expected", t::DANGER()));
         column![]
             .spacing(8)
             .push(legend)
@@ -278,20 +278,20 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
                 row![]
                     .spacing(10)
                     .align_y(Alignment::Center)
-                    .push(text("Burndown").size(12).color(t::TEXT_SECONDARY))
+                    .push(text("Burndown").size(12).color(t::TEXT_SECONDARY()))
                     .push_maybe(
-                        behind.then(|| text("Behind schedule").size(11).color(t::DANGER)),
+                        behind.then(|| text("Behind schedule").size(11).color(t::DANGER())),
                     ),
             )
-            .push(text(summary).size(12).color(t::TEXT_MUTED))
+            .push(text(summary).size(12).color(t::TEXT_MUTED()))
             .push(body),
     )
     .width(Length::Fill)
     .padding(16)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::BG_CARD)),
+        background: Some(iced::Background::Color(t::BG_CARD())),
         border: Border {
-            color: t::BORDER,
+            color: t::BORDER(),
             width: 1.0,
             radius: 6.0.into(),
         },
@@ -305,7 +305,7 @@ fn legend_item<'a>(label: &'a str, color: iced::Color) -> Element<'a, Message> {
         .spacing(5)
         .align_y(Alignment::Center)
         .push(text("\u{25CF}").size(9).color(color))
-        .push(text(label).size(11).color(t::TEXT_SECONDARY))
+        .push(text(label).size(11).color(t::TEXT_SECONDARY()))
         .into()
 }
 
@@ -321,11 +321,11 @@ fn issues_section<'a>(
     let mut col = column![].spacing(8).push(
         text(format!("Issues ({})", scoped.len()))
             .size(13)
-            .color(t::TEXT_SECONDARY),
+            .color(t::TEXT_SECONDARY()),
     );
 
     if scoped.is_empty() {
-        col = col.push(text("No issues to show").size(12).color(t::TEXT_MUTED));
+        col = col.push(text("No issues to show").size(12).color(t::TEXT_MUTED()));
     } else {
         for issue in scoped {
             col = col.push(issue_row(issue, display, team, lanes, members));
@@ -351,7 +351,7 @@ fn issue_row<'a>(
         content = content.push(
             text(identifier)
                 .size(12)
-                .color(t::TEXT_MUTED)
+                .color(t::TEXT_MUTED())
                 .width(Length::Fixed(90.0)),
         );
     }
@@ -365,7 +365,7 @@ fn issue_row<'a>(
     content = content.push(
         text(&issue.title)
             .size(13)
-            .color(t::TEXT_PRIMARY)
+            .color(t::TEXT_PRIMARY())
             .width(Length::Fill),
     );
     // Right-hand facts, only the enabled ones.
@@ -402,7 +402,7 @@ fn issue_row<'a>(
         facts.push(format!("Updated {}", util::short_date(&issue.updated_at)));
     }
     for f in facts {
-        content = content.push(text(f).size(12).color(t::TEXT_SECONDARY));
+        content = content.push(text(f).size(12).color(t::TEXT_SECONDARY()));
     }
 
     button(content)
@@ -410,10 +410,10 @@ fn issue_row<'a>(
         .padding([8, 10])
         .width(Length::Fill)
         .style(|_theme: &Theme, _status| button::Style {
-            background: Some(iced::Background::Color(t::BG_CARD)),
-            text_color: t::TEXT_PRIMARY,
+            background: Some(iced::Background::Color(t::BG_CARD())),
+            text_color: t::TEXT_PRIMARY(),
             border: Border {
-                color: t::BORDER,
+                color: t::BORDER(),
                 width: 1.0,
                 radius: 6.0.into(),
             },
@@ -426,13 +426,13 @@ fn issue_row<'a>(
 fn section<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![]
         .spacing(6)
-        .push(text(label).size(12).color(t::TEXT_MUTED))
+        .push(text(label).size(12).color(t::TEXT_MUTED()))
         .push(control.into())
         .into()
 }
 
 fn placeholder_value<'a>() -> Element<'a, Message> {
-    text("—").size(13).color(t::TEXT_MUTED).into()
+    text("—").size(13).color(t::TEXT_MUTED()).into()
 }
 
 /// Borderless, transparent style so the title input reads as an inline heading.
@@ -444,9 +444,9 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
             width: 0.0,
             radius: 0.0.into(),
         },
-        icon: t::TEXT_MUTED,
-        placeholder: t::TEXT_MUTED,
-        value: t::TEXT_PRIMARY,
-        selection: t::ACCENT,
+        icon: t::TEXT_MUTED(),
+        placeholder: t::TEXT_MUTED(),
+        value: t::TEXT_PRIMARY(),
+        selection: t::ACCENT(),
     }
 }

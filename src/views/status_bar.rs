@@ -19,16 +19,16 @@ pub fn view<'a>(
         // Transient network failures are non-fatal (sync retries) — surface them
         // as an amber warning rather than a hard red error.
         if err.contains("network") {
-            (format!("Sync warning: {err}"), t::WARNING)
+            (format!("Sync warning: {err}"), t::WARNING())
         } else {
-            (format!("Sync error: {err}"), t::DANGER)
+            (format!("Sync error: {err}"), t::DANGER())
         }
     } else if sync_in_progress {
-        ("Syncing\u{2026}".to_string(), t::TEXT_MUTED)
+        ("Syncing\u{2026}".to_string(), t::TEXT_MUTED())
     } else if !token_configured {
         (
             "Sync paused \u{2014} set API token".to_string(),
-            t::TEXT_MUTED,
+            t::TEXT_MUTED(),
         )
     } else if let Some(at) = last_synced_at {
         let base = format!("Synced {}", format_age(at));
@@ -37,14 +37,14 @@ pub fn view<'a>(
         } else {
             base
         };
-        (full, t::TEXT_MUTED)
+        (full, t::TEXT_MUTED())
     } else if pending_sync_count > 0 {
         (
             format!("Not synced yet \u{00B7} {pending_sync_count} pending"),
-            t::TEXT_MUTED,
+            t::TEXT_MUTED(),
         )
     } else {
-        ("Not synced yet".to_string(), t::TEXT_MUTED)
+        ("Not synced yet".to_string(), t::TEXT_MUTED())
     };
 
     let shortcuts = if show_help {
@@ -56,7 +56,7 @@ pub fn view<'a>(
     let mut bar = row![].spacing(16).push(
         text(shortcuts)
             .size(12)
-            .color(t::TEXT_MUTED)
+            .color(t::TEXT_MUTED())
             .width(Length::Fill),
     );
 
@@ -64,7 +64,7 @@ pub fn view<'a>(
         bar = bar.push(
             text(format!("\u{26A0} config: {}", msg))
                 .size(12)
-                .color(t::DANGER),
+                .color(t::DANGER()),
         );
     }
 
@@ -74,9 +74,9 @@ pub fn view<'a>(
         .padding([6, 14])
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_SECONDARY)),
+            background: Some(iced::Background::Color(t::BG_SECONDARY())),
             border: Border {
-                color: t::BORDER,
+                color: t::BORDER(),
                 width: 1.0,
                 radius: 0.0.into(),
             },

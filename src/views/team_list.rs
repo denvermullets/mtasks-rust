@@ -43,7 +43,7 @@ pub fn view<'a>(
                             "Show archived"
                         })
                         .size(11)
-                        .color(t::TEXT_MUTED),
+                        .color(t::TEXT_MUTED()),
                     )
                     .on_press(Message::ToggleShowArchivedTeams)
                     .padding([4, 14])
@@ -69,19 +69,19 @@ pub fn view<'a>(
             "\u{25B8}" // ▸
         })
         .size(10)
-        .color(t::TEXT_MUTED);
+        .color(t::TEXT_MUTED());
 
         let identifier_badge = container(text(&team.identifier).size(11).color(if is_selected {
-            t::ACCENT
+            t::ACCENT()
         } else {
-            t::TEXT_MUTED
+            t::TEXT_MUTED()
         }))
         .padding([2, 4]);
 
         let name_text = text(&team.name).size(14).color(if is_selected {
-            t::TEXT_PRIMARY
+            t::TEXT_PRIMARY()
         } else {
-            t::TEXT_SECONDARY
+            t::TEXT_SECONDARY()
         });
 
         let header_content = row![]
@@ -90,7 +90,7 @@ pub fn view<'a>(
             .push(chevron)
             .push(identifier_badge)
             .push(name_text)
-            .push_maybe(is_archived.then(|| text("archived").size(10).color(t::TEXT_MUTED)));
+            .push_maybe(is_archived.then(|| text("archived").size(10).color(t::TEXT_MUTED())));
 
         let header_button = button(header_content)
             .on_press(Message::ToggleTeamExpanded(team.id.clone()))
@@ -108,9 +108,9 @@ pub fn view<'a>(
                     .push(header_button)
                     .push(
                         button(text("\u{22EF}").size(14).color(if menu_open {
-                            t::TEXT_PRIMARY
+                            t::TEXT_PRIMARY()
                         } else {
-                            t::TEXT_MUTED
+                            t::TEXT_MUTED()
                         }))
                         .on_press(Message::ToggleTeamMenu(team.id.clone()))
                         .padding([6, 10])
@@ -163,7 +163,7 @@ pub fn view<'a>(
         .padding(0)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MENU)),
+            background: Some(iced::Background::Color(t::BG_MENU())),
             ..Default::default()
         })
         .into()
@@ -173,9 +173,9 @@ pub fn view<'a>(
 pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
     let btn = |label: &'a str, msg: Message| {
         button(text(label).size(13).color(if has_team {
-            t::TEXT_SECONDARY
+            t::TEXT_SECONDARY()
         } else {
-            t::TEXT_MUTED
+            t::TEXT_MUTED()
         }))
         .on_press_maybe(has_team.then_some(msg))
         .padding([6, 14])
@@ -190,9 +190,9 @@ pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
     .padding([6, 0])
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::BG_MENU)),
+        background: Some(iced::Background::Color(t::BG_MENU())),
         border: Border {
-            color: t::BORDER,
+            color: t::BORDER(),
             width: 1.0,
             radius: 0.0.into(),
         },
@@ -203,7 +203,7 @@ pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
 
 /// A muted uppercase section label.
 fn section_header<'a>(label: &'a str) -> Element<'a, Message> {
-    container(text(label).size(11).color(t::TEXT_MUTED))
+    container(text(label).size(11).color(t::TEXT_MUTED()))
         .padding([14, 14])
         .into()
 }
@@ -213,9 +213,9 @@ fn section_header<'a>(label: &'a str) -> Element<'a, Message> {
 fn menu_row<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Message> {
     let enabled = on_press.is_some();
     button(text(label).size(12).color(if enabled {
-        t::TEXT_SECONDARY
+        t::TEXT_SECONDARY()
     } else {
-        t::TEXT_MUTED
+        t::TEXT_MUTED()
     }))
     .on_press_maybe(on_press)
     .padding([5, 28])
@@ -233,9 +233,9 @@ fn nav_row<'a>(
     left_pad: u16,
 ) -> Element<'a, Message> {
     button(text(label).size(14).color(if active {
-        t::TEXT_PRIMARY
+        t::TEXT_PRIMARY()
     } else {
-        t::TEXT_SECONDARY
+        t::TEXT_SECONDARY()
     }))
     .on_press(on_press)
     .padding([6, left_pad])
@@ -247,14 +247,14 @@ fn nav_row<'a>(
 fn selected_row_style(active: bool) -> button::Style {
     button::Style {
         background: Some(iced::Background::Color(if active {
-            t::BG_CARD_FOCUSED
+            t::BG_CARD_FOCUSED()
         } else {
-            t::BG_MENU
+            t::BG_MENU()
         })),
-        text_color: t::TEXT_PRIMARY,
+        text_color: t::TEXT_PRIMARY(),
         border: Border {
             color: if active {
-                t::ACCENT
+                t::ACCENT()
             } else {
                 iced::Color::TRANSPARENT
             },
@@ -267,8 +267,8 @@ fn selected_row_style(active: bool) -> button::Style {
 
 fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
     button::Style {
-        background: Some(iced::Background::Color(t::BG_MENU)),
-        text_color: t::TEXT_PRIMARY,
+        background: Some(iced::Background::Color(t::BG_MENU())),
+        text_color: t::TEXT_PRIMARY(),
         border: Border {
             color: iced::Color::TRANSPARENT,
             width: 0.0,

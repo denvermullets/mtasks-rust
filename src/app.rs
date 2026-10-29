@@ -29,6 +29,8 @@ use crate::views::{
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// PROTOTYPE (JRST-4): cycle the live theme by delta.
+    ProtoCycleTheme(isize),
     // Navigation
     /// Toggle a team's sidebar expansion (chevron / team-header click).
     ToggleTeamExpanded(String),
@@ -1405,7 +1407,7 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        t::iced_theme()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -2106,6 +2108,10 @@ impl App {
                 self.label_form = None;
                 self.team_members.clear();
                 self.csv_import = None;
+            }
+
+            Message::ProtoCycleTheme(delta) => {
+                t::cycle(delta);
             }
 
             Message::ToggleHelp => {
@@ -2924,7 +2930,7 @@ impl App {
             View::MyIssues if my_empty.is_some() => iced::widget::container(
                 iced::widget::text(my_empty.unwrap_or_default())
                     .size(14)
-                    .color(t::TEXT_MUTED),
+                    .color(t::TEXT_MUTED()),
             )
             .center_x(Length::Fill)
             .center_y(Length::Fill)
@@ -3077,9 +3083,9 @@ impl App {
                     .width(Length::Fixed(220.0))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(t::BG_MENU)),
+                        background: Some(iced::Background::Color(t::BG_MENU())),
                         border: iced::Border {
-                            color: t::BORDER,
+                            color: t::BORDER(),
                             width: 0.0,
                             radius: 0.0.into(),
                         },
@@ -3094,7 +3100,7 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BG_PRIMARY)),
+                background: Some(iced::Background::Color(t::BG_PRIMARY())),
                 ..Default::default()
             })
             .into();
@@ -3210,11 +3216,12 @@ impl App {
         };
 
         // Toasts sit above everything, including any open modal.
-        if self.toasts.is_empty() {
+        let content: Element<'_, Message> = if self.toasts.is_empty() {
             content
         } else {
             iced::widget::stack![content, toast::overlay(&self.toasts)].into()
-        }
+        };
+        iced::widget::stack![content, crate::views::prototype_switcher::overlay()].into()
     }
 }
 
@@ -3328,14 +3335,14 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
 
     let content = column![]
         .spacing(16)
-        .push(text("Delete Issue?").size(18).color(t::TEXT_PRIMARY))
+        .push(text("Delete Issue?").size(18).color(t::TEXT_PRIMARY()))
         .push(
             text(format!(
                 "Are you sure you want to delete \"{}\"?",
                 issue_title
             ))
             .size(14)
-            .color(t::TEXT_SECONDARY),
+            .color(t::TEXT_SECONDARY()),
         )
         .push(
             row![]
@@ -3345,7 +3352,7 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
                         .on_press(Message::DeleteConfirmed)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(t::DANGER)),
+                            background: Some(iced::Background::Color(t::DANGER())),
                             text_color: iced::Color::WHITE,
                             border: Border {
                                 radius: 4.0.into(),
@@ -3366,9 +3373,9 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
         container(content)
             .padding(28)
             .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BG_MODAL)),
+                background: Some(iced::Background::Color(t::BG_MODAL())),
                 border: iced::Border {
-                    color: t::BORDER,
+                    color: t::BORDER(),
                     width: 1.0,
                     radius: 8.0.into(),
                 },
@@ -3395,14 +3402,14 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
 
     let content = column![]
         .spacing(16)
-        .push(text("Delete Project?").size(18).color(t::TEXT_PRIMARY))
+        .push(text("Delete Project?").size(18).color(t::TEXT_PRIMARY()))
         .push(
             text(format!(
                 "Are you sure you want to delete \"{}\"?",
                 project_name
             ))
             .size(14)
-            .color(t::TEXT_SECONDARY),
+            .color(t::TEXT_SECONDARY()),
         )
         .push(
             row![]
@@ -3412,7 +3419,7 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
                         .on_press(Message::DeleteProjectConfirmed)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(t::DANGER)),
+                            background: Some(iced::Background::Color(t::DANGER())),
                             text_color: iced::Color::WHITE,
                             border: Border {
                                 radius: 4.0.into(),
@@ -3433,9 +3440,9 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
         container(content)
             .padding(28)
             .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BG_MODAL)),
+                background: Some(iced::Background::Color(t::BG_MODAL())),
                 border: iced::Border {
-                    color: t::BORDER,
+                    color: t::BORDER(),
                     width: 1.0,
                     radius: 8.0.into(),
                 },

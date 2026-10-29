@@ -123,15 +123,15 @@ pub fn view<'a>(
         .spacing(6)
         .align_y(Alignment::Center)
         .push(
-            button(text("← Issues").size(13).color(t::TEXT_SECONDARY))
+            button(text("← Issues").size(13).color(t::TEXT_SECONDARY()))
                 .on_press(Message::NavigateToView(View::Board))
                 .padding(0)
                 .style(button::text),
         )
-        .push(text("›").size(13).color(t::TEXT_MUTED))
-        .push_maybe(project_name.map(|n| text(n).size(13).color(t::TEXT_SECONDARY)))
-        .push_maybe(project_name.map(|_| text("›").size(13).color(t::TEXT_MUTED)))
-        .push(text(identifier).size(13).color(t::TEXT_MUTED));
+        .push(text("›").size(13).color(t::TEXT_MUTED()))
+        .push_maybe(project_name.map(|n| text(n).size(13).color(t::TEXT_SECONDARY())))
+        .push_maybe(project_name.map(|_| text("›").size(13).color(t::TEXT_MUTED())))
+        .push(text(identifier).size(13).color(t::TEXT_MUTED()));
 
     // ---- Left column: title, description, activity stub ----
     let left = column![]
@@ -151,7 +151,7 @@ pub fn view<'a>(
             detail
                 .error
                 .as_deref()
-                .map(|e| text(e).size(12).color(t::DANGER)),
+                .map(|e| text(e).size(12).color(t::DANGER())),
         )
         .push(
             text_editor(&detail.description)
@@ -235,7 +235,7 @@ pub fn view<'a>(
         .spacing(18)
         .padding(20)
         .width(Length::Fill)
-        .push(text("Properties").size(11).color(t::TEXT_MUTED))
+        .push(text("Properties").size(11).color(t::TEXT_MUTED()))
         .push_maybe(parent.map(|p| section("Parent", parent_link(p, team))))
         .push(section(
             "Status",
@@ -263,7 +263,7 @@ pub fn view<'a>(
         .push(section(
             "Creator",
             match creator_name {
-                Some(name) => text(name).size(13).color(t::TEXT_SECONDARY).into(),
+                Some(name) => text(name).size(13).color(t::TEXT_SECONDARY()).into(),
                 None => placeholder_value(),
             },
         ))
@@ -309,12 +309,12 @@ pub fn view<'a>(
                 .push(
                     text(format!("Created {}", issue.created_at))
                         .size(11)
-                        .color(t::TEXT_MUTED),
+                        .color(t::TEXT_MUTED()),
                 )
                 .push(
                     text(format!("Updated {}", issue.updated_at))
                         .size(11)
-                        .color(t::TEXT_MUTED),
+                        .color(t::TEXT_MUTED()),
                 ),
         );
 
@@ -322,7 +322,7 @@ pub fn view<'a>(
         .width(Length::Fixed(300.0))
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_SECONDARY)),
+            background: Some(iced::Background::Color(t::BG_SECONDARY())),
             ..Default::default()
         });
 
@@ -331,7 +331,7 @@ pub fn view<'a>(
         .width(Length::Fixed(1.0))
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BORDER)),
+            background: Some(iced::Background::Color(t::BORDER())),
             ..Default::default()
         });
 
@@ -360,9 +360,9 @@ fn parent_link<'a>(parent: &'a Issue, team: Option<&'a Team>) -> Element<'a, Mes
             .push(
                 text(issue_identifier(parent, team))
                     .size(12)
-                    .color(t::TEXT_MUTED),
+                    .color(t::TEXT_MUTED()),
             )
-            .push(text(&parent.title).size(12).color(t::TEXT_SECONDARY)),
+            .push(text(&parent.title).size(12).color(t::TEXT_SECONDARY())),
     )
     .on_press(Message::OpenIssueDetail(parent.id.clone()))
     .padding(0)
@@ -381,12 +381,12 @@ fn sub_issues_section<'a>(
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(8)
-        .push(text("Sub-issues").size(13).color(t::TEXT_SECONDARY));
+        .push(text("Sub-issues").size(13).color(t::TEXT_SECONDARY()));
     for child in sub_issues {
         col = col.push(sub_issue_row(child, team, lanes));
     }
     col.push(
-        button(text("+ Add sub-issue").size(12).color(t::ACCENT))
+        button(text("+ Add sub-issue").size(12).color(t::ACCENT()))
             .on_press(Message::CreateSubIssue(issue.id.clone()))
             .padding(0)
             .style(button::text),
@@ -406,7 +406,7 @@ fn sub_issue_row<'a>(
             .color
             .as_deref()
             .and_then(t::hex_to_color)
-            .unwrap_or(t::TEXT_MUTED);
+            .unwrap_or(t::TEXT_MUTED());
         container(text(&l.name).size(11).color(color))
             .padding([2, 8])
             .style(move |_theme: &Theme| container::Style {
@@ -426,12 +426,12 @@ fn sub_issue_row<'a>(
             .push(
                 text(issue_identifier(child, team))
                     .size(12)
-                    .color(t::TEXT_MUTED),
+                    .color(t::TEXT_MUTED()),
             )
             .push(
                 text(&child.title)
                     .size(13)
-                    .color(t::TEXT_PRIMARY)
+                    .color(t::TEXT_PRIMARY())
                     .width(Length::Fill),
             )
             .push_maybe(badge),
@@ -447,7 +447,7 @@ fn sub_issue_row<'a>(
 fn section<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![]
         .spacing(6)
-        .push(text(label).size(12).color(t::TEXT_MUTED))
+        .push(text(label).size(12).color(t::TEXT_MUTED()))
         .push(control.into())
         .into()
 }
@@ -455,7 +455,7 @@ fn section<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 /// Em-dash placeholder for sidebar sections filled in by later tickets
 /// (Assignee JAIT-113, Labels JAIT-112).
 fn placeholder_value<'a>() -> Element<'a, Message> {
-    text("—").size(13).color(t::TEXT_MUTED).into()
+    text("—").size(13).color(t::TEXT_MUTED()).into()
 }
 
 /// A dependency sidebar section: the linked issues as clickable rows, followed
@@ -470,7 +470,7 @@ fn dependency_section<'a>(
         col = col.push(dependency_row(link));
     }
     col.push(
-        button(text(add_label).size(12).color(t::ACCENT))
+        button(text(add_label).size(12).color(t::ACCENT()))
             .on_press(Message::OpenDependencyPicker(direction))
             .padding(0)
             .style(button::text),
@@ -488,8 +488,8 @@ fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
             button(
                 row![]
                     .spacing(6)
-                    .push(text(&link.identifier).size(12).color(t::TEXT_MUTED))
-                    .push(text(&link.title).size(12).color(t::TEXT_SECONDARY)),
+                    .push(text(&link.identifier).size(12).color(t::TEXT_MUTED()))
+                    .push(text(&link.title).size(12).color(t::TEXT_SECONDARY())),
             )
             .on_press(Message::OpenIssueDetail(link.issue_id.clone()))
             .padding(0)
@@ -497,7 +497,7 @@ fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
             .style(button::text),
         )
         .push(
-            button(text("×").size(14).color(t::TEXT_MUTED))
+            button(text("×").size(14).color(t::TEXT_MUTED()))
                 .on_press(Message::RemoveDependency(link.dep_id.clone()))
                 .padding(0)
                 .style(button::text),
@@ -577,7 +577,7 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
     let mut col = column![].spacing(2).push(
         text("↑↓ to move · Enter/Tab or click to insert · Esc to dismiss")
             .size(10)
-            .color(t::TEXT_MUTED),
+            .color(t::TEXT_MUTED()),
     );
     for (i, item) in s.items.iter().enumerate() {
         let selected = i == s.selected;
@@ -585,8 +585,8 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
             button(
                 row![]
                     .spacing(8)
-                    .push(text(&item.label).size(12).color(t::ACCENT))
-                    .push(text(&item.detail).size(12).color(t::TEXT_SECONDARY)),
+                    .push(text(&item.label).size(12).color(t::ACCENT()))
+                    .push(text(&item.detail).size(12).color(t::TEXT_SECONDARY())),
             )
             .on_press(Message::PickSuggestion(i))
             .padding([3, 8])
@@ -594,7 +594,7 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
             .style(move |theme: &Theme, status| {
                 let mut st = button::text(theme, status);
                 if selected {
-                    st.background = Some(iced::Background::Color(t::BG_CARD_FOCUSED));
+                    st.background = Some(iced::Background::Color(t::BG_CARD_FOCUSED()));
                 }
                 st
             }),
@@ -604,9 +604,9 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         .padding(6)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_CARD)),
+            background: Some(iced::Background::Color(t::BG_CARD())),
             border: Border {
-                color: t::BORDER,
+                color: t::BORDER(),
                 width: 1.0,
                 radius: 6.0.into(),
             },
@@ -633,17 +633,17 @@ fn rich_body<'a>(
         .into_iter()
         .map(|seg| match seg {
             Segment::Text(s) => span(s.to_string()).color(plain),
-            Segment::Mention(s) => span(s.to_string()).color(t::HIGHLIGHT),
+            Segment::Mention(s) => span(s.to_string()).color(t::HIGHLIGHT()),
             Segment::Issue { text, .. } => {
                 // Resolves own-team and cross-team identifiers alike.
                 let target = mentions::parse_ident(text)
                     .and_then(|(p, n)| mentions::resolve_issue(issues, teams, p, n));
                 match target {
                     Some(i) => span(text.to_string())
-                        .color(t::ACCENT)
+                        .color(t::ACCENT())
                         .underline(true)
                         .link(i.id.clone()),
-                    None => span(text.to_string()).color(t::ACCENT),
+                    None => span(text.to_string()).color(t::ACCENT()),
                 }
             }
         })
@@ -673,8 +673,8 @@ fn description_preview<'a>(
         container(
             column![]
                 .spacing(4)
-                .push(text("Preview").size(10).color(t::TEXT_MUTED))
-                .push(rich_body(body, 12.0, t::TEXT_SECONDARY, team, teams, issues, members)),
+                .push(text("Preview").size(10).color(t::TEXT_MUTED()))
+                .push(rich_body(body, 12.0, t::TEXT_SECONDARY(), team, teams, issues, members)),
         )
         .padding([6, 10])
         .into(),
@@ -690,7 +690,7 @@ fn referenced_in_section<'a>(
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(4)
-        .push(text("Referenced in").size(13).color(t::TEXT_SECONDARY));
+        .push(text("Referenced in").size(13).color(t::TEXT_SECONDARY()));
     for r in references {
         let Some(src) = issues.iter().find(|i| i.id == r.source_issue_id) else {
             continue;
@@ -708,15 +708,15 @@ fn referenced_in_section<'a>(
                     .push(
                         text(issue_identifier(src, team))
                             .size(12)
-                            .color(t::TEXT_MUTED),
+                            .color(t::TEXT_MUTED()),
                     )
                     .push(
                         text(&src.title)
                             .size(13)
-                            .color(t::TEXT_PRIMARY)
+                            .color(t::TEXT_PRIMARY())
                             .width(Length::Fill),
                     )
-                    .push(text(via).size(11).color(t::TEXT_MUTED)),
+                    .push(text(via).size(11).color(t::TEXT_MUTED())),
             )
             .on_press(Message::OpenIssueDetail(src.id.clone()))
             .padding([6, 8])
@@ -741,11 +741,11 @@ fn comments_section<'a>(
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
-        .push(text("Activity").size(13).color(t::TEXT_SECONDARY));
+        .push(text("Activity").size(13).color(t::TEXT_SECONDARY()));
 
     let items = events::timeline(events, comments);
     if items.is_empty() {
-        col = col.push(text("No activity yet").size(12).color(t::TEXT_MUTED));
+        col = col.push(text("No activity yet").size(12).color(t::TEXT_MUTED()));
     }
     for item in items {
         match item {
@@ -803,13 +803,13 @@ fn event_row<'a>(event: &'a IssueEvent, members: &'a [Member]) -> Element<'a, Me
     row![]
         .spacing(6)
         .align_y(Alignment::Center)
-        .push(text("•").size(11).color(t::TEXT_MUTED))
-        .push(text(actor).size(12).color(t::TEXT_SECONDARY))
-        .push(text(event.description()).size(12).color(t::TEXT_MUTED))
+        .push(text("•").size(11).color(t::TEXT_MUTED()))
+        .push(text(actor).size(12).color(t::TEXT_SECONDARY()))
+        .push(text(event.description()).size(12).color(t::TEXT_MUTED()))
         .push(
             text(relative_time(&event.created_at))
                 .size(11)
-                .color(t::TEXT_MUTED),
+                .color(t::TEXT_MUTED()),
         )
         .into()
 }
@@ -882,17 +882,17 @@ fn comment_row<'a>(
         row![]
             .spacing(8)
             .align_y(Alignment::Center)
-            .push(text(author).size(12).color(t::TEXT_SECONDARY))
+            .push(text(author).size(12).color(t::TEXT_SECONDARY()))
             .push(
                 text(relative_time(&comment.created_at))
                     .size(11)
-                    .color(t::TEXT_MUTED),
+                    .color(t::TEXT_MUTED()),
             ),
     );
-    col = col.push(rich_body(&comment.body, 13.0, t::TEXT_PRIMARY, team, teams, issues, members));
+    col = col.push(rich_body(&comment.body, 13.0, t::TEXT_PRIMARY(), team, teams, issues, members));
     if Comment::can_reply_at(depth) {
         col = col.push(
-            button(text("Reply").size(11).color(t::TEXT_MUTED))
+            button(text("Reply").size(11).color(t::TEXT_MUTED()))
                 .on_press(Message::StartReply(comment.id.clone()))
                 .padding(0)
                 .style(button::text),
@@ -907,7 +907,7 @@ fn comment_row<'a>(
             .padding([4, 10])
             .style(|_theme: &Theme| container::Style {
                 border: Border {
-                    color: t::TEXT_MUTED,
+                    color: t::TEXT_MUTED(),
                     width: 1.0,
                     radius: 4.0.into(),
                 },
@@ -927,9 +927,9 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
             width: 0.0,
             radius: 0.0.into(),
         },
-        icon: t::TEXT_MUTED,
-        placeholder: t::TEXT_MUTED,
-        value: t::TEXT_PRIMARY,
-        selection: t::ACCENT,
+        icon: t::TEXT_MUTED(),
+        placeholder: t::TEXT_MUTED(),
+        value: t::TEXT_PRIMARY(),
+        selection: t::ACCENT(),
     }
 }
