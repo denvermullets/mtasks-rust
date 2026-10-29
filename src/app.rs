@@ -206,9 +206,8 @@ pub enum DepDirection {
     BlockedBy,
 }
 
-/// Which screen the right-hand pane renders. `Roadmap` and `MyIssues` still render
-/// titled "Coming soon" placeholders until their tickets land (JAIT-183 roadmap,
-/// JAIT-186 my issues).
+/// Which screen the right-hand pane renders. `MyIssues` still renders a titled
+/// "Coming soon" placeholder until its ticket lands (JAIT-186).
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
     Board,

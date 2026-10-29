@@ -46,14 +46,14 @@ const PER_ROW: usize = 3;
 /// Full-pane Roadmap view: three vertical swimlanes (Now / Next / Later) of
 /// project cards grouped by `roadmap_commitment`, with header status counts and
 /// per-lane "Add project" buttons. `projects` is the selected team's full list;
-/// off-roadmap projects (commitment `None`) simply don't appear in any lane.
+/// off-roadmap projects (commitment `None`) simply don't appear in any lane, and
+/// completed projects are hidden entirely (Rails scopes to `not_completed`).
 pub fn view<'a>(projects: &'a [Project], team: Option<&'a Team>) -> Element<'a, Message> {
     let identifier = team.map(|t| t.identifier.as_str()).unwrap_or("");
 
     // Projects on the roadmap drive the header counts (mirrors the Rails
     // controller, which flattens the three lanes' values).
-    let on_roadmap: Vec<&Project> = projects
-        .iter()
+    let on_roadmap: Vec<&Project> = roadmap_scope(projects)
         .filter(|p| p.roadmap_commitment.is_some())
         .collect();
     let behind = on_roadmap.iter().filter(|p| p.behind_schedule).count();
@@ -101,8 +101,7 @@ pub fn view<'a>(projects: &'a [Project], team: Option<&'a Team>) -> Element<'a, 
     // One lane block per commitment.
     let mut lanes = column![].spacing(12).width(Length::Fill);
     for (commitment, label, subtitle, dot) in LANES {
-        let mut in_lane: Vec<&Project> = projects
-            .iter()
+        let mut in_lane: Vec<&Project> = roadmap_scope(projects)
             .filter(|p| p.roadmap_commitment == Some(commitment))
             .collect();
         // due_date ASC, NULLS LAST (mirrors Project.in_commitment).
@@ -423,6 +422,14 @@ fn divider<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Projects eligible for the roadmap at all: everything but completed ones
+/// (mirrors `current_team.projects.not_completed` in the Rails controller).
+fn roadmap_scope(projects: &[Project]) -> impl Iterator<Item = &Project> {
+    projects
+        .iter()
+        .filter(|p| p.status != ProjectStatus::Completed)
+}
+
 /// Compare two optional due dates for ascending sort with NULLs last.
 fn cmp_due_nulls_last(a: &Option<String>, b: &Option<String>) -> std::cmp::Ordering {
     use std::cmp::Ordering;
@@ -448,10 +455,10 @@ pub fn add_modal_view<'a>(
 ) -> Element<'a, Message> {
     let identifier = team.map(|t| t.identifier.as_str()).unwrap_or("");
 
-    let off_roadmap: Vec<&Project> = projects
-        .iter()
+    let mut off_roadmap: Vec<&Project> = roadmap_scope(projects)
         .filter(|p| p.roadmap_commitment.is_none())
         .collect();
+    off_roadmap.sort_by_key(|p| p.name.to_lowercase());
 
     // Lane chip selector.
     let mut chip_row = row![].spacing(6).align_y(Alignment::Center);
