@@ -35,11 +35,14 @@ pub fn project_matches(project: &Project, needle: &str) -> bool {
 
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
-/// filter; `new_action` is `None` where "+ New" has no target.
+/// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
+/// is `Some(active_filter_count)` on the board, where Display and Filter apply,
+/// and `None` elsewhere (the buttons are disabled).
 pub fn view<'a>(
     crumbs: Vec<String>,
     query: &'a str,
     search_enabled: bool,
+    board_controls: Option<usize>,
     new_action: Option<Message>,
 ) -> Element<'a, Message> {
     let mut trail = row![].spacing(8).align_y(Alignment::Center);
@@ -65,11 +68,33 @@ pub fn view<'a>(
         search = search.on_input(Message::HeaderSearchChanged);
     }
 
-    // Display options land with JAIT-185; the button is a no-op until then.
     let display = button(text("Display").size(13))
-        .on_press(Message::OpenDisplayOptions)
+        .on_press_maybe(board_controls.map(|_| Message::OpenDisplayOptions))
         .padding([5, 12])
         .style(button::secondary);
+
+    // Filter button with an active-filter count badge.
+    let filter_count = board_controls.unwrap_or(0);
+    let filter_label = if filter_count > 0 {
+        format!("Filter \u{b7} {}", filter_count)
+    } else {
+        "Filter".to_string()
+    };
+    let filter = button(text(filter_label).size(13))
+        .on_press_maybe(board_controls.map(|_| Message::OpenFilterPanel))
+        .padding([5, 12])
+        .style(move |theme: &Theme, status| {
+            let mut style = button::secondary(theme, status);
+            if filter_count > 0 {
+                style.text_color = t::ACCENT;
+                style.border = Border {
+                    color: t::ACCENT,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                };
+            }
+            style
+        });
 
     let enabled = new_action.is_some();
     let mut new_button = button(text("+ New").size(13).color(if enabled {
@@ -100,6 +125,7 @@ pub fn view<'a>(
         .push(trail)
         .push(iced::widget::horizontal_space())
         .push(search)
+        .push(filter)
         .push(display)
         .push(new_button);
 

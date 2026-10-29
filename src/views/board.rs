@@ -6,43 +6,46 @@ use iced::widget::{
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::models::{Issue, Label, Lane, Team};
+use crate::db::models::{Issue, Label, Lane, Member, Project};
+use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
 use crate::theme as t;
-use crate::views::header;
 use crate::views::labels as labels_view;
 
+/// Lookup data cards need for their optional properties.
+pub struct CardData<'a> {
+    pub team_identifier: &'a str,
+    pub lanes: &'a [Lane],
+    pub members: &'a [Member],
+    pub projects: &'a [Project],
+    pub issue_labels: &'a HashMap<String, Vec<Label>>,
+    pub display: &'a DisplayOptions,
+}
+
+/// Render the board. Columns come from `display::build_columns`, so they may be
+/// lanes, priorities, assignees, etc.; `focused_lane` indexes `columns` and
+/// `focused_issue` is the flat index within the column (across sub-groups).
 pub fn view<'a>(
-    team: Option<&'a Team>,
-    lanes: &'a [Lane],
-    issues: &'a [Issue],
-    issue_labels: &'a HashMap<String, Vec<Label>>,
+    columns: &[BoardColumn<'a>],
+    data: CardData<'a>,
     focused_lane: usize,
     focused_issue: usize,
-    needle: &str,
 ) -> Element<'a, Message> {
-    let team_identifier = team.map(|t| t.identifier.as_str()).unwrap_or("---");
-
-    if lanes.is_empty() {
-        return container(
-            text("No lanes — select a team")
-                .size(14)
-                .color(t::TEXT_MUTED),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into();
+    if columns.is_empty() {
+        let msg = if data.lanes.is_empty() {
+            "No lanes — select a team"
+        } else {
+            "No columns to show"
+        };
+        return container(text(msg).size(14).color(t::TEXT_MUTED))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
     }
 
-    // Lane headers row
+    // Column headers row
     let mut header_row = row![].spacing(0).width(Length::Fill);
-    for (lane_idx, lane) in lanes.iter().enumerate() {
-        let lane_issues: Vec<&Issue> = issues
-            .iter()
-            .filter(|i| i.lane_id == lane.id && header::issue_matches(i, team, needle))
-            .collect();
-        let is_focused_lane = lane_idx == focused_lane;
-
-        let name_color = if is_focused_lane {
+    for (col_idx, col) in columns.iter().enumerate() {
+        let name_color = if col_idx == focused_lane {
             t::TEXT_PRIMARY
         } else {
             t::TEXT_SECONDARY
@@ -50,46 +53,47 @@ pub fn view<'a>(
 
         let header = row![]
             .spacing(6)
-            .push(text(&lane.name).size(14).color(name_color))
+            .push(text(col.title.clone()).size(14).color(name_color))
             .push(
-                text(format!("{}", lane_issues.len()))
+                text(format!("{}", col.issues.len()))
                     .size(13)
                     .color(t::TEXT_MUTED),
             );
 
-        let header_container = container(header).padding([10, 12]).width(Length::Fill);
-
-        header_row = header_row.push(header_container);
+        header_row = header_row.push(container(header).padding([10, 12]).width(Length::Fill));
     }
 
-    // Lane columns with cards
+    // Columns with cards
     let mut lane_columns = row![].spacing(1).width(Length::Fill).height(Length::Fill);
 
-    for (lane_idx, lane) in lanes.iter().enumerate() {
-        let lane_issues: Vec<&Issue> = issues
-            .iter()
-            .filter(|i| i.lane_id == lane.id && header::issue_matches(i, team, needle))
-            .collect();
-        let is_focused_lane = lane_idx == focused_lane;
+    for (col_idx, col) in columns.iter().enumerate() {
+        let is_focused_lane = col_idx == focused_lane;
 
         let mut issue_cards: Column<'_, Message> =
             column![].spacing(6).width(Length::Fill).padding([4, 8]);
 
-        for (issue_idx, issue) in lane_issues.iter().enumerate() {
+        for (issue_idx, issue) in col.issues.iter().copied().enumerate() {
+            // Sub-group heading before the first card of each section.
+            if let Some(section) = col.sections.iter().find(|s| s.start == issue_idx) {
+                issue_cards = issue_cards.push(
+                    row![]
+                        .spacing(6)
+                        .padding([4, 2])
+                        .push(
+                            text(section.title.clone())
+                                .size(12)
+                                .color(t::TEXT_SECONDARY),
+                        )
+                        .push(
+                            text(format!("{}", section.end - section.start))
+                                .size(12)
+                                .color(t::TEXT_MUTED),
+                        ),
+                );
+            }
             let is_focused = is_focused_lane && issue_idx == focused_issue;
-            let card_labels = issue_labels
-                .get(&issue.id)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            let card = issue_card(
-                issue,
-                team_identifier,
-                card_labels,
-                is_focused,
-                lane_idx,
-                issue_idx,
-            );
-            issue_cards = issue_cards.push(card);
+            issue_cards =
+                issue_cards.push(issue_card(issue, &data, is_focused, col_idx, issue_idx));
         }
 
         let lane_content = scrollable(issue_cards).height(Length::Fill);
@@ -134,37 +138,31 @@ pub fn view<'a>(
 
 fn issue_card<'a>(
     issue: &'a Issue,
-    team_identifier: &'a str,
-    labels: &'a [Label],
+    data: &CardData<'a>,
     focused: bool,
     lane_idx: usize,
     issue_idx: usize,
 ) -> Element<'a, Message> {
+    let d = data.display;
     let priority_color = t::priority_color(issue.priority_enum());
 
-    let tag = issue
-        .team_number
-        .map(|n| format!("{}-{}", team_identifier, n))
-        .unwrap_or_default();
+    let mut card_content = column![].spacing(4);
 
-    // Priority indicator: triangle + number like the Rails app
-    let priority_val = issue.priority;
-    let priority_indicator = row![]
-        .spacing(4)
-        .align_y(iced::Alignment::Center)
-        .push(text("\u{25B3}").size(11).color(priority_color))
-        .push(
-            text(format!("{}", priority_val))
-                .size(11)
-                .color(t::TEXT_MUTED),
-        );
+    if d.shows(CardProperty::Id) {
+        let tag = issue
+            .team_number
+            .map(|n| format!("{}-{}", data.team_identifier, n))
+            .unwrap_or_default();
+        card_content = card_content.push(text(tag).size(12).color(t::TEXT_MUTED));
+    }
+    card_content = card_content.push(text(&issue.title).size(14).color(t::TEXT_PRIMARY));
 
-    let mut card_content = column![]
-        .spacing(4)
-        .push(text(tag).size(12).color(t::TEXT_MUTED))
-        .push(text(&issue.title).size(14).color(t::TEXT_PRIMARY));
-
-    if !labels.is_empty() {
+    let labels = data
+        .issue_labels
+        .get(&issue.id)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    if d.shows(CardProperty::Labels) && !labels.is_empty() {
         let mut chips: Row<'a, Message> = row![].spacing(4);
         for label in labels {
             chips = chips.push(labels_view::static_chip(label));
@@ -172,7 +170,59 @@ fn issue_card<'a>(
         card_content = card_content.push(chips);
     }
 
-    let card_content = card_content.push(priority_indicator);
+    // Meta line: small muted facts, only the enabled ones.
+    let mut facts: Vec<String> = Vec::new();
+    if d.shows(CardProperty::Assignee) {
+        let name = issue
+            .assignee_id
+            .as_ref()
+            .and_then(|id| data.members.iter().find(|m| m.id == *id))
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| "Unassigned".to_string());
+        facts.push(name);
+    }
+    if d.shows(CardProperty::Project) {
+        if let Some(p) = issue
+            .project_id
+            .as_ref()
+            .and_then(|id| data.projects.iter().find(|p| p.id == *id))
+        {
+            facts.push(p.name.clone());
+        }
+    }
+    if d.shows(CardProperty::DueDate) {
+        if let Some(due) = issue.due_date.as_deref() {
+            facts.push(format!("Due {}", due.get(..10).unwrap_or(due)));
+        }
+    }
+    if d.shows(CardProperty::Status) {
+        if let Some(l) = data.lanes.iter().find(|l| l.id == issue.lane_id) {
+            facts.push(l.name.clone());
+        }
+    }
+
+    let mut meta: Row<'a, Message> = row![].spacing(10).align_y(iced::Alignment::Center);
+    if d.shows(CardProperty::Priority) {
+        // Priority indicator: triangle + number like the Rails app
+        meta = meta.push(
+            row![]
+                .spacing(4)
+                .align_y(iced::Alignment::Center)
+                .push(text("△").size(11).color(priority_color))
+                .push(
+                    text(format!("{}", issue.priority))
+                        .size(11)
+                        .color(t::TEXT_MUTED),
+                ),
+        );
+    }
+    let has_meta = d.shows(CardProperty::Priority) || !facts.is_empty();
+    for f in facts {
+        meta = meta.push(text(f).size(11).color(t::TEXT_MUTED));
+    }
+    if has_meta {
+        card_content = card_content.push(meta);
+    }
 
     let bg = if focused {
         t::BG_CARD_FOCUSED
