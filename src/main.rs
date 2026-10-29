@@ -5,6 +5,7 @@ mod csv_io;
 mod db;
 mod display;
 mod keys;
+mod mentions;
 mod sync;
 mod theme;
 mod views;

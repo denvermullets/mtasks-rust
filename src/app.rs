@@ -87,6 +87,10 @@ pub enum Message {
     ReplyComposerChanged(iced::widget::text_editor::Action),
     /// Submit the inline reply composer as a child of `reply_to`.
     SubmitReply,
+    /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
+    PickSuggestion(usize),
+    /// Escape pressed in an editor: close the suggestion list.
+    DismissSuggestions,
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
 
@@ -396,6 +400,8 @@ pub struct App {
     detail_comments: Vec<Comment>,
     /// Local change history for the open issue (see `db::events`).
     detail_events: Vec<IssueEvent>,
+    /// Issues whose description/comments mention the open detail issue ("Referenced In").
+    detail_references: Vec<crate::mentions::Reference>,
     /// Search + direction state for the open issue-dependency picker modal.
     issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
@@ -534,11 +540,66 @@ impl App {
                 queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_events = events::events_for_issue(conn, issue_id).unwrap_or_default();
+            self.detail_references = self.compute_references(conn, issue_id);
         } else {
+            self.detail_references.clear();
             self.detail_blocking.clear();
             self.detail_blocked_by.clear();
             self.detail_comments.clear();
             self.detail_events.clear();
+        }
+    }
+
+    /// Local "Referenced In": scan the open issue's team (descriptions in
+    /// `self.issues`, comments from SQLite) for tokens naming it. Rails exposes
+    /// no IssueReference list endpoint, so this is derived from synced text.
+    fn compute_references(
+        &self,
+        conn: &rusqlite::Connection,
+        issue_id: &str,
+    ) -> Vec<crate::mentions::Reference> {
+        let Ok(Some(target)) = queries::get_issue(conn, issue_id) else {
+            return Vec::new();
+        };
+        let Some(team) = self.teams.iter().find(|t| t.id == target.team_id) else {
+            return Vec::new();
+        };
+        let comments = queries::comments_for_team(conn, &target.team_id).unwrap_or_default();
+        crate::mentions::referenced_in(&target, &team.identifier, &self.issues, &comments)
+    }
+
+    /// Recompute the `@`/`#` suggestion list for `target` from its cursor.
+    fn refresh_suggestions(&mut self, target: crate::mentions::EditorTarget) {
+        use crate::mentions::{self as m, EditorTarget, Trigger};
+        let Some(d) = &self.issue_detail else { return };
+        let content = match target {
+            EditorTarget::Description => &d.description,
+            EditorTarget::Comment => &d.comment_composer,
+            EditorTarget::Reply => &d.reply_composer,
+        };
+        let (line, col) = content.cursor_position();
+        let trailing = content
+            .line(line)
+            .and_then(|l| m::trailing_query(m::line_before_cursor(&l, col)));
+        let items = match (trailing.as_ref(), self.selected_team()) {
+            (Some(t), Some(team)) => match t.trigger {
+                Trigger::Mention => m::member_suggestions(&self.members, &t.query),
+                Trigger::Issue => {
+                    m::issue_suggestions(&self.issues, &team.identifier, &d.issue_id, &t.query)
+                }
+            },
+            _ => Vec::new(),
+        };
+        let state = match (trailing, items.is_empty()) {
+            (Some(t), false) => Some(m::SuggestState {
+                target,
+                delete_chars: t.len_chars(),
+                items,
+            }),
+            _ => None,
+        };
+        if let Some(d) = &mut self.issue_detail {
+            d.suggest = state;
         }
     }
 
@@ -1091,6 +1152,7 @@ impl App {
             detail_blocked_by: Vec::new(),
             detail_comments: Vec::new(),
             detail_events: Vec::new(),
+            detail_references: Vec::new(),
             issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
@@ -1413,12 +1475,40 @@ impl App {
                 if let Some(d) = &mut self.issue_detail {
                     d.description.perform(action);
                 }
+                self.refresh_suggestions(crate::mentions::EditorTarget::Description);
             }
 
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
                 if let Some(d) = &mut self.issue_detail {
                     d.comment_composer.perform(action);
+                }
+                self.refresh_suggestions(crate::mentions::EditorTarget::Comment);
+            }
+            Message::PickSuggestion(idx) => {
+                use iced::widget::text_editor::{Action, Edit};
+                use crate::mentions::EditorTarget;
+                if let Some(d) = &mut self.issue_detail {
+                    if let Some(s) = d.suggest.take() {
+                        if let Some(item) = s.items.get(idx) {
+                            let content = match s.target {
+                                EditorTarget::Description => &mut d.description,
+                                EditorTarget::Comment => &mut d.comment_composer,
+                                EditorTarget::Reply => &mut d.reply_composer,
+                            };
+                            for _ in 0..s.delete_chars {
+                                content.perform(Action::Edit(Edit::Backspace));
+                            }
+                            content.perform(Action::Edit(Edit::Paste(std::sync::Arc::new(
+                                item.insert.clone(),
+                            ))));
+                        }
+                    }
+                }
+            }
+            Message::DismissSuggestions => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.suggest = None;
                 }
             }
             Message::SubmitComment => {
@@ -1429,12 +1519,14 @@ impl App {
                 if self.create_comment(body, None) {
                     if let Some(d) = &mut self.issue_detail {
                         d.comment_composer = iced::widget::text_editor::Content::new();
+                        d.suggest = None;
                     }
                 }
             }
             Message::StartReply(parent_id) => {
                 if let Some(d) = &mut self.issue_detail {
                     d.reply_to = Some(parent_id);
+                    d.suggest = None;
                     d.reply_composer = iced::widget::text_editor::Content::new();
                 }
             }
@@ -1442,12 +1534,14 @@ impl App {
                 if let Some(d) = &mut self.issue_detail {
                     d.reply_to = None;
                     d.reply_composer = iced::widget::text_editor::Content::new();
+                    d.suggest = None;
                 }
             }
             Message::ReplyComposerChanged(action) => {
                 if let Some(d) = &mut self.issue_detail {
                     d.reply_composer.perform(action);
                 }
+                self.refresh_suggestions(crate::mentions::EditorTarget::Reply);
             }
             Message::SubmitReply => {
                 let (body, parent) = match &self.issue_detail {
@@ -1461,6 +1555,7 @@ impl App {
                     if let Some(d) = &mut self.issue_detail {
                         d.reply_to = None;
                         d.reply_composer = iced::widget::text_editor::Content::new();
+                        d.suggest = None;
                     }
                 }
             }
@@ -2637,6 +2732,8 @@ impl App {
                             &self.detail_blocked_by,
                             &self.detail_comments,
                             &self.detail_events,
+                            &self.detail_references,
+                            &self.issues,
                             parent,
                             sub_issues,
                         )

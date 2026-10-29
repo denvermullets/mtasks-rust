@@ -1,5 +1,6 @@
 use iced::widget::{
-    button, column, container, pick_list, row, scrollable, text, text_editor, text_input,
+    button, column, container, pick_list, rich_text, row, scrollable, span, text, text_editor,
+    text_input,
 };
 use iced::{Alignment, Border, Element, Length, Theme};
 
@@ -7,6 +8,7 @@ use crate::app::{DepDirection, Message, View};
 use crate::db::events::{self, IssueEvent, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::DependencyLink;
+use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
 use crate::theme as t;
 use crate::views::issue_form::LaneOption;
 use crate::views::projects::MemberOption;
@@ -33,6 +35,8 @@ pub struct IssueDetailState {
     pub reply_to: Option<String>,
     /// Inline reply composer for `reply_to`. Reset on open/cancel/submit.
     pub reply_composer: text_editor::Content,
+    /// Open `@`/`#` autocomplete list (under the editor named by `target`).
+    pub suggest: Option<SuggestState>,
 }
 
 impl IssueDetailState {
@@ -57,6 +61,7 @@ impl IssueDetailState {
             comment_composer: text_editor::Content::new(),
             reply_to: None,
             reply_composer: text_editor::Content::new(),
+            suggest: None,
         }
     }
 
@@ -106,6 +111,8 @@ pub fn view<'a>(
     blocked_by: &'a [DependencyLink],
     comments: &'a [Comment],
     events: &'a [IssueEvent],
+    references: &'a [Reference],
+    issues: &'a [Issue],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
 ) -> Element<'a, Message> {
@@ -147,11 +154,25 @@ pub fn view<'a>(
         )
         .push(
             text_editor(&detail.description)
-                .placeholder("Add description…")
+                .placeholder("Add description…  (@ to mention, # to link an issue)")
                 .on_action(Message::IssueDetailDescriptionChanged)
+                .key_binding(editor_binding(
+                    None,
+                    suggesting(detail, EditorTarget::Description),
+                ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(220.0)),
+        )
+        .push_maybe(suggestion_list(detail, EditorTarget::Description))
+        .push_maybe(description_preview(
+            &detail.description_text(),
+            team,
+            issues,
+            members,
+        ))
+        .push_maybe(
+            (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
         // Rails nests one level only, so a sub-issue gets no section of its own.
         .push_maybe(
@@ -160,7 +181,7 @@ pub fn view<'a>(
                 .is_none()
                 .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
         )
-        .push(comments_section(comments, events, members, detail));
+        .push(comments_section(comments, events, members, detail, team, issues));
 
     // ---- Right sidebar: properties ----
     let lane_options: Vec<LaneOption> = lanes
@@ -482,22 +503,192 @@ fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
         .into()
 }
 
-/// Cmd/Ctrl+Enter submits the focused composer; everything else keeps the
-/// editor's default bindings.
-fn submit_binding(
-    on_submit: Message,
+/// Editor key bindings: Cmd/Ctrl+Enter submits (when `on_submit` is given),
+/// Escape closes the autocomplete list, and Tab accepts the first suggestion
+/// while one is showing. Everything else keeps the editor's defaults.
+fn editor_binding(
+    on_submit: Option<Message>,
+    suggesting: bool,
 ) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    use iced::keyboard::key::Named;
     move |press| {
-        let is_enter = matches!(
-            press.key.as_ref(),
-            iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
-        );
-        if is_enter && press.modifiers.command() {
-            Some(text_editor::Binding::Custom(on_submit.clone()))
-        } else {
-            text_editor::Binding::from_key_press(press)
+        let named = match press.key.as_ref() {
+            iced::keyboard::Key::Named(n) => Some(n),
+            _ => None,
+        };
+        match named {
+            Some(Named::Enter) if press.modifiers.command() && on_submit.is_some() => {
+                on_submit.clone().map(text_editor::Binding::Custom)
+            }
+            Some(Named::Escape) if suggesting => {
+                Some(text_editor::Binding::Custom(Message::DismissSuggestions))
+            }
+            Some(Named::Tab) if suggesting => {
+                Some(text_editor::Binding::Custom(Message::PickSuggestion(0)))
+            }
+            _ => text_editor::Binding::from_key_press(press),
         }
     }
+}
+
+fn suggesting(detail: &IssueDetailState, target: EditorTarget) -> bool {
+    detail.suggest.as_ref().is_some_and(|s| s.target == target)
+}
+
+/// Autocomplete rows under the editor `target`, if its list is open. Clicking a
+/// row replaces the partial `@query`/`#query` with the full token.
+fn suggestion_list<'a>(
+    detail: &'a IssueDetailState,
+    target: EditorTarget,
+) -> Option<Element<'a, Message>> {
+    let s = detail.suggest.as_ref().filter(|s| s.target == target)?;
+    let mut col = column![].spacing(2).push(
+        text("Tab or click to insert · Esc to dismiss")
+            .size(10)
+            .color(t::TEXT_MUTED),
+    );
+    for (i, item) in s.items.iter().enumerate() {
+        col = col.push(
+            button(
+                row![]
+                    .spacing(8)
+                    .push(text(&item.label).size(12).color(t::ACCENT))
+                    .push(text(&item.detail).size(12).color(t::TEXT_SECONDARY)),
+            )
+            .on_press(Message::PickSuggestion(i))
+            .padding([3, 8])
+            .width(Length::Fill)
+            .style(button::text),
+        );
+    }
+    Some(
+        container(col)
+            .padding(6)
+            .width(Length::Fill)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::BG_CARD)),
+                border: Border {
+                    color: t::BORDER,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            })
+            .into(),
+    )
+}
+
+/// Body text with `@mentions` and `IDENT-n` references highlighted. Own-team
+/// references that resolve to a local issue are clickable. Spans own their
+/// text so this also works for live editor content.
+fn rich_body<'a>(
+    body: &str,
+    size: f32,
+    plain: iced::Color,
+    team: Option<&Team>,
+    issues: &[Issue],
+    members: &[Member],
+) -> Element<'a, Message> {
+    let ident = team.map(|t| t.identifier.as_str()).unwrap_or("");
+    let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+    let spans: Vec<text::Span<'a, String, iced::Font>> = mentions::segments(body, ident, &names)
+        .into_iter()
+        .map(|seg| match seg {
+            Segment::Text(s) => span(s.to_string()).color(plain),
+            Segment::Mention(s) => span(s.to_string()).color(t::HIGHLIGHT),
+            Segment::Issue { text, number } => {
+                let target = number.and_then(|n| {
+                    issues.iter().find(|i| {
+                        Some(i.team_id.as_str()) == team.map(|t| t.id.as_str())
+                            && i64::from(i.team_number.unwrap_or(-1)) == n
+                    })
+                });
+                match target {
+                    Some(i) => span(text.to_string())
+                        .color(t::ACCENT)
+                        .underline(true)
+                        .link(i.id.clone()),
+                    None => span(text.to_string()).color(t::ACCENT),
+                }
+            }
+        })
+        .collect();
+    let el: Element<'a, String> = rich_text(spans).size(size).into();
+    el.map(Message::OpenIssueDetail)
+}
+
+/// Rendered (highlighted, clickable) view of the description, shown only when
+/// it contains at least one token; the editor itself is plain text.
+fn description_preview<'a>(
+    body: &str,
+    team: Option<&Team>,
+    issues: &[Issue],
+    members: &[Member],
+) -> Option<Element<'a, Message>> {
+    let ident = team.map(|t| t.identifier.as_str()).unwrap_or("");
+    let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+    let has_token = mentions::segments(body, ident, &names)
+        .iter()
+        .any(|s| !matches!(s, Segment::Text(_)));
+    if !has_token {
+        return None;
+    }
+    Some(
+        container(
+            column![]
+                .spacing(4)
+                .push(text("Preview").size(10).color(t::TEXT_MUTED))
+                .push(rich_body(body, 12.0, t::TEXT_SECONDARY, team, issues, members)),
+        )
+        .padding([6, 10])
+        .into(),
+    )
+}
+
+/// "Referenced in" block: one clickable row per issue whose description or
+/// comments mention this one.
+fn referenced_in_section<'a>(
+    references: &'a [Reference],
+    issues: &'a [Issue],
+    team: Option<&'a Team>,
+) -> Element<'a, Message> {
+    let mut col = column![]
+        .spacing(4)
+        .push(text("Referenced in").size(13).color(t::TEXT_SECONDARY));
+    for r in references {
+        let Some(src) = issues.iter().find(|i| i.id == r.source_issue_id) else {
+            continue;
+        };
+        let via = match (r.in_description, r.in_comment) {
+            (true, true) => "description, comment",
+            (true, false) => "description",
+            _ => "comment",
+        };
+        col = col.push(
+            button(
+                row![]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        text(issue_identifier(src, team))
+                            .size(12)
+                            .color(t::TEXT_MUTED),
+                    )
+                    .push(
+                        text(&src.title)
+                            .size(13)
+                            .color(t::TEXT_PRIMARY)
+                            .width(Length::Fill),
+                    )
+                    .push(text(via).size(11).color(t::TEXT_MUTED)),
+            )
+            .on_press(Message::OpenIssueDetail(src.id.clone()))
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(button::text),
+        );
+    }
+    col.into()
 }
 
 /// Activity timeline: change events interleaved with threaded comments
@@ -508,6 +699,8 @@ fn comments_section<'a>(
     events: &'a [IssueEvent],
     members: &'a [Member],
     detail: &'a IssueDetailState,
+    team: Option<&'a Team>,
+    issues: &'a [Issue],
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
@@ -522,9 +715,13 @@ fn comments_section<'a>(
             TimelineItem::Event(event) => col = col.push(event_row(event, members)),
             TimelineItem::Thread(thread) => {
                 for (depth, comment) in thread {
-                    col = col.push(comment_row(depth, comment, members));
+                    col = col.push(comment_row(depth, comment, members, team, issues));
                     if detail.reply_to.as_deref() == Some(comment.id.as_str()) {
                         col = col.push(reply_composer(depth + 1, detail));
+                        col = col.push_maybe(
+                            suggestion_list(detail, EditorTarget::Reply)
+                                .map(|e| indent(depth + 1, e)),
+                        );
                     }
                 }
             }
@@ -538,11 +735,15 @@ fn comments_section<'a>(
             text_editor(&detail.comment_composer)
                 .placeholder("Leave a comment…  (Cmd+Enter to send)")
                 .on_action(Message::CommentComposerChanged)
-                .key_binding(submit_binding(Message::SubmitComment))
+                .key_binding(editor_binding(
+                    Some(Message::SubmitComment),
+                    suggesting(detail, EditorTarget::Comment),
+                ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(80.0)),
         )
+        .push_maybe(suggestion_list(detail, EditorTarget::Comment))
         .push(
             button(text("Comment").size(13))
                 .on_press(Message::SubmitComment)
@@ -578,6 +779,12 @@ fn event_row<'a>(event: &'a IssueEvent, members: &'a [Member]) -> Element<'a, Me
 /// Left indent (px) per nesting level.
 const INDENT_PX: f32 = 18.0;
 
+fn indent<'a>(depth: usize, e: Element<'a, Message>) -> Element<'a, Message> {
+    container(e)
+        .padding(iced::Padding::ZERO.left(INDENT_PX * depth as f32))
+        .into()
+}
+
 /// Inline composer shown under the comment being replied to.
 fn reply_composer<'a>(depth: usize, detail: &'a IssueDetailState) -> Element<'a, Message> {
     let body = column![]
@@ -586,7 +793,10 @@ fn reply_composer<'a>(depth: usize, detail: &'a IssueDetailState) -> Element<'a,
             text_editor(&detail.reply_composer)
                 .placeholder("Write a reply…  (Cmd+Enter to send)")
                 .on_action(Message::ReplyComposerChanged)
-                .key_binding(submit_binding(Message::SubmitReply))
+                .key_binding(editor_binding(
+                    Some(Message::SubmitReply),
+                    suggesting(detail, EditorTarget::Reply),
+                ))
                 .padding(8)
                 .size(13)
                 .height(Length::Fixed(64.0)),
@@ -619,6 +829,8 @@ fn comment_row<'a>(
     depth: usize,
     comment: &'a Comment,
     members: &'a [Member],
+    team: Option<&'a Team>,
+    issues: &'a [Issue],
 ) -> Element<'a, Message> {
     let author = comment
         .author_id
@@ -638,7 +850,7 @@ fn comment_row<'a>(
                     .color(t::TEXT_MUTED),
             ),
     );
-    col = col.push(text(&comment.body).size(13).color(t::TEXT_PRIMARY));
+    col = col.push(rich_body(&comment.body, 13.0, t::TEXT_PRIMARY, team, issues, members));
     if Comment::can_reply_at(depth) {
         col = col.push(
             button(text("Reply").size(11).color(t::TEXT_MUTED))

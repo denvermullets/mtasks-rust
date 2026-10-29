@@ -220,6 +220,17 @@ pub fn comments_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Comme
     rows.collect()
 }
 
+/// Every comment on any issue of a team (for local "Referenced In" scanning).
+pub fn comments_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Comment>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.remote_id, c.issue_id, c.author_id, c.body, c.parent_id, c.created_at, c.updated_at
+         FROM comments c JOIN issues i ON i.id = c.issue_id
+         WHERE i.team_id = ?1 ORDER BY c.created_at",
+    )?;
+    let rows = stmt.query_map(params![team_id], Comment::from_row)?;
+    rows.collect()
+}
+
 pub fn get_comment(conn: &Connection, comment_id: &str) -> Result<Option<Comment>> {
     conn.query_row(
         "SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
