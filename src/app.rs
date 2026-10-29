@@ -104,6 +104,8 @@ pub enum Message {
     /// click on a linked dependency row). Rebuilds the detail buffer, unlike
     /// `NavigateToView(View::IssueDetail(_))` which only swaps the view.
     OpenIssueDetail(String),
+    /// Leave an issue detail that was opened from My Issues and return there.
+    BackToMyIssues,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
     /// The picker's search box changed.
@@ -395,6 +397,8 @@ pub struct App {
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_blocking: Vec<queries::DependencyLink>,
     detail_blocked_by: Vec<queries::DependencyLink>,
+    /// The open issue detail was reached from My Issues, so Back returns there.
+    detail_from_my_issues: bool,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -619,12 +623,25 @@ impl App {
     }
 
     fn breadcrumb(&self) -> Vec<String> {
-        breadcrumb(
+        let mut crumbs = breadcrumb(
             &self.view,
             self.selected_team(),
             &self.issues,
             &self.projects,
-        )
+        );
+        if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
+            crumbs.insert(0, "My Issues".into());
+        }
+        crumbs
+    }
+
+    /// Empty-state text for My Issues, when there's something to explain.
+    fn my_issues_empty(&self) -> Option<&'static str> {
+        let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
+        let visible: usize = self.board_columns().iter().map(|c| c.issues.len()).sum();
+        let narrowed = self.config.filters.count() > self.config.filters.assignees.len()
+            || !header::needle(self.active_search()).is_empty();
+        display::my_issues_empty_message(!ids.is_empty(), visible, narrowed)
     }
 
     /// Views with a list to filter; detail/placeholder views disable search.
@@ -668,7 +685,7 @@ impl App {
         let needle = header::needle(self.active_search());
         if my {
             let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
-            let filters = display::my_issues_filters(&self.config.filters, &ids);
+            let filters = display::my_issues_filters(&self.config.filters, &ids, &self.lanes);
             return display::build_columns(&data, &self.config.display, &filters, &needle);
         }
         display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
@@ -729,7 +746,13 @@ impl App {
 
     /// Active-filter badge count: selected filter values plus a non-empty search.
     fn active_filter_count(&self) -> usize {
-        self.config.filters.count()
+        // My Issues pins the assignee, so a saved assignee filter doesn't count.
+        let ignored = if self.view == View::MyIssues {
+            self.config.filters.assignees.len()
+        } else {
+            0
+        };
+        self.config.filters.count() - ignored
             + usize::from(!header::needle(self.active_search()).is_empty())
     }
 
@@ -756,6 +779,7 @@ impl App {
             self.selected_team_id = Some(issue.team_id.clone());
             self.view = View::Board;
             self.reload_data();
+            self.detail_from_my_issues = true;
         }
         self.open_issue_detail(&issue)
     }
@@ -1150,6 +1174,7 @@ impl App {
             issue_labels,
             detail_blocking: Vec::new(),
             detail_blocked_by: Vec::new(),
+            detail_from_my_issues: false,
             detail_comments: Vec::new(),
             detail_events: Vec::new(),
             detail_references: Vec::new(),
@@ -1222,16 +1247,13 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        // My Issues is a read/navigate view over several teams: board shortcuts
-        // that mutate or create need a single team's lanes, so they're no-ops here.
+        // My Issues spans several teams: create and lane moves need a single
+        // team's lanes, so they're no-ops here. Priority and delete act on the
+        // issue's own row/team, so they work cross-team.
         if self.view == View::MyIssues
             && matches!(
                 message,
-                Message::CreateIssue
-                    | Message::ConfirmDeleteFocusedIssue
-                    | Message::MoveIssueNextLane
-                    | Message::MoveIssuePrevLane
-                    | Message::SetFocusedPriority(_)
+                Message::CreateIssue | Message::MoveIssueNextLane | Message::MoveIssuePrevLane
             )
         {
             return Task::none();
@@ -1259,6 +1281,7 @@ impl App {
             Message::SelectTeamView(team_id, view) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
+                self.detail_from_my_issues = false;
                 let from_my = self.view == View::MyIssues;
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
                     self.selected_team_id = Some(team_id);
@@ -1273,6 +1296,7 @@ impl App {
             Message::NavigateToView(view) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
+                self.detail_from_my_issues = false;
                 self.switch_view(view);
             }
 
@@ -1597,6 +1621,12 @@ impl App {
             }
 
             // --- Issue detail: dependencies (blocking / blocked-by) ---
+            Message::BackToMyIssues => {
+                self.commit_issue_detail();
+                self.detail_from_my_issues = false;
+                self.issue_detail = None;
+                self.switch_view(View::MyIssues);
+            }
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
@@ -2620,6 +2650,8 @@ impl App {
             self.search_enabled(),
             matches!(self.view, View::Board | View::MyIssues).then(|| self.active_filter_count()),
             self.new_action(),
+            (self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)))
+                .then_some(Message::BackToMyIssues),
         );
 
         let columns = if matches!(self.view, View::Board | View::MyIssues) {
@@ -2628,7 +2660,20 @@ impl App {
             Vec::new()
         };
 
+        let my_empty = if self.view == View::MyIssues {
+            self.my_issues_empty()
+        } else {
+            None
+        };
         let main_pane: Element<'_, Message> = match self.view {
+            View::MyIssues if my_empty.is_some() => iced::widget::container(
+                iced::widget::text(my_empty.unwrap_or_default())
+                    .size(14)
+                    .color(t::TEXT_MUTED),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into(),
             View::Board | View::MyIssues if self.config.display.view_mode == ViewMode::List => {
                 issue_list::view(
                     &columns,
@@ -2811,6 +2856,7 @@ impl App {
                         members: &self.members,
                         labels: &self.labels,
                         projects: &self.projects,
+                        cross_team: self.view == View::MyIssues,
                     },
                 );
                 iced::widget::stack![base, display_panel::popover(panel)].into()

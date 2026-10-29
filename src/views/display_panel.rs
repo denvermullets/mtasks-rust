@@ -10,8 +10,8 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{
-    CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy, SubGroup, ViewMode,
-    PRIORITY_TITLES,
+    merged_status_options, CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy,
+    SubGroup, ViewMode, PRIORITY_TITLES,
 };
 use crate::theme as t;
 use crate::views::header;
@@ -146,6 +146,9 @@ pub struct FilterData<'a> {
     pub members: &'a [Member],
     pub labels: &'a [Label],
     pub projects: &'a [Project],
+    /// My Issues: assignee is fixed to the current user (section hidden) and
+    /// same-named lanes from different teams collapse into one status option.
+    pub cross_team: bool,
 }
 
 fn option_group<'a>(
@@ -197,11 +200,14 @@ pub fn filter_view<'a>(
         .iter()
         .map(|l| (l.id.clone(), l.name.clone()))
         .collect();
-    let statuses = data
-        .lanes
-        .iter()
-        .map(|l| (l.id.clone(), l.name.clone()))
-        .collect();
+    let statuses = if data.cross_team {
+        merged_status_options(data.lanes)
+    } else {
+        data.lanes
+            .iter()
+            .map(|l| (l.id.clone(), l.name.clone()))
+            .collect()
+    };
     let mut projects: Vec<(String, String)> = data
         .projects
         .iter()
@@ -221,14 +227,16 @@ pub fn filter_view<'a>(
         .push(horizontal_space())
         .push(clear.style(button::secondary));
 
-    let groups = column![]
-        .spacing(14)
-        .push(option_group(
+    let mut groups = column![].spacing(14);
+    if !data.cross_team {
+        groups = groups.push(option_group(
             "ASSIGNEE",
             FilterField::Assignee,
             filters,
             assignees,
-        ))
+        ));
+    }
+    let groups = groups
         .push(option_group(
             "PRIORITY",
             FilterField::Priority,

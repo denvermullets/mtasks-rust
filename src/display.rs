@@ -436,15 +436,58 @@ pub fn my_member_ids(members: &[Member], current_user_remote_id: Option<i64>) ->
 /// `base` with the assignee field forced to `my_ids` (My Issues view). Other
 /// fields are kept. With no known member ids nothing can match, so a sentinel
 /// that no issue carries is used rather than leaving the filter empty (which
-/// would show everything).
-pub fn my_issues_filters(base: &Filters, my_ids: &[String]) -> Filters {
+/// would show everything). Selected statuses are expanded to every lane with
+/// the same (case-insensitive) name, since each team has its own lane rows and
+/// the cross-team columns merge them.
+pub fn my_issues_filters(base: &Filters, my_ids: &[String], lanes: &[Lane]) -> Filters {
     let mut f = base.clone();
     f.assignees = if my_ids.is_empty() {
         vec!["\u{0}no-member".to_string()]
     } else {
         my_ids.to_vec()
     };
+    for id in &base.statuses {
+        if let Some(sel) = lanes.iter().find(|l| l.id == *id) {
+            let name = sel.name.to_lowercase();
+            for l in lanes.iter().filter(|l| l.name.to_lowercase() == name) {
+                if !f.statuses.contains(&l.id) {
+                    f.statuses.push(l.id.clone());
+                }
+            }
+        }
+    }
     f
+}
+
+/// Status filter options for the cross-team view: one `(lane id, name)` per
+/// distinct lane name (first lane by position is the stored value), in column
+/// order. Matches how `buckets` merges lanes.
+pub fn merged_status_options(lanes: &[Lane]) -> Vec<(String, String)> {
+    let mut sorted: Vec<&Lane> = lanes.iter().collect();
+    sorted.sort_by_key(|l| l.position);
+    let mut seen = HashSet::new();
+    sorted
+        .into_iter()
+        .filter(|l| seen.insert(l.name.to_lowercase()))
+        .map(|l| (l.id.clone(), l.name.clone()))
+        .collect()
+}
+
+/// Message for the My Issues view when it has nothing to list: `Some` only when
+/// the current user isn't cached yet, or when there are no assigned issues at
+/// all (no filters/search narrowing the result).
+pub fn my_issues_empty_message(
+    my_ids_known: bool,
+    visible_count: usize,
+    narrowed: bool,
+) -> Option<&'static str> {
+    if !my_ids_known {
+        Some("Sync once to load your issues")
+    } else if visible_count == 0 && !narrowed {
+        Some("No issues assigned to you")
+    } else {
+        None
+    }
 }
 
 pub const PRIORITY_TITLES: [&str; 5] = ["Urgent", "High", "Medium", "Low", "No priority"];
@@ -923,7 +966,7 @@ mod tests {
             ..data(&lanes, &issues, &[], &il)
         };
         let ids = vec!["a1".to_string(), "a2".to_string()];
-        let f = my_issues_filters(&Filters::default(), &ids);
+        let f = my_issues_filters(&Filters::default(), &ids, &lanes);
         let cols = build_columns(&d, &DisplayOptions::default(), &f, "");
         // "Todo" and "todo" merge; "Done" stays.
         assert_eq!(cols.len(), 2);
@@ -934,16 +977,89 @@ mod tests {
         let cols = build_columns(&d, &DisplayOptions::default(), &f, "bbb-");
         assert_eq!(cols[0].issues.len(), 1);
         // Unknown current user matches nothing.
-        let f = my_issues_filters(&Filters::default(), &[]);
+        let f = my_issues_filters(&Filters::default(), &[], &lanes);
         let cols = build_columns(&d, &DisplayOptions::default(), &f, "");
         assert!(cols.iter().all(|c| c.issues.is_empty()));
         // A user-saved assignee filter is overridden, other fields kept.
         let mut base = Filters::default();
         base.toggle(FilterField::Assignee, "zzz");
         base.toggle(FilterField::Priority, "1");
-        let f = my_issues_filters(&base, &ids);
+        let f = my_issues_filters(&base, &ids, &lanes);
         assert_eq!(f.assignees, ids);
         assert_eq!(f.priorities, ["1"]);
+    }
+
+    #[test]
+    fn my_issues_status_filter_merges_by_name() {
+        let mut l2 = lane("l2", "todo", 0);
+        l2.team_id = "t2".into();
+        let lanes = [lane("l1", "Todo", 0), l2, lane("l3", "Done", 1)];
+        let opts = merged_status_options(&lanes);
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0], ("l1".to_string(), "Todo".to_string()));
+        let ids = vec!["a".to_string()];
+        let mut base = Filters::default();
+        base.toggle(FilterField::Status, "l1");
+        let f = my_issues_filters(&base, &ids, &lanes);
+        assert_eq!(f.statuses, ["l1", "l2"]);
+        // Selecting via the other team's lane id expands the same way.
+        let mut base = Filters::default();
+        base.toggle(FilterField::Status, "l2");
+        let f = my_issues_filters(&base, &ids, &lanes);
+        assert_eq!(f.statuses, ["l2", "l1"]);
+    }
+
+    #[test]
+    fn my_issues_empty_messages() {
+        assert_eq!(
+            my_issues_empty_message(false, 0, false),
+            Some("Sync once to load your issues")
+        );
+        assert_eq!(
+            my_issues_empty_message(true, 0, false),
+            Some("No issues assigned to you")
+        );
+        assert_eq!(my_issues_empty_message(true, 0, true), None);
+        assert_eq!(my_issues_empty_message(true, 3, false), None);
+    }
+
+    #[test]
+    fn cross_team_group_by_parent() {
+        let lanes = [lane("l1", "Todo", 0)];
+        // Parent lives in team t2 (BBB, #7); my children are in t and t2.
+        let mut parent = issue("1", "l1", 1);
+        parent.team_id = "t2".into();
+        parent.team_number = Some(7);
+        let mut c1 = issue("2", "l1", 1);
+        c1.parent_issue_id = Some("1".into());
+        c1.assignee_id = Some("a1".into());
+        let mut c2 = issue("3", "l1", 1);
+        c2.team_id = "t2".into();
+        c2.parent_issue_id = Some("1".into());
+        c2.assignee_id = Some("a2".into());
+        let mut c3 = issue("4", "l1", 1);
+        c3.assignee_id = Some("a1".into());
+        let issues = [parent, c1, c2, c3];
+        let teams = [team("t", "AAA"), team("t2", "BBB")];
+        let il = HashMap::new();
+        let d = Data {
+            teams: &teams,
+            merge_lanes_by_name: true,
+            ..data(&lanes, &issues, &[], &il)
+        };
+        let opts = DisplayOptions {
+            group_by: GroupBy::Parent,
+            ..DisplayOptions::default()
+        };
+        let ids = vec!["a1".to_string(), "a2".to_string()];
+        let f = my_issues_filters(&Filters::default(), &ids, &lanes);
+        let cols = build_columns(&d, &opts, &f, "");
+        assert_eq!(cols.len(), 2);
+        // Parent title resolves the parent's own team identifier.
+        assert_eq!(cols[0].title, "BBB-7 Issue 1");
+        assert_eq!(cols[0].issues.len(), 2);
+        assert_eq!(cols[1].title, "No parent");
+        assert_eq!(cols[1].issues.len(), 1);
     }
 
     #[test]
