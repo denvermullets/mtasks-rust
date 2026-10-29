@@ -14,14 +14,14 @@ use crate::db::models::{
 };
 use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
-use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup};
+use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup, ViewMode};
 use crate::keys;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, csv_import, display_panel, header, issue_detail, issue_form, issue_picker,
-    labels as labels_view, placeholder,
+    board, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
+    issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
     team_list, team_members, toast,
 };
@@ -149,6 +149,7 @@ pub enum Message {
     OpenFilterPanel,
     /// Inert click target (swallows clicks inside a popover).
     Noop,
+    SetViewMode(ViewMode),
     SetGroupBy(GroupBy),
     SetSubGroup(SubGroup),
     SetOrderBy(OrderBy),
@@ -557,6 +558,14 @@ impl App {
         };
         let needle = header::needle(self.active_search());
         display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
+    }
+
+    /// Issue count per column/section, in display order.
+    fn column_counts(&self) -> Vec<usize> {
+        self.board_columns()
+            .iter()
+            .map(|c| c.issues.len())
+            .collect()
     }
 
     /// Issues in the focused column, in on-screen order (sub-groups flattened).
@@ -1534,6 +1543,31 @@ impl App {
                 }
             }
 
+            Message::FocusNextIssue | Message::FocusPrevIssue
+                if self.config.display.view_mode == ViewMode::List =>
+            {
+                // List mode: j/k walk rows top-to-bottom across sections.
+                let counts = self.column_counts();
+                let delta = if matches!(message, Message::FocusNextIssue) {
+                    1
+                } else {
+                    -1
+                };
+                (self.focused_lane, self.focused_issue) =
+                    display::list_step(&counts, self.focused_lane, self.focused_issue, delta);
+            }
+            Message::FocusNextLane | Message::FocusPrevLane
+                if self.config.display.view_mode == ViewMode::List =>
+            {
+                // List mode: h/l jump to the next/previous non-empty section.
+                let counts = self.column_counts();
+                let forward = matches!(message, Message::FocusNextLane);
+                let lane = display::list_jump_section(&counts, self.focused_lane, forward);
+                if lane != self.focused_lane {
+                    self.focused_lane = lane;
+                    self.focused_issue = 0;
+                }
+            }
             Message::FocusNextIssue => {
                 let count = self.issues_in_focused_lane().len();
                 if count > 0 && self.focused_issue + 1 < count {
@@ -1583,6 +1617,10 @@ impl App {
             Message::OpenDisplayOptions => self.modal = Modal::DisplayOptions,
             Message::OpenFilterPanel => self.modal = Modal::FilterPanel,
             Message::Noop => {}
+            Message::SetViewMode(m) => {
+                self.config.display.view_mode = m;
+                self.persist_display();
+            }
             Message::SetGroupBy(g) => {
                 self.config.display.group_by = g;
                 self.focused_lane = 0;
@@ -2415,6 +2453,22 @@ impl App {
         };
 
         let main_pane: Element<'_, Message> = match self.view {
+            View::Board if self.config.display.view_mode == ViewMode::List => issue_list::view(
+                &columns,
+                board::CardData {
+                    team_identifier: self
+                        .selected_team()
+                        .map(|t| t.identifier.as_str())
+                        .unwrap_or("---"),
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    projects: &self.projects,
+                    issue_labels: &self.issue_labels,
+                    display: &self.config.display,
+                },
+                self.focused_lane,
+                self.focused_issue,
+            ),
             View::Board => board::view(
                 &columns,
                 board::CardData {
