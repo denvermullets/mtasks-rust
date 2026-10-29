@@ -169,6 +169,38 @@ pub fn view<'a>(
         .into()
 }
 
+/// Sidebar footer: per-team CSV export / import (disabled without a team).
+pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
+    let btn = |label: &'a str, msg: Message| {
+        button(text(label).size(13).color(if has_team {
+            t::TEXT_SECONDARY
+        } else {
+            t::TEXT_MUTED
+        }))
+        .on_press_maybe(has_team.then_some(msg))
+        .padding([6, 14])
+        .width(Length::Fill)
+        .style(plain_row_style)
+    };
+    container(
+        column![]
+            .push(btn("Export CSV", Message::ExportCsv))
+            .push(btn("Import CSV", Message::PickCsvImport)),
+    )
+    .padding([6, 0])
+    .width(Length::Fill)
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::BG_MENU)),
+        border: Border {
+            color: t::BORDER,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
 /// A muted uppercase section label.
 fn section_header<'a>(label: &'a str) -> Element<'a, Message> {
     container(text(label).size(11).color(t::TEXT_MUTED))
