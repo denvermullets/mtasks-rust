@@ -1949,10 +1949,27 @@ impl App {
 
             Message::CsvImportLoaded(result) => match result {
                 Ok(Some((file_name, text))) => {
+                    let Some(team_id) = self.selected_team_id.clone() else {
+                        return Task::none();
+                    };
+                    let Some(team) = self.teams.iter().find(|t| t.id == team_id) else {
+                        return Task::none();
+                    };
+                    let conn = self.db();
+                    let issues = queries::issues_for_team(&conn, &team_id).unwrap_or_default();
+                    let fallback_creator_id = self.config.current_user_remote_id.and_then(|rid| {
+                        queries::find_member_by_remote_id(&conn, rid)
+                            .ok()
+                            .flatten()
+                            .map(|m| m.id)
+                    });
                     let ctx = csv_io::ImportContext {
+                        team,
                         lanes: &self.lanes,
                         projects: &self.projects,
                         members: &self.members,
+                        issues: &issues,
+                        fallback_creator_id: fallback_creator_id.as_deref(),
                     };
                     match csv_io::parse_import(&text, &ctx) {
                         Ok(preview) => {
@@ -1975,21 +1992,20 @@ impl App {
                     return Task::none();
                 };
                 let conn = self.db();
-                let creator_id = self.config.current_user_remote_id.and_then(|rid| {
-                    queries::find_member_by_remote_id(&conn, rid)
-                        .ok()
-                        .flatten()
-                        .map(|m| m.id)
-                });
                 let skipped = state.preview.errors.len();
-                match csv_io::apply_import(
-                    &conn,
-                    &team_id,
-                    creator_id.as_deref(),
-                    &state.preview.rows,
-                ) {
+                let duplicates = state.preview.duplicates.len();
+                match csv_io::apply_import(&conn, &team_id, &state.preview.rows) {
                     Ok(outcome) => {
                         let mut msg = format!("Imported {} issue(s)", outcome.imported);
+                        if outcome.projects_created > 0 {
+                            msg.push_str(&format!(
+                                ", created {} project(s)",
+                                outcome.projects_created
+                            ));
+                        }
+                        if duplicates > 0 {
+                            msg.push_str(&format!(", skipped {duplicates} duplicate(s)"));
+                        }
                         if skipped > 0 {
                             msg.push_str(&format!(", skipped {skipped} bad row(s)"));
                         }

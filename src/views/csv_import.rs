@@ -56,6 +56,18 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
         .color(t::TEXT_PRIMARY),
     );
 
+    if !p.new_projects.is_empty() {
+        body = body.push(
+            text(format!(
+                "Will create {} project(s): {}",
+                p.new_projects.len(),
+                p.new_projects.join(", ")
+            ))
+            .size(12)
+            .color(t::TEXT_SECONDARY),
+        );
+    }
+
     // Short preview of the first few valid rows.
     if !p.rows.is_empty() {
         let mut list = column![].spacing(2);
@@ -74,6 +86,16 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
             );
         }
         body = body.push(list);
+    }
+    if !p.duplicates.is_empty() {
+        body = body.push(problem_list(
+            format!(
+                "Already in this team ({}) — these rows are skipped",
+                p.duplicates.len()
+            ),
+            &p.duplicates,
+            t::TEXT_MUTED,
+        ));
     }
     if !p.errors.is_empty() {
         body = body.push(problem_list(
