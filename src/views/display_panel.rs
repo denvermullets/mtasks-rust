@@ -10,7 +10,7 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{
-    merged_status_options, CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy,
+    merged_status_options, CardProperty, CompletedFilter, DisplayOptions, FilterField, Filters, GroupBy, OrderBy,
     SubGroup, ViewMode, PRIORITY_TITLES,
 };
 use crate::theme as t;
@@ -62,23 +62,32 @@ fn chips<'a, T: Copy + PartialEq + 'a>(
     current: T,
     msg: impl Fn(T) -> Message,
     per_row: usize,
+    disabled: impl Fn(T) -> bool,
 ) -> Element<'a, Message> {
     let mut col: Column<'a, Message> = column![].spacing(4);
     for chunk in options.chunks(per_row) {
         let mut r = row![].spacing(4);
         for (value, label) in chunk {
             let active = *value == current;
+            let off = disabled(*value);
+            let mut b = button(text(*label).size(12)).padding([3, 9]);
+            if !off {
+                b = b.on_press(msg(*value));
+            }
             r = r.push(
-                button(text(*label).size(12))
-                    .on_press(msg(*value))
-                    .padding([3, 9])
-                    .style(move |_theme: &Theme, _status| button::Style {
+                b.style(move |_theme: &Theme, _status| button::Style {
                         background: Some(iced::Background::Color(if active {
                             t::BG_CARD_FOCUSED
                         } else {
                             t::BG_CARD
                         })),
-                        text_color: if active { t::ACCENT } else { t::TEXT_SECONDARY },
+                        text_color: if off {
+                            t::TEXT_MUTED
+                        } else if active {
+                            t::ACCENT
+                        } else {
+                            t::TEXT_SECONDARY
+                        },
                         border: Border {
                             color: if active { t::ACCENT } else { t::BORDER },
                             width: 1.0,
@@ -95,8 +104,6 @@ fn chips<'a, T: Copy + PartialEq + 'a>(
 
 /// The "Display" dropdown: group by / sub-group / order / completed / properties.
 pub fn display_view<'a>(opts: &'a DisplayOptions) -> Element<'a, Message> {
-    const COMPLETED: [(bool, &str); 2] = [(true, "Show"), (false, "Hide")];
-
     let mut props: Column<'a, Message> = column![].spacing(4);
     for (prop, label) in CardProperty::ALL {
         props = props.push(
@@ -111,25 +118,58 @@ pub fn display_view<'a>(opts: &'a DisplayOptions) -> Element<'a, Message> {
         .spacing(12)
         .push(text("Display").size(14).color(t::TEXT_PRIMARY))
         .push(heading("VIEW"))
-        .push(chips(&ViewMode::ALL, opts.view_mode, Message::SetViewMode, 2))
+        .push(chips(
+            &ViewMode::ALL,
+            opts.view_mode,
+            Message::SetViewMode,
+            2,
+            |_| false,
+        ))
         .push(heading("GROUP BY (COLUMNS / SECTIONS)"))
-        .push(chips(&GroupBy::ALL, opts.group_by, Message::SetGroupBy, 4))
+        .push(chips(
+            &GroupBy::ALL,
+            opts.group_by,
+            Message::SetGroupBy,
+            4,
+            |_| false,
+        ))
         .push(heading("SUB-GROUP"))
         .push(chips(
             &SubGroup::ALL,
             opts.sub_group,
             Message::SetSubGroup,
             3,
+            |s| opts.sub_group_conflicts(s),
         ))
         .push(heading("ORDER BY"))
-        .push(chips(&OrderBy::ALL, opts.order_by, Message::SetOrderBy, 3))
+        .push(chips(
+            &OrderBy::ALL,
+            opts.order_by,
+            Message::SetOrderBy,
+            3,
+            |_| false,
+        ))
         .push(heading("COMPLETED ISSUES"))
         .push(chips(
-            &COMPLETED,
-            opts.show_completed,
-            Message::SetShowCompleted,
-            2,
+            &CompletedFilter::ALL,
+            opts.completed_filter(),
+            Message::SetCompletedFilter,
+            3,
+            |_| false,
         ))
+        .push(heading("OPTIONS"))
+        .push(
+            checkbox("Show sub-issues", opts.show_sub_issues)
+                .on_toggle(|_| Message::ToggleShowSubIssues)
+                .size(14)
+                .text_size(12),
+        )
+        .push(
+            checkbox("Show empty groups", opts.show_empty_groups)
+                .on_toggle(|_| Message::ToggleShowEmptyGroups)
+                .size(14)
+                .text_size(12),
+        )
         .push(heading("CARD PROPERTIES"))
         .push(props);
 
@@ -149,6 +189,9 @@ pub struct FilterData<'a> {
     /// My Issues: assignee is fixed to the current user (section hidden) and
     /// same-named lanes from different teams collapse into one status option.
     pub cross_team: bool,
+    /// Project detail is already scoped to one project, so the project
+    /// section is hidden and not counted.
+    pub scoped_to_project: bool,
 }
 
 fn option_group<'a>(
@@ -180,7 +223,12 @@ pub fn filter_view<'a>(
     search: &'a str,
     data: FilterData<'a>,
 ) -> Element<'a, Message> {
-    let count = filters.count() + usize::from(!header::needle(search).is_empty());
+    let hidden = if data.scoped_to_project {
+        filters.projects.len()
+    } else {
+        0
+    };
+    let count = filters.count() - hidden + usize::from(!header::needle(search).is_empty());
 
     let mut assignees: Vec<(String, String)> = data
         .members
@@ -250,12 +298,17 @@ pub fn filter_view<'a>(
             filters,
             statuses,
         ))
-        .push(option_group(
+        ;
+    let groups = if data.scoped_to_project {
+        groups
+    } else {
+        groups.push(option_group(
             "PROJECT",
             FilterField::Project,
             filters,
             projects,
-        ));
+        ))
+    };
 
     let body = column![]
         .spacing(12)

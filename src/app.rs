@@ -170,7 +170,9 @@ pub enum Message {
     SetGroupBy(GroupBy),
     SetSubGroup(SubGroup),
     SetOrderBy(OrderBy),
-    SetShowCompleted(bool),
+    SetCompletedFilter(display::CompletedFilter),
+    ToggleShowSubIssues,
+    ToggleShowEmptyGroups,
     ToggleCardProperty(CardProperty),
     ToggleFilter(FilterField, String),
     ClearFilters,
@@ -507,6 +509,21 @@ impl App {
             self.issue_labels.clear();
         }
 
+        // Filters are global but hold per-team ids; drop the ones this data
+        // doesn't contain (My Issues loads every team, so its ids all stay).
+        if self.selected_team_id.is_some()
+            && self.config.filters.prune(
+                &self.members,
+                &self.labels,
+                &self.lanes,
+                &self.projects,
+            )
+        {
+            if let Err(e) = config::save(&self.config) {
+                self.config_error = Some(e);
+            }
+        }
+
         self.load_detail_dependencies(&conn);
 
         self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
@@ -770,6 +787,34 @@ impl App {
         display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
     }
 
+    /// A project's issues for the detail page: the board's filters (minus the
+    /// project field, which the page already scopes), completed/sub-issue
+    /// settings, search and ordering.
+    fn project_detail_issues(&self, project_id: &str, needle: &str) -> Vec<&Issue> {
+        let data = display::Data {
+            team: self.selected_team(),
+            teams: &self.teams,
+            merge_lanes_by_name: false,
+            lanes: &self.lanes,
+            issues: &self.issues,
+            members: &self.members,
+            projects: &self.projects,
+            labels: &self.labels,
+            issue_labels: &self.issue_labels,
+        };
+        let mut filters = self.config.filters.clone();
+        filters.projects.clear();
+        display::visible_from(
+            self.issues
+                .iter()
+                .filter(|i| i.project_id.as_deref() == Some(project_id)),
+            &data,
+            &self.config.display,
+            &filters,
+            needle,
+        )
+    }
+
     /// Issues in the focused column, in on-screen order (sub-groups flattened).
     fn issues_in_focused_lane(&self) -> Vec<&Issue> {
         let mut cols = self.board_columns();
@@ -891,10 +936,11 @@ impl App {
     /// Active-filter badge count: selected filter values plus a non-empty search.
     fn active_filter_count(&self) -> usize {
         // My Issues pins the assignee, so a saved assignee filter doesn't count.
-        let ignored = if self.view == View::MyIssues {
-            self.config.filters.assignees.len()
-        } else {
-            0
+        // Project detail is scoped to one project, so project filters don't count.
+        let ignored = match self.view {
+            View::MyIssues => self.config.filters.assignees.len(),
+            View::ProjectDetail(_) => self.config.filters.projects.len(),
+            _ => 0,
         };
         self.config.filters.count() - ignored
             + usize::from(!header::needle(self.active_search()).is_empty())
@@ -2003,20 +2049,36 @@ impl App {
             }
             Message::SetGroupBy(g) => {
                 self.config.display.group_by = g;
+                // A sub-group repeating the new group-by axis is meaningless.
+                if self.config.display.sub_group_conflicts(self.config.display.sub_group) {
+                    self.config.display.sub_group = SubGroup::None;
+                }
                 self.focused_lane = 0;
                 self.focused_issue = 0;
                 self.persist_display();
             }
             Message::SetSubGroup(g) => {
-                self.config.display.sub_group = g;
-                self.persist_display();
+                if !self.config.display.sub_group_conflicts(g) {
+                    self.config.display.sub_group = g;
+                    self.persist_display();
+                }
             }
             Message::SetOrderBy(o) => {
                 self.config.display.order_by = o;
                 self.persist_display();
             }
-            Message::SetShowCompleted(show) => {
-                self.config.display.show_completed = show;
+            Message::SetCompletedFilter(f) => {
+                self.config.display.set_completed_filter(f);
+                self.persist_display();
+            }
+            Message::ToggleShowSubIssues => {
+                let d = &mut self.config.display;
+                d.show_sub_issues = !d.show_sub_issues;
+                self.persist_display();
+            }
+            Message::ToggleShowEmptyGroups => {
+                let d = &mut self.config.display;
+                d.show_empty_groups = !d.show_empty_groups;
                 self.persist_display();
             }
             Message::ToggleCardProperty(p) => {
@@ -2837,7 +2899,11 @@ impl App {
             self.breadcrumb(),
             search,
             self.search_enabled(),
-            matches!(self.view, View::Board | View::MyIssues).then(|| self.active_filter_count()),
+            matches!(
+                self.view,
+                View::Board | View::MyIssues | View::ProjectDetail(_)
+            )
+            .then(|| self.active_filter_count()),
             self.new_action(),
             (self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)))
                 .then_some(Message::BackToMyIssues),
@@ -2927,8 +2993,9 @@ impl App {
                             self.selected_team(),
                             &self.members,
                             &self.issues,
+                            self.project_detail_issues(project_id, &needle),
+                            &self.config.display,
                             &self.lanes,
-                            &needle,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -3048,6 +3115,7 @@ impl App {
                         labels: &self.labels,
                         projects: &self.projects,
                         cross_team: self.view == View::MyIssues,
+                        scoped_to_project: matches!(self.view, View::ProjectDetail(_)),
                     },
                 );
                 iced::widget::stack![base, display_panel::popover(panel)].into()
