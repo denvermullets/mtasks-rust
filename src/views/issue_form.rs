@@ -22,6 +22,8 @@ pub struct IssueFormState {
     /// Inline validation message shown under the title (client-side on Save, or
     /// a server 422 routed back after a failed background push). `None` = valid.
     pub error: Option<String>,
+    /// Open `@`/`#` autocomplete list under the description.
+    pub suggest: Option<crate::mentions::SuggestState>,
 }
 
 impl IssueFormState {
@@ -36,6 +38,7 @@ impl IssueFormState {
             parent_issue_id: None,
             project_id: None,
             error: None,
+            suggest: None,
         }
     }
 
@@ -63,6 +66,7 @@ impl IssueFormState {
             parent_issue_id: issue.parent_issue_id.clone(),
             project_id: issue.project_id.clone(),
             error: None,
+            suggest: None,
         }
     }
 
@@ -139,11 +143,20 @@ pub fn view<'a>(
         )
         .push(
             text_editor(&form.description)
-                .placeholder("Description")
+                .placeholder("Description  (@ to mention, # to link an issue)")
                 .on_action(Message::IssueDescriptionChanged)
+                .key_binding(crate::views::issue_detail::editor_binding(
+                    None,
+                    form.suggest.is_some(),
+                ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(160.0)),
+        )
+        .push_maybe(
+            form.suggest
+                .as_ref()
+                .map(crate::views::issue_detail::suggestion_rows),
         )
         .push(
             row![]

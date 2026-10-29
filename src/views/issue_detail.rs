@@ -103,6 +103,7 @@ pub fn view<'a>(
     issue: &'a Issue,
     detail: &'a IssueDetailState,
     team: Option<&'a Team>,
+    teams: &'a [Team],
     lanes: &'a [Lane],
     projects: &'a [Project],
     members: &'a [Member],
@@ -168,6 +169,7 @@ pub fn view<'a>(
         .push_maybe(description_preview(
             &detail.description_text(),
             team,
+            teams,
             issues,
             members,
         ))
@@ -181,7 +183,7 @@ pub fn view<'a>(
                 .is_none()
                 .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
         )
-        .push(comments_section(comments, events, members, detail, team, issues));
+        .push(comments_section(comments, events, members, detail, team, teams, issues));
 
     // ---- Right sidebar: properties ----
     let lane_options: Vec<LaneOption> = lanes
@@ -503,28 +505,49 @@ fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
         .into()
 }
 
-/// Editor key bindings: Cmd/Ctrl+Enter submits (when `on_submit` is given),
-/// Escape closes the autocomplete list, and Tab accepts the first suggestion
-/// while one is showing. Everything else keeps the editor's defaults.
-fn editor_binding(
+/// Editor key bindings: Cmd/Ctrl+Enter submits (when `on_submit` is given).
+/// While the autocomplete list is open, Up/Down (Ctrl-p/n) move the highlight,
+/// Enter/Tab accept it (so Enter never inserts a newline) and Esc is left
+/// uncaptured so the app closes the list. Everything else keeps the editor's
+/// defaults.
+pub fn editor_binding(
     on_submit: Option<Message>,
     suggesting: bool,
 ) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     use iced::keyboard::key::Named;
+    use text_editor::Binding::Custom;
     move |press| {
-        let named = match press.key.as_ref() {
-            iced::keyboard::Key::Named(n) => Some(n),
-            _ => None,
-        };
-        match named {
-            Some(Named::Enter) if press.modifiers.command() && on_submit.is_some() => {
-                on_submit.clone().map(text_editor::Binding::Custom)
+        if suggesting {
+            let ctrl = press.modifiers.control() && !press.modifiers.command();
+            match press.key.as_ref() {
+                iced::keyboard::Key::Named(Named::ArrowDown) => {
+                    return Some(Custom(Message::MoveSuggestion(1)));
+                }
+                iced::keyboard::Key::Named(Named::ArrowUp) => {
+                    return Some(Custom(Message::MoveSuggestion(-1)));
+                }
+                iced::keyboard::Key::Character("n") if ctrl => {
+                    return Some(Custom(Message::MoveSuggestion(1)));
+                }
+                iced::keyboard::Key::Character("p") if ctrl => {
+                    return Some(Custom(Message::MoveSuggestion(-1)));
+                }
+                iced::keyboard::Key::Named(Named::Tab) => {
+                    return Some(Custom(Message::AcceptSuggestion));
+                }
+                iced::keyboard::Key::Named(Named::Enter) if !press.modifiers.command() => {
+                    return Some(Custom(Message::AcceptSuggestion));
+                }
+                // Not bound: the key reaches the app, which dismisses the list.
+                iced::keyboard::Key::Named(Named::Escape) => return None,
+                _ => {}
             }
-            Some(Named::Escape) if suggesting => {
-                Some(text_editor::Binding::Custom(Message::DismissSuggestions))
-            }
-            Some(Named::Tab) if suggesting => {
-                Some(text_editor::Binding::Custom(Message::PickSuggestion(0)))
+        }
+        match press.key.as_ref() {
+            iced::keyboard::Key::Named(Named::Enter)
+                if press.modifiers.command() && on_submit.is_some() =>
+            {
+                on_submit.clone().map(Custom)
             }
             _ => text_editor::Binding::from_key_press(press),
         }
@@ -535,19 +558,29 @@ fn suggesting(detail: &IssueDetailState, target: EditorTarget) -> bool {
     detail.suggest.as_ref().is_some_and(|s| s.target == target)
 }
 
-/// Autocomplete rows under the editor `target`, if its list is open. Clicking a
-/// row replaces the partial `@query`/`#query` with the full token.
+/// Autocomplete rows under the editor `target`, if its list is open.
 fn suggestion_list<'a>(
     detail: &'a IssueDetailState,
     target: EditorTarget,
 ) -> Option<Element<'a, Message>> {
-    let s = detail.suggest.as_ref().filter(|s| s.target == target)?;
+    detail
+        .suggest
+        .as_ref()
+        .filter(|s| s.target == target)
+        .map(suggestion_rows)
+}
+
+/// The list itself: arrow keys move the highlight, Enter/Tab or a click
+/// replaces the partial `@query`/`#query` with the full token. Rendered inline
+/// under the editor (not a floating popover).
+pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, Message> {
     let mut col = column![].spacing(2).push(
-        text("Tab or click to insert · Esc to dismiss")
+        text("↑↓ to move · Enter/Tab or click to insert · Esc to dismiss")
             .size(10)
             .color(t::TEXT_MUTED),
     );
     for (i, item) in s.items.iter().enumerate() {
+        let selected = i == s.selected;
         col = col.push(
             button(
                 row![]
@@ -558,24 +591,28 @@ fn suggestion_list<'a>(
             .on_press(Message::PickSuggestion(i))
             .padding([3, 8])
             .width(Length::Fill)
-            .style(button::text),
+            .style(move |theme: &Theme, status| {
+                let mut st = button::text(theme, status);
+                if selected {
+                    st.background = Some(iced::Background::Color(t::BG_CARD_FOCUSED));
+                }
+                st
+            }),
         );
     }
-    Some(
-        container(col)
-            .padding(6)
-            .width(Length::Fill)
-            .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::BG_CARD)),
-                border: Border {
-                    color: t::BORDER,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            })
-            .into(),
-    )
+    container(col)
+        .padding(6)
+        .width(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::BG_CARD)),
+            border: Border {
+                color: t::BORDER,
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 /// Body text with `@mentions` and `IDENT-n` references highlighted. Own-team
@@ -586,6 +623,7 @@ fn rich_body<'a>(
     size: f32,
     plain: iced::Color,
     team: Option<&Team>,
+    teams: &[Team],
     issues: &[Issue],
     members: &[Member],
 ) -> Element<'a, Message> {
@@ -596,13 +634,10 @@ fn rich_body<'a>(
         .map(|seg| match seg {
             Segment::Text(s) => span(s.to_string()).color(plain),
             Segment::Mention(s) => span(s.to_string()).color(t::HIGHLIGHT),
-            Segment::Issue { text, number } => {
-                let target = number.and_then(|n| {
-                    issues.iter().find(|i| {
-                        Some(i.team_id.as_str()) == team.map(|t| t.id.as_str())
-                            && i64::from(i.team_number.unwrap_or(-1)) == n
-                    })
-                });
+            Segment::Issue { text, .. } => {
+                // Resolves own-team and cross-team identifiers alike.
+                let target = mentions::parse_ident(text)
+                    .and_then(|(p, n)| mentions::resolve_issue(issues, teams, p, n));
                 match target {
                     Some(i) => span(text.to_string())
                         .color(t::ACCENT)
@@ -622,6 +657,7 @@ fn rich_body<'a>(
 fn description_preview<'a>(
     body: &str,
     team: Option<&Team>,
+    teams: &[Team],
     issues: &[Issue],
     members: &[Member],
 ) -> Option<Element<'a, Message>> {
@@ -638,7 +674,7 @@ fn description_preview<'a>(
             column![]
                 .spacing(4)
                 .push(text("Preview").size(10).color(t::TEXT_MUTED))
-                .push(rich_body(body, 12.0, t::TEXT_SECONDARY, team, issues, members)),
+                .push(rich_body(body, 12.0, t::TEXT_SECONDARY, team, teams, issues, members)),
         )
         .padding([6, 10])
         .into(),
@@ -700,6 +736,7 @@ fn comments_section<'a>(
     members: &'a [Member],
     detail: &'a IssueDetailState,
     team: Option<&'a Team>,
+    teams: &'a [Team],
     issues: &'a [Issue],
 ) -> Element<'a, Message> {
     let mut col = column![]
@@ -715,7 +752,7 @@ fn comments_section<'a>(
             TimelineItem::Event(event) => col = col.push(event_row(event, members)),
             TimelineItem::Thread(thread) => {
                 for (depth, comment) in thread {
-                    col = col.push(comment_row(depth, comment, members, team, issues));
+                    col = col.push(comment_row(depth, comment, members, team, teams, issues));
                     if detail.reply_to.as_deref() == Some(comment.id.as_str()) {
                         col = col.push(reply_composer(depth + 1, detail));
                         col = col.push_maybe(
@@ -831,6 +868,7 @@ fn comment_row<'a>(
     comment: &'a Comment,
     members: &'a [Member],
     team: Option<&'a Team>,
+    teams: &'a [Team],
     issues: &'a [Issue],
 ) -> Element<'a, Message> {
     let author = comment
@@ -851,7 +889,7 @@ fn comment_row<'a>(
                     .color(t::TEXT_MUTED),
             ),
     );
-    col = col.push(rich_body(&comment.body, 13.0, t::TEXT_PRIMARY, team, issues, members));
+    col = col.push(rich_body(&comment.body, 13.0, t::TEXT_PRIMARY, team, teams, issues, members));
     if Comment::can_reply_at(depth) {
         col = col.push(
             button(text("Reply").size(11).color(t::TEXT_MUTED))
