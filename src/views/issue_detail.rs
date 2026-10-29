@@ -761,6 +761,7 @@ fn event_row<'a>(event: &'a IssueEvent, members: &'a [Member]) -> Element<'a, Me
         .as_ref()
         .and_then(|aid| members.iter().find(|m| &m.id == aid))
         .map(|m| m.name.as_str())
+        .or(event.actor_name.as_deref())
         .unwrap_or_else(|| event.default_actor());
     row![]
         .spacing(6)
