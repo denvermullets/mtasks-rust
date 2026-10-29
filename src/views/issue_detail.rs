@@ -28,6 +28,10 @@ pub struct IssueDetailState {
     pub error: Option<String>,
     /// New-comment composer. Cleared on submit.
     pub comment_composer: text_editor::Content,
+    /// Local id of the comment currently being replied to (inline composer open).
+    pub reply_to: Option<String>,
+    /// Inline reply composer for `reply_to`. Reset on open/cancel/submit.
+    pub reply_composer: text_editor::Content,
 }
 
 impl IssueDetailState {
@@ -50,6 +54,8 @@ impl IssueDetailState {
                 .unwrap_or_default(),
             error: None,
             comment_composer: text_editor::Content::new(),
+            reply_to: None,
+            reply_composer: text_editor::Content::new(),
         }
     }
 
@@ -59,6 +65,10 @@ impl IssueDetailState {
 
     pub fn comment_text(&self) -> String {
         self.comment_composer.text()
+    }
+
+    pub fn reply_text(&self) -> String {
+        self.reply_composer.text()
     }
 }
 
@@ -470,8 +480,26 @@ fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
         .into()
 }
 
-/// Flat comment thread + composer, appended to the bottom of the left column.
-/// Nesting and delete are deferred to follow-up tickets (v1 is add + view only).
+/// Cmd/Ctrl+Enter submits the focused composer; everything else keeps the
+/// editor's default bindings.
+fn submit_binding(
+    on_submit: Message,
+) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    move |press| {
+        let is_enter = matches!(
+            press.key.as_ref(),
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+        );
+        if is_enter && press.modifiers.command() {
+            Some(text_editor::Binding::Custom(on_submit.clone()))
+        } else {
+            text_editor::Binding::from_key_press(press)
+        }
+    }
+}
+
+/// Threaded comment list (indented, depth-capped) + top-level composer, appended
+/// to the bottom of the left column. Delete/edit are not supported by the API.
 fn comments_section<'a>(
     comments: &'a [Comment],
     members: &'a [Member],
@@ -484,8 +512,11 @@ fn comments_section<'a>(
     if comments.is_empty() {
         col = col.push(text("No comments yet").size(12).color(t::TEXT_MUTED));
     } else {
-        for comment in comments {
-            col = col.push(comment_row(comment, members));
+        for (depth, comment) in Comment::thread_order(comments) {
+            col = col.push(comment_row(depth, comment, members));
+            if detail.reply_to.as_deref() == Some(comment.id.as_str()) {
+                col = col.push(reply_composer(depth + 1, detail));
+            }
         }
     }
 
@@ -494,8 +525,9 @@ fn comments_section<'a>(
         .spacing(8)
         .push(
             text_editor(&detail.comment_composer)
-                .placeholder("Leave a comment…")
+                .placeholder("Leave a comment…  (Cmd+Enter to send)")
                 .on_action(Message::CommentComposerChanged)
+                .key_binding(submit_binding(Message::SubmitComment))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(80.0)),
@@ -510,8 +542,51 @@ fn comments_section<'a>(
     col.push(composer).into()
 }
 
-/// One comment: author name + relative timestamp on a header row, body below.
-fn comment_row<'a>(comment: &'a Comment, members: &'a [Member]) -> Element<'a, Message> {
+/// Left indent (px) per nesting level.
+const INDENT_PX: f32 = 18.0;
+
+/// Inline composer shown under the comment being replied to.
+fn reply_composer<'a>(depth: usize, detail: &'a IssueDetailState) -> Element<'a, Message> {
+    let body = column![]
+        .spacing(6)
+        .push(
+            text_editor(&detail.reply_composer)
+                .placeholder("Write a reply…  (Cmd+Enter to send)")
+                .on_action(Message::ReplyComposerChanged)
+                .key_binding(submit_binding(Message::SubmitReply))
+                .padding(8)
+                .size(13)
+                .height(Length::Fixed(64.0)),
+        )
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text("Reply").size(12))
+                        .on_press(Message::SubmitReply)
+                        .padding([4, 12])
+                        .style(button::primary),
+                )
+                .push(
+                    button(text("Cancel").size(12))
+                        .on_press(Message::CancelReply)
+                        .padding([4, 12])
+                        .style(button::secondary),
+                ),
+        );
+    container(body)
+        .padding(iced::Padding::ZERO.left(INDENT_PX * depth as f32))
+        .into()
+}
+
+/// One comment: author name + relative timestamp on a header row, body below,
+/// then a "Reply" link while the thread is under the depth cap. Replies are
+/// indented per level inside a bordered container.
+fn comment_row<'a>(
+    depth: usize,
+    comment: &'a Comment,
+    members: &'a [Member],
+) -> Element<'a, Message> {
     let author = comment
         .author_id
         .as_ref()
@@ -519,21 +594,44 @@ fn comment_row<'a>(comment: &'a Comment, members: &'a [Member]) -> Element<'a, M
         .map(|m| m.name.as_str())
         .unwrap_or("Unknown");
 
-    column![]
-        .spacing(4)
-        .push(
-            row![]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(text(author).size(12).color(t::TEXT_SECONDARY))
-                .push(
-                    text(relative_time(&comment.created_at))
-                        .size(11)
-                        .color(t::TEXT_MUTED),
-                ),
-        )
-        .push(text(&comment.body).size(13).color(t::TEXT_PRIMARY))
-        .into()
+    let mut col = column![].spacing(4).push(
+        row![]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(text(author).size(12).color(t::TEXT_SECONDARY))
+            .push(
+                text(relative_time(&comment.created_at))
+                    .size(11)
+                    .color(t::TEXT_MUTED),
+            ),
+    );
+    col = col.push(text(&comment.body).size(13).color(t::TEXT_PRIMARY));
+    if Comment::can_reply_at(depth) {
+        col = col.push(
+            button(text("Reply").size(11).color(t::TEXT_MUTED))
+                .on_press(Message::StartReply(comment.id.clone()))
+                .padding(0)
+                .style(button::text),
+        );
+    }
+
+    if depth == 0 {
+        return col.into();
+    }
+    container(
+        container(col)
+            .padding([4, 10])
+            .style(|_theme: &Theme| container::Style {
+                border: Border {
+                    color: t::TEXT_MUTED,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }),
+    )
+    .padding(iced::Padding::ZERO.left(INDENT_PX * depth as f32))
+    .into()
 }
 
 /// Borderless, transparent style so the title input reads as an inline heading.

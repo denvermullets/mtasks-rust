@@ -773,15 +773,40 @@ fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
+    let parent_remote_id = match resolve_comment_parent(&conn, &comment) {
+        Ok(p) => p,
+        Err(o) => return Prep::Done(o),
+    };
     Prep::Ready(CommentCreatePrep {
         team_remote_id,
         issue_remote_id,
         params: CommentParams {
             body: comment.body,
-            parent_id: None,
+            parent_id: parent_remote_id,
         },
         local_id: comment.id,
     })
+}
+
+/// Remote id of a reply's parent. A parent that hasn't synced yet leaves the
+/// reply pending (the queue is FIFO so the parent normally goes first).
+fn resolve_comment_parent(
+    conn: &rusqlite::Connection,
+    comment: &crate::db::models::Comment,
+) -> Result<Option<i64>, Outcome> {
+    let Some(parent_local) = comment.parent_id.as_deref() else {
+        return Ok(None);
+    };
+    match queries::get_comment(conn, parent_local) {
+        Ok(Some(p)) => match p.remote_id {
+            Some(id) => Ok(Some(id)),
+            None => Err(Outcome::LeavePending(
+                "parent comment not synced yet".into(),
+            )),
+        },
+        Ok(None) => Err(Outcome::DropAndLog("parent comment missing locally".into())),
+        Err(e) => Err(Outcome::LeavePending(format!("db: {e}"))),
+    }
 }
 
 async fn comment_create(client: &ApiClient, entity_id: &str) -> Outcome {
@@ -1556,6 +1581,56 @@ mod tests {
     }
     fn is_retry(o: &Outcome) -> bool {
         matches!(o, Outcome::LeavePending(_))
+    }
+
+    fn reply_fixture(
+        parent_remote: Option<i64>,
+    ) -> (rusqlite::Connection, crate::db::models::Comment) {
+        use crate::db::models::Comment;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        let mk = |id: &str, remote: Option<i64>, parent: Option<&str>| Comment {
+            id: id.into(),
+            remote_id: remote,
+            issue_id: "i1".into(),
+            author_id: None,
+            body: id.into(),
+            parent_id: parent.map(String::from),
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(&conn, &mk("p", parent_remote, None)).unwrap();
+        let reply = mk("r", None, Some("p"));
+        queries::insert_comment(&conn, &reply).unwrap();
+        (conn, reply)
+    }
+
+    #[test]
+    fn reply_push_carries_parent_remote_id() {
+        let (conn, reply) = reply_fixture(Some(77));
+        assert_eq!(resolve_comment_parent(&conn, &reply).unwrap(), Some(77));
+        let params = CommentParams {
+            body: "r".into(),
+            parent_id: Some(77),
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["parent_id"], 77);
+    }
+
+    #[test]
+    fn reply_waits_for_unsynced_parent() {
+        let (conn, reply) = reply_fixture(None);
+        assert!(is_retry(
+            &resolve_comment_parent(&conn, &reply).unwrap_err()
+        ));
+    }
+
+    #[test]
+    fn top_level_comment_has_no_parent() {
+        let (conn, _) = reply_fixture(Some(1));
+        let top = queries::get_comment(&conn, "p").unwrap().unwrap();
+        assert_eq!(resolve_comment_parent(&conn, &top).unwrap(), None);
     }
 
     #[test]

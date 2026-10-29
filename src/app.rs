@@ -77,6 +77,12 @@ pub enum Message {
     CommentComposerChanged(iced::widget::text_editor::Action),
     /// "Comment" button pressed: persist the composer body locally + enqueue push.
     SubmitComment,
+    /// "Reply" pressed on a comment (local id): open the inline reply composer.
+    StartReply(String),
+    CancelReply,
+    ReplyComposerChanged(iced::widget::text_editor::Action),
+    /// Submit the inline reply composer as a child of `reply_to`.
+    SubmitReply,
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
 
@@ -558,6 +564,57 @@ impl App {
         let conn = self.db();
         self.load_detail_dependencies(&conn);
         self.fetch_comments_task(&conn, issue)
+    }
+
+    /// Persist a new comment (optionally a reply to local comment `parent_id`) on
+    /// the open detail issue and enqueue its push. Returns whether it was saved.
+    /// Replies beyond `MAX_NESTING_DEPTH` are refused (Rails rejects them too).
+    fn create_comment(&mut self, body: String, parent_id: Option<String>) -> bool {
+        let issue_id = match &self.issue_detail {
+            Some(d) => d.issue_id.clone(),
+            None => return false,
+        };
+        if body.is_empty() {
+            return false;
+        }
+        if let Some(pid) = &parent_id {
+            let depth = Comment::thread_order(&self.detail_comments)
+                .into_iter()
+                .find(|(_, c)| &c.id == pid)
+                .map(|(d, _)| d);
+            if !matches!(depth, Some(d) if Comment::can_reply_at(d)) {
+                return false;
+            }
+        }
+        let conn = self.db();
+        // Stamp the signed-in user as author for immediate local display;
+        // Rails also forces the author server-side from the token.
+        let author_id = self.config.current_user_remote_id.and_then(|rid| {
+            queries::find_member_by_remote_id(&conn, rid)
+                .ok()
+                .flatten()
+                .map(|m| m.id)
+        });
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        let comment = Comment {
+            id: uuid::Uuid::new_v4().to_string(),
+            remote_id: None,
+            issue_id,
+            author_id,
+            body,
+            parent_id,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        if queries::insert_comment(&conn, &comment).is_err() {
+            return false;
+        }
+        drop(conn);
+        self.enqueue_sync("comment", &comment.id, "create", None);
+        self.reload_data();
+        true
     }
 
     /// Build the async task that pulls an issue's comments from Rails. Returns
@@ -1204,54 +1261,52 @@ impl App {
                 }
             }
             Message::SubmitComment => {
-                let (issue_id, body) = match &self.issue_detail {
-                    Some(d) => (d.issue_id.clone(), d.comment_text().trim().to_string()),
+                let body = match &self.issue_detail {
+                    Some(d) => d.comment_text().trim().to_string(),
                     None => return Task::none(),
                 };
-                if body.is_empty() {
-                    return Task::none();
-                }
-                let conn = self.db();
-                // Stamp the signed-in user as author for immediate local display;
-                // Rails also forces the author server-side from the token.
-                let author_id = self.config.current_user_remote_id.and_then(|rid| {
-                    queries::find_member_by_remote_id(&conn, rid)
-                        .ok()
-                        .flatten()
-                        .map(|m| m.id)
-                });
-                let now = chrono::Utc::now()
-                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                    .to_string();
-                let comment = Comment {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    remote_id: None,
-                    issue_id,
-                    author_id,
-                    body,
-                    parent_id: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                };
-                if queries::insert_comment(&conn, &comment).is_ok() {
-                    self.enqueue_sync("comment", &comment.id, "create", None);
+                if self.create_comment(body, None) {
                     if let Some(d) = &mut self.issue_detail {
                         d.comment_composer = iced::widget::text_editor::Content::new();
                     }
-                    self.reload_data();
+                }
+            }
+            Message::StartReply(parent_id) => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.reply_to = Some(parent_id);
+                    d.reply_composer = iced::widget::text_editor::Content::new();
+                }
+            }
+            Message::CancelReply => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.reply_to = None;
+                    d.reply_composer = iced::widget::text_editor::Content::new();
+                }
+            }
+            Message::ReplyComposerChanged(action) => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.reply_composer.perform(action);
+                }
+            }
+            Message::SubmitReply => {
+                let (body, parent) = match &self.issue_detail {
+                    Some(d) => match &d.reply_to {
+                        Some(p) => (d.reply_text().trim().to_string(), p.clone()),
+                        None => return Task::none(),
+                    },
+                    None => return Task::none(),
+                };
+                if self.create_comment(body, Some(parent)) {
+                    if let Some(d) = &mut self.issue_detail {
+                        d.reply_to = None;
+                        d.reply_composer = iced::widget::text_editor::Content::new();
+                    }
                 }
             }
             Message::CommentsFetched(issue_id, result) => {
                 if let Ok(dtos) = result {
                     let conn = self.db();
-                    for dto in dtos {
-                        let existing = queries::find_comment_by_remote_id(&conn, dto.id)
-                            .ok()
-                            .flatten()
-                            .map(|c| c.id);
-                        let comment = dto.into_model(&conn, issue_id.clone(), existing);
-                        let _ = queries::upsert_comment(&conn, &comment);
-                    }
+                    crate::api::dto::merge_comment_tree(&conn, &issue_id, dtos, None);
                     drop(conn);
                     // Refresh so the open detail's comment list reflects the merge.
                     self.reload_data();
