@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod config;
+mod csv_io;
 mod db;
 mod keys;
 mod sync;

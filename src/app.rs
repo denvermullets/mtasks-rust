@@ -7,6 +7,7 @@ use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
 use crate::config::{self, Config};
+use crate::csv_io;
 use crate::db::models::{
     Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
@@ -17,7 +18,8 @@ use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, header, issue_detail, issue_form, issue_picker, labels as labels_view, placeholder,
+    board, csv_import, header, issue_detail, issue_form, issue_picker, labels as labels_view,
+    placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
     team_list, team_members, toast,
 };
@@ -191,6 +193,17 @@ pub enum Message {
     // Roadmap
     /// Open the "Add project to roadmap" picker preset to `commitment`.
     OpenRoadmapAdd(RoadmapCommitment),
+
+    // CSV import / export (sidebar footer)
+    /// Export the selected team's issues via a native save dialog.
+    ExportCsv,
+    /// Result of the save dialog + write: Ok(Some(path)) saved, Ok(None) cancelled.
+    CsvExported(Result<Option<String>, String>),
+    /// Open the native file picker for an import.
+    PickCsvImport,
+    /// Picked file contents: Ok(Some((file name, text))), Ok(None) cancelled.
+    CsvImportLoaded(Result<Option<(String, String)>, String>),
+    ConfirmCsvImport,
     /// Switch which lane a picked project will land in (chip selector).
     RoadmapAddLaneChanged(RoadmapCommitment),
     /// Assign an off-roadmap project (local UUID) to the picker's current lane.
@@ -227,6 +240,8 @@ pub enum Modal {
     RoadmapAdd(RoadmapCommitment),
     /// Read-only members panel for a team (local UUID).
     TeamMembers(String),
+    /// Preview of a CSV import (see `csv_import`).
+    CsvImport,
 }
 
 /// Sections of the Rails team settings page (`/teams/:id/edit?section=…`).
@@ -381,6 +396,7 @@ pub struct App {
     project_form: Option<projects_view::ProjectFormState>,
     settings_form: Option<settings::SettingsFormState>,
     label_form: Option<labels_view::LabelFormState>,
+    csv_import: Option<csv_import::CsvImportState>,
     show_help: bool,
     pending_sync_count: i32,
     config: Config,
@@ -962,6 +978,7 @@ impl App {
             project_form: None,
             settings_form: None,
             label_form: None,
+            csv_import: None,
             show_help: false,
             pending_sync_count,
             config,
@@ -1500,6 +1517,7 @@ impl App {
                 self.project_form = None;
                 self.label_form = None;
                 self.team_members.clear();
+                self.csv_import = None;
             }
 
             Message::ToggleHelp => {
@@ -1523,6 +1541,144 @@ impl App {
                     form.api_token = v;
                     form.status = None;
                 }
+            }
+
+            Message::ExportCsv => {
+                let Some(team) = self.selected_team().cloned() else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                let issues = queries::issues_for_team(&conn, &team.id).unwrap_or_default();
+                let lanes = queries::lanes_for_team(&conn, &team.id).unwrap_or_default();
+                let projects = queries::projects_for_team(&conn, &team.id).unwrap_or_default();
+                let members = queries::members_for_team(&conn, &team.id).unwrap_or_default();
+                let mut labels: HashMap<String, Vec<String>> = HashMap::new();
+                for (issue_id, label) in
+                    queries::issue_labels_for_team(&conn, &team.id).unwrap_or_default()
+                {
+                    labels.entry(issue_id).or_default().push(label.name);
+                }
+                let csv = csv_io::export_csv(&csv_io::ExportData {
+                    team: &team,
+                    issues: &issues,
+                    lanes: &lanes,
+                    projects: &projects,
+                    members: &members,
+                    labels: &labels,
+                });
+                let csv = match csv {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.push_toast(format!("Export failed: {e}"), ToastKind::Error, false);
+                        return Task::none();
+                    }
+                };
+                let filename = csv_io::export_filename(&team, chrono::Local::now().date_naive());
+                return Task::perform(
+                    async move {
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_file_name(filename)
+                            .add_filter("CSV", &["csv"])
+                            .save_file()
+                            .await
+                        else {
+                            return Ok(None);
+                        };
+                        let path = handle.path().to_path_buf();
+                        std::fs::write(&path, csv).map_err(|e| e.to_string())?;
+                        Ok(Some(path.display().to_string()))
+                    },
+                    Message::CsvExported,
+                );
+            }
+
+            Message::CsvExported(result) => match result {
+                Ok(Some(path)) => {
+                    self.push_toast(format!("Exported to {path}"), ToastKind::Info, false)
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.push_toast(format!("Export failed: {e}"), ToastKind::Error, false)
+                }
+            },
+
+            Message::PickCsvImport => {
+                if self.selected_team_id.is_none() {
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .add_filter("CSV", &["csv"])
+                            .pick_file()
+                            .await
+                        else {
+                            return Ok(None);
+                        };
+                        let bytes = handle.read().await;
+                        Ok(Some((
+                            handle.file_name(),
+                            String::from_utf8_lossy(&bytes).into_owned(),
+                        )))
+                    },
+                    Message::CsvImportLoaded,
+                );
+            }
+
+            Message::CsvImportLoaded(result) => match result {
+                Ok(Some((file_name, text))) => {
+                    let ctx = csv_io::ImportContext {
+                        lanes: &self.lanes,
+                        projects: &self.projects,
+                        members: &self.members,
+                    };
+                    match csv_io::parse_import(&text, &ctx) {
+                        Ok(preview) => {
+                            self.csv_import = Some(csv_import::CsvImportState { file_name, preview });
+                            self.modal = Modal::CsvImport;
+                        }
+                        Err(e) => {
+                            self.push_toast(format!("Import failed: {e}"), ToastKind::Error, false)
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => self.push_toast(format!("Import failed: {e}"), ToastKind::Error, false),
+            },
+
+            Message::ConfirmCsvImport => {
+                let (Some(state), Some(team_id)) =
+                    (self.csv_import.take(), self.selected_team_id.clone())
+                else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                let creator_id = self.config.current_user_remote_id.and_then(|rid| {
+                    queries::find_member_by_remote_id(&conn, rid)
+                        .ok()
+                        .flatten()
+                        .map(|m| m.id)
+                });
+                let skipped = state.preview.errors.len();
+                match csv_io::apply_import(
+                    &conn,
+                    &team_id,
+                    creator_id.as_deref(),
+                    &state.preview.rows,
+                ) {
+                    Ok(outcome) => {
+                        let mut msg = format!("Imported {} issue(s)", outcome.imported);
+                        if skipped > 0 {
+                            msg.push_str(&format!(", skipped {skipped} bad row(s)"));
+                        }
+                        self.push_toast(msg, ToastKind::Info, false);
+                    }
+                    Err(e) => {
+                        self.push_toast(format!("Import failed: {e}"), ToastKind::Error, false)
+                    }
+                }
+                self.modal = Modal::None;
+                self.reload_data();
             }
 
             Message::TestConnection => {
@@ -2129,7 +2285,10 @@ impl App {
             self.team_menu_open.as_deref(),
             self.show_archived_teams,
         );
-        let sidebar_column = iced::widget::scrollable(team_sidebar).height(Length::Fill);
+        let sidebar_column = column![
+            iced::widget::scrollable(team_sidebar).height(Length::Fill),
+            team_list::footer(self.selected_team_id.is_some()),
+        ];
 
         let search = self.active_search();
         let needle = header::needle(search);
@@ -2305,6 +2464,12 @@ impl App {
                     base
                 }
             }
+            Modal::CsvImport => match self.csv_import {
+                Some(ref state) => {
+                    iced::widget::stack![base, csv_import::view(state)].into()
+                }
+                None => base,
+            },
             Modal::DeleteConfirm(issue_id) => {
                 let issue_title = self
                     .issues
