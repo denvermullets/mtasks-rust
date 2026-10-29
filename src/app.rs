@@ -89,8 +89,10 @@ pub enum Message {
     SubmitReply,
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
-    /// Escape pressed in an editor: close the suggestion list.
-    DismissSuggestions,
+    /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
+    AcceptSuggestion,
+    /// Up/Down (or Ctrl-p/n) in an editor with the suggestion list open.
+    MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
 
@@ -574,36 +576,99 @@ impl App {
 
     /// Recompute the `@`/`#` suggestion list for `target` from its cursor.
     fn refresh_suggestions(&mut self, target: crate::mentions::EditorTarget) {
-        use crate::mentions::{self as m, EditorTarget, Trigger};
+        use crate::mentions::{self as m, EditorTarget};
         let Some(d) = &self.issue_detail else { return };
         let content = match target {
             EditorTarget::Description => &d.description,
             EditorTarget::Comment => &d.comment_composer,
             EditorTarget::Reply => &d.reply_composer,
         };
+        // Column is a byte offset into the line (iced 0.13 / cosmic-text).
         let (line, col) = content.cursor_position();
-        let trailing = content
-            .line(line)
-            .and_then(|l| m::trailing_query(m::line_before_cursor(&l, col)));
-        let items = match (trailing.as_ref(), self.selected_team()) {
-            (Some(t), Some(team)) => match t.trigger {
-                Trigger::Mention => m::member_suggestions(&self.members, &t.query),
-                Trigger::Issue => {
-                    m::issue_suggestions(&self.issues, &team.identifier, &d.issue_id, &t.query)
-                }
-            },
-            _ => Vec::new(),
-        };
-        let state = match (trailing, items.is_empty()) {
-            (Some(t), false) => Some(m::SuggestState {
+        let state = match (content.line(line), self.selected_team()) {
+            (Some(l), Some(team)) => m::build_suggest(
                 target,
-                delete_chars: t.len_chars(),
-                items,
-            }),
+                &l,
+                col,
+                &self.members,
+                &self.issues,
+                &team.identifier,
+                &d.issue_id,
+            ),
             _ => None,
         };
         if let Some(d) = &mut self.issue_detail {
             d.suggest = state;
+        }
+    }
+
+    /// Same for the issue form's description (new/edit modal).
+    fn refresh_form_suggestions(&mut self) {
+        use crate::mentions::{self as m, EditorTarget};
+        let Some(form) = &self.issue_form else { return };
+        let (line, col) = form.description.cursor_position();
+        let team = self.selected_team();
+        let state = match (form.description.line(line), team) {
+            (Some(l), Some(team)) => m::build_suggest(
+                EditorTarget::Description,
+                &l,
+                col,
+                &self.members,
+                &self.issues,
+                &team.identifier,
+                form.editing_issue_id.as_deref().unwrap_or(""),
+            ),
+            _ => None,
+        };
+        if let Some(form) = &mut self.issue_form {
+            form.suggest = state;
+        }
+    }
+
+    /// Replace the partial token in `content` with suggestion `idx` (or the
+    /// highlighted one).
+    fn insert_suggestion(
+        content: &mut iced::widget::text_editor::Content,
+        s: &crate::mentions::SuggestState,
+        idx: Option<usize>,
+    ) {
+        use iced::widget::text_editor::{Action, Edit};
+        if let Some(item) = s.items.get(idx.unwrap_or(s.selected)) {
+            for _ in 0..s.delete_chars {
+                content.perform(Action::Edit(Edit::Backspace));
+            }
+            content.perform(Action::Edit(Edit::Paste(std::sync::Arc::new(
+                item.insert.clone(),
+            ))));
+        }
+    }
+
+    /// The open suggestion list: the form's while its modal is up, else the
+    /// detail view's.
+    fn open_suggest_mut(&mut self) -> Option<&mut Option<crate::mentions::SuggestState>> {
+        if self.modal == Modal::IssueForm {
+            return self.issue_form.as_mut().map(|f| &mut f.suggest);
+        }
+        self.issue_detail.as_mut().map(|d| &mut d.suggest)
+    }
+
+    fn pick_suggestion(&mut self, idx: Option<usize>) {
+        use crate::mentions::EditorTarget;
+        if self.modal == Modal::IssueForm {
+            if let Some(form) = &mut self.issue_form {
+                if let Some(s) = form.suggest.take() {
+                    Self::insert_suggestion(&mut form.description, &s, idx);
+                }
+            }
+        } else if let Some(d) = &mut self.issue_detail {
+            if let Some(s) = d.suggest.take() {
+                let content = match s.target {
+                    EditorTarget::Description => &mut d.description,
+                    EditorTarget::Comment => &mut d.comment_composer,
+                    EditorTarget::Reply => &mut d.reply_composer,
+                };
+                Self::insert_suggestion(content, &s, idx);
+            }
         }
     }
 
@@ -1260,6 +1325,14 @@ impl App {
         }
         match message {
             Message::KeyPressed(key, modifiers) => {
+                // Esc with an autocomplete list open only closes the list.
+                if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                    if let Some(slot) = self.open_suggest_mut() {
+                        if slot.take().is_some() {
+                            return Task::none();
+                        }
+                    }
+                }
                 let modal_open = self.modal != Modal::None;
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
@@ -1382,6 +1455,7 @@ impl App {
                 if let Some(ref mut form) = self.issue_form {
                     form.description.perform(action);
                 }
+                self.refresh_form_suggestions();
             }
             Message::IssuePriorityChanged(p) => {
                 if let Some(ref mut form) = self.issue_form {
@@ -1509,30 +1583,11 @@ impl App {
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Comment);
             }
-            Message::PickSuggestion(idx) => {
-                use iced::widget::text_editor::{Action, Edit};
-                use crate::mentions::EditorTarget;
-                if let Some(d) = &mut self.issue_detail {
-                    if let Some(s) = d.suggest.take() {
-                        if let Some(item) = s.items.get(idx) {
-                            let content = match s.target {
-                                EditorTarget::Description => &mut d.description,
-                                EditorTarget::Comment => &mut d.comment_composer,
-                                EditorTarget::Reply => &mut d.reply_composer,
-                            };
-                            for _ in 0..s.delete_chars {
-                                content.perform(Action::Edit(Edit::Backspace));
-                            }
-                            content.perform(Action::Edit(Edit::Paste(std::sync::Arc::new(
-                                item.insert.clone(),
-                            ))));
-                        }
-                    }
-                }
-            }
-            Message::DismissSuggestions => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.suggest = None;
+            Message::PickSuggestion(idx) => self.pick_suggestion(Some(idx)),
+            Message::AcceptSuggestion => self.pick_suggestion(None),
+            Message::MoveSuggestion(delta) => {
+                if let Some(Some(s)) = self.open_suggest_mut() {
+                    s.move_selection(delta);
                 }
             }
             Message::SubmitComment => {
@@ -2769,6 +2824,7 @@ impl App {
                             issue,
                             detail,
                             self.selected_team(),
+                            &self.teams,
                             &self.lanes,
                             &self.projects,
                             &self.members,

@@ -12,7 +12,7 @@
 //!
 //! Everything here is pure so it can be unit tested without iced or SQLite.
 
-use crate::db::models::{Comment, Issue, Member};
+use crate::db::models::{Comment, Issue, Member, Team};
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -374,6 +374,64 @@ pub struct SuggestState {
     /// Chars of the partial token to delete before inserting the choice.
     pub delete_chars: usize,
     pub items: Vec<Suggestion>,
+    /// Highlighted row (keyboard navigation); always `< items.len()`.
+    pub selected: usize,
+}
+
+impl SuggestState {
+    /// Move the highlight by `delta` rows, wrapping at both ends.
+    pub fn move_selection(&mut self, delta: i32) {
+        let n = self.items.len() as i32;
+        if n > 0 {
+            self.selected = (self.selected as i32 + delta).rem_euclid(n) as usize;
+        }
+    }
+}
+
+/// Build the suggestion list for the cursor's `line`/`col` (byte offset, as
+/// reported by `text_editor::Content::cursor_position`). `None` when there is
+/// no partial `@`/`#` token or nothing matches.
+pub fn build_suggest(
+    target: EditorTarget,
+    line: &str,
+    col: usize,
+    members: &[Member],
+    issues: &[Issue],
+    team_identifier: &str,
+    exclude_id: &str,
+) -> Option<SuggestState> {
+    let t = trailing_query(line_before_cursor(line, col))?;
+    let items = match t.trigger {
+        Trigger::Mention => member_suggestions(members, &t.query),
+        Trigger::Issue => issue_suggestions(issues, team_identifier, exclude_id, &t.query),
+    };
+    (!items.is_empty()).then(|| SuggestState {
+        target,
+        delete_chars: t.len_chars(),
+        items,
+        selected: 0,
+    })
+}
+
+/// Split a token like `ENG-12` / `#eng-12` into (prefix, number).
+pub fn parse_ident(token: &str) -> Option<(&str, i64)> {
+    let (prefix, num) = token.trim_start_matches('#').split_once('-')?;
+    Some((prefix, num.parse().ok()?))
+}
+
+/// Local issue for `PREFIX-number` across all teams (prefix case-insensitive).
+pub fn resolve_issue<'a>(
+    issues: &'a [Issue],
+    teams: &[Team],
+    prefix: &str,
+    number: i64,
+) -> Option<&'a Issue> {
+    let team = teams
+        .iter()
+        .find(|t| t.identifier.eq_ignore_ascii_case(prefix))?;
+    issues
+        .iter()
+        .find(|i| i.team_id == team.id && i.team_number.map(i64::from) == Some(number))
 }
 
 /// Text of the cursor's line up to the cursor. `col` is the editor's column
@@ -527,6 +585,58 @@ mod tests {
         assert_eq!(trailing_query(""), None);
         // Multibyte whitespace/chars before the trigger.
         assert!(trailing_query("é\u{00a0}#x").is_some());
+    }
+
+    #[test]
+    fn cursor_column_is_a_byte_offset() {
+        // iced 0.13 reports cosmic-text's byte index, not a char index.
+        // "héllo @a": 'é' is 2 bytes, so the cursor after "@a" is at byte 9.
+        let line = "héllo @a";
+        assert_eq!(line.len(), 9);
+        assert_eq!(line_before_cursor(line, 9), line);
+        let t = trailing_query(line_before_cursor(line, 9)).unwrap();
+        assert_eq!((t.trigger, t.query.as_str()), (Trigger::Mention, "a"));
+        // Cursor mid-line after "é": must not be treated as char index 2.
+        assert_eq!(line_before_cursor(line, 3), "hé");
+        // CJK + emoji before the trigger.
+        let line = "日本 🎉 #1";
+        let t = trailing_query(line_before_cursor(line, line.len())).unwrap();
+        assert_eq!((t.trigger, t.query.as_str()), (Trigger::Issue, "1"));
+    }
+
+    #[test]
+    fn build_suggest_and_selection_wrap() {
+        let ms = [member("Ann"), member("Anders")];
+        let mut s = build_suggest(EditorTarget::Comment, "héy @An", 8, &ms, &[], "ENG", "x")
+            .unwrap();
+        assert_eq!((s.items.len(), s.selected, s.delete_chars), (2, 0, 3));
+        s.move_selection(-1);
+        assert_eq!(s.selected, 1);
+        s.move_selection(1);
+        assert_eq!(s.selected, 0);
+        assert!(build_suggest(EditorTarget::Comment, "plain", 5, &ms, &[], "ENG", "x").is_none());
+    }
+
+    #[test]
+    fn parse_and_resolve_cross_team() {
+        assert_eq!(parse_ident("#ENG-12"), Some(("ENG", 12)));
+        assert_eq!(parse_ident("ENG-x"), None);
+        let mut a = issue("a", 5, None);
+        a.team_id = "t2".into();
+        let mut t = Team {
+            id: "t2".into(),
+            name: "Other".into(),
+            identifier: "OTH".into(),
+            remote_id: None,
+            archived_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let issues = [a];
+        assert!(resolve_issue(&issues, std::slice::from_ref(&t), "oth", 5).is_some());
+        assert!(resolve_issue(&issues, std::slice::from_ref(&t), "OTH", 6).is_none());
+        t.identifier = "ZZZ".into();
+        assert!(resolve_issue(&issues, &[t], "OTH", 5).is_none());
     }
 
     #[test]
