@@ -44,8 +44,17 @@ pub fn view<'a>(
     search_enabled: bool,
     board_controls: Option<usize>,
     new_action: Option<Message>,
+    back: Option<Message>,
 ) -> Element<'a, Message> {
     let mut trail = row![].spacing(8).align_y(Alignment::Center);
+    if let Some(msg) = back {
+        trail = trail.push(
+            button(text("\u{2039} Back").size(13))
+                .on_press(msg)
+                .padding([3, 9])
+                .style(button::secondary),
+        );
+    }
     let last = crumbs.len().saturating_sub(1);
     for (i, crumb) in crumbs.into_iter().enumerate() {
         if i > 0 {
