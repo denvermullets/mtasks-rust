@@ -1,4 +1,5 @@
 pub mod connection;
+pub mod events;
 pub mod migrations;
 pub mod models;
 pub mod queries;

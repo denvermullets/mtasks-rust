@@ -12,6 +12,7 @@ use crate::db::models::{
     Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
+use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
 use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup};
 use crate::keys;
@@ -390,6 +391,8 @@ pub struct App {
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
+    /// Local change history for the open issue (see `db::events`).
+    detail_events: Vec<IssueEvent>,
     /// Search + direction state for the open issue-dependency picker modal.
     issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
@@ -488,10 +491,12 @@ impl App {
             self.detail_blocked_by =
                 queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
+            self.detail_events = events::events_for_issue(conn, issue_id).unwrap_or_default();
         } else {
             self.detail_blocking.clear();
             self.detail_blocked_by.clear();
             self.detail_comments.clear();
+            self.detail_events.clear();
         }
     }
 
@@ -1011,6 +1016,7 @@ impl App {
             detail_blocking: Vec::new(),
             detail_blocked_by: Vec::new(),
             detail_comments: Vec::new(),
+            detail_events: Vec::new(),
             issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
@@ -2499,6 +2505,7 @@ impl App {
                             &self.detail_blocking,
                             &self.detail_blocked_by,
                             &self.detail_comments,
+                            &self.detail_events,
                             parent,
                             sub_issues,
                         )
