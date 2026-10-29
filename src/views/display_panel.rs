@@ -10,7 +10,8 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{
-    CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy, SubGroup, PRIORITY_TITLES,
+    CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy, SubGroup, ViewMode,
+    PRIORITY_TITLES,
 };
 use crate::theme as t;
 use crate::views::header;
@@ -109,7 +110,9 @@ pub fn display_view<'a>(opts: &'a DisplayOptions) -> Element<'a, Message> {
     let body = column![]
         .spacing(12)
         .push(text("Display").size(14).color(t::TEXT_PRIMARY))
-        .push(heading("GROUP BY (COLUMNS)"))
+        .push(heading("VIEW"))
+        .push(chips(&ViewMode::ALL, opts.view_mode, Message::SetViewMode, 2))
+        .push(heading("GROUP BY (COLUMNS / SECTIONS)"))
         .push(chips(&GroupBy::ALL, opts.group_by, Message::SetGroupBy, 4))
         .push(heading("SUB-GROUP"))
         .push(chips(

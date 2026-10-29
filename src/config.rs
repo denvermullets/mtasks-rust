@@ -126,4 +126,14 @@ mod tests {
         assert_eq!(cfg.display, DisplayOptions::default());
         assert_eq!(cfg.filters.count(), 0);
     }
+
+    #[test]
+    fn old_display_table_without_view_mode_defaults_to_board_and_list_persists() {
+        let cfg: Config = toml::from_str("[display]\ngroup_by = \"priority\"\n").unwrap();
+        assert_eq!(cfg.display.view_mode, crate::display::ViewMode::Board);
+        let mut cfg = Config::default();
+        cfg.display.view_mode = crate::display::ViewMode::List;
+        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.display.view_mode, crate::display::ViewMode::List);
+    }
 }

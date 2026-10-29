@@ -125,8 +125,25 @@ impl CardProperty {
     ];
 }
 
+/// How issues are laid out: kanban columns or a vertical list of rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    #[default]
+    Board,
+    List,
+}
+
+impl ViewMode {
+    pub const ALL: [(ViewMode, &'static str); 2] =
+        [(ViewMode::Board, "Board"), (ViewMode::List, "List")];
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DisplayOptions {
+    /// Board (columns) or List (rows under section headers).
+    #[serde(default)]
+    pub view_mode: ViewMode,
     #[serde(default = "default_group_by")]
     pub group_by: GroupBy,
     #[serde(default = "default_sub_group")]
@@ -163,6 +180,7 @@ fn default_properties() -> Vec<CardProperty> {
 impl Default for DisplayOptions {
     fn default() -> Self {
         Self {
+            view_mode: ViewMode::Board,
             group_by: default_group_by(),
             sub_group: default_sub_group(),
             order_by: default_order_by(),
@@ -184,6 +202,40 @@ impl DisplayOptions {
             self.properties.push(p);
         }
     }
+}
+
+/// List-mode j/k: move the (column, issue) focus one row (`delta` >= 0 is
+/// down, < 0 is up) through the flattened list, crossing section boundaries
+/// and skipping empty sections. Stays put at the first/last row.
+pub fn list_step(counts: &[usize], lane: usize, issue: usize, delta: i32) -> (usize, usize) {
+    if delta >= 0 {
+        if issue + 1 < counts.get(lane).copied().unwrap_or(0) {
+            return (lane, issue + 1);
+        }
+        match (lane + 1..counts.len()).find(|&l| counts[l] > 0) {
+            Some(l) => (l, 0),
+            None => (lane, issue),
+        }
+    } else {
+        if issue > 0 {
+            return (lane, issue - 1);
+        }
+        match (0..lane.min(counts.len())).rev().find(|&l| counts[l] > 0) {
+            Some(l) => (l, counts[l] - 1),
+            None => (lane, issue),
+        }
+    }
+}
+
+/// List-mode h/l: first row of the next (`forward`) or previous non-empty
+/// section; unchanged lane when there is none.
+pub fn list_jump_section(counts: &[usize], lane: usize, forward: bool) -> usize {
+    let found = if forward {
+        (lane + 1..counts.len()).find(|&l| counts[l] > 0)
+    } else {
+        (0..lane.min(counts.len())).rev().find(|&l| counts[l] > 0)
+    };
+    found.unwrap_or(lane)
 }
 
 /// Which multi-select a filter toggle targets.
@@ -892,5 +944,32 @@ mod tests {
         let f = my_issues_filters(&base, &ids);
         assert_eq!(f.assignees, ids);
         assert_eq!(f.priorities, ["1"]);
+    }
+
+    #[test]
+    fn list_step_crosses_sections_and_skips_empty() {
+        let counts = [2, 0, 1];
+        assert_eq!(list_step(&counts, 0, 0, 1), (0, 1));
+        assert_eq!(list_step(&counts, 0, 1, 1), (2, 0));
+        assert_eq!(list_step(&counts, 2, 0, 1), (2, 0));
+        assert_eq!(list_step(&counts, 2, 0, -1), (0, 1));
+        assert_eq!(list_step(&counts, 0, 0, -1), (0, 0));
+        assert_eq!(list_step(&[], 0, 0, 1), (0, 0));
+    }
+
+    #[test]
+    fn list_jump_section_skips_empty() {
+        let counts = [2, 0, 1];
+        assert_eq!(list_jump_section(&counts, 0, true), 2);
+        assert_eq!(list_jump_section(&counts, 2, false), 0);
+        assert_eq!(list_jump_section(&counts, 2, true), 2);
+    }
+
+    #[test]
+    fn view_mode_defaults_to_board_when_missing() {
+        let o: DisplayOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(o.view_mode, ViewMode::Board);
+        let o: DisplayOptions = serde_json::from_str(r#"{"view_mode":"list"}"#).unwrap();
+        assert_eq!(o.view_mode, ViewMode::List);
     }
 }
