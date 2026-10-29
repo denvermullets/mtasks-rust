@@ -25,3 +25,39 @@ pub fn relative_time(rfc3339: &str) -> String {
         Err(_) => rfc3339.to_string(),
     }
 }
+
+/// "Jan 05" from an RFC 3339 timestamp or `YYYY-MM-DD` date (Rails list-row
+/// format); falls back to the raw date prefix when unparseable.
+pub fn short_date(raw: &str) -> String {
+    let day = raw.get(..10).unwrap_or(raw);
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map(|d| d.format("%b %d").to_string())
+        .unwrap_or_else(|_| day.to_string())
+}
+
+/// "3pt" / "2.5pt" estimate label.
+pub fn format_estimate(e: f64) -> String {
+    if e.fract() == 0.0 {
+        format!("{}pt", e as i64)
+    } else {
+        format!("{e:.1}pt")
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::*;
+
+    #[test]
+    fn short_date_formats_and_falls_back() {
+        assert_eq!(short_date("2026-01-05T10:00:00Z"), "Jan 05");
+        assert_eq!(short_date("2026-03-09"), "Mar 09");
+        assert_eq!(short_date("bad"), "bad");
+    }
+
+    #[test]
+    fn estimate_label() {
+        assert_eq!(format_estimate(3.0), "3pt");
+        assert_eq!(format_estimate(2.5), "2.5pt");
+    }
+}

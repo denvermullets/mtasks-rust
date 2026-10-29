@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use iced::keyboard;
-use iced::widget::{column, container, row, text_input};
+use iced::widget::{column, container, row, scrollable, text_input};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
@@ -16,6 +16,7 @@ use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
 use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup, ViewMode};
 use crate::keys;
+use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
@@ -154,6 +155,14 @@ pub enum Message {
     /// Inert click target (swallows clicks inside a popover).
     Noop,
     SetViewMode(ViewMode),
+    /// `v`: flip between Board and List.
+    ToggleViewMode,
+    /// List mode: collapse/expand the section with this title (header click).
+    ToggleSection(String),
+    /// List mode `c`: collapse/expand the focused section.
+    ToggleFocusedSection,
+    /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
+    Scrolled(usize, f32, f32),
     SetGroupBy(GroupBy),
     SetSubGroup(SubGroup),
     SetOrderBy(OrderBy),
@@ -406,6 +415,11 @@ pub struct App {
     issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
     focused_issue: usize,
+    /// List-mode sections (by title) whose rows are hidden.
+    collapsed_sections: HashSet<String>,
+    /// Last reported (offset, viewport height) per scrollable: board lane
+    /// index, or `issue_list::SCROLL_KEY`. Drives scroll-to-focus.
+    scroll_state: HashMap<usize, (f32, f32)>,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
     /// Buffered edit state while the right pane shows `View::IssueDetail`.
@@ -674,14 +688,6 @@ impl App {
         display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
     }
 
-    /// Issue count per column/section, in display order.
-    fn column_counts(&self) -> Vec<usize> {
-        self.board_columns()
-            .iter()
-            .map(|c| c.issues.len())
-            .collect()
-    }
-
     /// Issues in the focused column, in on-screen order (sub-groups flattened).
     fn issues_in_focused_lane(&self) -> Vec<&Issue> {
         let mut cols = self.board_columns();
@@ -690,6 +696,79 @@ impl App {
         } else {
             vec![]
         }
+    }
+
+    /// Per-section counts for list-mode navigation: collapsed sections count
+    /// as empty so j/k and h/l skip their hidden rows.
+    fn list_nav_counts(&self) -> Vec<usize> {
+        self.board_columns()
+            .iter()
+            .map(|c| {
+                if self.collapsed_sections.contains(&c.title) {
+                    0
+                } else {
+                    c.issues.len()
+                }
+            })
+            .collect()
+    }
+
+    /// Scroll the board lane / list so the focused card or row is fully in
+    /// view. Positions come from fixed element heights (see `scroll`); the
+    /// current offset and viewport height come from `Message::Scrolled`.
+    fn scroll_to_focus(&mut self) -> Task<Message> {
+        if !matches!(self.view, View::Board | View::MyIssues) {
+            return Task::none();
+        }
+        let list = self.config.display.view_mode == ViewMode::List;
+        let (key, id, top, height) = {
+            let columns = self.board_columns();
+            let Some(col) = columns.get(self.focused_lane) else {
+                return Task::none();
+            };
+            if self.focused_issue >= col.issues.len() {
+                return Task::none();
+            }
+            if list {
+                if self.collapsed_sections.contains(&col.title) {
+                    return Task::none();
+                }
+                let (top, h) = issue_list::focused_span(
+                    &columns,
+                    &self.collapsed_sections,
+                    self.focused_lane,
+                    self.focused_issue,
+                );
+                (issue_list::SCROLL_KEY, issue_list::scroll_id(), top, h)
+            } else {
+                let data = board::CardData {
+                    teams: &self.teams,
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    projects: &self.projects,
+                    issue_labels: &self.issue_labels,
+                    display: &self.config.display,
+                };
+                let (top, h) = board::focused_span(col, &data, self.focused_issue);
+                (
+                    self.focused_lane,
+                    board::lane_scroll_id(self.focused_lane),
+                    top,
+                    h,
+                )
+            }
+        };
+        let (offset, viewport) = self
+            .scroll_state
+            .get(&key)
+            .copied()
+            .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+        let new = scroll::offset_to_reveal(top, height, offset, viewport);
+        if (new - offset).abs() < 0.5 {
+            return Task::none();
+        }
+        self.scroll_state.insert(key, (new, viewport));
+        scrollable::scroll_to(id, scrollable::AbsoluteOffset { x: 0.0, y: new })
     }
 
     fn focused_issue(&self) -> Option<&Issue> {
@@ -1156,6 +1235,8 @@ impl App {
             issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
+            collapsed_sections: HashSet::new(),
+            scroll_state: HashMap::new(),
             modal: Modal::None,
             issue_form: None,
             issue_detail: None,
@@ -1486,8 +1567,8 @@ impl App {
                 self.refresh_suggestions(crate::mentions::EditorTarget::Comment);
             }
             Message::PickSuggestion(idx) => {
-                use iced::widget::text_editor::{Action, Edit};
                 use crate::mentions::EditorTarget;
+                use iced::widget::text_editor::{Action, Edit};
                 if let Some(d) = &mut self.issue_detail {
                     if let Some(s) = d.suggest.take() {
                         if let Some(item) = s.items.get(idx) {
@@ -1723,7 +1804,7 @@ impl App {
                 if self.config.display.view_mode == ViewMode::List =>
             {
                 // List mode: j/k walk rows top-to-bottom across sections.
-                let counts = self.column_counts();
+                let counts = self.list_nav_counts();
                 let delta = if matches!(message, Message::FocusNextIssue) {
                     1
                 } else {
@@ -1731,29 +1812,33 @@ impl App {
                 };
                 (self.focused_lane, self.focused_issue) =
                     display::list_step(&counts, self.focused_lane, self.focused_issue, delta);
+                return self.scroll_to_focus();
             }
             Message::FocusNextLane | Message::FocusPrevLane
                 if self.config.display.view_mode == ViewMode::List =>
             {
                 // List mode: h/l jump to the next/previous non-empty section.
-                let counts = self.column_counts();
+                let counts = self.list_nav_counts();
                 let forward = matches!(message, Message::FocusNextLane);
                 let lane = display::list_jump_section(&counts, self.focused_lane, forward);
                 if lane != self.focused_lane {
                     self.focused_lane = lane;
                     self.focused_issue = 0;
                 }
+                return self.scroll_to_focus();
             }
             Message::FocusNextIssue => {
                 let count = self.issues_in_focused_lane().len();
                 if count > 0 && self.focused_issue + 1 < count {
                     self.focused_issue += 1;
                 }
+                return self.scroll_to_focus();
             }
             Message::FocusPrevIssue => {
                 if self.focused_issue > 0 {
                     self.focused_issue -= 1;
                 }
+                return self.scroll_to_focus();
             }
             Message::FocusNextLane => {
                 if self.focused_lane + 1 < self.board_columns().len() {
@@ -1761,6 +1846,7 @@ impl App {
                     self.focused_issue = 0;
                     self.clamp_focus();
                 }
+                return self.scroll_to_focus();
             }
             Message::FocusPrevLane => {
                 if self.focused_lane > 0 {
@@ -1768,6 +1854,7 @@ impl App {
                     self.focused_issue = 0;
                     self.clamp_focus();
                 }
+                return self.scroll_to_focus();
             }
 
             Message::CardPressed(lane_idx, issue_idx) => {
@@ -1795,7 +1882,39 @@ impl App {
             Message::Noop => {}
             Message::SetViewMode(m) => {
                 self.config.display.view_mode = m;
+                self.scroll_state.clear();
                 self.persist_display();
+            }
+            Message::ToggleViewMode => {
+                let next = match self.config.display.view_mode {
+                    ViewMode::Board => ViewMode::List,
+                    ViewMode::List => ViewMode::Board,
+                };
+                return self.update(Message::SetViewMode(next));
+            }
+            Message::ToggleSection(title) => {
+                if !self.collapsed_sections.remove(&title) {
+                    self.collapsed_sections.insert(title);
+                }
+            }
+            Message::ToggleFocusedSection => {
+                if self.config.display.view_mode == ViewMode::List {
+                    let title = self
+                        .board_columns()
+                        .get(self.focused_lane)
+                        .map(|c| c.title.clone());
+                    if let Some(title) = title {
+                        let expanded = self.collapsed_sections.remove(&title);
+                        if !expanded {
+                            self.collapsed_sections.insert(title);
+                        } else {
+                            return self.scroll_to_focus();
+                        }
+                    }
+                }
+            }
+            Message::Scrolled(key, offset, viewport) => {
+                self.scroll_state.insert(key, (offset, viewport));
             }
             Message::SetGroupBy(g) => {
                 self.config.display.group_by = g;
@@ -1919,9 +2038,7 @@ impl App {
                     self.push_toast(format!("Exported to {path}"), ToastKind::Info, false)
                 }
                 Ok(None) => {}
-                Err(e) => {
-                    self.push_toast(format!("Export failed: {e}"), ToastKind::Error, false)
-                }
+                Err(e) => self.push_toast(format!("Export failed: {e}"), ToastKind::Error, false),
             },
 
             Message::PickCsvImport => {
@@ -1956,7 +2073,8 @@ impl App {
                     };
                     match csv_io::parse_import(&text, &ctx) {
                         Ok(preview) => {
-                            self.csv_import = Some(csv_import::CsvImportState { file_name, preview });
+                            self.csv_import =
+                                Some(csv_import::CsvImportState { file_name, preview });
                             self.modal = Modal::CsvImport;
                         }
                         Err(e) => {
@@ -2640,6 +2758,7 @@ impl App {
                         issue_labels: &self.issue_labels,
                         display: &self.config.display,
                     },
+                    &self.collapsed_sections,
                     self.focused_lane,
                     self.focused_issue,
                 )
@@ -2832,9 +2951,7 @@ impl App {
                 }
             }
             Modal::CsvImport => match self.csv_import {
-                Some(ref state) => {
-                    iced::widget::stack![base, csv_import::view(state)].into()
-                }
+                Some(ref state) => iced::widget::stack![base, csv_import::view(state)].into(),
                 None => base,
             },
             Modal::DeleteConfirm(issue_id) => {
@@ -3002,7 +3119,10 @@ fn sort_projects(list: &mut [&Project], sort: ProjectSort, dir: SortDir) {
 }
 
 fn cmp_option_nulls_last(a: &Option<String>, b: &Option<String>, dir: SortDir) -> Ordering {
-    match (a.as_deref().filter(|s| !s.is_empty()), b.as_deref().filter(|s| !s.is_empty())) {
+    match (
+        a.as_deref().filter(|s| !s.is_empty()),
+        b.as_deref().filter(|s| !s.is_empty()),
+    ) {
         (Some(x), Some(y)) => {
             let o = x.cmp(y);
             match dir {

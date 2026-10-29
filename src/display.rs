@@ -111,10 +111,13 @@ pub enum CardProperty {
     Project,
     DueDate,
     Status,
+    Estimate,
+    Created,
+    Updated,
 }
 
 impl CardProperty {
-    pub const ALL: [(CardProperty, &'static str); 7] = [
+    pub const ALL: [(CardProperty, &'static str); 10] = [
         (CardProperty::Id, "ID"),
         (CardProperty::Priority, "Priority"),
         (CardProperty::Labels, "Labels"),
@@ -122,6 +125,9 @@ impl CardProperty {
         (CardProperty::Project, "Project"),
         (CardProperty::DueDate, "Due date"),
         (CardProperty::Status, "Status"),
+        (CardProperty::Estimate, "Estimate"),
+        (CardProperty::Created, "Created"),
+        (CardProperty::Updated, "Updated"),
     ];
 }
 
@@ -971,5 +977,29 @@ mod tests {
         assert_eq!(o.view_mode, ViewMode::Board);
         let o: DisplayOptions = serde_json::from_str(r#"{"view_mode":"list"}"#).unwrap();
         assert_eq!(o.view_mode, ViewMode::List);
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    #[test]
+    fn new_properties_toggle_and_roundtrip() {
+        let mut o = DisplayOptions::default();
+        for p in [
+            CardProperty::Estimate,
+            CardProperty::Created,
+            CardProperty::Updated,
+        ] {
+            assert!(!o.shows(p));
+            o.toggle_property(p);
+            assert!(o.shows(p));
+        }
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(json.contains("estimate") && json.contains("created") && json.contains("updated"));
+        let back: DisplayOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, o);
+        assert_eq!(CardProperty::ALL.len(), 10);
     }
 }

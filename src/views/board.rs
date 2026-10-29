@@ -8,8 +8,10 @@ use iced::{Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
 use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
+use crate::scroll;
 use crate::theme as t;
 use crate::views::labels as labels_view;
+use crate::views::util;
 
 /// Lookup data cards need for their optional properties.
 pub struct CardData<'a> {
@@ -77,19 +79,22 @@ pub fn view<'a>(
             // Sub-group heading before the first card of each section.
             if let Some(section) = col.sections.iter().find(|s| s.start == issue_idx) {
                 issue_cards = issue_cards.push(
-                    row![]
-                        .spacing(6)
-                        .padding([4, 2])
-                        .push(
-                            text(section.title.clone())
-                                .size(12)
-                                .color(t::TEXT_SECONDARY),
-                        )
-                        .push(
-                            text(format!("{}", section.end - section.start))
-                                .size(12)
-                                .color(t::TEXT_MUTED),
-                        ),
+                    container(
+                        row![]
+                            .spacing(6)
+                            .push(
+                                text(section.title.clone())
+                                    .size(12)
+                                    .color(t::TEXT_SECONDARY),
+                            )
+                            .push(
+                                text(format!("{}", section.end - section.start))
+                                    .size(12)
+                                    .color(t::TEXT_MUTED),
+                            ),
+                    )
+                    .padding([4, 2])
+                    .height(Length::Fixed(scroll::BOARD_SUBHEAD_H)),
                 );
             }
             let is_focused = is_focused_lane && issue_idx == focused_issue;
@@ -97,7 +102,12 @@ pub fn view<'a>(
                 issue_cards.push(issue_card(issue, &data, is_focused, col_idx, issue_idx));
         }
 
-        let lane_content = scrollable(issue_cards).height(Length::Fill);
+        let lane_content = scrollable(issue_cards)
+            .id(lane_scroll_id(col_idx))
+            .on_scroll(move |vp| {
+                Message::Scrolled(col_idx, vp.absolute_offset().y, vp.bounds().height)
+            })
+            .height(Length::Fill);
 
         let lane_container = container(lane_content)
             .width(Length::Fill)
@@ -137,47 +147,9 @@ pub fn view<'a>(
         .into()
 }
 
-fn issue_card<'a>(
-    issue: &'a Issue,
-    data: &CardData<'a>,
-    focused: bool,
-    lane_idx: usize,
-    issue_idx: usize,
-) -> Element<'a, Message> {
+/// The muted "fact" strings on a card's meta line, in display order.
+fn card_facts(issue: &Issue, data: &CardData<'_>) -> Vec<String> {
     let d = data.display;
-    let priority_color = t::priority_color(issue.priority_enum());
-
-    let mut card_content = column![].spacing(4);
-
-    if d.shows(CardProperty::Id) {
-        let ident = data
-            .teams
-            .iter()
-            .find(|t| t.id == issue.team_id)
-            .map(|t| t.identifier.as_str())
-            .unwrap_or("---");
-        let tag = issue
-            .team_number
-            .map(|n| format!("{ident}-{n}"))
-            .unwrap_or_default();
-        card_content = card_content.push(text(tag).size(12).color(t::TEXT_MUTED));
-    }
-    card_content = card_content.push(text(&issue.title).size(14).color(t::TEXT_PRIMARY));
-
-    let labels = data
-        .issue_labels
-        .get(&issue.id)
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-    if d.shows(CardProperty::Labels) && !labels.is_empty() {
-        let mut chips: Row<'a, Message> = row![].spacing(4);
-        for label in labels {
-            chips = chips.push(labels_view::static_chip(label));
-        }
-        card_content = card_content.push(chips);
-    }
-
-    // Meta line: small muted facts, only the enabled ones.
     let mut facts: Vec<String> = Vec::new();
     if d.shows(CardProperty::Assignee) {
         let name = issue
@@ -207,6 +179,96 @@ fn issue_card<'a>(
             facts.push(l.name.clone());
         }
     }
+    if d.shows(CardProperty::Estimate) {
+        if let Some(e) = issue.estimate {
+            facts.push(util::format_estimate(e));
+        }
+    }
+    if d.shows(CardProperty::Created) {
+        facts.push(format!("Created {}", util::short_date(&issue.created_at)));
+    }
+    if d.shows(CardProperty::Updated) {
+        facts.push(format!("Updated {}", util::short_date(&issue.updated_at)));
+    }
+    facts
+}
+
+/// Rendered height of `issue`'s card (cards are fixed-height so scroll-to-focus
+/// can be computed; see `scroll::board_card_height`).
+pub fn card_height(issue: &Issue, data: &CardData<'_>) -> f32 {
+    let d = data.display;
+    let has_chips = d.shows(CardProperty::Labels)
+        && data
+            .issue_labels
+            .get(&issue.id)
+            .is_some_and(|l| !l.is_empty());
+    let has_meta = d.shows(CardProperty::Priority) || !card_facts(issue, data).is_empty();
+    scroll::board_card_height(d.shows(CardProperty::Id), has_chips, has_meta)
+}
+
+/// Scrollable id of board lane `idx`.
+pub fn lane_scroll_id(idx: usize) -> scrollable::Id {
+    scrollable::Id::new(format!("board-lane-{idx}"))
+}
+
+/// `(top, height)` of the focused card within its lane's scroll content.
+pub fn focused_span(col: &BoardColumn<'_>, data: &CardData<'_>, issue: usize) -> (f32, f32) {
+    let heights: Vec<f32> = col.issues.iter().map(|i| card_height(i, data)).collect();
+    let starts: Vec<usize> = col.sections.iter().map(|s| s.start).collect();
+    scroll::board_card_span(&heights, &starts, issue)
+}
+
+fn issue_card<'a>(
+    issue: &'a Issue,
+    data: &CardData<'a>,
+    focused: bool,
+    lane_idx: usize,
+    issue_idx: usize,
+) -> Element<'a, Message> {
+    let d = data.display;
+    let priority_color = t::priority_color(issue.priority_enum());
+
+    let mut card_content = column![].spacing(4);
+
+    if d.shows(CardProperty::Id) {
+        let ident = data
+            .teams
+            .iter()
+            .find(|t| t.id == issue.team_id)
+            .map(|t| t.identifier.as_str())
+            .unwrap_or("---");
+        let tag = issue
+            .team_number
+            .map(|n| format!("{ident}-{n}"))
+            .unwrap_or_default();
+        card_content = card_content.push(text(tag).size(12).color(t::TEXT_MUTED));
+    }
+    card_content = card_content.push(
+        text(&issue.title)
+            .size(14)
+            .color(t::TEXT_PRIMARY)
+            .wrapping(text::Wrapping::None),
+    );
+
+    let labels = data
+        .issue_labels
+        .get(&issue.id)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    if d.shows(CardProperty::Labels) && !labels.is_empty() {
+        let mut chips: Row<'a, Message> = row![].spacing(4);
+        for label in labels {
+            chips = chips.push(labels_view::static_chip(label));
+        }
+        card_content = card_content.push(
+            container(chips)
+                .height(Length::Fixed(20.0))
+                .align_y(iced::alignment::Vertical::Center),
+        );
+    }
+
+    // Meta line: small muted facts, only the enabled ones.
+    let facts = card_facts(issue, data);
 
     let mut meta: Row<'a, Message> = row![].spacing(10).align_y(iced::Alignment::Center);
     if d.shows(CardProperty::Priority) {
@@ -225,7 +287,12 @@ fn issue_card<'a>(
     }
     let has_meta = d.shows(CardProperty::Priority) || !facts.is_empty();
     for f in facts {
-        meta = meta.push(text(f).size(11).color(t::TEXT_MUTED));
+        meta = meta.push(
+            text(f)
+                .size(11)
+                .color(t::TEXT_MUTED)
+                .wrapping(text::Wrapping::None),
+        );
     }
     if has_meta {
         card_content = card_content.push(meta);
@@ -242,6 +309,8 @@ fn issue_card<'a>(
     let card = container(card_content)
         .padding([10, 12])
         .width(Length::Fill)
+        .height(Length::Fixed(card_height(issue, data)))
+        .clip(true)
         .style(move |_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(bg)),
             border: Border {
