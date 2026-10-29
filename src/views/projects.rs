@@ -1,6 +1,6 @@
 use iced::widget::{
-    button, column, container, horizontal_rule, mouse_area, pick_list, row, scrollable, text,
-    text_editor, text_input,
+    button, column, container, horizontal_rule, mouse_area, pick_list, responsive, row, scrollable,
+    text, text_editor, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
@@ -300,6 +300,8 @@ const COL_LEAD: f32 = 56.0;
 const COL_TARGET: f32 = 120.0;
 const COL_STATUS: f32 = 130.0;
 const COL_TREND: f32 = 90.0;
+/// Table width below which the Burndown column is hidden.
+const TREND_MIN_WIDTH: f32 = 760.0;
 
 /// Full-pane Projects table: a controls row (sort + hide-completed + new), a
 /// column header, then one clickable row per project. `projects` arrives already
@@ -320,14 +322,15 @@ pub fn list_view<'a>(
         .push(text("Sort by").size(12).color(t::TEXT_MUTED));
     for option in ProjectSort::ALL {
         let active = option == sort;
-        let mut label = row![]
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .push(text(option.label()).size(12).color(if active {
-                t::TEXT_PRIMARY
-            } else {
-                t::TEXT_SECONDARY
-            }));
+        let mut label =
+            row![]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .push(text(option.label()).size(12).color(if active {
+                    t::TEXT_PRIMARY
+                } else {
+                    t::TEXT_SECONDARY
+                }));
         if active {
             label = label.push(text(dir.arrow()).size(9).color(t::TEXT_SECONDARY));
         }
@@ -336,11 +339,14 @@ pub fn list_view<'a>(
                 .on_press(Message::ProjectSortChanged(option))
                 .padding([4, 8])
                 .style(move |_theme: &Theme, _status| button::Style {
-                    background: active
-                        .then_some(iced::Background::Color(t::BG_CARD_FOCUSED)),
+                    background: active.then_some(iced::Background::Color(t::BG_CARD_FOCUSED)),
                     text_color: t::TEXT_PRIMARY,
                     border: Border {
-                        color: if active { t::BORDER } else { Color::TRANSPARENT },
+                        color: if active {
+                            t::BORDER
+                        } else {
+                            Color::TRANSPARENT
+                        },
                         width: 1.0,
                         radius: 10.0.into(),
                     },
@@ -389,49 +395,72 @@ pub fn list_view<'a>(
                 }),
         );
 
-    // ---- Column header ----
-    let header = row![]
-        .spacing(12)
-        .padding([8, 16])
-        .align_y(Alignment::Center)
-        .push(header_cell("Name", Length::Fill))
-        .push(header_cell("Health", Length::Fixed(COL_HEALTH)))
-        .push(header_cell("Priority", Length::Fixed(COL_PRIORITY)))
-        .push(header_cell("Lead", Length::Fixed(COL_LEAD)))
-        .push(header_cell("Burndown", Length::Fixed(COL_TREND)))
-        .push(header_cell("Target", Length::Fixed(COL_TARGET)))
-        .push(header_cell("Status", Length::Fixed(COL_STATUS)));
+    // The fixed columns need ~750px; below that (min window 800 minus sidebar)
+    // the sparkline column is dropped so Name keeps room. Header + rows are
+    // built inside `responsive` since the available width is only known at layout.
+    let projects: Vec<&'a Project> = projects.to_vec();
+    let table = responsive(move |size| {
+        let show_trend = size.width >= TREND_MIN_WIDTH;
+        // ---- Column header ----
+        let mut header = row![]
+            .spacing(12)
+            .padding([8, 16])
+            .align_y(Alignment::Center)
+            .push(header_cell("Name", Length::Fill))
+            .push(header_cell("Health", Length::Fixed(COL_HEALTH)))
+            .push(header_cell("Priority", Length::Fixed(COL_PRIORITY)))
+            .push(header_cell("Lead", Length::Fixed(COL_LEAD)));
+        if show_trend {
+            header = header.push(header_cell("Burndown", Length::Fixed(COL_TREND)));
+        }
+        header = header
+            .push(header_cell("Target", Length::Fixed(COL_TARGET)))
+            .push(header_cell("Status", Length::Fixed(COL_STATUS)));
 
-    // ---- Rows ----
-    let mut rows = column![].width(Length::Fill);
-    if projects.is_empty() {
-        rows = rows.push(
-            container(
-                column![]
-                    .spacing(10)
-                    .align_x(Alignment::Center)
-                    .push(text("No projects yet").size(14).color(t::TEXT_MUTED))
-                    .push(
-                        button(text("Create your first project").size(13).color(t::ACCENT))
-                            .on_press(Message::CreateProject)
-                            .padding(0)
-                            .style(button::text),
-                    ),
-            )
-            .center_x(Length::Fill)
-            .padding(40),
-        );
-    } else {
-        for &project in projects {
-            rows = rows.push(project_row(project, members, issues));
+        // ---- Rows ----
+        let mut rows = column![].width(Length::Fill);
+        if projects.is_empty() {
             rows = rows.push(
+                container(
+                    column![]
+                        .spacing(10)
+                        .align_x(Alignment::Center)
+                        .push(text("No projects yet").size(14).color(t::TEXT_MUTED))
+                        .push(
+                            button(text("Create your first project").size(13).color(t::ACCENT))
+                                .on_press(Message::CreateProject)
+                                .padding(0)
+                                .style(button::text),
+                        ),
+                )
+                .center_x(Length::Fill)
+                .padding(40),
+            );
+        } else {
+            for &project in &projects {
+                rows = rows.push(project_row(project, members, issues, show_trend));
+                rows = rows.push(container(horizontal_rule(1)).style(|_theme: &Theme| {
+                    container::Style {
+                        background: Some(iced::Background::Color(t::BORDER)),
+                        ..Default::default()
+                    }
+                }));
+            }
+        }
+
+        column![]
+            .spacing(0)
+            .width(Length::Fill)
+            .push(header)
+            .push(
                 container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
                     background: Some(iced::Background::Color(t::BORDER)),
                     ..Default::default()
                 }),
-            );
-        }
-    }
+            )
+            .push(scrollable(rows).height(Length::Fill))
+            .into()
+    });
 
     let body = column![]
         .spacing(0)
@@ -443,14 +472,7 @@ pub fn list_view<'a>(
                 ..Default::default()
             }),
         )
-        .push(header)
-        .push(
-            container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::BORDER)),
-                ..Default::default()
-            }),
-        )
-        .push(scrollable(rows).height(Length::Fill));
+        .push(table);
 
     container(body)
         .width(Length::Fill)
@@ -472,6 +494,7 @@ fn project_row<'a>(
     project: &'a Project,
     members: &'a [Member],
     issues: &'a [Issue],
+    show_trend: bool,
 ) -> Element<'a, Message> {
     let (health_color, health_label) = project_health(project);
     let priority = project.priority_enum();
@@ -498,20 +521,26 @@ fn project_row<'a>(
             .spacing(5)
             .align_y(Alignment::Center)
             .push(text("\u{25B3}").size(10).color(t::priority_color(priority)))
-            .push(text(format!("{priority}")).size(12).color(t::TEXT_SECONDARY)),
+            .push(
+                text(format!("{priority}"))
+                    .size(12)
+                    .color(t::TEXT_SECONDARY),
+            ),
     )
     .width(Length::Fixed(COL_PRIORITY));
 
-    let lead_cell = container(lead_avatar(project.lead_id.as_deref(), members))
-        .width(Length::Fixed(COL_LEAD));
+    let lead_cell =
+        container(lead_avatar(project.lead_id.as_deref(), members)).width(Length::Fixed(COL_LEAD));
 
-    let trend_data = progress_chart::compute(project, issues, progress_chart::today());
-    let trend_cell = container(if trend_data.snapshots.is_empty() {
-        text("\u{2014}").size(12).color(t::TEXT_MUTED).into()
-    } else {
-        progress_chart::sparkline(trend_data, COL_TREND - 12.0)
-    })
-    .width(Length::Fixed(COL_TREND));
+    let trend_cell = show_trend.then(|| {
+        let trend_data = progress_chart::compute(project, issues, progress_chart::today());
+        container(if trend_data.snapshots.is_empty() {
+            text("\u{2014}").size(12).color(t::TEXT_MUTED).into()
+        } else {
+            progress_chart::sparkline(trend_data, COL_TREND - 12.0)
+        })
+        .width(Length::Fixed(COL_TREND))
+    });
 
     let target_color = if project.behind_schedule {
         t::DANGER
@@ -519,15 +548,13 @@ fn project_row<'a>(
         t::TEXT_SECONDARY
     };
     let target_cell = container(match project.due_date.as_deref() {
-        Some(d) if !d.is_empty() => {
-            text(format_target_date(d)).size(12).color(target_color)
-        }
+        Some(d) if !d.is_empty() => text(format_target_date(d)).size(12).color(target_color),
         _ => text("\u{2014}").size(12).color(t::TEXT_MUTED),
     })
     .width(Length::Fixed(COL_TARGET));
 
-    let status_cell = container(progress_status(project.progress_percentage))
-        .width(Length::Fixed(COL_STATUS));
+    let status_cell =
+        container(progress_status(project.progress_percentage)).width(Length::Fixed(COL_STATUS));
 
     let row_content = row![]
         .spacing(12)
@@ -537,7 +564,7 @@ fn project_row<'a>(
         .push(health_cell)
         .push(priority_cell)
         .push(lead_cell)
-        .push(trend_cell)
+        .push_maybe(trend_cell)
         .push(target_cell)
         .push(status_cell);
 
