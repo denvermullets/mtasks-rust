@@ -10,5 +10,6 @@ pub mod roadmap;
 pub mod settings;
 pub mod status_bar;
 pub mod team_list;
+pub mod team_members;
 pub mod toast;
 pub mod util;

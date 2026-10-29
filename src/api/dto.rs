@@ -398,6 +398,7 @@ impl From<TeamDto> for Team {
             name: dto.name,
             identifier: dto.identifier,
             remote_id: Some(dto.id),
+            archived_at: None,
             created_at,
             updated_at,
         }
@@ -626,7 +627,7 @@ fn local_uuid_for(conn: &Connection, table: &str, remote_id: i64) -> Result<Stri
 
 fn lookup_team_by_local_id(conn: &Connection, id: &str) -> Result<Team, ApiError> {
     conn.query_row(
-        "SELECT id, name, identifier, remote_id, created_at, updated_at
+        "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
          FROM teams WHERE id = ?1",
         params![id],
         Team::from_row,
@@ -878,6 +879,7 @@ mod tests {
             name: "Apollo".into(),
             identifier: "APO".into(),
             remote_id: Some(99),
+            archived_at: None,
             created_at: now(),
             updated_at: now(),
         };

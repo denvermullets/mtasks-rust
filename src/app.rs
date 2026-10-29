@@ -19,7 +19,7 @@ use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
     board, issue_detail, issue_form, issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
-    team_list, toast,
+    team_list, team_members, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +31,17 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
+
+    // Team menu (sidebar kebab)
+    /// Open/close the per-team menu on an expanded team header.
+    ToggleTeamMenu(String),
+    /// Show/hide archived teams in the sidebar.
+    ToggleShowArchivedTeams,
+    /// Open the read-only members panel for a team (local UUID).
+    OpenTeamMembers(String),
+    /// Open a team's Rails settings page in the browser. Teams and lanes have
+    /// no API write endpoints, so editing them is web-only.
+    OpenTeamWebSettings(String, TeamWebSection),
 
     // Issue CRUD
     CreateIssue,
@@ -200,6 +211,35 @@ pub enum Modal {
     IssuePicker,
     /// "Add project to roadmap" picker; carries the lane a chosen project lands in.
     RoadmapAdd(RoadmapCommitment),
+    /// Read-only members panel for a team (local UUID).
+    TeamMembers(String),
+}
+
+/// Sections of the Rails team settings page (`/teams/:id/edit?section=…`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeamWebSection {
+    General,
+    Lanes,
+    Members,
+}
+
+impl TeamWebSection {
+    fn query_value(self) -> &'static str {
+        match self {
+            TeamWebSection::General => "general",
+            TeamWebSection::Lanes => "lanes",
+            TeamWebSection::Members => "members",
+        }
+    }
+}
+
+/// Build the Rails web URL for a team's settings section.
+fn team_web_url(base_url: &str, team_remote_id: i64, section: TeamWebSection) -> String {
+    format!(
+        "{}/teams/{team_remote_id}/edit?section={}",
+        base_url.trim().trim_end_matches('/'),
+        section.query_value()
+    )
 }
 
 /// Which dependency section a picker/add-action targets, relative to the open
@@ -283,6 +323,13 @@ pub struct App {
     view: View,
     /// Teams whose sidebar sub-rows are expanded. Session-only (not persisted).
     expanded_teams: HashSet<String>,
+    /// Team whose sidebar kebab menu is open, if any.
+    team_menu_open: Option<String>,
+    /// Sidebar toggle: include archived teams. Session-only, defaults off.
+    show_archived_teams: bool,
+    /// Members for the team shown in `Modal::TeamMembers` (may not be the
+    /// selected team, so it's loaded separately from `members`).
+    team_members: Vec<Member>,
     lanes: Vec<Lane>,
     issues: Vec<Issue>,
     projects: Vec<Project>,
@@ -359,9 +406,7 @@ impl App {
         self.teams = queries::all_teams(&conn).unwrap_or_default();
 
         if self.selected_team_id.is_none() {
-            if let Some(first) = self.teams.first() {
-                self.selected_team_id = Some(first.id.clone());
-            }
+            self.selected_team_id = default_team_id(&self.teams);
         }
 
         if let Some(ref team_id) = self.selected_team_id {
@@ -756,7 +801,7 @@ impl App {
         }
 
         let teams = queries::all_teams(&conn).unwrap_or_default();
-        let selected_team_id = teams.first().map(|t| t.id.clone());
+        let selected_team_id = default_team_id(&teams);
 
         let (lanes, issues, projects, members, labels, issue_labels) =
             if let Some(ref tid) = selected_team_id {
@@ -782,6 +827,9 @@ impl App {
             selected_team_id,
             view: View::Board,
             expanded_teams,
+            team_menu_open: None,
+            show_archived_teams: false,
+            team_members: Vec::new(),
             lanes,
             issues,
             projects,
@@ -861,7 +909,12 @@ impl App {
             }
 
             Message::ToggleTeamExpanded(team_id) => {
-                if !self.expanded_teams.remove(&team_id) {
+                if self.expanded_teams.remove(&team_id) {
+                    // The menu hangs off the expanded header; collapse closes it.
+                    if self.team_menu_open.as_deref() == Some(team_id.as_str()) {
+                        self.team_menu_open = None;
+                    }
+                } else {
                     self.expanded_teams.insert(team_id);
                 }
             }
@@ -882,6 +935,50 @@ impl App {
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.view = view;
+            }
+
+            Message::ToggleTeamMenu(team_id) => {
+                if self.team_menu_open.as_deref() == Some(team_id.as_str()) {
+                    self.team_menu_open = None;
+                } else {
+                    self.team_menu_open = Some(team_id);
+                }
+            }
+
+            Message::ToggleShowArchivedTeams => {
+                self.show_archived_teams = !self.show_archived_teams;
+            }
+
+            Message::OpenTeamMembers(team_id) => {
+                self.team_members =
+                    queries::members_for_team(&self.db(), &team_id).unwrap_or_default();
+                self.team_menu_open = None;
+                self.modal = Modal::TeamMembers(team_id);
+            }
+
+            Message::OpenTeamWebSettings(team_id, section) => {
+                self.team_menu_open = None;
+                let remote_id = self
+                    .teams
+                    .iter()
+                    .find(|t| t.id == team_id)
+                    .and_then(|t| t.remote_id);
+                let Some(remote_id) = remote_id else {
+                    self.push_toast(
+                        "This team isn't synced to the web app yet",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                };
+                let url = team_web_url(&self.config.api_base_url, remote_id, section);
+                if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
+                    self.push_toast(
+                        format!("Couldn't open browser: {e}"),
+                        ToastKind::Error,
+                        false,
+                    );
+                }
             }
 
             Message::CreateIssue => {
@@ -1275,6 +1372,7 @@ impl App {
                 self.settings_form = None;
                 self.project_form = None;
                 self.label_form = None;
+                self.team_members.clear();
             }
 
             Message::ToggleHelp => {
@@ -1901,6 +1999,8 @@ impl App {
             self.selected_team_id.as_deref(),
             &self.expanded_teams,
             &self.view,
+            self.team_menu_open.as_deref(),
+            self.show_archived_teams,
         );
         let sidebar_column = iced::widget::scrollable(team_sidebar).height(Length::Fill);
 
@@ -2147,6 +2247,13 @@ impl App {
                     roadmap_view::add_modal_view(*commitment, &self.projects, self.selected_team());
                 iced::widget::stack![base, modal].into()
             }
+            Modal::TeamMembers(team_id) => match self.teams.iter().find(|t| t.id == *team_id) {
+                Some(team) => {
+                    let modal = team_members::modal_view(team, &self.team_members);
+                    iced::widget::stack![base, modal].into()
+                }
+                None => base,
+            },
             Modal::None => base,
         };
 
@@ -2157,6 +2264,16 @@ impl App {
             iced::widget::stack![content, toast::overlay(&self.toasts)].into()
         }
     }
+}
+
+/// Boot/default team selection: the first non-archived team, falling back to
+/// the first team at all so an all-archived install still shows something.
+fn default_team_id(teams: &[Team]) -> Option<String> {
+    teams
+        .iter()
+        .find(|t| t.archived_at.is_none())
+        .or_else(|| teams.first())
+        .map(|t| t.id.clone())
 }
 
 /// Group the team's issue↔label join rows into a per-issue map for the board.
@@ -2342,4 +2459,46 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
             ..Default::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn team(id: &str, archived: bool) -> Team {
+        Team {
+            id: id.into(),
+            name: id.into(),
+            identifier: id.into(),
+            remote_id: None,
+            archived_at: archived.then(|| "2026-01-01T00:00:00.000Z".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn team_web_url_targets_settings_section() {
+        assert_eq!(
+            team_web_url("http://localhost:3005/", 7, TeamWebSection::Lanes),
+            "http://localhost:3005/teams/7/edit?section=lanes"
+        );
+        assert_eq!(
+            team_web_url(" https://jait.app ", 7, TeamWebSection::General),
+            "https://jait.app/teams/7/edit?section=general"
+        );
+    }
+
+    #[test]
+    fn default_team_skips_archived() {
+        let teams = vec![team("a", true), team("b", false)];
+        assert_eq!(default_team_id(&teams).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn default_team_falls_back_when_all_archived() {
+        let teams = vec![team("a", true)];
+        assert_eq!(default_team_id(&teams).as_deref(), Some("a"));
+        assert_eq!(default_team_id(&[]), None);
+    }
 }

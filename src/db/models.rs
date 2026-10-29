@@ -10,6 +10,10 @@ pub struct Team {
     pub name: String,
     pub identifier: String,
     pub remote_id: Option<i64>,
+    /// Set when Rails stopped returning the team (archived upstream). Archived
+    /// teams are hidden from the sidebar unless "Show archived" is on.
+    #[serde(default)]
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -21,6 +25,7 @@ impl Team {
             name: row.get("name")?,
             identifier: row.get("identifier")?,
             remote_id: row.get("remote_id")?,
+            archived_at: row.get("archived_at")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })

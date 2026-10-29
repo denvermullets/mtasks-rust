@@ -6,7 +6,7 @@ use super::models::{Comment, Issue, IssueDependency, Label, Lane, Member, Projec
 
 pub fn all_teams(conn: &Connection) -> Result<Vec<Team>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, identifier, remote_id, created_at, updated_at
+        "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
          FROM teams ORDER BY name",
     )?;
     let rows = stmt.query_map([], Team::from_row)?;
@@ -555,7 +555,7 @@ pub fn set_issue_dependency_remote_id(
 
 pub fn find_team_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Team>> {
     conn.query_row(
-        "SELECT id, name, identifier, remote_id, created_at, updated_at
+        "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
          FROM teams WHERE remote_id = ?1",
         params![remote_id],
         Team::from_row,
