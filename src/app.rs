@@ -1939,6 +1939,7 @@ impl App {
                     self.project_sort,
                     self.project_sort_dir,
                     self.hide_completed_projects,
+                    &self.issues,
                 )
             }
             View::ProjectDetail(ref project_id) => {

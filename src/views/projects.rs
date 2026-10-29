@@ -7,8 +7,9 @@ use iced::{Alignment, Border, Color, Element, Length, Theme};
 use chrono::Datelike;
 
 use crate::app::{Message, ProjectSort, SortDir};
-use crate::db::models::{Member, Priority, Project, ProjectStatus, RoadmapCommitment};
+use crate::db::models::{Issue, Member, Priority, Project, ProjectStatus, RoadmapCommitment};
 use crate::theme as t;
+use crate::views::progress_chart;
 
 pub struct ProjectFormState {
     pub name: String,
@@ -298,6 +299,7 @@ const COL_PRIORITY: f32 = 100.0;
 const COL_LEAD: f32 = 56.0;
 const COL_TARGET: f32 = 120.0;
 const COL_STATUS: f32 = 130.0;
+const COL_TREND: f32 = 90.0;
 
 /// Full-pane Projects table: a controls row (sort + hide-completed + new), a
 /// column header, then one clickable row per project. `projects` arrives already
@@ -309,6 +311,7 @@ pub fn list_view<'a>(
     sort: ProjectSort,
     dir: SortDir,
     hide_completed: bool,
+    issues: &'a [Issue],
 ) -> Element<'a, Message> {
     // ---- Controls row: Sort by … | Hide completed | + New Project ----
     let mut sort_row = row![]
@@ -395,6 +398,7 @@ pub fn list_view<'a>(
         .push(header_cell("Health", Length::Fixed(COL_HEALTH)))
         .push(header_cell("Priority", Length::Fixed(COL_PRIORITY)))
         .push(header_cell("Lead", Length::Fixed(COL_LEAD)))
+        .push(header_cell("Burndown", Length::Fixed(COL_TREND)))
         .push(header_cell("Target", Length::Fixed(COL_TARGET)))
         .push(header_cell("Status", Length::Fixed(COL_STATUS)));
 
@@ -419,7 +423,7 @@ pub fn list_view<'a>(
         );
     } else {
         for &project in projects {
-            rows = rows.push(project_row(project, members));
+            rows = rows.push(project_row(project, members, issues));
             rows = rows.push(
                 container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
                     background: Some(iced::Background::Color(t::BORDER)),
@@ -464,7 +468,11 @@ fn header_cell<'a>(label: &'a str, width: Length) -> Element<'a, Message> {
         .into()
 }
 
-fn project_row<'a>(project: &'a Project, members: &'a [Member]) -> Element<'a, Message> {
+fn project_row<'a>(
+    project: &'a Project,
+    members: &'a [Member],
+    issues: &'a [Issue],
+) -> Element<'a, Message> {
     let (health_color, health_label) = project_health(project);
     let priority = project.priority_enum();
 
@@ -497,6 +505,14 @@ fn project_row<'a>(project: &'a Project, members: &'a [Member]) -> Element<'a, M
     let lead_cell = container(lead_avatar(project.lead_id.as_deref(), members))
         .width(Length::Fixed(COL_LEAD));
 
+    let trend_data = progress_chart::compute(project, issues, progress_chart::today());
+    let trend_cell = container(if trend_data.snapshots.is_empty() {
+        text("\u{2014}").size(12).color(t::TEXT_MUTED).into()
+    } else {
+        progress_chart::sparkline(trend_data, COL_TREND - 12.0)
+    })
+    .width(Length::Fixed(COL_TREND));
+
     let target_color = if project.behind_schedule {
         t::DANGER
     } else {
@@ -521,6 +537,7 @@ fn project_row<'a>(project: &'a Project, members: &'a [Member]) -> Element<'a, M
         .push(health_cell)
         .push(priority_cell)
         .push(lead_cell)
+        .push(trend_cell)
         .push(target_cell)
         .push(status_cell);
 
