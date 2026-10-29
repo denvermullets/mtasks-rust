@@ -334,13 +334,65 @@ pub struct Column<'a> {
 
 /// Everything `build_columns` reads, borrowed from `App`.
 pub struct Data<'a> {
+    /// The single team being shown, or `None` for a cross-team view.
     pub team: Option<&'a Team>,
+    /// All teams, used to resolve an issue's own team in cross-team views.
+    pub teams: &'a [Team],
+    /// Cross-team views merge same-named lanes (case-insensitive) into one
+    /// Status bucket, since each team has its own lane rows.
+    pub merge_lanes_by_name: bool,
     pub lanes: &'a [Lane],
     pub issues: &'a [Issue],
     pub members: &'a [Member],
     pub projects: &'a [Project],
     pub labels: &'a [Label],
     pub issue_labels: &'a HashMap<String, Vec<Label>>,
+}
+
+impl Data<'_> {
+    /// The team `issue` belongs to: the fixed team in single-team views,
+    /// otherwise looked up by `issue.team_id`.
+    pub fn team_of(&self, issue: &Issue) -> Option<&Team> {
+        self.team
+            .or_else(|| self.teams.iter().find(|t| t.id == issue.team_id))
+    }
+
+    fn lane_key(&self, lane_id: &str) -> String {
+        if !self.merge_lanes_by_name {
+            return lane_id.to_string();
+        }
+        match self.lanes.iter().find(|l| l.id == lane_id) {
+            Some(l) => l.name.to_lowercase(),
+            None => lane_id.to_string(),
+        }
+    }
+}
+
+/// Local member ids (one per team) that are the current user, matched by the
+/// Rails user id. Empty when the current user isn't known yet.
+pub fn my_member_ids(members: &[Member], current_user_remote_id: Option<i64>) -> Vec<String> {
+    let Some(rid) = current_user_remote_id else {
+        return vec![];
+    };
+    members
+        .iter()
+        .filter(|m| m.remote_id == Some(rid))
+        .map(|m| m.id.clone())
+        .collect()
+}
+
+/// `base` with the assignee field forced to `my_ids` (My Issues view). Other
+/// fields are kept. With no known member ids nothing can match, so a sentinel
+/// that no issue carries is used rather than leaving the filter empty (which
+/// would show everything).
+pub fn my_issues_filters(base: &Filters, my_ids: &[String]) -> Filters {
+    let mut f = base.clone();
+    f.assignees = if my_ids.is_empty() {
+        vec!["\u{0}no-member".to_string()]
+    } else {
+        my_ids.to_vec()
+    };
+    f
 }
 
 pub const PRIORITY_TITLES: [&str; 5] = ["Urgent", "High", "Medium", "Low", "No priority"];
@@ -365,7 +417,7 @@ pub fn visible_issues<'a>(
                 .unwrap_or(&[]);
             filters.matches(i, labels)
         })
-        .filter(|i| header::issue_matches(i, data.team, needle))
+        .filter(|i| header::issue_matches(i, data.team_of(i), needle))
         .collect();
     order_issues(&mut out, opts.order_by);
     out
@@ -387,6 +439,16 @@ fn buckets(axis: Axis, data: &Data<'_>, visible: &[&Issue]) -> Vec<Bucket> {
         title: title.to_string(),
     };
     match axis {
+        Axis::Status if data.merge_lanes_by_name => {
+            let mut sorted: Vec<&Lane> = data.lanes.iter().collect();
+            sorted.sort_by_key(|l| l.position); // stable: ties keep source order
+            let mut seen = HashSet::new();
+            sorted
+                .into_iter()
+                .filter(|l| seen.insert(l.name.to_lowercase()))
+                .map(|l| b(&l.name.to_lowercase(), &l.name))
+                .collect()
+        }
         Axis::Status => data.lanes.iter().map(|l| b(&l.id, &l.name)).collect(),
         Axis::Priority => PRIORITY_TITLES
             .iter()
@@ -427,7 +489,7 @@ fn buckets(axis: Axis, data: &Data<'_>, visible: &[&Issue]) -> Vec<Bucket> {
             ps.sort_by_key(|i| i.team_number.unwrap_or(0));
             let mut v: Vec<Bucket> = ps
                 .iter()
-                .map(|i| b(&i.id, &parent_title(i, data.team)))
+                .map(|i| b(&i.id, &parent_title(i, data.team_of(i))))
                 .collect();
             v.push(b(NONE_KEY, "No parent"));
             v
@@ -438,7 +500,7 @@ fn buckets(axis: Axis, data: &Data<'_>, visible: &[&Issue]) -> Vec<Bucket> {
 /// Bucket keys `issue` belongs to on `axis` (labels can be several, or none).
 fn keys_for(issue: &Issue, axis: Axis, data: &Data<'_>) -> Vec<String> {
     match axis {
-        Axis::Status => vec![issue.lane_id.clone()],
+        Axis::Status => vec![data.lane_key(&issue.lane_id)],
         Axis::Priority => vec![issue.priority.clamp(0, 4).to_string()],
         Axis::Assignee => vec![issue.assignee_id.clone().unwrap_or_default()],
         Axis::Project => vec![issue.project_id.clone().unwrap_or_default()],
@@ -598,6 +660,8 @@ mod tests {
     ) -> Data<'a> {
         Data {
             team: None,
+            teams: &[],
+            merge_lanes_by_name: false,
             lanes,
             issues,
             members: &[],
@@ -746,5 +810,87 @@ mod tests {
         assert!(!o.shows(CardProperty::Id));
         o.toggle_property(CardProperty::DueDate);
         assert!(o.shows(CardProperty::DueDate));
+    }
+
+    fn member(id: &str, team: &str, remote: Option<i64>) -> Member {
+        Member {
+            id: id.into(),
+            remote_id: remote,
+            team_id: team.into(),
+            name: id.into(),
+            email: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn team(id: &str, ident: &str) -> Team {
+        Team {
+            id: id.into(),
+            name: ident.into(),
+            identifier: ident.into(),
+            remote_id: None,
+            archived_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn my_member_ids_spans_teams() {
+        let ms = [
+            member("a1", "t1", Some(7)),
+            member("a2", "t2", Some(7)),
+            member("b1", "t1", Some(8)),
+            member("c1", "t1", None),
+        ];
+        assert_eq!(my_member_ids(&ms, Some(7)), ["a1", "a2"]);
+        assert!(my_member_ids(&ms, Some(99)).is_empty());
+        assert!(my_member_ids(&ms, None).is_empty());
+    }
+
+    #[test]
+    fn my_issues_aggregates_across_teams() {
+        let mut l2 = lane("l2", "todo", 0);
+        l2.team_id = "t2".into();
+        let lanes = [lane("l1", "Todo", 0), l2, lane("l3", "Done", 1)];
+        let mut i1 = issue("1", "l1", 1);
+        i1.assignee_id = Some("a1".into());
+        let mut i2 = issue("2", "l2", 1);
+        i2.team_id = "t2".into();
+        i2.assignee_id = Some("a2".into());
+        let mut i3 = issue("3", "l1", 1);
+        i3.assignee_id = Some("b1".into());
+        let i4 = issue("4", "l1", 1);
+        let issues = [i1, i2, i3, i4];
+        let teams = [team("t", "AAA"), team("t2", "BBB")];
+        let il = HashMap::new();
+        let d = Data {
+            teams: &teams,
+            merge_lanes_by_name: true,
+            ..data(&lanes, &issues, &[], &il)
+        };
+        let ids = vec!["a1".to_string(), "a2".to_string()];
+        let f = my_issues_filters(&Filters::default(), &ids);
+        let cols = build_columns(&d, &DisplayOptions::default(), &f, "");
+        // "Todo" and "todo" merge; "Done" stays.
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].issues.len(), 2);
+        assert!(cols[1].issues.is_empty());
+        assert_eq!(d.team_of(cols[0].issues[1]).unwrap().identifier, "BBB");
+        // Search resolves the issue's own team identifier.
+        let cols = build_columns(&d, &DisplayOptions::default(), &f, "bbb-");
+        assert_eq!(cols[0].issues.len(), 1);
+        // Unknown current user matches nothing.
+        let f = my_issues_filters(&Filters::default(), &[]);
+        let cols = build_columns(&d, &DisplayOptions::default(), &f, "");
+        assert!(cols.iter().all(|c| c.issues.is_empty()));
+        // A user-saved assignee filter is overridden, other fields kept.
+        let mut base = Filters::default();
+        base.toggle(FilterField::Assignee, "zzz");
+        base.toggle(FilterField::Priority, "1");
+        let f = my_issues_filters(&base, &ids);
+        assert_eq!(f.assignees, ids);
+        assert_eq!(f.priorities, ["1"]);
     }
 }
