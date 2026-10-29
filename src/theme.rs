@@ -43,6 +43,10 @@ pub const PRIORITY_LOW: Color = Color::from_rgb(0.23, 0.73, 0.53);
 pub const PRIORITY_NONE: Color = Color::from_rgb(0.42, 0.42, 0.48);
 
 pub const DANGER: Color = Color::from_rgb(0.94, 0.27, 0.27);
+// Progress chart series (mirrors Rails progress_chart_controller.js).
+pub const CHART_SCOPE: Color = Color::from_rgb(0.545, 0.576, 0.655);
+pub const CHART_STARTED: Color = Color::from_rgb(0.961, 0.753, 0.290);
+pub const CHART_COMPLETED: Color = Color::from_rgb(0.369, 0.918, 0.831);
 // Amber — non-blocking warnings (e.g. transient network sync failures).
 pub const WARNING: Color = Color::from_rgb(0.90, 0.62, 0.22);
 

@@ -7,6 +7,7 @@ use crate::app::{Message, View};
 use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme as t;
 use crate::views::header;
+use crate::views::progress_chart;
 use crate::views::projects::MemberOption;
 
 /// Buffered edit state for the full-page project detail view. Name, description,
@@ -128,7 +129,7 @@ pub fn view<'a>(
                 .size(14)
                 .height(Length::Fixed(160.0)),
         )
-        .push(burndown_stub(project))
+        .push(burndown(project, issues))
         .push(issues_section(
             project, issues, team, lanes, members, needle,
         ));
@@ -241,9 +242,9 @@ pub fn view<'a>(
         .into()
 }
 
-/// Placeholder for the real burndown chart (JAIT-217). Shows a compact progress
-/// summary in the meantime so the panel isn't empty.
-fn burndown_stub<'a>(project: &'a Project) -> Element<'a, Message> {
+/// Burndown / progress chart: scope, started, completed over time against the
+/// expected-progress line (JAIT-217). Red "Behind schedule" badge when trailing.
+fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Message> {
     let summary = format!(
         "{} of {} issues complete · {}% · velocity {}",
         project.completed_issues_count,
@@ -251,16 +252,38 @@ fn burndown_stub<'a>(project: &'a Project) -> Element<'a, Message> {
         project.progress_percentage,
         project.velocity_score,
     );
+    let data = progress_chart::compute(project, issues, progress_chart::today());
+    let behind = data.behind;
+    let body: Element<'a, Message> = if data.snapshots.is_empty() {
+        text("No data yet").size(12).color(t::TEXT_MUTED).into()
+    } else {
+        let legend = row![]
+            .spacing(14)
+            .align_y(Alignment::Center)
+            .push(legend_item("Scope", t::CHART_SCOPE))
+            .push(legend_item("Started", t::CHART_STARTED))
+            .push(legend_item("Completed", t::CHART_COMPLETED))
+            .push(legend_item("Expected", t::DANGER));
+        column![]
+            .spacing(8)
+            .push(legend)
+            .push(progress_chart::view(data))
+            .into()
+    };
     container(
         column![]
             .spacing(6)
-            .push(text("Burndown").size(12).color(t::TEXT_SECONDARY))
-            .push(text(summary).size(12).color(t::TEXT_MUTED))
             .push(
-                text("Chart coming soon")
-                    .size(11)
-                    .color(t::TEXT_MUTED),
-            ),
+                row![]
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .push(text("Burndown").size(12).color(t::TEXT_SECONDARY))
+                    .push_maybe(
+                        behind.then(|| text("Behind schedule").size(11).color(t::DANGER)),
+                    ),
+            )
+            .push(text(summary).size(12).color(t::TEXT_MUTED))
+            .push(body),
     )
     .width(Length::Fill)
     .padding(16)
@@ -274,6 +297,15 @@ fn burndown_stub<'a>(project: &'a Project) -> Element<'a, Message> {
         ..Default::default()
     })
     .into()
+}
+
+fn legend_item<'a>(label: &'a str, color: iced::Color) -> Element<'a, Message> {
+    row![]
+        .spacing(5)
+        .align_y(Alignment::Center)
+        .push(text("\u{25CF}").size(9).color(color))
+        .push(text(label).size(11).color(t::TEXT_SECONDARY))
+        .into()
 }
 
 /// Issues scoped to this project, each a clickable row that opens issue detail.
