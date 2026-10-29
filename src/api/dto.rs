@@ -340,12 +340,13 @@ impl CommentDto {
     /// local UUID of the parent issue (already resolved by the caller). The
     /// author is resolved to a local member by `user.id`; if that member isn't
     /// known locally the author is left `None` (falls back to "Unknown" in the
-    /// UI). v1 is flat: `parent_id` is dropped.
+    /// UI). `parent_local_uuid` is the local UUID of the parent comment, if any.
     pub fn into_model(
         self,
         conn: &Connection,
         issue_local_uuid: String,
         existing_uuid: Option<String>,
+        parent_local_uuid: Option<String>,
     ) -> Comment {
         let author_id = self
             .user
@@ -357,11 +358,41 @@ impl CommentDto {
             issue_id: issue_local_uuid,
             author_id,
             body: self.body,
-            parent_id: None,
+            parent_id: parent_local_uuid,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
     }
+}
+
+/// Flatten a fetched comment tree into local rows, parents before children (the
+/// `parent_id` column is a FK). Nested `replies` give the parent link; a reply
+/// delivered at top level falls back to resolving its `parent_id` remote id.
+/// Returns the number of comments upserted.
+pub fn merge_comment_tree(
+    conn: &Connection,
+    issue_local_uuid: &str,
+    dtos: Vec<CommentDto>,
+    parent_local_uuid: Option<&str>,
+) -> usize {
+    let mut count = 0;
+    for mut dto in dtos {
+        let replies = dto.replies.take().unwrap_or_default();
+        let existing = crate::db::queries::find_comment_by_remote_id(conn, dto.id)
+            .ok()
+            .flatten()
+            .map(|c| c.id);
+        let parent = parent_local_uuid.map(String::from).or_else(|| {
+            dto.parent_id
+                .and_then(|pid| local_uuid_for(conn, "comments", pid).ok())
+        });
+        let comment = dto.into_model(conn, issue_local_uuid.to_string(), existing, parent);
+        if crate::db::queries::upsert_comment(conn, &comment).is_ok() {
+            count += 1;
+            count += merge_comment_tree(conn, issue_local_uuid, replies, Some(&comment.id));
+        }
+    }
+    count
 }
 
 // ── Flat DTOs (no Rails serializer; mirror default AR as_json output) ──
@@ -837,6 +868,51 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn merge_comment_tree_flattens_replies_with_parent_links() {
+        let conn = fresh_conn();
+        conn.execute_batch(
+            "INSERT INTO teams (id,name,identifier,remote_id,created_at,updated_at) VALUES ('t1','T','TT',1,'x','x');
+             INSERT INTO lanes (id,name,color,position,team_id,created_at,updated_at) VALUES ('l1','L','#fff',0,'t1','x','x');
+             INSERT INTO issues (id,title,priority,team_number,lane_id,team_id,created_at,updated_at) VALUES ('i1','I',0,1,'l1','t1','x','x');",
+        )
+        .unwrap();
+        let mk = |id: i64, parent: Option<i64>, replies: Option<Vec<CommentDto>>| CommentDto {
+            id,
+            body: format!("c{id}"),
+            parent_id: parent,
+            user: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            replies,
+        };
+        let tree = vec![mk(
+            10,
+            None,
+            Some(vec![mk(11, Some(10), Some(vec![mk(12, Some(11), None)]))]),
+        )];
+        assert_eq!(merge_comment_tree(&conn, "i1", tree.clone(), None), 3);
+        let all = crate::db::queries::comments_for_issue(&conn, "i1").unwrap();
+        let by_remote = |r: i64| all.iter().find(|c| c.remote_id == Some(r)).unwrap();
+        assert_eq!(by_remote(10).parent_id, None);
+        assert_eq!(
+            by_remote(11).parent_id.as_deref(),
+            Some(by_remote(10).id.as_str())
+        );
+        assert_eq!(
+            by_remote(12).parent_id.as_deref(),
+            Some(by_remote(11).id.as_str())
+        );
+        // Idempotent re-merge.
+        assert_eq!(merge_comment_tree(&conn, "i1", tree, None), 3);
+        assert_eq!(
+            crate::db::queries::comments_for_issue(&conn, "i1")
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     fn now() -> String {

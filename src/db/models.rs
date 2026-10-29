@@ -405,7 +405,44 @@ pub struct Comment {
     pub updated_at: String,
 }
 
+/// Max reply depth (top-level = 0). Mirrors Rails `Comment::MAX_NESTING_DEPTH`.
+pub const MAX_NESTING_DEPTH: usize = 4;
+
 impl Comment {
+    /// Whether a comment at `depth` accepts replies (Rails `can_reply?`).
+    pub fn can_reply_at(depth: usize) -> bool {
+        depth < MAX_NESTING_DEPTH
+    }
+
+    /// Order a flat comment list (oldest first) as a depth-first thread: each
+    /// comment followed by its replies, paired with its display depth (capped at
+    /// `MAX_NESTING_DEPTH`). Comments whose parent is missing locally are
+    /// treated as top-level.
+    pub fn thread_order(comments: &[Comment]) -> Vec<(usize, &Comment)> {
+        fn walk<'a>(
+            comments: &'a [Comment],
+            node: &'a Comment,
+            depth: usize,
+            out: &mut Vec<(usize, &'a Comment)>,
+        ) {
+            out.push((depth.min(MAX_NESTING_DEPTH), node));
+            for child in comments
+                .iter()
+                .filter(|c| c.parent_id.as_deref() == Some(node.id.as_str()))
+            {
+                walk(comments, child, depth + 1, out);
+            }
+        }
+        let mut out = Vec::with_capacity(comments.len());
+        for root in comments.iter().filter(|c| match c.parent_id.as_deref() {
+            None => true,
+            Some(p) => !comments.iter().any(|o| o.id == p),
+        }) {
+            walk(comments, root, 0, &mut out);
+        }
+        out
+    }
+
     pub fn from_row(row: &Row<'_>) -> SqlResult<Self> {
         Ok(Self {
             id: row.get("id")?,
@@ -435,6 +472,52 @@ pub struct SyncQueueEntry {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    fn cm(id: &str, parent: Option<&str>) -> Comment {
+        Comment {
+            id: id.into(),
+            remote_id: None,
+            issue_id: "i".into(),
+            author_id: None,
+            body: id.into(),
+            parent_id: parent.map(String::from),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        }
+    }
+
+    #[test]
+    fn thread_order_nests_depth_first_and_caps_depth() {
+        let list = vec![
+            cm("a", None),
+            cm("b", None),
+            cm("a1", Some("a")),
+            cm("a2", Some("a1")),
+            cm("a3", Some("a2")),
+            cm("a4", Some("a3")),
+            cm("a5", Some("a4")),
+            cm("orphan", Some("gone")),
+        ];
+        let order: Vec<(usize, &str)> = Comment::thread_order(&list)
+            .into_iter()
+            .map(|(d, c)| (d, c.id.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (0, "a"),
+                (1, "a1"),
+                (2, "a2"),
+                (3, "a3"),
+                (4, "a4"),
+                (4, "a5"),
+                (0, "b"),
+                (0, "orphan"),
+            ]
+        );
+        assert!(Comment::can_reply_at(3));
+        assert!(!Comment::can_reply_at(MAX_NESTING_DEPTH));
+    }
 
     const ALL_PRIORITIES: [Priority; 5] = [
         Priority::Urgent,
