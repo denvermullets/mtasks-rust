@@ -4,6 +4,7 @@ use iced::{Alignment, Border, Color, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Project, ProjectStatus, RoadmapCommitment, Team};
 use crate::theme as t;
+use crate::views::header;
 use crate::views::projects::format_target_date;
 
 /// u8 → Color helper (mirrors `theme::c`), for the roadmap-specific dot/status
@@ -48,7 +49,13 @@ const PER_ROW: usize = 3;
 /// per-lane "Add project" buttons. `projects` is the selected team's full list;
 /// off-roadmap projects (commitment `None`) simply don't appear in any lane, and
 /// completed projects are hidden entirely (Rails scopes to `not_completed`).
-pub fn view<'a>(projects: &'a [Project], team: Option<&'a Team>) -> Element<'a, Message> {
+/// `needle` (from the header search) narrows the lanes; the header counts
+/// still reflect the whole roadmap.
+pub fn view<'a>(
+    projects: &'a [Project],
+    team: Option<&'a Team>,
+    needle: &str,
+) -> Element<'a, Message> {
     let identifier = team.map(|t| t.identifier.as_str()).unwrap_or("");
 
     // Projects on the roadmap drive the header counts (mirrors the Rails
@@ -103,6 +110,7 @@ pub fn view<'a>(projects: &'a [Project], team: Option<&'a Team>) -> Element<'a, 
     for (commitment, label, subtitle, dot) in LANES {
         let mut in_lane: Vec<&Project> = roadmap_scope(projects)
             .filter(|p| p.roadmap_commitment == Some(commitment))
+            .filter(|p| header::project_matches(p, needle))
             .collect();
         // due_date ASC, NULLS LAST (mirrors Project.in_commitment).
         in_lane.sort_by(|a, b| cmp_due_nulls_last(&a.due_date, &b.due_date));

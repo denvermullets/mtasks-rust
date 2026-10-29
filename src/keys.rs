@@ -18,6 +18,7 @@ pub fn handle_key_press(
     match key {
         Key::Character(ref c) => match c.as_str() {
             // Global shortcuts — active on any view.
+            "f" if modifiers.command() => Some(Message::FocusSearch),
             "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
             "s" if modifiers.is_empty() => Some(Message::SyncNow),

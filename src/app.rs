@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use iced::keyboard;
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row, text_input};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
@@ -17,7 +17,7 @@ use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, issue_detail, issue_form, issue_picker, labels as labels_view, placeholder,
+    board, header, issue_detail, issue_form, issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
     team_list, team_members, toast,
 };
@@ -127,6 +127,14 @@ pub enum Message {
     // UI
     CloseModal,
     ToggleHelp,
+
+    // Header bar
+    /// Header search box changed; filters the current view's items.
+    HeaderSearchChanged(String),
+    /// Focus the header search box (Cmd+F).
+    FocusSearch,
+    /// "Display" button. No-op until the display options panel (JAIT-185).
+    OpenDisplayOptions,
 
     // Settings
     OpenSettings,
@@ -360,6 +368,10 @@ pub struct App {
     project_sort_dir: SortDir,
     /// "Hide completed" filter for the Projects table; defaults on, matching Rails.
     hide_completed_projects: bool,
+    /// Header search text and the view it was typed on. The filter only applies
+    /// while `view` still equals `search_view`, so navigating away drops it.
+    search_query: String,
+    search_view: View,
     project_form: Option<projects_view::ProjectFormState>,
     settings_form: Option<settings::SettingsFormState>,
     label_form: Option<labels_view::LabelFormState>,
@@ -451,11 +463,50 @@ impl App {
             .and_then(|id| self.teams.iter().find(|t| t.id == *id))
     }
 
+    /// The header search text if it applies to the current view, else "".
+    fn active_search(&self) -> &str {
+        if self.search_view == self.view {
+            &self.search_query
+        } else {
+            ""
+        }
+    }
+
+    fn breadcrumb(&self) -> Vec<String> {
+        breadcrumb(
+            &self.view,
+            self.selected_team(),
+            &self.issues,
+            &self.projects,
+        )
+    }
+
+    /// Views with a list to filter; detail/placeholder views disable search.
+    fn search_enabled(&self) -> bool {
+        matches!(
+            self.view,
+            View::Board | View::ProjectList | View::ProjectDetail(_) | View::Roadmap
+        )
+    }
+
+    /// What the header "+ New" button creates on the current view, if anything.
+    fn new_action(&self) -> Option<Message> {
+        self.selected_team()?;
+        match self.view {
+            View::Board => Some(Message::CreateIssue),
+            View::ProjectList => Some(Message::CreateProject),
+            View::Roadmap => Some(Message::OpenRoadmapAdd(RoadmapCommitment::Now)),
+            _ => None,
+        }
+    }
+
     fn issues_in_focused_lane(&self) -> Vec<&Issue> {
         if let Some(lane) = self.lanes.get(self.focused_lane) {
+            let needle = header::needle(self.active_search());
+            let team = self.selected_team();
             self.issues
                 .iter()
-                .filter(|i| i.lane_id == lane.id)
+                .filter(|i| i.lane_id == lane.id && header::issue_matches(i, team, &needle))
                 .collect()
         } else {
             vec![]
@@ -849,6 +900,8 @@ impl App {
             project_sort: ProjectSort::Created,
             project_sort_dir: SortDir::Asc,
             hide_completed_projects: true,
+            search_query: String::new(),
+            search_view: View::Board,
             project_form: None,
             settings_form: None,
             label_form: None,
@@ -875,9 +928,15 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let keys = event::listen_with(|event, _status, _id| {
+        let keys = event::listen_with(|event, status, _id| {
             if let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
             {
+                // A focused text field captures keystrokes; don't also treat them
+                // as shortcuts. Escape still passes through so it closes modals.
+                let escape = key == keyboard::Key::Named(keyboard::key::Named::Escape);
+                if status == event::Status::Captured && !escape {
+                    return None;
+                }
                 Some(Message::KeyPressed(key, modifiers))
             } else {
                 None
@@ -1365,6 +1424,19 @@ impl App {
                     return self.open_issue_detail(&issue);
                 }
             }
+
+            Message::HeaderSearchChanged(query) => {
+                self.search_query = query;
+                self.search_view = self.view.clone();
+                if self.view == View::Board {
+                    self.focused_issue = 0;
+                    self.clamp_focus();
+                }
+            }
+            Message::FocusSearch => {
+                return text_input::focus(header::search_input_id());
+            }
+            Message::OpenDisplayOptions => {}
 
             Message::CloseModal => {
                 self.modal = Modal::None;
@@ -2004,28 +2076,14 @@ impl App {
         );
         let sidebar_column = iced::widget::scrollable(team_sidebar).height(Length::Fill);
 
-        let header_content: Element<'_, Message> = match self.selected_team() {
-            Some(team) => row![]
-                .spacing(10)
-                .align_y(iced::Alignment::Center)
-                .push(text(&team.identifier).size(18).color(t::TEXT_PRIMARY))
-                .push(text(&team.name).size(14).color(t::TEXT_MUTED))
-                .into(),
-            None => text("JAIT").size(18).color(t::TEXT_PRIMARY).into(),
-        };
-
-        let header = container(header_content)
-            .padding([12, 16])
-            .width(Length::Fill)
-            .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BG_SECONDARY)),
-                border: iced::Border {
-                    color: t::BORDER,
-                    width: 0.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            });
+        let search = self.active_search();
+        let needle = header::needle(search);
+        let header = header::view(
+            self.breadcrumb(),
+            search,
+            self.search_enabled(),
+            self.new_action(),
+        );
 
         let main_pane: Element<'_, Message> = match self.view {
             View::Board => board::view(
@@ -2035,6 +2093,7 @@ impl App {
                 &self.issue_labels,
                 self.focused_lane,
                 self.focused_issue,
+                &needle,
             ),
             View::ProjectList => {
                 let mut list: Vec<&Project> = self
@@ -2047,6 +2106,7 @@ impl App {
                                 ProjectStatus::Completed | ProjectStatus::Cancelled
                             )
                     })
+                    .filter(|p| header::project_matches(p, &needle))
                     .collect();
                 sort_projects(&mut list, self.project_sort, self.project_sort_dir);
                 projects_view::list_view(
@@ -2070,6 +2130,7 @@ impl App {
                             &self.members,
                             &self.issues,
                             &self.lanes,
+                            &needle,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -2115,7 +2176,7 @@ impl App {
                     _ => placeholder::view("Issue"),
                 }
             }
-            View::Roadmap => roadmap_view::view(&self.projects, self.selected_team()),
+            View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
             View::MyIssues => placeholder::view("My Issues"),
         };
 
@@ -2274,6 +2335,46 @@ fn default_team_id(teams: &[Team]) -> Option<String> {
         .find(|t| t.archived_at.is_none())
         .or_else(|| teams.first())
         .map(|t| t.id.clone())
+}
+
+/// Header breadcrumb for `view`, e.g. ["JAIT", "Projects", "Desktop Application"]
+/// or ["JAIT", "JAIT-111"]. Team-scoped views lead with the team identifier.
+fn breadcrumb(
+    view: &View,
+    team: Option<&Team>,
+    issues: &[Issue],
+    projects: &[Project],
+) -> Vec<String> {
+    if *view == View::MyIssues {
+        return vec!["My Issues".into()];
+    }
+    let mut crumbs = vec![team
+        .map(|t| t.identifier.clone())
+        .unwrap_or_else(|| "JAIT".into())];
+    match view {
+        View::Board => crumbs.push("Issues".into()),
+        View::ProjectList => crumbs.push("Projects".into()),
+        View::Roadmap => crumbs.push("Roadmap".into()),
+        View::ProjectDetail(id) => {
+            crumbs.push("Projects".into());
+            if let Some(p) = projects.iter().find(|p| p.id == *id) {
+                crumbs.push(p.name.clone());
+            }
+        }
+        View::IssueDetail(id) => {
+            if let Some(issue) = issues.iter().find(|i| i.id == *id) {
+                let number = issue.team_number.unwrap_or(0);
+                crumbs.push(match team {
+                    Some(t) => format!("{}-{number}", t.identifier),
+                    None => format!("#{number}"),
+                });
+            } else {
+                crumbs.push("Issues".into());
+            }
+        }
+        View::MyIssues => {}
+    }
+    crumbs
 }
 
 /// Group the team's issue↔label join rows into a per-issue map for the board.
@@ -2487,6 +2588,59 @@ mod tests {
             team_web_url(" https://jait.app ", 7, TeamWebSection::General),
             "https://jait.app/teams/7/edit?section=general"
         );
+    }
+
+    fn issue(id: &str, title: &str, number: i32) -> Issue {
+        Issue {
+            id: id.into(),
+            title: title.into(),
+            description: None,
+            priority: 0,
+            team_number: Some(number),
+            due_date: None,
+            estimate: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
+            lane_id: "lane".into(),
+            team_id: "t".into(),
+            project_id: None,
+            parent_issue_id: None,
+            assignee_id: None,
+            creator_id: None,
+            archived_at: None,
+            remote_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn breadcrumb_follows_view() {
+        let jait = team("JAIT", false);
+        let issues = vec![issue("i1", "Header bar", 184)];
+        let crumbs = |v: View| breadcrumb(&v, Some(&jait), &issues, &[]);
+        assert_eq!(crumbs(View::Board), ["JAIT", "Issues"]);
+        assert_eq!(crumbs(View::Roadmap), ["JAIT", "Roadmap"]);
+        assert_eq!(crumbs(View::IssueDetail("i1".into())), ["JAIT", "JAIT-184"]);
+        assert_eq!(crumbs(View::MyIssues), ["My Issues"]);
+        // Missing project falls back to the list crumb rather than a blank.
+        assert_eq!(
+            crumbs(View::ProjectDetail("gone".into())),
+            ["JAIT", "Projects"]
+        );
+    }
+
+    #[test]
+    fn issue_search_matches_title_or_identifier() {
+        let jait = team("JAIT", false);
+        let i = issue("i1", "Header bar — Search", 184);
+        let m = |q: &str| header::issue_matches(&i, Some(&jait), &header::needle(q));
+        assert!(m(""));
+        assert!(m("  HEADER "));
+        assert!(m("jait-184"));
+        assert!(m("184"));
+        assert!(!m("roadmap"));
     }
 
     #[test]

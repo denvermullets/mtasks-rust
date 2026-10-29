@@ -8,6 +8,7 @@ use iced::{Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Issue, Label, Lane, Team};
 use crate::theme as t;
+use crate::views::header;
 use crate::views::labels as labels_view;
 
 pub fn view<'a>(
@@ -17,6 +18,7 @@ pub fn view<'a>(
     issue_labels: &'a HashMap<String, Vec<Label>>,
     focused_lane: usize,
     focused_issue: usize,
+    needle: &str,
 ) -> Element<'a, Message> {
     let team_identifier = team.map(|t| t.identifier.as_str()).unwrap_or("---");
 
@@ -34,7 +36,10 @@ pub fn view<'a>(
     // Lane headers row
     let mut header_row = row![].spacing(0).width(Length::Fill);
     for (lane_idx, lane) in lanes.iter().enumerate() {
-        let lane_issues: Vec<&Issue> = issues.iter().filter(|i| i.lane_id == lane.id).collect();
+        let lane_issues: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| i.lane_id == lane.id && header::issue_matches(i, team, needle))
+            .collect();
         let is_focused_lane = lane_idx == focused_lane;
 
         let name_color = if is_focused_lane {
@@ -61,7 +66,10 @@ pub fn view<'a>(
     let mut lane_columns = row![].spacing(1).width(Length::Fill).height(Length::Fill);
 
     for (lane_idx, lane) in lanes.iter().enumerate() {
-        let lane_issues: Vec<&Issue> = issues.iter().filter(|i| i.lane_id == lane.id).collect();
+        let lane_issues: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| i.lane_id == lane.id && header::issue_matches(i, team, needle))
+            .collect();
         let is_focused_lane = lane_idx == focused_lane;
 
         let mut issue_cards: Column<'_, Message> =

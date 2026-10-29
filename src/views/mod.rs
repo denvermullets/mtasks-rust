@@ -1,4 +1,5 @@
 pub mod board;
+pub mod header;
 pub mod issue_detail;
 pub mod issue_form;
 pub mod issue_picker;

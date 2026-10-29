@@ -6,6 +6,7 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::{Message, View};
 use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme as t;
+use crate::views::header;
 use crate::views::projects::MemberOption;
 
 /// Buffered edit state for the full-page project detail view. Name, description,
@@ -65,6 +66,7 @@ pub fn view<'a>(
     members: &'a [Member],
     issues: &'a [Issue],
     lanes: &'a [Lane],
+    needle: &str,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -127,7 +129,9 @@ pub fn view<'a>(
                 .height(Length::Fixed(160.0)),
         )
         .push(burndown_stub(project))
-        .push(issues_section(project, issues, team, lanes, members));
+        .push(issues_section(
+            project, issues, team, lanes, members, needle,
+        ));
 
     // ---- Right sidebar: properties ----
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
@@ -279,10 +283,12 @@ fn issues_section<'a>(
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     members: &'a [Member],
+    needle: &str,
 ) -> Element<'a, Message> {
     let scoped: Vec<&Issue> = issues
         .iter()
         .filter(|i| i.project_id.as_deref() == Some(project.id.as_str()))
+        .filter(|i| header::issue_matches(i, team, needle))
         .collect();
 
     let mut col = column![].spacing(8).push(

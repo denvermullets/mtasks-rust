@@ -1,0 +1,119 @@
+use iced::widget::{button, container, row, text, text_input};
+use iced::{Alignment, Border, Element, Length, Theme};
+
+use crate::app::Message;
+use crate::db::models::{Issue, Project, Team};
+use crate::theme as t;
+
+/// Id of the header search box, so a shortcut can focus it.
+pub fn search_input_id() -> text_input::Id {
+    text_input::Id::new("header-search")
+}
+
+/// Normalize a raw search query into the lowercase needle the matchers expect.
+/// An empty needle matches everything.
+pub fn needle(query: &str) -> String {
+    query.trim().to_lowercase()
+}
+
+/// Whether `issue` matches `needle` by title or identifier (e.g. "JAIT-111").
+pub fn issue_matches(issue: &Issue, team: Option<&Team>, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let ident = match team {
+        Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
+        None => format!("#{}", issue.team_number.unwrap_or(0)),
+    };
+    ident.to_lowercase().contains(needle) || issue.title.to_lowercase().contains(needle)
+}
+
+/// Whether `project` matches `needle` by name.
+pub fn project_matches(project: &Project, needle: &str) -> bool {
+    needle.is_empty() || project.name.to_lowercase().contains(needle)
+}
+
+/// Top strip above the main pane: breadcrumb on the left; Search, Display and
+/// "+ New" on the right. `search_enabled` is false on views with nothing to
+/// filter; `new_action` is `None` where "+ New" has no target.
+pub fn view<'a>(
+    crumbs: Vec<String>,
+    query: &'a str,
+    search_enabled: bool,
+    new_action: Option<Message>,
+) -> Element<'a, Message> {
+    let mut trail = row![].spacing(8).align_y(Alignment::Center);
+    let last = crumbs.len().saturating_sub(1);
+    for (i, crumb) in crumbs.into_iter().enumerate() {
+        if i > 0 {
+            trail = trail.push(text("\u{203A}").size(14).color(t::TEXT_MUTED)); // ›
+        }
+        let color = if i == last {
+            t::TEXT_PRIMARY
+        } else {
+            t::TEXT_SECONDARY
+        };
+        trail = trail.push(text(crumb).size(14).color(color));
+    }
+
+    let mut search = text_input(if search_enabled { "Search…" } else { "" }, query)
+        .id(search_input_id())
+        .padding([5, 10])
+        .size(13)
+        .width(Length::Fixed(220.0));
+    if search_enabled {
+        search = search.on_input(Message::HeaderSearchChanged);
+    }
+
+    // Display options land with JAIT-185; the button is a no-op until then.
+    let display = button(text("Display").size(13))
+        .on_press(Message::OpenDisplayOptions)
+        .padding([5, 12])
+        .style(button::secondary);
+
+    let enabled = new_action.is_some();
+    let mut new_button = button(text("+ New").size(13).color(if enabled {
+        t::BG_PRIMARY
+    } else {
+        t::TEXT_MUTED
+    }))
+    .padding([5, 12])
+    .style(move |_theme: &Theme, _status| button::Style {
+        background: Some(iced::Background::Color(if enabled {
+            t::ACCENT
+        } else {
+            t::BG_CARD
+        })),
+        border: Border {
+            radius: 6.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    if let Some(msg) = new_action {
+        new_button = new_button.on_press(msg);
+    }
+
+    let content = row![]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(trail)
+        .push(iced::widget::horizontal_space())
+        .push(search)
+        .push(display)
+        .push(new_button);
+
+    container(content)
+        .padding([8, 16])
+        .width(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::BG_SECONDARY)),
+            border: Border {
+                color: t::BORDER,
+                width: 0.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
