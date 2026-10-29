@@ -214,6 +214,30 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE projects ADD COLUMN behind_schedule INTEGER NOT NULL DEFAULT 0;
         ",
     },
+    Migration {
+        version: 10,
+        name: "create_issue_events",
+        up: "
+            CREATE TABLE IF NOT EXISTS issue_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                actor_id TEXT REFERENCES members(id) ON DELETE SET NULL,
+                source TEXT NOT NULL DEFAULT 'local',
+                kind TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_issue_events_issue_id
+                ON issue_events(issue_id, created_at);
+            -- Backfill a 'created' entry for issues that already exist.
+            INSERT INTO issue_events (issue_id, actor_id, source, kind, created_at)
+                SELECT id, creator_id,
+                       CASE WHEN remote_id IS NOT NULL THEN 'sync' ELSE 'local' END,
+                       'created', created_at
+                FROM issues;
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -332,11 +356,12 @@ mod tests {
             "members",
             "issue_dependencies",
             "comments",
+            "issue_events",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }
 
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 
     #[test]
@@ -344,7 +369,7 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 
     #[test]
@@ -358,7 +383,7 @@ mod tests {
         run(&conn).unwrap();
 
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
         assert!(table_exists(&conn, "comments"));
@@ -402,6 +427,16 @@ mod tests {
             })
             .unwrap();
         assert_eq!(issue_title, "Old Issue");
+
+        // v10 backfills a 'created' event for pre-existing issues.
+        let (kind, at): (String, String) = conn
+            .query_row(
+                "SELECT kind, created_at FROM issue_events WHERE issue_id='i1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), at.as_str()), ("created", now));
 
         // New columns exist and default to NULL on legacy rows.
         let archived: Option<String> = conn

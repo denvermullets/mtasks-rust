@@ -4,6 +4,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
+use crate::db::events::{self, IssueEvent, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::DependencyLink;
 use crate::theme as t;
@@ -104,6 +105,7 @@ pub fn view<'a>(
     blocking: &'a [DependencyLink],
     blocked_by: &'a [DependencyLink],
     comments: &'a [Comment],
+    events: &'a [IssueEvent],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
 ) -> Element<'a, Message> {
@@ -158,7 +160,7 @@ pub fn view<'a>(
                 .is_none()
                 .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
         )
-        .push(comments_section(comments, members, detail));
+        .push(comments_section(comments, events, members, detail));
 
     // ---- Right sidebar: properties ----
     let lane_options: Vec<LaneOption> = lanes
@@ -498,24 +500,33 @@ fn submit_binding(
     }
 }
 
-/// Threaded comment list (indented, depth-capped) + top-level composer, appended
-/// to the bottom of the left column. Delete/edit are not supported by the API.
+/// Activity timeline: change events interleaved with threaded comments
+/// (oldest first), plus the top-level composer, appended to the bottom of the
+/// left column. Delete/edit are not supported by the API.
 fn comments_section<'a>(
     comments: &'a [Comment],
+    events: &'a [IssueEvent],
     members: &'a [Member],
     detail: &'a IssueDetailState,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
-        .push(text("Comments").size(13).color(t::TEXT_SECONDARY));
+        .push(text("Activity").size(13).color(t::TEXT_SECONDARY));
 
-    if comments.is_empty() {
-        col = col.push(text("No comments yet").size(12).color(t::TEXT_MUTED));
-    } else {
-        for (depth, comment) in Comment::thread_order(comments) {
-            col = col.push(comment_row(depth, comment, members));
-            if detail.reply_to.as_deref() == Some(comment.id.as_str()) {
-                col = col.push(reply_composer(depth + 1, detail));
+    let items = events::timeline(events, comments);
+    if items.is_empty() {
+        col = col.push(text("No activity yet").size(12).color(t::TEXT_MUTED));
+    }
+    for item in items {
+        match item {
+            TimelineItem::Event(event) => col = col.push(event_row(event, members)),
+            TimelineItem::Thread(thread) => {
+                for (depth, comment) in thread {
+                    col = col.push(comment_row(depth, comment, members));
+                    if detail.reply_to.as_deref() == Some(comment.id.as_str()) {
+                        col = col.push(reply_composer(depth + 1, detail));
+                    }
+                }
             }
         }
     }
@@ -540,6 +551,28 @@ fn comments_section<'a>(
         );
 
     col.push(composer).into()
+}
+
+/// One change-history line: "actor description  ·  3d ago".
+fn event_row<'a>(event: &'a IssueEvent, members: &'a [Member]) -> Element<'a, Message> {
+    let actor = event
+        .actor_id
+        .as_ref()
+        .and_then(|aid| members.iter().find(|m| &m.id == aid))
+        .map(|m| m.name.as_str())
+        .unwrap_or_else(|| event.default_actor());
+    row![]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(text("•").size(11).color(t::TEXT_MUTED))
+        .push(text(actor).size(12).color(t::TEXT_SECONDARY))
+        .push(text(event.description()).size(12).color(t::TEXT_MUTED))
+        .push(
+            text(relative_time(&event.created_at))
+                .size(11)
+                .color(t::TEXT_MUTED),
+        )
+        .into()
 }
 
 /// Left indent (px) per nesting level.

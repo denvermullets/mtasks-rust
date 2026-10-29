@@ -1,5 +1,6 @@
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
+use super::events::{self, Source};
 use super::models::{Comment, Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
@@ -83,10 +84,27 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
+    events::record_created(conn, issue, Source::Local)?;
+    Ok(())
+}
+
+fn now_ts() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
+/// Record local activity events for a write that turned `old` into the
+/// current row. No-op when the issue didn't exist beforehand.
+fn record_local_diff(conn: &Connection, old: Option<Issue>, issue_id: &str) -> Result<()> {
+    if let (Some(old), Some(new)) = (old, get_issue(conn, issue_id)?) {
+        events::record_changes(conn, &old, &new, Source::Local, &now_ts())?;
+    }
     Ok(())
 }
 
 pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
+    let old = get_issue(conn, &issue.id)?;
     conn.execute(
         "UPDATE issues SET title=?1, description=?2, priority=?3, due_date=?4, estimate=?5, started_at=?6, completed_at=?7, canceled_at=?8, lane_id=?9, project_id=?10, assignee_id=?11, updated_at=?12 WHERE id=?13",
         params![
@@ -105,6 +123,7 @@ pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.id,
         ],
     )?;
+    record_local_diff(conn, old, &issue.id)?;
     Ok(())
 }
 
@@ -114,6 +133,7 @@ pub fn delete_issue(conn: &Connection, issue_id: &str) -> Result<()> {
 }
 
 pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> Result<()> {
+    let old = get_issue(conn, issue_id)?;
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
@@ -121,10 +141,12 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
         "UPDATE issues SET lane_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![lane_id, now, issue_id],
     )?;
+    record_local_diff(conn, old, issue_id)?;
     Ok(())
 }
 
 pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> Result<()> {
+    let old = get_issue(conn, issue_id)?;
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
@@ -132,6 +154,7 @@ pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> R
         "UPDATE issues SET priority = ?1, updated_at = ?2 WHERE id = ?3",
         params![priority, now, issue_id],
     )?;
+    record_local_diff(conn, old, issue_id)?;
     Ok(())
 }
 
@@ -768,6 +791,7 @@ pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
 }
 
 pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
+    let old = get_issue(conn, &issue.id)?;
     conn.execute(
         "INSERT INTO issues
             (id, title, description, priority, team_number, due_date, estimate,
@@ -818,6 +842,14 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
+    // Local-only activity history: a new row gets a "created" event, an
+    // existing one gets an event per tracked field the pull changed.
+    match old {
+        Some(old) => {
+            events::record_changes(conn, &old, issue, Source::Sync, &issue.updated_at)?;
+        }
+        None => events::record_created(conn, issue, Source::Sync)?,
+    }
     Ok(())
 }
 
@@ -1230,5 +1262,69 @@ mod tests {
         delete_issue_dependency(&conn, "d1").unwrap();
         assert!(blocking_links_for_issue(&conn, "i1").unwrap().is_empty());
         assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
+    }
+
+    fn event_lines(conn: &Connection, issue_id: &str) -> Vec<String> {
+        events::events_for_issue(conn, issue_id)
+            .unwrap()
+            .iter()
+            .map(|e| e.description())
+            .collect()
+    }
+
+    #[test]
+    fn local_writes_record_events_and_not_sync_queue() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+             VALUES ('l2', 'In Progress', 1, 't1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        insert_issue(&conn, &make_issue("n1", None, None)).unwrap();
+        move_issue_to_lane(&conn, "n1", "l2").unwrap();
+        set_issue_priority(&conn, "n1", 1).unwrap();
+        // No-op rewrite adds nothing.
+        let mut issue = get_issue(&conn, "n1").unwrap().unwrap();
+        update_issue(&conn, &issue).unwrap();
+        issue.title = "Renamed".into();
+        issue.estimate = Some(2.0);
+        update_issue(&conn, &issue).unwrap();
+        assert_eq!(
+            event_lines(&conn, "n1"),
+            vec![
+                "created the issue",
+                "changed status from Backlog to In Progress",
+                "changed priority from None to High",
+                "changed the title",
+                "changed estimate from none to 2",
+            ]
+        );
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
+    fn pull_upsert_records_created_then_diffs() {
+        let conn = setup();
+        let mut issue = make_issue("p1", None, None);
+        issue.created_at = "2026-03-01T00:00:00.000Z".into();
+        issue.updated_at = "2026-03-01T00:00:00.000Z".into();
+        upsert_issue(&conn, &issue).unwrap();
+        // Re-pulling an unchanged row adds nothing.
+        upsert_issue(&conn, &issue).unwrap();
+        issue.priority = 0;
+        issue.updated_at = "2026-03-02T00:00:00.000Z".into();
+        upsert_issue(&conn, &issue).unwrap();
+
+        let evs = events::events_for_issue(&conn, "p1").unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].created_at, "2026-03-01T00:00:00.000Z");
+        assert_eq!(evs[0].source, "sync");
+        assert_eq!(evs[1].description(), "changed priority from None to Urgent");
+        assert_eq!(evs[1].created_at, "2026-03-02T00:00:00.000Z");
+        assert_eq!(evs[1].default_actor(), "Someone");
     }
 }
