@@ -69,6 +69,11 @@ pub enum Message {
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
 
+    // Issue detail — sub-issues
+    /// "+ Add sub-issue" pressed: open the create modal with the parent's local
+    /// UUID pre-filled as `parent_issue_id`.
+    CreateSubIssue(String),
+
     // Issue detail — dependencies (blocking / blocked-by)
     /// Open the issue-detail view for another issue by its local UUID (e.g. a
     /// click on a linked dependency row). Rebuilds the detail buffer, unlike
@@ -885,6 +890,17 @@ impl App {
                 self.modal = Modal::IssueForm;
             }
 
+            Message::CreateSubIssue(parent_id) => {
+                if let Some(parent) = self.issues.iter().find(|i| i.id == parent_id) {
+                    let default_lane = self.lanes.first().map(|l| l.id.clone()).unwrap_or_default();
+                    self.issue_form = Some(issue_form::IssueFormState::new_sub_issue(
+                        default_lane,
+                        parent,
+                    ));
+                    self.modal = Modal::IssueForm;
+                }
+            }
+
             Message::EditFocusedIssue => {
                 if let Some(issue) = self.focused_issue().cloned() {
                     return self.open_issue_detail(&issue);
@@ -991,8 +1007,8 @@ impl App {
                             canceled_at: None,
                             lane_id: form.lane_id.clone(),
                             team_id: team_id.clone(),
-                            project_id: None,
-                            parent_issue_id: None,
+                            project_id: form.project_id.clone(),
+                            parent_issue_id: form.parent_issue_id.clone(),
                             assignee_id: None,
                             creator_id,
                             archived_at: None,
@@ -1971,6 +1987,15 @@ impl App {
                             .as_ref()
                             .and_then(|pid| self.projects.iter().find(|p| p.id == *pid))
                             .map(|p| p.name.as_str());
+                        let parent = issue
+                            .parent_issue_id
+                            .as_ref()
+                            .and_then(|pid| self.issues.iter().find(|i| i.id == *pid));
+                        let sub_issues: Vec<&Issue> = self
+                            .issues
+                            .iter()
+                            .filter(|i| i.parent_issue_id.as_deref() == Some(issue.id.as_str()))
+                            .collect();
                         issue_detail::view(
                             issue,
                             detail,
@@ -1982,6 +2007,8 @@ impl App {
                             &self.detail_blocking,
                             &self.detail_blocked_by,
                             &self.detail_comments,
+                            parent,
+                            sub_issues,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.

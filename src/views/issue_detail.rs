@@ -94,12 +94,11 @@ pub fn view<'a>(
     blocking: &'a [DependencyLink],
     blocked_by: &'a [DependencyLink],
     comments: &'a [Comment],
+    parent: Option<&'a Issue>,
+    sub_issues: Vec<&'a Issue>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
-    let identifier = match team {
-        Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
-        None => format!("#{}", issue.team_number.unwrap_or(0)),
-    };
+    let identifier = issue_identifier(issue, team);
     let breadcrumb = row![]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -141,6 +140,13 @@ pub fn view<'a>(
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(220.0)),
+        )
+        // Rails nests one level only, so a sub-issue gets no section of its own.
+        .push_maybe(
+            issue
+                .parent_issue_id
+                .is_none()
+                .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
         )
         .push(comments_section(comments, members, detail));
 
@@ -195,6 +201,7 @@ pub fn view<'a>(
         .padding(20)
         .width(Length::Fill)
         .push(text("Properties").size(11).color(t::TEXT_MUTED))
+        .push_maybe(parent.map(|p| section("Parent", parent_link(p, team))))
         .push(section(
             "Status",
             pick_list(lane_options, selected_lane, |o: LaneOption| {
@@ -300,6 +307,105 @@ pub fn view<'a>(
         .push(divider)
         .push(sidebar_panel)
         .into()
+}
+
+/// `IDENT-#` for an issue, or `#N` when the team isn't loaded.
+fn issue_identifier(issue: &Issue, team: Option<&Team>) -> String {
+    match team {
+        Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
+        None => format!("#{}", issue.team_number.unwrap_or(0)),
+    }
+}
+
+/// Sidebar "Parent" value: a clickable `IDENT — title` that opens the parent.
+fn parent_link<'a>(parent: &'a Issue, team: Option<&'a Team>) -> Element<'a, Message> {
+    button(
+        row![]
+            .spacing(6)
+            .push(
+                text(issue_identifier(parent, team))
+                    .size(12)
+                    .color(t::TEXT_MUTED),
+            )
+            .push(text(&parent.title).size(12).color(t::TEXT_SECONDARY)),
+    )
+    .on_press(Message::OpenIssueDetail(parent.id.clone()))
+    .padding(0)
+    .width(Length::Fill)
+    .style(button::text)
+    .into()
+}
+
+/// "Sub-issues" block in the left column: one clickable row per child, then a
+/// "+ Add sub-issue" button that opens the create modal pre-linked to `issue`.
+fn sub_issues_section<'a>(
+    issue: &'a Issue,
+    sub_issues: &[&'a Issue],
+    team: Option<&'a Team>,
+    lanes: &'a [Lane],
+) -> Element<'a, Message> {
+    let mut col = column![]
+        .spacing(8)
+        .push(text("Sub-issues").size(13).color(t::TEXT_SECONDARY));
+    for child in sub_issues {
+        col = col.push(sub_issue_row(child, team, lanes));
+    }
+    col.push(
+        button(text("+ Add sub-issue").size(12).color(t::ACCENT))
+            .on_press(Message::CreateSubIssue(issue.id.clone()))
+            .padding(0)
+            .style(button::text),
+    )
+    .into()
+}
+
+/// One sub-issue: `IDENT  title` with its lane name as a colored badge on the right.
+fn sub_issue_row<'a>(
+    child: &'a Issue,
+    team: Option<&'a Team>,
+    lanes: &'a [Lane],
+) -> Element<'a, Message> {
+    let lane = lanes.iter().find(|l| l.id == child.lane_id);
+    let badge = lane.map(|l| {
+        let color = l
+            .color
+            .as_deref()
+            .and_then(t::hex_to_color)
+            .unwrap_or(t::TEXT_MUTED);
+        container(text(&l.name).size(11).color(color))
+            .padding([2, 8])
+            .style(move |_theme: &Theme| container::Style {
+                border: Border {
+                    color,
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..Default::default()
+            })
+    });
+
+    button(
+        row![]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(
+                text(issue_identifier(child, team))
+                    .size(12)
+                    .color(t::TEXT_MUTED),
+            )
+            .push(
+                text(&child.title)
+                    .size(13)
+                    .color(t::TEXT_PRIMARY)
+                    .width(Length::Fill),
+            )
+            .push_maybe(badge),
+    )
+    .on_press(Message::OpenIssueDetail(child.id.clone()))
+    .padding([6, 8])
+    .width(Length::Fill)
+    .style(button::text)
+    .into()
 }
 
 /// A labelled sidebar row: small muted label above its control.

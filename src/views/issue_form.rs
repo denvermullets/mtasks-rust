@@ -14,6 +14,11 @@ pub struct IssueFormState {
     pub editing_issue_id: Option<String>,
     /// Local UUIDs of labels attached to this issue, toggled via the chip grid.
     pub selected_label_ids: Vec<String>,
+    /// Local UUID of the parent issue when creating a sub-issue. Ignored on
+    /// edit (the existing issue's parent is preserved as-is).
+    pub parent_issue_id: Option<String>,
+    /// Project pre-filled for a new sub-issue (inherited from its parent).
+    pub project_id: Option<String>,
     /// Inline validation message shown under the title (client-side on Save, or
     /// a server 422 routed back after a failed background push). `None` = valid.
     pub error: Option<String>,
@@ -28,7 +33,19 @@ impl IssueFormState {
             lane_id: default_lane_id,
             editing_issue_id: None,
             selected_label_ids: Vec::new(),
+            parent_issue_id: None,
+            project_id: None,
             error: None,
+        }
+    }
+
+    /// Blank create form for a sub-issue of `parent`: links the parent and
+    /// inherits its project so the child shows up alongside it.
+    pub fn new_sub_issue(default_lane_id: String, parent: &Issue) -> Self {
+        Self {
+            parent_issue_id: Some(parent.id.clone()),
+            project_id: parent.project_id.clone(),
+            ..Self::new(default_lane_id)
         }
     }
 
@@ -43,6 +60,8 @@ impl IssueFormState {
             lane_id: issue.lane_id.clone(),
             editing_issue_id: Some(issue.id.clone()),
             selected_label_ids: label_ids,
+            parent_issue_id: issue.parent_issue_id.clone(),
+            project_id: issue.project_id.clone(),
             error: None,
         }
     }
@@ -88,6 +107,8 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     let title = if form.editing_issue_id.is_some() {
         "Edit Issue"
+    } else if form.parent_issue_id.is_some() {
+        "New Sub-issue"
     } else {
         "New Issue"
     };
