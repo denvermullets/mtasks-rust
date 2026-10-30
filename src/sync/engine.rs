@@ -1979,40 +1979,6 @@ async fn pull_projects_step(
     Ok(())
 }
 
-/// Max in-flight issue-detail GETs during the pull (stopgap until JRST-32).
-#[allow(dead_code)]
-const DETAIL_FETCH_CONCURRENCY: usize = 6;
-
-/// Runs `fetch` for every id with at most `limit` in flight. A failure is
-/// logged and counted, never aborting the rest. Returns (successes, failures).
-#[allow(dead_code)]
-async fn fetch_bounded<T, F, Fut>(ids: Vec<i64>, limit: usize, fetch: F) -> (Vec<T>, usize)
-where
-    F: Fn(i64) -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
-{
-    use futures_util::stream::{self, StreamExt};
-    let mut ok = Vec::with_capacity(ids.len());
-    let mut skipped = 0usize;
-    let mut results = stream::iter(ids.into_iter().map(|id| {
-        let fut = fetch(id);
-        async move { (id, fut.await) }
-    }))
-    .buffer_unordered(limit);
-    while let Some((id, res)) = results.next().await {
-        match res {
-            Ok(d) => ok.push(d),
-            Err(e) => {
-                eprintln!(
-                    "[sync] phase=pull_issues issue_remote_id={id} fetch_failed reason=\"{e}\""
-                );
-                skipped += 1;
-            }
-        }
-    }
-    (ok, skipped)
-}
-
 /// Cursor resource name for the issue index in `pull_cursors`.
 const ISSUES_CURSOR: &str = "issues";
 
@@ -3068,27 +3034,6 @@ mod tests {
             (d.remote_id, d.kind.as_str(), d.direction.as_str()),
             (Some(77), "blocks", "blocking")
         );
-    }
-
-    #[tokio::test]
-    async fn fetch_bounded_limits_concurrency_and_survives_failures() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let cur = AtomicUsize::new(0);
-        let peak = AtomicUsize::new(0);
-        let (ok, skipped) = fetch_bounded((0..20).collect(), 4, |id| {
-            let (cur, peak) = (&cur, &peak);
-            async move {
-                let n = cur.fetch_add(1, Ordering::SeqCst) + 1;
-                peak.fetch_max(n, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                cur.fetch_sub(1, Ordering::SeqCst);
-                if id % 5 == 0 { Err("boom".to_string()) } else { Ok(id) }
-            }
-        })
-        .await;
-        assert_eq!(ok.len(), 16);
-        assert_eq!(skipped, 4);
-        assert!(peak.load(Ordering::SeqCst) > 1 && peak.load(Ordering::SeqCst) <= 4);
     }
 
     fn detail_dto(id: i64, title: &str, updated_at: &str) -> IssueDto {

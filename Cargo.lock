@@ -2418,7 +2418,6 @@ dependencies = [
  "chrono",
  "csv",
  "dirs 5.0.1",
- "futures-util",
  "iced",
  "reqwest",
  "rfd",
