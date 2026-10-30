@@ -351,6 +351,21 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE sync_queue ADD COLUMN attempted_at TEXT;
         ",
     },
+    Migration {
+        version: 19,
+        name: "pull_cursors",
+        up: "
+            -- Incremental-pull cursor per (team, resource): the X-Server-Time of
+            -- the last fully applied pull. resource: issues | (later) comments,
+            -- projects, tombstones, ...
+            CREATE TABLE IF NOT EXISTS pull_cursors (
+                team_id TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                cursor TEXT NOT NULL,
+                PRIMARY KEY (team_id, resource)
+            );
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with

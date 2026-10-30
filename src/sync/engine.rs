@@ -27,6 +27,7 @@ use crate::api::{
 };
 use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
+use crate::sync::cursor;
 
 #[derive(Debug, Default, Clone)]
 pub struct SyncReport {
@@ -1979,10 +1980,12 @@ async fn pull_projects_step(
 }
 
 /// Max in-flight issue-detail GETs during the pull (stopgap until JRST-32).
+#[allow(dead_code)]
 const DETAIL_FETCH_CONCURRENCY: usize = 6;
 
 /// Runs `fetch` for every id with at most `limit` in flight. A failure is
 /// logged and counted, never aborting the rest. Returns (successes, failures).
+#[allow(dead_code)]
 async fn fetch_bounded<T, F, Fut>(ids: Vec<i64>, limit: usize, fetch: F) -> (Vec<T>, usize)
 where
     F: Fn(i64) -> Fut,
@@ -2010,118 +2013,139 @@ where
     (ok, skipped)
 }
 
+/// Cursor resource name for the issue index in `pull_cursors`.
+const ISSUES_CURSOR: &str = "issues";
+
+/// Pull a team's issues with full detail in paged requests. With a stored
+/// cursor only rows changed since (cursor minus a small overlap) are fetched;
+/// without one the whole team is fetched the same way. The cursor advances to
+/// the first page's `X-Server-Time`, and only when every row was applied.
 async fn pull_issues_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    // Rails' issue *index* serializer omits detail-only fields like
-    // `description`, `parent_issue`, `blocking_issues`, `blocked_issues`, and
-    // the lifecycle timestamps. We use the index to discover which issues
-    // changed (cheap) and then only fetch full detail for the ones we'll
-    // actually write — steady-state pulls don't refetch unchanged rows.
-    let listings: Vec<IssueDto> = issues::list(client, team_remote_id, &Default::default())
-        .await
-        .map_err(|e| format!("issues: {e}"))?;
-
-    let active_ids: Vec<i64> = listings.iter().map(|d| d.id).collect();
-
-    // Phase 1 (sync): decide which remote_ids need a full detail fetch.
-    let to_fetch: Vec<i64> = {
+    let since = {
         let conn = open()?;
-        let mut ids = Vec::new();
-        for dto in &listings {
-            if queries::is_issue_tombstoned_by_remote_id(&conn, dto.id)
-                .map_err(|e| format!("db (tombstone): {e}"))?
-            {
-                continue;
-            }
-            let existing = queries::find_issue_by_remote_id(&conn, dto.id)
-                .map_err(|e| format!("db (find issue): {e}"))?;
-            let has_pending = match &existing {
-                Some(i) => sync_queue::has_pending_entry(&conn, "issue", &i.id)
-                    .map_err(|e| format!("db: {e}"))?,
-                None => false,
-            };
-            let should_fetch = match &existing {
-                Some(local) => {
-                    decide(&local.updated_at, &dto.updated_at, has_pending)
-                        != MergeDecision::KeepLocal
-                }
-                None => true, // new issue → always fetch
-            };
-            if should_fetch {
-                ids.push(dto.id);
-            }
-        }
-        ids
+        queries::get_pull_cursor(&conn, local_team_id, ISSUES_CURSOR)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
     };
-    let total_to_fetch = to_fetch.len();
 
-    // Phase 2 (async): fetch detail for each. Errors per-issue are logged and
-    // counted; one failure doesn't block the rest.
-    let (details, mut skipped) = fetch_bounded(to_fetch, DETAIL_FETCH_CONCURRENCY, |id| async move {
-        issues::get(client, team_remote_id, id)
-            .await
-            .map_err(|e| e.to_string())
+    let collected = cursor::collect_pages(|after_id| {
+        let query = issues::IssuePageQuery {
+            updated_since: since.clone(),
+            include_detail: true,
+            limit: Some(cursor::PAGE_LIMIT),
+            after_id,
+        };
+        async move { issues::list_page(client, team_remote_id, &query).await }
     })
-    .await;
+    .await
+    .map_err(|e| format!("issues: {e}"))?;
+    eprintln!(
+        "[sync] phase=pull_issues team_remote_id={team_remote_id} mode={} requests={} rows={}",
+        if since.is_some() { "incremental" } else { "full" },
+        collected.requests,
+        collected.rows.len()
+    );
 
-    // Phase 3 (sync): write each detail to the local DB.
-    {
-        let conn = open()?;
-        // Dependencies are persisted after every issue in this batch exists
-        // locally, since an edge may point at an issue later in the batch.
-        let mut pending_links: Vec<Vec<PulledDependency>> = Vec::new();
-        for dto in details {
-            let issue_remote_id = dto.id;
-            if queries::is_issue_tombstoned_by_remote_id(&conn, issue_remote_id).unwrap_or(false) {
-                continue;
-            }
-            pending_links.push(dto.dependency_links());
-            let dto = relax_issue_fks(&conn, dto);
-
-            let result = (|| -> Result<(), String> {
-                let existing = queries::find_issue_by_remote_id(&conn, dto.id)
-                    .map_err(|e| format!("db (find issue): {e}"))?;
-                let existing_uuid = existing.as_ref().map(|i| i.id.clone());
-                // Capture the remote label ids before `into_model` consumes dto.
-                let label_remote_ids: Vec<i64> = dto.labels.iter().map(|l| l.id).collect();
-                let issue: Issue = dto
-                    .into_model(&conn, local_team_id.to_string(), existing_uuid)
-                    .map_err(|e| format!("convert: {e}"))?;
-                queries::upsert_issue(&conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
-                // Reflect the remote label set into the issue_labels join. Labels
-                // are pulled before issues, so their local rows already exist; any
-                // remote id we can't resolve locally is skipped defensively.
-                let local_label_ids = resolve_local_label_ids(&conn, &label_remote_ids)?;
-                queries::set_issue_labels(&conn, &issue.id, &local_label_ids)
-                    .map_err(|e| format!("db (set issue labels): {e}"))?;
-                Ok(())
-            })();
-
-            if let Err(e) = result {
-                eprintln!(
-                    "[sync] phase=pull_issues issue_remote_id={issue_remote_id} skipped reason=\"{e}\""
-                );
-                skipped += 1;
-            }
-        }
-        for links in &pending_links {
-            persist_pulled_dependencies(&conn, links);
-        }
-    }
-
+    let dtos = dedupe_by_id(collected.rows, |d| d.id);
+    let total = dtos.len();
     let conn = open()?;
-    let _ = queries::archive_missing_issues(&conn, local_team_id, &active_ids);
+    let skipped = apply_pulled_issues(&conn, local_team_id, dtos.clone());
 
     if skipped > 0 {
-        Err(format!(
-            "issues: {skipped}/{total_to_fetch} skipped (see [sync] log)"
-        ))
-    } else {
-        Ok(())
+        // Leave the cursor where it was so the failed rows are retried.
+        return Err(format!(
+            "issues: {skipped}/{total} skipped (see [sync] log)"
+        ));
     }
+    if since.is_none() {
+        // A full (unfiltered) listing is the complete set of active issues, so
+        // anything missing from it was archived or removed server-side.
+        let active_ids: Vec<i64> = dtos.iter().map(|d| d.id).collect();
+        let _ = queries::archive_missing_issues(&conn, local_team_id, &active_ids);
+    }
+    if let Some(t) = &collected.server_time {
+        queries::set_pull_cursor(&conn, local_team_id, ISSUES_CURSOR, t)
+            .map_err(|e| format!("db (pull cursor): {e}"))?;
+    }
+    Ok(())
+}
+
+/// Keep one row per key (the last delivered wins), in first-seen order. The
+/// cursor overlap re-delivers rows, and paging can repeat one across pages.
+fn dedupe_by_id<T>(rows: Vec<T>, key: impl Fn(&T) -> i64) -> Vec<T> {
+    let mut index: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let mut out: Vec<T> = Vec::with_capacity(rows.len());
+    for row in rows {
+        match index.get(&key(&row)) {
+            Some(&i) => out[i] = row,
+            None => {
+                index.insert(key(&row), out.len());
+                out.push(row);
+            }
+        }
+    }
+    out
+}
+
+/// Write detailed issue rows to the local DB (idempotent, so overlap
+/// re-delivery is safe). Returns how many rows failed to apply.
+fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDto>) -> usize {
+    let mut skipped = 0;
+    // Dependencies are persisted after every issue in this batch exists
+    // locally, since an edge may point at an issue later in the batch.
+    let mut pending_links: Vec<Vec<PulledDependency>> = Vec::new();
+    for dto in dtos {
+        let issue_remote_id = dto.id;
+        let result = (|| -> Result<bool, String> {
+            if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote_id)
+                .map_err(|e| format!("db (tombstone): {e}"))?
+            {
+                return Ok(false);
+            }
+            let existing = queries::find_issue_by_remote_id(conn, issue_remote_id)
+                .map_err(|e| format!("db (find issue): {e}"))?;
+            if let Some(local) = &existing {
+                let has_pending = sync_queue::has_pending_entry(conn, "issue", &local.id)
+                    .map_err(|e| format!("db: {e}"))?;
+                if decide(&local.updated_at, &dto.updated_at, has_pending)
+                    == MergeDecision::KeepLocal
+                {
+                    return Ok(false);
+                }
+            }
+            let links = dto.dependency_links();
+            let dto = relax_issue_fks(conn, dto);
+            let existing_uuid = existing.map(|i| i.id);
+            // Capture the remote label ids before `into_model` consumes dto.
+            let label_remote_ids: Vec<i64> = dto.labels.iter().map(|l| l.id).collect();
+            let issue: Issue = dto
+                .into_model(conn, local_team_id.to_string(), existing_uuid)
+                .map_err(|e| format!("convert: {e}"))?;
+            queries::upsert_issue(conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
+            // Reflect the remote label set into the issue_labels join. Labels
+            // are pulled before issues, so their local rows already exist; any
+            // remote id we can't resolve locally is skipped defensively.
+            let local_label_ids = resolve_local_label_ids(conn, &label_remote_ids)?;
+            queries::set_issue_labels(conn, &issue.id, &local_label_ids)
+                .map_err(|e| format!("db (set issue labels): {e}"))?;
+            pending_links.push(links);
+            Ok(true)
+        })();
+        if let Err(e) = result {
+            eprintln!(
+                "[sync] phase=pull_issues issue_remote_id={issue_remote_id} skipped reason=\"{e}\""
+            );
+            skipped += 1;
+        }
+    }
+    for links in &pending_links {
+        persist_pulled_dependencies(conn, links);
+    }
+    skipped
 }
 
 /// Store pulled dependency edges. An edge whose endpoint issue isn't present
@@ -3065,6 +3089,106 @@ mod tests {
         assert_eq!(ok.len(), 16);
         assert_eq!(skipped, 4);
         assert!(peak.load(Ordering::SeqCst) > 1 && peak.load(Ordering::SeqCst) <= 4);
+    }
+
+    fn detail_dto(id: i64, title: &str, updated_at: &str) -> IssueDto {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "identifier": format!("T-{id}"), "title": title,
+            "priority": "medium", "estimate": null, "due_date": null,
+            "lane": {"id": 10, "name": "B"}, "assignee": null, "creator": null,
+            "project": null, "labels": [],
+            "created_at": "2026-01-01T00:00:00.000Z", "updated_at": updated_at,
+            "description": format!("desc {id}"),
+            "parent_issue": {"id": 1, "identifier": "T-1"},
+            "blocking_issues": [{"id": 3, "identifier": "T-3", "title": "x", "dependency_id": 55}],
+            "blocked_issues": [],
+            "started_at": "2026-02-01T00:00:00.000Z",
+            "completed_at": "2026-03-01T00:00:00.000Z",
+            "canceled_at": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pull_cursor_is_stored_per_team_and_resource() {
+        let conn = setup_labels_db();
+        assert_eq!(queries::get_pull_cursor(&conn, "t1", "issues").unwrap(), None);
+        queries::set_pull_cursor(&conn, "t1", "issues", "A").unwrap();
+        queries::set_pull_cursor(&conn, "t1", "issues", "B").unwrap();
+        queries::set_pull_cursor(&conn, "t1", "comments", "C").unwrap();
+        assert_eq!(
+            queries::get_pull_cursor(&conn, "t1", "issues").unwrap().as_deref(),
+            Some("B")
+        );
+        assert_eq!(
+            queries::get_pull_cursor(&conn, "t2", "issues").unwrap(),
+            None
+        );
+        queries::clear_pull_cursor(&conn, "t1", "issues").unwrap();
+        assert_eq!(queries::get_pull_cursor(&conn, "t1", "issues").unwrap(), None);
+        assert!(queries::get_pull_cursor(&conn, "t1", "comments").unwrap().is_some());
+    }
+
+    #[test]
+    fn dedupe_keeps_last_delivery_in_first_seen_order() {
+        let rows = vec![(1, "a"), (2, "b"), (1, "c")];
+        assert_eq!(dedupe_by_id(rows, |r| r.0), vec![(1, "c"), (2, "b")]);
+    }
+
+    #[test]
+    fn detail_rows_set_description_parent_dependencies_and_lifecycle() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        let dtos = vec![
+            detail_dto(2, "two", "2026-05-01T00:00:00.000Z"),
+            // Overlap re-delivery of the same row is idempotent.
+            detail_dto(2, "two", "2026-05-01T00:00:00.000Z"),
+        ];
+        let dtos = dedupe_by_id(dtos, |d| d.id);
+        assert_eq!(apply_pulled_issues(&conn, "t1", dtos.clone()), 0);
+        assert_eq!(apply_pulled_issues(&conn, "t1", dtos), 0);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(i.description.as_deref(), Some("desc 2"));
+        assert_eq!(i.parent_issue_id.as_deref(), Some("i1"));
+        assert_eq!(i.started_at.as_deref(), Some("2026-02-01T00:00:00.000Z"));
+        assert_eq!(i.completed_at.as_deref(), Some("2026-03-01T00:00:00.000Z"));
+        assert_eq!(i.canceled_at, None);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issues WHERE remote_id = 2"), 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE remote_id = 55"),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_local_edit_survives_incremental_apply() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        conn.execute(
+            "UPDATE issues SET title = 'local', updated_at = '2026-09-01T00:00:00.000Z' WHERE id = 'i2'",
+            [],
+        )
+        .unwrap();
+        sync_queue::enqueue(&conn, "issue", "i2", "update", None).unwrap();
+        let skipped = apply_pulled_issues(
+            &conn,
+            "t1",
+            vec![detail_dto(2, "remote", "2026-05-01T00:00:00.000Z")],
+        );
+        assert_eq!(skipped, 0);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(i.title, "local");
+    }
+
+    #[test]
+    fn unresolvable_row_counts_as_skipped() {
+        let conn = setup_dependency_db(); // lane has no remote id -> lane lookup fails
+        let skipped = apply_pulled_issues(
+            &conn,
+            "t1",
+            vec![detail_dto(2, "x", "2026-05-01T00:00:00.000Z")],
+        );
+        assert_eq!(skipped, 1);
     }
 
     #[test]

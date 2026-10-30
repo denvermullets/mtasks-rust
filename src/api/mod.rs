@@ -12,7 +12,7 @@ pub mod projects;
 pub mod teams;
 pub mod users;
 
-pub use client::{ApiClient, Conditional};
+pub use client::{ApiClient, Conditional, Page};
 pub use comments::CommentParams;
 pub use dependencies::{Direction, IssueDependencyResponse};
 pub use dto::{

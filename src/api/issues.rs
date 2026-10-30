@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::{ApiClient, ApiError, IssueDto};
+use super::{ApiClient, ApiError, IssueDto, Page};
 
 #[derive(Debug, Default, Clone)]
 pub struct IssueFilters {
@@ -84,6 +84,66 @@ pub async fn list(
     client.get_list(&path).await
 }
 
+/// Query for the incremental, keyset-paged issue index.
+#[derive(Debug, Default, Clone)]
+pub struct IssuePageQuery {
+    /// ISO8601 lower bound on `updated_at` (inclusive). `None` = everything.
+    pub updated_since: Option<String>,
+    /// Ask for the detailed serializer on every row.
+    pub include_detail: bool,
+    /// Page size; Rails caps at 500 and defaults to 200.
+    pub limit: Option<u32>,
+    /// Resume after this issue id (from the previous page's `X-Next-After-Id`).
+    pub after_id: Option<i64>,
+}
+
+impl IssuePageQuery {
+    pub(crate) fn query_string(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(s) = &self.updated_since {
+            parts.push(format!("updated_since={}", encode_query_value(s)));
+        }
+        if self.include_detail {
+            parts.push("include=detail".to_string());
+        }
+        if let Some(l) = self.limit {
+            parts.push(format!("limit={l}"));
+        }
+        if let Some(a) = self.after_id {
+            parts.push(format!("after_id={a}"));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", parts.join("&"))
+        }
+    }
+}
+
+/// Percent-encode a query value (timestamps carry `:` and possibly `+`).
+pub(crate) fn encode_query_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// One page of the paged issue index plus `X-Next-After-Id` / `X-Server-Time`.
+pub async fn list_page(
+    client: &ApiClient,
+    team_id: i64,
+    query: &IssuePageQuery,
+) -> Result<Page<IssueDto>, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/issues{}", query.query_string());
+    client.get_list_page(&path).await
+}
+
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<IssueDto, ApiError> {
     let path = format!("api/v1/teams/{team_id}/issues/{id}");
     client.get(&path).await
@@ -117,6 +177,21 @@ pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), Api
 mod tests {
     use super::*;
     use crate::db::models::Priority;
+
+    #[test]
+    fn page_query_encodes_cursor_and_paging() {
+        let q = IssuePageQuery {
+            updated_since: Some("2026-10-30T12:00:00Z".into()),
+            include_detail: true,
+            limit: Some(500),
+            after_id: Some(9),
+        };
+        assert_eq!(
+            q.query_string(),
+            "?updated_since=2026-10-30T12%3A00%3A00Z&include=detail&limit=500&after_id=9"
+        );
+        assert_eq!(IssuePageQuery::default().query_string(), "");
+    }
 
     #[test]
     fn empty_filters_produce_no_query_string() {
