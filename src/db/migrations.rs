@@ -249,6 +249,14 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 12,
+        name: "lane_category",
+        up: "
+            -- Rails workflow category: backlog, unstarted, started, completed, canceled.
+            ALTER TABLE lanes ADD COLUMN category TEXT;
+        ",
+    },
+    Migration {
+        version: 13,
         name: "projects_status_nullable",
         // SQLite cannot drop NOT NULL in place, so rebuild the table. Runs with
         // foreign keys off (see FK_OFF_MIGRATIONS) so the DROP doesn't cascade
@@ -297,7 +305,7 @@ const MIGRATIONS: &[Migration] = &[
 /// Migrations that rebuild a table other tables reference. They must run with
 /// `PRAGMA foreign_keys=OFF`, which is a no-op inside a transaction, so `run`
 /// toggles it around the transaction.
-const FK_OFF_MIGRATIONS: &[u32] = &[12];
+const FK_OFF_MIGRATIONS: &[u32] = &[13];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -437,7 +445,7 @@ mod tests {
 
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
     }
 
@@ -446,7 +454,7 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     }
 
     #[test]
@@ -460,7 +468,7 @@ mod tests {
         run(&conn).unwrap();
 
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
         assert!(table_exists(&conn, "comments"));
@@ -539,7 +547,7 @@ mod tests {
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
         )
         .unwrap();
-        for m in MIGRATIONS.iter().filter(|m| m.version < 12) {
+        for m in MIGRATIONS.iter().filter(|m| m.version < 13) {
             conn.execute_batch(m.up).unwrap();
             conn.execute(
                 "INSERT INTO schema_migrations VALUES (?1, 'x')",
