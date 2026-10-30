@@ -16,6 +16,11 @@ pub enum Direction {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IssueDependencyResponse {
     pub id: i64,
+    /// `blocks` | `relates` | `duplicates`.
+    pub kind: String,
+    /// Relative to the issue in the URL: `blocking` | `blocked_by` | `relates`
+    /// | `duplicates` | `duplicated_by`.
+    pub direction: String,
     pub blocking_issue: IssueRef,
     pub blocked_issue: IssueRef,
     pub created_at: String,
@@ -101,12 +106,16 @@ mod tests {
     fn response_deserializes_from_rails_shape() {
         let raw = serde_json::json!({
             "id": 9,
+            "kind": "blocks",
+            "direction": "blocking",
             "blocking_issue": { "id": 1, "identifier": "TEAM-1", "title": "A" },
             "blocked_issue":  { "id": 2, "identifier": "TEAM-2", "title": "B" },
             "created_at": "2026-04-27T10:00:00Z"
         });
         let parsed: IssueDependencyResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(parsed.id, 9);
+        assert_eq!(parsed.kind, "blocks");
+        assert_eq!(parsed.direction, "blocking");
         assert_eq!(parsed.blocking_issue.identifier, "TEAM-1");
         assert_eq!(parsed.blocked_issue.identifier, "TEAM-2");
     }

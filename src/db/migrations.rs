@@ -322,6 +322,17 @@ const MIGRATIONS: &[Migration] = &[
                 ON projects(team_id, roadmap_commitment);
         ",
     },
+    Migration {
+        version: 16,
+        name: "issue_dependencies_kind_direction",
+        up: "
+            -- kind mirrors Rails (blocks | relates | duplicates). direction is
+            -- stored relative to blocking_issue_id (the link's source side):
+            -- blocking | relates | duplicates.
+            ALTER TABLE issue_dependencies ADD COLUMN kind TEXT NOT NULL DEFAULT 'blocks';
+            ALTER TABLE issue_dependencies ADD COLUMN direction TEXT NOT NULL DEFAULT 'blocking';
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
