@@ -806,7 +806,7 @@ fn build_project_params(conn: &Connection, project: &Project) -> Result<ProjectP
                 .as_rails_str()
                 .to_string(),
         ),
-        status: Some(project.status.as_str().to_string()),
+        status: project.status.map(|s| s.as_str().to_string()),
         lead_id: lead_remote_id,
         start_date: project.start_date.clone(),
         due_date: project.due_date.clone(),

@@ -48,7 +48,7 @@ impl ProjectFormState {
                 Some(body) => text_editor::Content::with_text(body),
                 None => text_editor::Content::new(),
             },
-            status: p.status,
+            status: p.status.unwrap_or(ProjectStatus::Backlog),
             priority: Priority::from_i32(p.priority),
             lead_id: p.lead_id.clone(),
             start_date: p.start_date.clone().unwrap_or_default(),
@@ -576,10 +576,10 @@ fn project_row<'a>(
 /// Health dot color + label, mirroring Rails `project_health_state`.
 fn project_health(project: &Project) -> (Color, String) {
     match project.status {
-        ProjectStatus::Completed => (t::PRIORITY_LOW, "Complete".to_string()),
-        ProjectStatus::Cancelled => (t::TEXT_MUTED, "Cancelled".to_string()),
-        ProjectStatus::Paused => (t::PRIORITY_HIGH, "Paused".to_string()),
-        ProjectStatus::Started => {
+        Some(ProjectStatus::Completed) => (t::PRIORITY_LOW, "Complete".to_string()),
+        Some(ProjectStatus::Cancelled) => (t::TEXT_MUTED, "Cancelled".to_string()),
+        Some(ProjectStatus::Paused) => (t::PRIORITY_HIGH, "Paused".to_string()),
+        Some(ProjectStatus::Started) => {
             if project.progress_percentage >= 100 {
                 (t::PRIORITY_LOW, "Complete".to_string())
             } else if project.behind_schedule {
@@ -588,7 +588,7 @@ fn project_health(project: &Project) -> (Color, String) {
                 (t::PRIORITY_LOW, "On track".to_string())
             }
         }
-        ProjectStatus::Backlog => {
+        Some(ProjectStatus::Backlog) | None => {
             if project
                 .due_date
                 .as_deref()

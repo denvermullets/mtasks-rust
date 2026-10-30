@@ -7,5 +7,5 @@ pub async fn list_conditional(
     etag: Option<&str>,
 ) -> Result<Conditional<Vec<LaneDto>>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/lanes");
-    client.get_conditional(&path, etag).await
+    client.get_list_conditional(&path, etag).await
 }

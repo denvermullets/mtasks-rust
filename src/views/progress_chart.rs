@@ -492,7 +492,7 @@ mod tests {
             team_id: "t".into(),
             name: "P".into(),
             description: None,
-            status: ProjectStatus::Started,
+            status: Some(ProjectStatus::Started),
             priority: 0,
             lead_id: None,
             start_date: start.map(String::from),

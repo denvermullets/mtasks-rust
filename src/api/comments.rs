@@ -22,7 +22,7 @@ pub async fn list(
     issue_id: i64,
 ) -> Result<Vec<CommentDto>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/comments");
-    client.get(&path).await
+    client.get_list(&path).await
 }
 
 /// Create a comment. `idempotency_key` (the local UUID) is sent as the

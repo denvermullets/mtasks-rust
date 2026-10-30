@@ -53,6 +53,31 @@ impl ApiClient {
         self.send_json(req).await
     }
 
+    /// GET a list endpoint. A row that fails to decode (e.g. an unknown enum
+    /// value) is skipped with a log line instead of failing the whole list.
+    pub async fn get_list<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, ApiError> {
+        let value: serde_json::Value = self.get(path).await?;
+        decode_list_lenient(value, path)
+    }
+
+    /// Conditional variant of [`Self::get_list`]: same row-skipping decode.
+    pub async fn get_list_conditional<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+    ) -> Result<Conditional<Vec<T>>, ApiError> {
+        match self
+            .get_conditional::<serde_json::Value>(path, etag)
+            .await?
+        {
+            Conditional::NotModified => Ok(Conditional::NotModified),
+            Conditional::Modified { data, etag } => Ok(Conditional::Modified {
+                data: decode_list_lenient(data, path)?,
+                etag,
+            }),
+        }
+    }
+
     /// GET with `If-None-Match` when `etag` is known. A 304 is "not modified",
     /// not an error; a 200 returns the body and the new `ETag` header.
     pub async fn get_conditional<T: DeserializeOwned>(
@@ -197,5 +222,81 @@ fn extract_message(body: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         body.to_string()
+    }
+}
+
+/// Decode a JSON array row by row. A non-array body is a hard decode error; a
+/// row that doesn't decode is logged and skipped so one bad row can't take the
+/// whole list down.
+pub(crate) fn decode_list_lenient<T: DeserializeOwned>(
+    value: serde_json::Value,
+    what: &str,
+) -> Result<Vec<T>, ApiError> {
+    let rows = match value {
+        serde_json::Value::Array(rows) => rows,
+        other => {
+            return Err(ApiError::Decode(format!(
+                "{what}: expected a JSON array, got {}",
+                match other {
+                    serde_json::Value::Object(_) => "an object",
+                    serde_json::Value::Null => "null",
+                    _ => "a scalar",
+                }
+            )))
+        }
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        match serde_json::from_value::<T>(row) {
+            Ok(item) => out.push(item),
+            Err(e) => eprintln!("skipping undecodable row {i} from {what}: {e}"),
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ProjectDto;
+    use crate::db::models::ProjectStatus;
+
+    fn project_json(id: i64, status: &str) -> String {
+        format!(
+            r#"{{"id":{id},"name":"P{id}","description":null,"status":{status},
+            "priority":"high","lead":null,"start_date":null,"due_date":null,
+            "velocity_score":0,"completed_issues_count":0,"total_issues_count":0,
+            "progress_percentage":0,"behind_schedule":false,"roadmap_commitment":null,
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}"#
+        )
+    }
+
+    #[test]
+    fn project_with_null_status_decodes_as_none() {
+        let dto: ProjectDto = serde_json::from_str(&project_json(1, "null")).unwrap();
+        assert_eq!(dto.status, None);
+    }
+
+    #[test]
+    fn list_skips_row_with_unknown_enum_value() {
+        let body = format!(
+            "[{},{},{}]",
+            project_json(1, r#""started""#),
+            project_json(2, r#""bogus""#),
+            project_json(3, "null"),
+        );
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rows: Vec<ProjectDto> = decode_list_lenient(value, "projects").unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(rows[0].status, Some(ProjectStatus::Started));
+        assert_eq!(rows[1].status, None);
+    }
+
+    #[test]
+    fn non_array_body_is_a_decode_error() {
+        let value = serde_json::json!({"error": "x"});
+        let r: Result<Vec<ProjectDto>, _> = decode_list_lenient(value, "projects");
+        assert!(matches!(r, Err(ApiError::Decode(_))));
     }
 }
