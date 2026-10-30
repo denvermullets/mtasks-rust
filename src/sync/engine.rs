@@ -1636,15 +1636,33 @@ impl SyncEngine {
         // Phase 4: per-team resources. Each helper logs and updates the report
         // independently so one team's failure doesn't block the others.
         for target in &targets {
-            for step in [
+            let mut steps = vec![
                 pull_lanes_step(client, target.remote_id, &target.local_id).await,
                 pull_labels_step(client, target.remote_id, &target.local_id).await,
                 pull_members_step(client, target.remote_id, &target.local_id).await,
                 pull_projects_step(client, target.remote_id, &target.local_id).await,
                 pull_issues_step(client, target.remote_id, &target.local_id).await,
-                pull_tombstones_step(client, target.remote_id, &target.local_id).await,
-                pull_comments_step(client, target.remote_id, &target.local_id).await,
-            ] {
+            ];
+            // Tombstones run before comments; the comment ids they removed
+            // are handed on so a feed row for one cannot resurrect it.
+            let mut deleted_comments = HashSet::new();
+            match pull_tombstones_step(client, target.remote_id, &target.local_id).await {
+                Ok(ids) => {
+                    deleted_comments = ids;
+                    steps.push(Ok(()));
+                }
+                Err(e) => steps.push(Err(e)),
+            }
+            steps.push(
+                pull_comments_step(
+                    client,
+                    target.remote_id,
+                    &target.local_id,
+                    &deleted_comments,
+                )
+                .await,
+            );
+            for step in steps {
                 match step {
                     Ok(()) => report.processed += 1,
                     Err(msg) => {
@@ -2090,7 +2108,7 @@ async fn pull_tombstones_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
-) -> Result<(), String> {
+) -> Result<HashSet<i64>, String> {
     let since = {
         let conn = open()?;
         queries::get_pull_cursor(&conn, local_team_id, DELETED_CURSOR)
@@ -2107,6 +2125,7 @@ async fn pull_tombstones_step(
     );
     let conn = open()?;
     let failed = apply_tombstones(&conn, local_team_id, &page.rows);
+    let deleted_comments = tombstoned_comment_ids(&page.rows);
     if failed > 0 {
         return Err(format!("deleted: {failed} failed (see [sync] log)"));
     }
@@ -2114,7 +2133,15 @@ async fn pull_tombstones_step(
         queries::set_pull_cursor(&conn, local_team_id, DELETED_CURSOR, t)
             .map_err(|e| format!("db (pull cursor): {e}"))?;
     }
-    Ok(())
+    Ok(deleted_comments)
+}
+
+/// Remote ids of the comments this feed page deleted.
+fn tombstoned_comment_ids(rows: &[TombstoneDto]) -> HashSet<i64> {
+    rows.iter()
+        .filter(|r| r.record_type == "Comment")
+        .map(|r| r.record_id)
+        .collect()
 }
 
 /// Cursor resource name for the team comments feed in `pull_cursors`.
@@ -2128,6 +2155,7 @@ async fn pull_comments_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
+    deleted_comments: &HashSet<i64>,
 ) -> Result<(), String> {
     let since = {
         let conn = open()?;
@@ -2143,7 +2171,7 @@ async fn pull_comments_step(
         if since.is_some() { "incremental" } else { "full" },
         page.rows.len()
     );
-    let dtos = dedupe_by_id(page.rows, |d| d.id);
+    let dtos = drop_deleted_comments(dedupe_by_id(page.rows, |d| d.id), deleted_comments);
     let total = dtos.len();
     let conn = open()?;
     let failed = apply_pulled_comments(&conn, dtos);
@@ -2157,21 +2185,48 @@ async fn pull_comments_step(
     Ok(())
 }
 
+/// Drop feed comments the tombstone pass just deleted, along with replies to
+/// them (their parent is gone, so they would come back as top-level).
+fn drop_deleted_comments(dtos: Vec<CommentDto>, deleted: &HashSet<i64>) -> Vec<CommentDto> {
+    if deleted.is_empty() {
+        return dtos;
+    }
+    let mut gone = deleted.clone();
+    loop {
+        let before = gone.len();
+        for d in &dtos {
+            if d.parent_id.is_some_and(|p| gone.contains(&p)) {
+                gone.insert(d.id);
+            }
+        }
+        if gone.len() == before {
+            break;
+        }
+    }
+    dtos.into_iter().filter(|d| !gone.contains(&d.id)).collect()
+}
+
 /// Apply feed entries to the local DB (idempotent, so the cursor overlap is
-/// safe). Only `Issue` is handled; other record types are ignored for now.
-/// Returns how many entries failed to apply.
+/// safe). Handles Issue, Comment, Label and Project; other record types
+/// (IssueDependency, RecurringIssue) are ignored. Returns how many entries
+/// failed to apply.
 fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto]) -> usize {
     let mut failed = 0;
     for row in rows {
-        if row.record_type == "Issue" {
-            if let Err(e) = queries::apply_server_issue_tombstone(conn, local_team_id, row.record_id)
-            {
-                eprintln!(
-                    "[sync] phase=pull_deleted issue_remote_id={} apply_failed reason=\"{e}\"",
-                    row.record_id
-                );
-                failed += 1;
-            }
+        let id = row.record_id;
+        let result = match row.record_type.as_str() {
+            "Issue" => queries::apply_server_issue_tombstone(conn, local_team_id, id),
+            "Comment" => queries::apply_server_comment_tombstone(conn, local_team_id, id),
+            "Label" => queries::apply_server_label_tombstone(conn, local_team_id, id),
+            "Project" => queries::apply_server_project_tombstone(conn, local_team_id, id),
+            _ => continue,
+        };
+        if let Err(e) = result {
+            eprintln!(
+                "[sync] phase=pull_deleted type={} remote_id={id} apply_failed reason=\"{e}\"",
+                row.record_type
+            );
+            failed += 1;
         }
     }
     failed
@@ -2951,13 +3006,126 @@ mod tests {
     }
 
     #[test]
-    fn non_issue_tombstones_are_ignored_and_repeats_are_safe() {
+    fn unhandled_tombstone_types_are_ignored_and_repeats_are_safe() {
         let conn = setup_tombstoned_issue();
         give_i1_remote_id(&conn);
-        let rows = [tomb("Comment", 500), tomb("Label", 11), tomb("Issue", 500)];
+        let rows = [
+            tomb("IssueDependency", 1),
+            tomb("RecurringIssue", 2),
+            tomb("Issue", 500),
+        ];
         assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
         assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
         assert_purged(&conn);
+    }
+
+    fn exec(conn: &Connection, sql: &str) {
+        conn.execute_batch(sql).unwrap();
+    }
+
+    #[test]
+    fn comment_tombstone_deletes_comment_and_replies_only() {
+        let conn = setup_labels_db();
+        exec(
+            &conn,
+            "INSERT INTO comments (id, remote_id, issue_id, body, parent_id, created_at, updated_at) VALUES
+               ('c1', 901, 'i1', 'a', NULL, '2026-01-01', '2026-01-01'),
+               ('c2', 902, 'i1', 'reply', 'c1', '2026-01-01', '2026-01-01'),
+               ('c3', 903, 'i1', 'reply2', 'c2', '2026-01-01', '2026-01-01'),
+               ('c4', 904, 'i1', 'other', NULL, '2026-01-01', '2026-01-01');",
+        );
+        sync_queue::enqueue(&conn, "comment", "c2", "create", Some("{}")).unwrap();
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Comment", 901)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments WHERE id='c4'"), 1);
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 0);
+        // Repeat, unknown id and another team are no-ops.
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Comment", 901)]), 0);
+        assert_eq!(apply_tombstones(&conn, "other", &[tomb("Comment", 904)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 1);
+    }
+
+    #[test]
+    fn label_tombstone_detaches_from_issues_and_projects() {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", Some(11));
+        insert_test_label(&conn, "lab2", Some(22));
+        exec(
+            &conn,
+            "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+               VALUES ('p1', 800, 't1', 'P', '2026-01-01', '2026-01-01');
+             INSERT INTO project_labels (project_id, label_id, created_at, updated_at)
+               VALUES ('p1', 'lab1', '2026-01-01', '2026-01-01'), ('p1', 'lab2', '2026-01-01', '2026-01-01');",
+        );
+        queries::set_issue_labels(&conn, "i1", &["lab1".into(), "lab2".into()]).unwrap();
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Label", 11)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM labels WHERE id='lab1'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_labels"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM project_labels"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM labels WHERE id='lab2'"), 1);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Label", 11)]), 0);
+    }
+
+    #[test]
+    fn project_tombstone_unlinks_issues_and_deletes_project() {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", Some(11));
+        exec(
+            &conn,
+            "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+               VALUES ('p1', 800, 't1', 'P', '2026-01-01', '2026-01-01');
+             INSERT INTO project_labels (project_id, label_id, created_at, updated_at)
+               VALUES ('p1', 'lab1', '2026-01-01', '2026-01-01');
+             UPDATE issues SET project_id = 'p1' WHERE id = 'i1';",
+        );
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Project", 800)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM projects"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM project_labels"), 0);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM issues WHERE id='i1' AND project_id IS NULL"),
+            1
+        );
+        // The label itself survives.
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM labels WHERE id='lab1'"), 1);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Project", 800)]), 0);
+    }
+
+    fn comment_dto(id: i64, parent: Option<i64>) -> CommentDto {
+        CommentDto {
+            id,
+            body: "x".into(),
+            parent_id: parent,
+            user: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            replies: None,
+            issue_id: Some(500),
+        }
+    }
+
+    #[test]
+    fn tombstoned_comment_in_feed_is_not_resurrected() {
+        let conn = setup_labels_db();
+        give_i1_remote_id(&conn);
+        exec(
+            &conn,
+            "INSERT INTO comments (id, remote_id, issue_id, body, created_at, updated_at)
+               VALUES ('c1', 901, 'i1', 'a', '2026-01-01', '2026-01-01');",
+        );
+        let rows = [tomb("Comment", 901)];
+        assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
+        let deleted = tombstoned_comment_ids(&rows);
+        // Feed still carries the comment, a reply to it, and an unrelated one.
+        let feed = vec![
+            comment_dto(901, None),
+            comment_dto(902, Some(901)),
+            comment_dto(903, None),
+        ];
+        let kept = drop_deleted_comments(feed, &deleted);
+        assert_eq!(kept.iter().map(|d| d.id).collect::<Vec<_>>(), vec![903]);
+        assert_eq!(apply_pulled_comments(&conn, kept), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments WHERE remote_id IN (901,902)"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments WHERE remote_id = 903"), 1);
     }
 
     #[test]

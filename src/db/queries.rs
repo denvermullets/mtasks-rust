@@ -218,6 +218,117 @@ pub fn apply_server_issue_tombstone(
     Ok(true)
 }
 
+fn retire_pending_sync(conn: &Connection, entity_type: &str, local_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sync_queue SET synced_at = ?3
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
+        params![
+            entity_type,
+            local_id,
+            chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Apply a server tombstone for a comment: hard-delete it and its replies
+/// (children first, any depth), and retire pending sync entries for them.
+/// Scoped to the team through the comment's issue. Idempotent; returns whether
+/// a local comment existed.
+pub fn apply_server_comment_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT c.id FROM comments c JOIN issues i ON i.id = c.issue_id
+             WHERE c.remote_id = ?1 AND i.team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    let mut ids = vec![local_id];
+    let mut i = 0;
+    while i < ids.len() {
+        let mut stmt = tx.prepare("SELECT id FROM comments WHERE parent_id = ?1")?;
+        let kids: Vec<String> = stmt
+            .query_map(params![ids[i]], |r| r.get(0))?
+            .collect::<Result<_>>()?;
+        drop(stmt);
+        ids.extend(kids);
+        i += 1;
+    }
+    for id in ids.iter().rev() {
+        tx.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "comment", id)?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Apply a server tombstone for a label: detach it from issues and projects,
+/// then delete it. Idempotent; returns whether a local label existed.
+pub fn apply_server_label_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT id FROM labels WHERE remote_id = ?1 AND team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_labels WHERE label_id = ?1", params![local_id])?;
+    tx.execute("DELETE FROM project_labels WHERE label_id = ?1", params![local_id])?;
+    tx.execute("DELETE FROM labels WHERE id = ?1", params![local_id])?;
+    retire_pending_sync(&tx, "label", &local_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Apply a server tombstone for a project: issues lose their project link
+/// (Rails nullifies), project labels are detached, then the project is
+/// deleted. Idempotent; returns whether a local project existed.
+pub fn apply_server_project_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT id FROM projects WHERE remote_id = ?1 AND team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE issues SET project_id = NULL WHERE project_id = ?1",
+        params![local_id],
+    )?;
+    tx.execute("DELETE FROM project_labels WHERE project_id = ?1", params![local_id])?;
+    tx.execute("DELETE FROM projects WHERE id = ?1", params![local_id])?;
+    retire_pending_sync(&tx, "project", &local_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// True when a local row for this remote id carries the delete tombstone.
 pub fn is_issue_tombstoned_by_remote_id(conn: &Connection, remote_id: i64) -> Result<bool> {
     let n: i64 = conn.query_row(
