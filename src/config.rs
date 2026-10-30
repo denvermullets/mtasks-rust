@@ -118,7 +118,9 @@ mod tests {
         let cfg: Config =
             toml::from_str("api_base_url = \"http://x\"\nsync_interval_secs = 30\n").unwrap();
         assert_eq!(cfg.api_base_url, "http://x");
-        assert!(!toml::to_string_pretty(&cfg).unwrap().contains("sync_interval"));
+        assert!(!toml::to_string_pretty(&cfg)
+            .unwrap()
+            .contains("sync_interval"));
     }
 
     #[test]
