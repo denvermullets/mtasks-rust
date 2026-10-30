@@ -268,6 +268,66 @@ pub fn apply_server_comment_tombstone(
     Ok(true)
 }
 
+/// Apply a server tombstone for an issue dependency (Rails destroys blocking
+/// edges when an issue completes): delete the local edge with this remote id
+/// and retire its pending sync entries. Edges are team-scoped through their
+/// issues. Idempotent; returns whether a local edge existed.
+pub fn apply_server_dependency_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT d.id FROM issue_dependencies d
+             JOIN issues i ON i.id = d.blocking_issue_id
+             WHERE d.remote_id = ?1 AND i.team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_dependencies WHERE id = ?1", params![local_id])?;
+    retire_pending_sync(&tx, "dependency", &local_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Delete an issue's local dependency edges (either side) that carry a
+/// remote id the server's detail payload no longer lists. Edges with a NULL
+/// remote id are local creates still pending push and are never touched.
+/// Returns how many edges were removed.
+pub fn prune_issue_dependencies(
+    conn: &Connection,
+    issue_id: &str,
+    keep_remote_ids: &[i64],
+) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id FROM issue_dependencies
+         WHERE (blocking_issue_id = ?1 OR blocked_issue_id = ?1) AND remote_id IS NOT NULL",
+    )?;
+    let stale: Vec<String> = stmt
+        .query_map(params![issue_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, remote)| !keep_remote_ids.contains(remote))
+        .map(|(id, _)| id)
+        .collect();
+    drop(stmt);
+    let tx = conn.unchecked_transaction()?;
+    for id in &stale {
+        tx.execute("DELETE FROM issue_dependencies WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "dependency", id)?;
+    }
+    tx.commit()?;
+    Ok(stale.len())
+}
+
 /// Apply a server tombstone for a label: detach it from issues and projects,
 /// then delete it. Idempotent; returns whether a local label existed.
 pub fn apply_server_label_tombstone(
