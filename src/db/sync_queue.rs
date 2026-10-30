@@ -1,6 +1,16 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rusqlite::{params, Connection, Result};
 
 use super::models::SyncQueueEntry;
+
+static LOCAL_WRITE: AtomicBool = AtomicBool::new(false);
+
+/// True once if any entry was enqueued since the last call. The app polls this
+/// after each update to send the scheduler a local-write event.
+pub fn take_local_write() -> bool {
+    LOCAL_WRITE.swap(false, Ordering::SeqCst)
+}
 
 pub fn enqueue(
     conn: &Connection,
@@ -16,6 +26,7 @@ pub fn enqueue(
         "INSERT INTO sync_queue (entity_type, entity_id, action, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![entity_type, entity_id, action, payload, now],
     )?;
+    LOCAL_WRITE.store(true, Ordering::SeqCst);
     Ok(())
 }
 
