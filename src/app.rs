@@ -185,6 +185,8 @@ pub enum Message {
     SettingsTokenChanged(String),
     /// Theme picked in Settings: applies live and saves to config immediately.
     SettingsThemeChanged(crate::theme::ThemeChoice),
+    /// Font picked in Settings: saves to config; applies after restart.
+    SettingsFontChanged(crate::fonts::FontChoice),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
@@ -2255,6 +2257,21 @@ impl App {
                 self.config = new_cfg;
                 if let Some(ref mut form) = self.settings_form {
                     form.theme = choice;
+                    form.status = saved.as_ref().err().map(|e| format!("Error: {}", e));
+                }
+                if saved.is_ok() {
+                    self.config_error = None;
+                }
+            }
+
+            Message::SettingsFontChanged(choice) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.font = choice.key.to_string();
+                let saved = config::save(&new_cfg);
+                // No live apply: Iced fixes the default font at launch.
+                self.config = new_cfg;
+                if let Some(ref mut form) = self.settings_form {
+                    form.font = choice;
                     form.status = saved.as_ref().err().map(|e| format!("Error: {}", e));
                 }
                 if saved.is_ok() {
