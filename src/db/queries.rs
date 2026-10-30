@@ -91,9 +91,7 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
 }
 
 fn now_ts() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
+    crate::db::now_iso()
 }
 
 /// Record local activity events for a write that turned `old` into the
@@ -132,9 +130,7 @@ pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
 /// Soft-delete: stamp the local tombstone instead of removing the row, so a
 /// later pull can't recreate the issue while the server delete is pending.
 pub fn delete_issue(conn: &Connection, issue_id: &str) -> Result<()> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "UPDATE issues SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
         params![issue_id, now],
@@ -210,9 +206,7 @@ pub fn apply_server_issue_tombstone(
          WHERE entity_type = 'issue' AND entity_id = ?1 AND synced_at IS NULL",
         params![
             local_id,
-            chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string()
+            crate::db::now_iso()
         ],
     )?;
     Ok(true)
@@ -225,9 +219,7 @@ fn retire_pending_sync(conn: &Connection, entity_type: &str, local_id: &str) -> 
         params![
             entity_type,
             local_id,
-            chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string()
+            crate::db::now_iso()
         ],
     )?;
     Ok(())
@@ -341,9 +333,7 @@ pub fn is_issue_tombstoned_by_remote_id(conn: &Connection, remote_id: i64) -> Re
 
 pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> Result<()> {
     let old = get_issue(conn, issue_id)?;
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "UPDATE issues SET lane_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![lane_id, now, issue_id],
@@ -354,9 +344,7 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
 
 pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> Result<()> {
     let old = get_issue(conn, issue_id)?;
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "UPDATE issues SET priority = ?1, updated_at = ?2 WHERE id = ?3",
         params![priority, now, issue_id],
@@ -645,9 +633,7 @@ pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(St
 /// Replace the full set of labels attached to `issue_id` with `label_ids`.
 /// Mirrors Rails' `label_ids=` collection setter (delete + insert to match).
 pub fn set_issue_labels(conn: &Connection, issue_id: &str, label_ids: &[String]) -> Result<()> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "DELETE FROM issue_labels WHERE issue_id = ?1",
@@ -1244,9 +1230,7 @@ pub fn archive_missing_issues(
     team_id: &str,
     active_remote_ids: &[i64],
 ) -> Result<usize> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     if active_remote_ids.is_empty() {
         return conn.execute(
             "UPDATE issues SET archived_at = ?1
@@ -1273,9 +1257,7 @@ pub fn archive_missing_issues(
 /// Intentionally conservative: only flips `archived_at` when the column is NULL,
 /// never resurrects.
 pub fn archive_missing_teams(conn: &Connection, active_remote_ids: &[i64]) -> Result<usize> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     if active_remote_ids.is_empty() {
         return conn.execute(
             "UPDATE teams SET archived_at = ?1
@@ -1300,9 +1282,7 @@ pub fn archive_missing_teams(conn: &Connection, active_remote_ids: &[i64]) -> Re
 /// team-access 404. Pending edits stay queued; pushes for the team are skipped.
 pub fn set_team_access_lost(conn: &Connection, remote_id: i64, lost: bool) -> Result<usize> {
     if lost {
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let now = crate::db::now_iso();
         conn.execute(
             "UPDATE teams SET access_lost_at = ?1 WHERE remote_id = ?2 AND access_lost_at IS NULL",
             params![now, remote_id],

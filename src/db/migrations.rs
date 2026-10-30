@@ -407,9 +407,7 @@ pub fn run(conn: &Connection) -> Result<()> {
             }
             return Err(e);
         }
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let now = crate::db::now_iso();
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
             rusqlite::params![migration.version as i64, &now],
@@ -445,9 +443,7 @@ fn bootstrap_legacy(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
         rusqlite::params![&now],

@@ -19,9 +19,7 @@ pub fn enqueue(
     action: &str,
     payload: Option<&str>,
 ) -> Result<()> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, action, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![entity_type, entity_id, action, payload, now],
@@ -77,9 +75,7 @@ pub fn begin_attempt(conn: &Connection, entry_id: i64) -> Result<Option<String>>
         |row| row.get(0),
     )?;
     if previous.is_none() {
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let now = crate::db::now_iso();
         conn.execute(
             "UPDATE sync_queue SET attempted_at = ?1 WHERE id = ?2",
             params![now, entry_id],
@@ -89,9 +85,7 @@ pub fn begin_attempt(conn: &Connection, entry_id: i64) -> Result<Option<String>>
 }
 
 pub fn mark_synced(conn: &Connection, entry_id: i64) -> Result<()> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "UPDATE sync_queue SET synced_at = ?1 WHERE id = ?2",
         params![now, entry_id],

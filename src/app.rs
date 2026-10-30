@@ -1027,9 +1027,7 @@ impl App {
                 .flatten()
                 .map(|m| m.id)
         });
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let now = crate::db::now_iso();
         let comment = Comment {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
@@ -1089,9 +1087,7 @@ impl App {
         };
         if let Some(mut issue) = self.issues.iter().find(|i| i.id == id).cloned() {
             mutate(&mut issue);
-            issue.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            issue.updated_at = crate::db::now_iso();
             let conn = self.db();
             let _ = queries::update_issue(&conn, &issue);
             let payload = serde_json::to_string(&issue).ok();
@@ -1122,9 +1118,7 @@ impl App {
             DepDirection::Blocking => (current_id, target_id.to_string()),
             DepDirection::BlockedBy => (target_id.to_string(), current_id),
         };
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let now = crate::db::now_iso();
         let dep = IssueDependency {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
@@ -1234,9 +1228,7 @@ impl App {
             issue.description = description;
             issue.estimate = estimate;
             issue.due_date = due_date;
-            issue.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            issue.updated_at = crate::db::now_iso();
             let conn = self.db();
             let _ = queries::update_issue(&conn, &issue);
             let payload = serde_json::to_string(&issue).ok();
@@ -1268,9 +1260,7 @@ impl App {
         let conn = self.db();
         if let Ok(Some(mut project)) = queries::get_project(&conn, &id) {
             mutate(&mut project);
-            project.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            project.updated_at = crate::db::now_iso();
             let _ = queries::update_project(&conn, &project);
             let payload = serde_json::to_string(&project).ok();
             self.enqueue_sync("project", &project.id, "update", payload.as_deref());
@@ -1319,9 +1309,7 @@ impl App {
             project.description = description;
             project.start_date = start_date;
             project.due_date = due_date;
-            project.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            project.updated_at = crate::db::now_iso();
             let _ = queries::update_project(&conn, &project);
             let payload = serde_json::to_string(&project).ok();
             self.enqueue_sync("project", &project.id, "update", payload.as_deref());
@@ -1698,9 +1686,7 @@ impl App {
                 }
                 if let Some(ref form) = self.issue_form {
                     let conn = self.db();
-                    let now = chrono::Utc::now()
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                        .to_string();
+                    let now = crate::db::now_iso();
 
                     let description_body = form.description_text();
                     let description = if description_body.trim().is_empty() {
@@ -2676,9 +2662,7 @@ impl App {
                     let conn = self.db();
                     if let Ok(Some(mut project)) = queries::get_project(&conn, &project_id) {
                         project.roadmap_commitment = Some(commitment);
-                        project.updated_at = chrono::Utc::now()
-                            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                            .to_string();
+                        project.updated_at = crate::db::now_iso();
                         let _ = queries::update_project(&conn, &project);
                         let payload = serde_json::to_string(&project).ok();
                         self.enqueue_sync("project", &project.id, "update", payload.as_deref());
@@ -2734,9 +2718,7 @@ impl App {
                 }
                 if let Some(ref form) = self.project_form {
                     let conn = self.db();
-                    let now = chrono::Utc::now()
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                        .to_string();
+                    let now = crate::db::now_iso();
 
                     let description_body = form.description_text();
                     let description = if description_body.trim().is_empty() {
@@ -2884,9 +2866,7 @@ impl App {
                         return Task::none();
                     };
                     let conn = self.db();
-                    let now = chrono::Utc::now()
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                        .to_string();
+                    let now = crate::db::now_iso();
                     let label = Label {
                         id: uuid::Uuid::new_v4().to_string(),
                         remote_id: None,
