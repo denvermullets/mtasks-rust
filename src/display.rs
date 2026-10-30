@@ -906,6 +906,7 @@ mod tests {
             position: pos,
             team_id: "t".into(),
             remote_id: None,
+            category: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
