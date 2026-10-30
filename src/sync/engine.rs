@@ -16,9 +16,11 @@
 //! happens in short synchronous helpers that open and drop their own
 //! connections; async dispatchers only hold owned data across awaits.
 
+use std::collections::HashSet;
+
 use rusqlite::Connection;
 
-use crate::api::dto::{IssueDto, PulledDependency};
+use crate::api::dto::{IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
     ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, ProjectParams,
@@ -124,6 +126,9 @@ pub struct FullSyncReport {
     pub current_user: Option<(i64, String)>,
     /// Write scope reported by this sync's `/me` call (`None` if `/me` failed).
     pub can_write: Option<bool>,
+    /// True for a push-only cycle (local-write trigger): nothing was pulled,
+    /// so the app must not treat it as a completed pull.
+    pub push_only: bool,
 }
 
 impl FullSyncReport {
@@ -218,6 +223,18 @@ impl SyncEngine {
         .await
     }
 
+    /// Push-only cycle for the local-write trigger: the same `/me` write-scope
+    /// gate as [`Self::full_cycle`], then drain the queue. No pull, so a burst
+    /// of edits costs one `/me` plus the pushes.
+    pub async fn push_cycle(client: &ApiClient) -> FullSyncReport {
+        let can_write = users::me(client)
+            .await
+            .ok()
+            .map(|m| m.token.has_write_scope());
+        let push = Self::drain_if_writable(client, can_write).await;
+        push_only_report(can_write, push)
+    }
+
     /// Drain unless `/me` said the token cannot write; then skip every push
     /// (entries stay pending) and report [`PushPause::ReadOnly`].
     pub async fn drain_if_writable(client: &ApiClient, can_write: Option<bool>) -> SyncReport {
@@ -280,6 +297,7 @@ where
             deleted_orphan_team: None,
             current_user: None,
             can_write: preflight_can_write,
+            push_only: false,
         };
     }
     let outcome = pull().await;
@@ -289,6 +307,16 @@ where
         deleted_orphan_team: outcome.deleted_orphan_team,
         current_user: outcome.current_user,
         can_write: outcome.can_write.or(preflight_can_write),
+        push_only: false,
+    }
+}
+
+fn push_only_report(can_write: Option<bool>, push: SyncReport) -> FullSyncReport {
+    FullSyncReport {
+        push,
+        can_write,
+        push_only: true,
+        ..FullSyncReport::default()
     }
 }
 
@@ -534,6 +562,22 @@ async fn issue_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
         Prep::Done(o) => return o,
     };
 
+    let attempt = match begin_attempt(entry_id, "issues") {
+        Ok(a) => a,
+        Err(o) => return o,
+    };
+    if let Some(since) = &attempt.previous {
+        match find_issue_on_server(client, prep.team_remote_id, &prep.params, since, &attempt)
+            .await
+        {
+            Ok(Some(remote_id)) => {
+                return commit_create(entry_id, "issues", &prep.local_id, remote_id)
+            }
+            Ok(None) => {}
+            Err(e) => return classify(&e),
+        }
+    }
+
     match issues::create(client, prep.team_remote_id, &prep.params).await {
         Ok(dto) => commit_create(entry_id, "issues", &prep.local_id, dto.id),
         Err(e) => classify_in_team(&e, prep.team_remote_id),
@@ -640,6 +684,185 @@ fn commit_create(entry_id: i64, table: &str, local_id: &str, remote_id: i64) -> 
         Ok(()) => Outcome::Created,
         Err(e) => Outcome::LeavePending(e),
     }
+}
+
+// ── Create reconciliation (JRST-23) ───────────────────────────────────────
+//
+// If a create's POST reached Rails but we never saw the response (crash, lost
+// connection), the entry is still pending. Before re-POSTing we look for the
+// record the earlier attempt made and adopt its id. `sync_queue.attempted_at`
+// is written before the first POST and never moved forward, so a retry's
+// window covers every earlier attempt.
+//
+// Rails has no creator/created_at filter and no server-side idempotency for
+// issue/project/label creates, so each type uses the strongest rule its
+// payload allows. Every rule also skips server ids already linked to another
+// local row, so two identical local creates cannot adopt the same record.
+//
+//  - Issues:   `GET issues?updated_since=<attempt>`; match `creator.id` ==
+//              token user (`/me`), exact `title`, and `created_at` >= attempt.
+//              Strongest (creator + title + time).
+//  - Projects: `GET projects?updated_since=<attempt>`; rows carry no creator,
+//              so match exact `name` and `created_at` >= attempt. Cannot
+//              verify the creator.
+//  - Labels:   rows carry only `updated_at` (no created_at/creator, no
+//              updated_since filter), which says nothing about creation. List
+//              the team's labels and match `name` case-insensitively (Rails
+//              enforces per-team case-insensitive uniqueness, so the match is
+//              unambiguous, and a plain POST would 422 on it anyway).
+//
+// `created_at` is compared with CLOCK_SKEW_SLACK_SECS of tolerance because it
+// is the server's clock and the attempt time is ours; a small slack beats a
+// missed adoption (which would duplicate). Issue lookups fetch one page of up
+// to RECONCILE_PAGE_LIMIT rows. A lookup error leaves the entry pending
+// rather than POSTing blind.
+
+const CLOCK_SKEW_SLACK_SECS: i64 = 60;
+const RECONCILE_PAGE_LIMIT: i64 = 500;
+
+/// State read before a create's POST: when an earlier attempt began (if any)
+/// and the server ids already linked locally for the entity's table.
+struct Attempt {
+    previous: Option<String>,
+    taken: HashSet<i64>,
+}
+
+fn begin_attempt(entry_id: i64, table: &str) -> Result<Attempt, Outcome> {
+    let conn = open().map_err(Outcome::LeavePending)?;
+    begin_attempt_on(&conn, entry_id, table).map_err(Outcome::LeavePending)
+}
+
+fn begin_attempt_on(conn: &Connection, entry_id: i64, table: &str) -> Result<Attempt, String> {
+    let taken = linked_remote_ids(conn, table)?;
+    let previous =
+        sync_queue::begin_attempt(conn, entry_id).map_err(|e| format!("begin_attempt: {e}"))?;
+    Ok(Attempt { previous, taken })
+}
+
+fn linked_remote_ids(conn: &Connection, table: &str) -> Result<HashSet<i64>, String> {
+    if !matches!(table, "issues" | "projects" | "labels") {
+        return Err(format!("unknown reconcile table {table}"));
+    }
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT remote_id FROM {table} WHERE remote_id IS NOT NULL"
+        ))
+        .map_err(|e| format!("db: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("db: {e}"))?;
+    rows.collect::<Result<_, _>>().map_err(|e| format!("db: {e}"))
+}
+
+/// True when `created_at` is at or after `attempted_at` (minus clock slack).
+/// Unparseable timestamps never match.
+fn created_after_attempt(created_at: &str, attempted_at: &str) -> bool {
+    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+    match (parse(created_at), parse(attempted_at)) {
+        (Some(c), Some(a)) => c >= a - chrono::Duration::seconds(CLOCK_SKEW_SLACK_SECS),
+        _ => false,
+    }
+}
+
+/// Earliest-created matching issue: same creator, exact title, created after
+/// the attempt, not already linked to a local row.
+fn match_issue(
+    candidates: &[IssueDto],
+    me_id: i64,
+    title: &str,
+    attempted_at: &str,
+    taken: &HashSet<i64>,
+) -> Option<i64> {
+    candidates
+        .iter()
+        .filter(|d| {
+            d.title == title
+                && d.creator.as_ref().map(|c| c.id) == Some(me_id)
+                && created_after_attempt(&d.created_at, attempted_at)
+                && !taken.contains(&d.id)
+        })
+        .min_by(|a, b| a.created_at.cmp(&b.created_at))
+        .map(|d| d.id)
+}
+
+/// Earliest-created project with the exact name created after the attempt.
+fn match_project(
+    candidates: &[ProjectDto],
+    name: &str,
+    attempted_at: &str,
+    taken: &HashSet<i64>,
+) -> Option<i64> {
+    candidates
+        .iter()
+        .filter(|d| {
+            d.name == name
+                && created_after_attempt(&d.created_at, attempted_at)
+                && !taken.contains(&d.id)
+        })
+        .min_by(|a, b| a.created_at.cmp(&b.created_at))
+        .map(|d| d.id)
+}
+
+/// Label with the same name, case-insensitively, not already linked.
+fn match_label(candidates: &[LabelDto], name: &str, taken: &HashSet<i64>) -> Option<i64> {
+    let wanted = name.trim().to_lowercase();
+    candidates
+        .iter()
+        .find(|d| d.name.trim().to_lowercase() == wanted && !taken.contains(&d.id))
+        .map(|d| d.id)
+}
+
+async fn find_issue_on_server(
+    client: &ApiClient,
+    team_remote_id: i64,
+    params: &IssueParams,
+    attempted_at: &str,
+    attempt: &Attempt,
+) -> Result<Option<i64>, ApiError> {
+    let Some(title) = params.title.as_deref() else {
+        return Ok(None);
+    };
+    let me = users::me(client).await?;
+    let filters = issues::IssueFilters {
+        updated_since: Some(attempted_at.to_string()),
+        limit: Some(RECONCILE_PAGE_LIMIT),
+        ..Default::default()
+    };
+    let candidates = issues::list(client, team_remote_id, &filters).await?;
+    Ok(match_issue(
+        &candidates,
+        me.id,
+        title,
+        attempted_at,
+        &attempt.taken,
+    ))
+}
+
+async fn find_project_on_server(
+    client: &ApiClient,
+    team_remote_id: i64,
+    params: &ProjectParams,
+    attempted_at: &str,
+    attempt: &Attempt,
+) -> Result<Option<i64>, ApiError> {
+    let Some(name) = params.name.as_deref() else {
+        return Ok(None);
+    };
+    let candidates = projects::list_updated_since(client, team_remote_id, attempted_at).await?;
+    Ok(match_project(&candidates, name, attempted_at, &attempt.taken))
+}
+
+async fn find_label_on_server(
+    client: &ApiClient,
+    team_remote_id: i64,
+    params: &LabelParams,
+    attempt: &Attempt,
+) -> Result<Option<i64>, ApiError> {
+    let candidates = match labels::list_conditional(client, team_remote_id, None).await? {
+        Conditional::Modified { data, .. } => data,
+        Conditional::NotModified => return Ok(None),
+    };
+    Ok(match_label(&candidates, &params.name, &attempt.taken))
 }
 
 fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, Outcome> {
@@ -795,6 +1018,21 @@ async fn project_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
+    let attempt = match begin_attempt(entry_id, "projects") {
+        Ok(a) => a,
+        Err(o) => return o,
+    };
+    if let Some(since) = &attempt.previous {
+        match find_project_on_server(client, prep.team_remote_id, &prep.params, since, &attempt)
+            .await
+        {
+            Ok(Some(remote_id)) => {
+                return commit_create(entry_id, "projects", &prep.local_id, remote_id)
+            }
+            Ok(None) => {}
+            Err(e) => return classify(&e),
+        }
+    }
     match projects::create(client, prep.team_remote_id, &prep.params).await {
         Ok(dto) => commit_create(entry_id, "projects", &prep.local_id, dto.id),
         Err(e) => classify_in_team(&e, prep.team_remote_id),
@@ -916,6 +1154,19 @@ async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
+    let attempt = match begin_attempt(entry_id, "labels") {
+        Ok(a) => a,
+        Err(o) => return o,
+    };
+    if attempt.previous.is_some() {
+        match find_label_on_server(client, prep.team_remote_id, &prep.params, &attempt).await {
+            Ok(Some(remote_id)) => {
+                return commit_create(entry_id, "labels", &prep.local_id, remote_id)
+            }
+            Ok(None) => {}
+            Err(e) => return classify(&e),
+        }
+    }
     match labels::create(client, prep.team_remote_id, &prep.params).await {
         Ok(dto) => commit_create(entry_id, "labels", &prep.local_id, dto.id),
         Err(e) => classify_in_team(&e, prep.team_remote_id),
@@ -1999,6 +2250,26 @@ mod tests {
         assert!(!r.cycle_succeeded());
     }
 
+    #[test]
+    fn push_only_report_does_not_claim_a_pull() {
+        let r = push_only_report(Some(true), SyncReport::default());
+        assert!(r.push_only);
+        assert_eq!(r.pull.failed, 0);
+        assert!(r.deleted_orphan_team.is_none() && r.current_user.is_none());
+        assert!(r.cycle_succeeded());
+        // A read-only token never pushes and shows the banner.
+        let ro = push_only_report(Some(false), read_only_report());
+        assert!(ro.read_only());
+        assert!(ro.cycle_succeeded());
+    }
+
+    #[tokio::test]
+    async fn read_only_token_never_drains() {
+        let client = ApiClient::new("http://127.0.0.1:9", "t").unwrap();
+        let r = SyncEngine::drain_if_writable(&client, Some(false)).await;
+        assert_eq!(r.push_paused, Some(PushPause::ReadOnly));
+    }
+
     fn is_drop(o: &Outcome) -> bool {
         matches!(o, Outcome::DropAndLog(_))
     }
@@ -2093,6 +2364,7 @@ mod tests {
             deleted_orphan_team: None,
             current_user: None,
             can_write,
+            push_only: false,
         };
         assert!(mk(Some(false), read_only_report()).read_only());
         assert!(mk(
@@ -2596,6 +2868,108 @@ mod tests {
         .unwrap()
     }
 
+    // ── Create reconciliation (JRST-23) ──
+
+    const ATTEMPT: &str = "2026-10-30T12:00:00.000Z";
+
+    fn issue_dto(id: i64, title: &str, creator: Option<i64>, created_at: &str) -> IssueDto {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "identifier": format!("X-{id}"), "title": title,
+            "priority": "no_priority", "estimate": null, "due_date": null,
+            "lane": null, "assignee": null,
+            "creator": creator.map(|c| serde_json::json!({"id": c, "name": "n"})),
+            "project": null, "labels": [],
+            "created_at": created_at, "updated_at": created_at,
+        }))
+        .unwrap()
+    }
+
+    fn project_dto(id: i64, name: &str, created_at: &str) -> ProjectDto {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "description": null, "status": "backlog",
+            "priority": "no_priority", "lead": null, "start_date": null,
+            "due_date": null, "velocity_score": 0, "completed_issues_count": 0,
+            "total_issues_count": 0, "progress_percentage": 0,
+            "behind_schedule": false, "roadmap_commitment": null,
+            "created_at": created_at, "updated_at": created_at,
+        }))
+        .unwrap()
+    }
+
+    fn label_dto(id: i64, name: &str) -> LabelDto {
+        serde_json::from_value(serde_json::json!({"id": id, "name": name, "color": null}))
+            .unwrap()
+    }
+
+    fn none() -> HashSet<i64> {
+        HashSet::new()
+    }
+
+    #[test]
+    fn issue_match_requires_creator_title_and_time() {
+        let after = "2026-10-30T12:00:05.000Z";
+        let c = vec![
+            issue_dto(1, "Fix", Some(8), after),
+            issue_dto(2, "Other", Some(7), after),
+            issue_dto(3, "Fix", Some(7), "2026-10-30T11:00:00.000Z"),
+            issue_dto(4, "Fix", None, after),
+            issue_dto(5, "Fix", Some(7), after),
+        ];
+        assert_eq!(match_issue(&c, 7, "Fix", ATTEMPT, &none()), Some(5));
+        assert_eq!(match_issue(&c[..4], 7, "Fix", ATTEMPT, &none()), None);
+    }
+
+    #[test]
+    fn issue_match_tolerates_small_clock_skew_only() {
+        let near = issue_dto(1, "Fix", Some(7), "2026-10-30T11:59:30.000Z");
+        let far = issue_dto(2, "Fix", Some(7), "2026-10-30T11:55:00.000Z");
+        assert_eq!(match_issue(&[near], 7, "Fix", ATTEMPT, &none()), Some(1));
+        assert_eq!(match_issue(&[far], 7, "Fix", ATTEMPT, &none()), None);
+    }
+
+    #[test]
+    fn issue_match_picks_earliest_and_skips_linked_ids() {
+        let c = vec![
+            issue_dto(10, "Fix", Some(7), "2026-10-30T12:00:09.000Z"),
+            issue_dto(11, "Fix", Some(7), "2026-10-30T12:00:02.000Z"),
+        ];
+        assert_eq!(match_issue(&c, 7, "Fix", ATTEMPT, &none()), Some(11));
+        let taken: HashSet<i64> = [11].into_iter().collect();
+        assert_eq!(match_issue(&c, 7, "Fix", ATTEMPT, &taken), Some(10));
+    }
+
+    #[test]
+    fn project_match_is_exact_name_after_attempt() {
+        let after = "2026-10-30T12:01:00.000Z";
+        let c = vec![
+            project_dto(1, "Roadmap", "2026-10-29T00:00:00.000Z"),
+            project_dto(2, "roadmap", after),
+            project_dto(3, "Roadmap", after),
+        ];
+        assert_eq!(match_project(&c, "Roadmap", ATTEMPT, &none()), Some(3));
+        let taken: HashSet<i64> = [3].into_iter().collect();
+        assert_eq!(match_project(&c, "Roadmap", ATTEMPT, &taken), None);
+    }
+
+    #[test]
+    fn label_match_is_case_insensitive_name_and_skips_linked() {
+        let c = vec![label_dto(1, "Bug"), label_dto(2, "Feature")];
+        assert_eq!(match_label(&c, "bug", &none()), Some(1));
+        assert_eq!(match_label(&c, " FEATURE ", &none()), Some(2));
+        assert_eq!(match_label(&c, "Chore", &none()), None);
+        let taken: HashSet<i64> = [1].into_iter().collect();
+        assert_eq!(match_label(&c, "Bug", &taken), None);
+    }
+
+    fn stored_attempt(conn: &Connection, entry: i64) -> String {
+        conn.query_row(
+            "SELECT attempted_at FROM sync_queue WHERE id=?1",
+            [entry],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn pull_persists_dependencies_with_remote_id_kind_direction() {
         let conn = setup_dependency_db();
@@ -2691,6 +3065,43 @@ mod tests {
         assert_eq!(ok.len(), 16);
         assert_eq!(skipped, 4);
         assert!(peak.load(Ordering::SeqCst) > 1 && peak.load(Ordering::SeqCst) <= 4);
+    }
+
+    #[test]
+    fn begin_attempt_records_time_once_and_reports_earlier_attempt() {
+        let conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        let first = begin_attempt_on(&conn, entry, "issues").unwrap();
+        assert!(first.previous.is_none());
+        let stored = stored_attempt(&conn, entry);
+        let second = begin_attempt_on(&conn, entry, "issues").unwrap();
+        assert_eq!(second.previous.as_deref(), Some(stored.as_str()));
+        assert_eq!(stored_attempt(&conn, entry), stored);
+    }
+
+    #[test]
+    fn begin_attempt_collects_linked_remote_ids() {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "a", Some(41));
+        insert_test_label(&conn, "b", None);
+        let entry = queue_create(&conn, "label", "b");
+        let a = begin_attempt_on(&conn, entry, "labels").unwrap();
+        assert_eq!(a.taken, [41].into_iter().collect::<HashSet<_>>());
+        assert!(begin_attempt_on(&conn, entry, "comments").is_err());
+    }
+
+    #[test]
+    fn adopting_a_match_links_and_marks_synced_without_posting() {
+        let mut conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        let _ = begin_attempt_on(&conn, entry, "issues").unwrap();
+        let retry = begin_attempt_on(&conn, entry, "issues").unwrap();
+        let since = retry.previous.unwrap();
+        let c = vec![issue_dto(55, "Issue", Some(7), "2999-01-01T00:00:00.000Z")];
+        let id = match_issue(&c, 7, "Issue", &since, &retry.taken).unwrap();
+        save_remote_id_and_mark_synced(&mut conn, "issues", "i1", id, entry).unwrap();
+        assert_eq!(issue_remote(&conn), Some(55));
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 0);
     }
 
     #[test]

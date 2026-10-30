@@ -9,6 +9,10 @@ pub struct IssueFilters {
     pub project_id: Option<i64>,
     /// Use [`crate::db::models::Priority::as_rails_str`] for valid values.
     pub priority: Option<String>,
+    /// ISO8601; only issues updated at or after this instant.
+    pub updated_since: Option<String>,
+    /// Page size (Rails caps at 500).
+    pub limit: Option<i64>,
 }
 
 impl IssueFilters {
@@ -25,6 +29,12 @@ impl IssueFilters {
         }
         if let Some(v) = &self.priority {
             parts.push(format!("priority={v}"));
+        }
+        if let Some(v) = &self.updated_since {
+            parts.push(format!("updated_since={v}"));
+        }
+        if let Some(v) = self.limit {
+            parts.push(format!("limit={v}"));
         }
         if parts.is_empty() {
             String::new()
@@ -120,6 +130,7 @@ mod tests {
             assignee_id: Some(2),
             project_id: Some(3),
             priority: Some(Priority::High.as_rails_str().into()),
+            ..Default::default()
         };
         assert_eq!(
             f.query_string(),
