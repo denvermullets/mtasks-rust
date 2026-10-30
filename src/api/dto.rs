@@ -78,6 +78,9 @@ pub struct IssueDto {
     pub labels: Vec<LabelRef>,
     pub created_at: String,
     pub updated_at: String,
+    /// Set when the issue is archived upstream; absent/null when active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
 
     // detail-only (None when the Rails serializer ran with detailed: false)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +156,7 @@ impl IssueDto {
             labels,
             created_at: issue.created_at.clone(),
             updated_at: issue.updated_at.clone(),
+            archived_at: None,
             description: issue.description.clone(),
             parent_issue,
             blocking_issues: Some(blocking),
@@ -266,7 +270,7 @@ impl IssueDto {
             parent_issue_id,
             assignee_id,
             creator_id,
-            archived_at: None,
+            archived_at: self.archived_at,
             remote_id: Some(self.id),
             created_at: self.created_at,
             updated_at: self.updated_at,

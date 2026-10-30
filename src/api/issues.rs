@@ -91,6 +91,9 @@ pub struct IssuePageQuery {
     pub updated_since: Option<String>,
     /// Ask for the detailed serializer on every row.
     pub include_detail: bool,
+    /// Also return archived issues (`include_archived=1`) so archive and
+    /// unarchive transitions arrive through the pull.
+    pub include_archived: bool,
     /// Page size; Rails caps at 500 and defaults to 200.
     pub limit: Option<u32>,
     /// Resume after this issue id (from the previous page's `X-Next-After-Id`).
@@ -105,6 +108,9 @@ impl IssuePageQuery {
         }
         if self.include_detail {
             parts.push("include=detail".to_string());
+        }
+        if self.include_archived {
+            parts.push("include_archived=1".to_string());
         }
         if let Some(l) = self.limit {
             parts.push(format!("limit={l}"));
@@ -183,12 +189,13 @@ mod tests {
         let q = IssuePageQuery {
             updated_since: Some("2026-10-30T12:00:00Z".into()),
             include_detail: true,
+            include_archived: true,
             limit: Some(500),
             after_id: Some(9),
         };
         assert_eq!(
             q.query_string(),
-            "?updated_since=2026-10-30T12%3A00%3A00Z&include=detail&limit=500&after_id=9"
+            "?updated_since=2026-10-30T12%3A00%3A00Z&include=detail&include_archived=1&limit=500&after_id=9"
         );
         assert_eq!(IssuePageQuery::default().query_string(), "");
     }
