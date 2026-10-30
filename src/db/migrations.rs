@@ -255,6 +255,15 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE lanes ADD COLUMN category TEXT;
         ",
     },
+    Migration {
+        version: 13,
+        name: "team_access_lost",
+        up: "
+            -- Set when Rails answered a push with a team-access 404 (team archived
+            -- or dropped from the token). Cleared when a pull sees the team again.
+            ALTER TABLE teams ADD COLUMN access_lost_at TEXT;
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -380,7 +389,7 @@ mod tests {
 
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
     }
 
@@ -389,7 +398,7 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     }
 
     #[test]
@@ -403,7 +412,7 @@ mod tests {
         run(&conn).unwrap();
 
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
         assert!(table_exists(&conn, "comments"));

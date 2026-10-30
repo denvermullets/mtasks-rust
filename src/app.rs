@@ -452,6 +452,8 @@ pub struct App {
     config: Config,
     config_error: Option<String>,
     last_sync_error: Option<String>,
+    /// Identifiers of teams flagged inaccessible (team-access 404 on push).
+    inaccessible_teams: Vec<String>,
     sync_in_progress: bool,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
@@ -1391,6 +1393,7 @@ impl App {
             config,
             config_error,
             last_sync_error: None,
+            inaccessible_teams: queries::inaccessible_team_identifiers(&conn).unwrap_or_default(),
             sync_in_progress: false,
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -2410,6 +2413,8 @@ impl App {
             Message::SyncCompleted(report) => {
                 self.sync_in_progress = false;
                 self.last_sync_error = report.last_error().map(str::to_string);
+                self.inaccessible_teams =
+                    queries::inaccessible_team_identifiers(&self.db()).unwrap_or_default();
 
                 // If pull deleted the orphan seed team and that's what was
                 // selected, drop the now-dangling selection. reload_data will
@@ -2433,7 +2438,7 @@ impl App {
                 if !auth_failed {
                     for f in report.failures() {
                         match &f.kind {
-                            SyncErrorKind::Auth | SyncErrorKind::Network => {}
+                            SyncErrorKind::Auth | SyncErrorKind::Network | SyncErrorKind::TeamAccess => {}
                             SyncErrorKind::Validation(errs) if f.entity_type == "issue" => {
                                 validation_issue = Some((f.entity_id.clone(), errs.clone()));
                             }
@@ -3062,6 +3067,7 @@ impl App {
             self.sync_in_progress,
             self.config.last_synced_at,
             token_configured,
+            &self.inaccessible_teams,
         );
 
         let main_content = column![]

@@ -70,6 +70,9 @@ pub enum SyncErrorKind {
     Forbidden,
     /// 422 — server-side validation errors (full messages).
     Validation(Vec<String>),
+    /// 404 "Team not found or access denied" — the team was archived or removed
+    /// from the token. The edit stays pending; the status bar shows the team.
+    TeamAccess,
     /// Transient connectivity failure — surfaced in the status bar, not a toast.
     Network,
     /// Any other server-side error.
@@ -83,6 +86,8 @@ impl SyncErrorKind {
     fn from_push_reason(reason: &str) -> Option<SyncErrorKind> {
         if reason.starts_with("unauthorized:") {
             Some(SyncErrorKind::Auth)
+        } else if reason.starts_with("team access lost:") {
+            Some(SyncErrorKind::TeamAccess)
         } else if reason.starts_with("forbidden:") {
             Some(SyncErrorKind::Forbidden)
         } else if let Some(rest) = reason.strip_prefix("validation: ") {
@@ -149,6 +154,9 @@ enum Outcome {
     LeavePending(String),
     /// Keep this entry pending AND skip the remaining pushes this drain.
     PausePushes(PushPause, String),
+    /// Team-access 404: keep the entry pending, flag the team (by Rails id) as
+    /// inaccessible, and carry on with other teams' entries.
+    TeamAccessLost(i64, String),
 }
 
 /// `Done` short-circuits the API call (e.g. idempotency hit, missing FK).
@@ -182,6 +190,10 @@ impl SyncEngine {
                 Some(id) => id,
                 None => continue,
             };
+
+            if entry_team_is_inaccessible(&entry) {
+                continue;
+            }
 
             let outcome = process(client, &entry).await;
             if record(&mut report, &entry, entry_id, outcome) {
@@ -237,6 +249,18 @@ fn record(
             report.last_error = Some(reason);
             report.push_paused = Some(pause);
             return true;
+        }
+        Outcome::TeamAccessLost(team_remote_id, reason) => {
+            eprintln!(
+                "[sync] entry_id={entry_id} type={} action={} outcome=team_access_lost team={team_remote_id} reason=\"{reason}\"",
+                entry.entity_type, entry.action
+            );
+            if let Ok(conn) = open() {
+                let _ = queries::set_team_access_lost(&conn, team_remote_id, true);
+            }
+            report.failed += 1;
+            record_push_failure(report, entry, &reason);
+            report.last_error = Some(reason);
         }
         Outcome::DropAndLog(reason) => {
             eprintln!(
@@ -415,7 +439,7 @@ async fn issue_create(client: &ApiClient, entity_id: &str) -> Outcome {
 
     match issues::create(client, prep.team_remote_id, &prep.params).await {
         Ok(dto) => write_issue_remote_id(&prep.local_id, dto.id),
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
 
@@ -427,7 +451,7 @@ async fn issue_update(client: &ApiClient, entity_id: &str) -> Outcome {
 
     match issues::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
         Ok(_) => Outcome::Success,
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
 
@@ -452,8 +476,8 @@ async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
     };
     match issues::delete(client, team_remote_id, remote_id).await {
         Ok(_) => Outcome::Success,
-        Err(ApiError::NotFound(_)) => Outcome::Success,
-        Err(e) => classify(&e),
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(e) => classify_in_team(&e, team_remote_id),
     }
 }
 
@@ -632,7 +656,7 @@ async fn project_create(client: &ApiClient, entity_id: &str) -> Outcome {
             }
             Outcome::Success
         }
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
 
@@ -643,7 +667,7 @@ async fn project_update(client: &ApiClient, entity_id: &str) -> Outcome {
     };
     match projects::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
         Ok(_) => Outcome::Success,
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
 
@@ -668,8 +692,8 @@ async fn project_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
     };
     match projects::delete(client, team_remote_id, remote_id).await {
         Ok(_) => Outcome::Success,
-        Err(ApiError::NotFound(_)) => Outcome::Success,
-        Err(e) => classify(&e),
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(e) => classify_in_team(&e, team_remote_id),
     }
 }
 
@@ -762,7 +786,7 @@ async fn label_create(client: &ApiClient, entity_id: &str) -> Outcome {
             }
             Outcome::Success
         }
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
 
@@ -871,7 +895,7 @@ async fn comment_create(client: &ApiClient, entity_id: &str) -> Outcome {
             }
             Outcome::Success
         }
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
 
@@ -957,7 +981,7 @@ async fn dependency_create(client: &ApiClient, entity_id: &str) -> Outcome {
             }
             Outcome::Success
         }
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
 
@@ -1004,11 +1028,69 @@ async fn dependency_delete(client: &ApiClient, payload: Option<&str>) -> Outcome
     };
     match dependencies::delete(client, team_remote_id, issue_remote_id, remote_id).await {
         Ok(_) => Outcome::Success,
-        Err(e) => classify(&e),
+        Err(e) => classify_in_team(&e, team_remote_id),
     }
 }
 
 // ── Error classification ──────────────────────────────────────────────────
+
+/// Rails' message for a 404 on the team scope (unknown, archived, or outside
+/// the token). Resource 404s ("Issue not found", ...) use different messages.
+const TEAM_ACCESS_MESSAGE: &str = "Team not found or access denied";
+
+fn is_team_access_message(m: &str) -> bool {
+    m.trim() == TEAM_ACCESS_MESSAGE
+}
+
+/// Like [`classify`], but a team-access 404 flags `team_remote_id` as lost.
+fn classify_in_team(err: &ApiError, team_remote_id: i64) -> Outcome {
+    match err {
+        ApiError::NotFound(m) if is_team_access_message(m) => {
+            Outcome::TeamAccessLost(team_remote_id, format!("team access lost: {m}"))
+        }
+        other => classify(other),
+    }
+}
+
+/// True when the entry belongs to a team currently flagged inaccessible.
+fn entry_team_is_inaccessible(entry: &SyncQueueEntry) -> bool {
+    let Ok(conn) = open() else { return false };
+    match entry_team_remote_id(&conn, entry) {
+        Some(rid) => queries::team_access_lost(&conn, rid).unwrap_or(false),
+        None => false,
+    }
+}
+
+fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64> {
+    let team_remote = |team_id: &str| {
+        queries::remote_id_for(conn, "teams", team_id)
+            .ok()
+            .flatten()
+    };
+    let id = entry.entity_id.as_str();
+    match (entry.entity_type.as_str(), entry.action.as_str()) {
+        (_, "delete") => {
+            let v: serde_json::Value = serde_json::from_str(entry.payload.as_deref()?).ok()?;
+            v.get("team_remote_id")?.as_i64()
+        }
+        ("issue", _) => team_remote(&queries::get_issue(conn, id).ok()??.team_id),
+        ("project", _) => team_remote(&queries::get_project(conn, id).ok()??.team_id),
+        ("label", _) => team_remote(&queries::get_label(conn, id).ok()??.team_id),
+        ("comment", _) => {
+            let c = queries::get_comment(conn, id).ok()??;
+            team_remote(&queries::get_issue(conn, &c.issue_id).ok()??.team_id)
+        }
+        ("dependency", _) => {
+            let d = queries::get_issue_dependency(conn, id).ok()??;
+            team_remote(
+                &queries::get_issue(conn, &d.blocking_issue_id)
+                    .ok()??
+                    .team_id,
+            )
+        }
+        _ => None,
+    }
+}
 
 fn classify(err: &ApiError) -> Outcome {
     match err {
@@ -1236,6 +1318,10 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
     let inserted_any_remote_team = !dtos.is_empty();
 
     let conn = open()?;
+    // A team Rails lists is accessible again: lift any inaccessible flag.
+    for id in &active_ids {
+        let _ = queries::set_team_access_lost(&conn, *id, false);
+    }
     for dto in dtos {
         let existing = queries::find_team_by_remote_id(&conn, dto.id)
             .map_err(|e| format!("db (find team): {e}"))?;
@@ -1720,6 +1806,79 @@ mod tests {
             .failures
             .iter()
             .any(|f| f.kind == SyncErrorKind::Forbidden));
+    }
+
+    #[test]
+    fn team_access_404_is_told_apart_from_resource_404() {
+        let team = ApiError::NotFound("Team not found or access denied".into());
+        match classify_in_team(&team, 42) {
+            Outcome::TeamAccessLost(42, m) => assert!(m.starts_with("team access lost:")),
+            other => panic!("expected team access lost, got {other:?}"),
+        }
+        // Resource 404s keep today's drop-and-log.
+        for m in ["Issue not found", "Project not found", "Label not found"] {
+            let o = classify_in_team(&ApiError::NotFound(m.into()), 42);
+            assert!(is_drop(&o), "{m} should drop, got {o:?}");
+        }
+    }
+
+    #[test]
+    fn team_access_failure_surfaces_as_team_access_kind() {
+        let entry = SyncQueueEntry {
+            id: Some(1),
+            entity_type: "issue".into(),
+            entity_id: "i1".into(),
+            action: "update".into(),
+            payload: None,
+            created_at: String::new(),
+            synced_at: None,
+        };
+        let mut report = SyncReport::default();
+        record_push_failure(
+            &mut report,
+            &entry,
+            "team access lost: Team not found or access denied",
+        );
+        assert_eq!(report.failures[0].kind, SyncErrorKind::TeamAccess);
+    }
+
+    #[test]
+    fn entries_resolve_to_their_team_and_flag_round_trips() {
+        let conn = setup_labels_db();
+        let mk =|et: &str, id: &str, action: &str, payload: Option<&str>| SyncQueueEntry {
+            id: Some(1),
+            entity_type: et.into(),
+            entity_id: id.into(),
+            action: action.into(),
+            payload: payload.map(str::to_string),
+            created_at: String::new(),
+            synced_at: None,
+        };
+        assert_eq!(
+            entry_team_remote_id(&conn, &mk("issue", "i1", "update", None)),
+            Some(700)
+        );
+        assert_eq!(
+            entry_team_remote_id(
+                &conn,
+                &mk("issue", "i1", "delete", Some("{\"team_remote_id\":700}"))
+            ),
+            Some(700)
+        );
+
+        assert!(!queries::team_access_lost(&conn, 700).unwrap());
+        queries::set_team_access_lost(&conn, 700, true).unwrap();
+        assert!(queries::team_access_lost(&conn, 700).unwrap());
+        assert_eq!(
+            queries::inaccessible_team_identifiers(&conn).unwrap(),
+            vec!["T"]
+        );
+        // Visible again: flag clears.
+        queries::set_team_access_lost(&conn, 700, false).unwrap();
+        assert!(!queries::team_access_lost(&conn, 700).unwrap());
+        assert!(queries::inaccessible_team_identifiers(&conn)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

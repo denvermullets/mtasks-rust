@@ -14,6 +14,7 @@ pub fn view<'a>(
     sync_in_progress: bool,
     last_synced_at: Option<DateTime<Utc>>,
     token_configured: bool,
+    inaccessible_teams: &[String],
 ) -> Element<'a, Message> {
     let (sync_text, sync_color) = if let Some(err) = last_sync_error {
         // Transient network failures are non-fatal (sync retries) — surface them
@@ -65,6 +66,17 @@ pub fn view<'a>(
             text(format!("\u{26A0} config: {}", msg))
                 .size(12)
                 .color(t::DANGER),
+        );
+    }
+
+    if !inaccessible_teams.is_empty() {
+        bar = bar.push(
+            text(format!(
+                "\u{26A0} No access to team: {} (edits kept pending)",
+                inaccessible_teams.join(", ")
+            ))
+            .size(12)
+            .color(t::WARNING),
         );
     }
 
