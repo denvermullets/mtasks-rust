@@ -917,12 +917,25 @@ fn match_project(
         .map(|d| d.id)
 }
 
-/// Label with the same name, case-insensitively, not already linked.
-fn match_label(candidates: &[LabelDto], name: &str, taken: &HashSet<i64>) -> Option<i64> {
+/// Label with the same name (case-insensitive), last written after the
+/// attempt, not already linked. Labels carry no creator, so the timestamp is
+/// what tells our own create from an older label that shares the name.
+fn match_label(
+    candidates: &[LabelDto],
+    name: &str,
+    attempted_at: &str,
+    taken: &HashSet<i64>,
+) -> Option<i64> {
     let wanted = name.trim().to_lowercase();
     candidates
         .iter()
-        .find(|d| d.name.trim().to_lowercase() == wanted && !taken.contains(&d.id))
+        .find(|d| {
+            d.name.trim().to_lowercase() == wanted
+                && d.updated_at
+                    .as_deref()
+                    .is_some_and(|u| created_after_attempt(u, attempted_at))
+                && !taken.contains(&d.id)
+        })
         .map(|d| d.id)
 }
 
@@ -981,13 +994,19 @@ async fn find_label_on_server(
     client: &ApiClient,
     team_remote_id: i64,
     params: &LabelParams,
+    attempted_at: &str,
     attempt: &Attempt,
 ) -> Result<Option<i64>, ApiError> {
     let candidates = match labels::list_conditional(client, team_remote_id, None).await? {
         Conditional::Modified { data, .. } => data,
         Conditional::NotModified => return Ok(None),
     };
-    Ok(match_label(&candidates, &params.name, &attempt.taken))
+    Ok(match_label(
+        &candidates,
+        &params.name,
+        attempted_at,
+        &attempt.taken,
+    ))
 }
 
 fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, Outcome> {
@@ -1283,8 +1302,10 @@ async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
         Ok(a) => a,
         Err(o) => return o,
     };
-    if attempt.previous.is_some() {
-        match find_label_on_server(client, prep.team_remote_id, &prep.params, &attempt).await {
+    if let Some(since) = &attempt.previous {
+        match find_label_on_server(client, prep.team_remote_id, &prep.params, since, &attempt)
+            .await
+        {
             Ok(Some(remote_id)) => {
                 return commit_create(entry_id, "labels", &prep.local_id, remote_id)
             }
@@ -3546,6 +3567,13 @@ mod tests {
             .unwrap()
     }
 
+    fn label_dto_at(id: i64, name: &str, updated_at: &str) -> LabelDto {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "color": null, "updated_at": updated_at
+        }))
+        .unwrap()
+    }
+
     fn none() -> HashSet<i64> {
         HashSet::new()
     }
@@ -3638,12 +3666,30 @@ mod tests {
 
     #[test]
     fn label_match_is_case_insensitive_name_and_skips_linked() {
-        let c = vec![label_dto(1, "Bug"), label_dto(2, "Feature")];
-        assert_eq!(match_label(&c, "bug", &none()), Some(1));
-        assert_eq!(match_label(&c, " FEATURE ", &none()), Some(2));
-        assert_eq!(match_label(&c, "Chore", &none()), None);
+        let at = "2026-10-30T12:00:00Z";
+        let c = vec![
+            label_dto_at(1, "Bug", "2026-10-30T12:00:05Z"),
+            label_dto_at(2, "Feature", "2026-10-30T12:00:05Z"),
+        ];
+        assert_eq!(match_label(&c, "bug", at, &none()), Some(1));
+        assert_eq!(match_label(&c, " FEATURE ", at, &none()), Some(2));
+        assert_eq!(match_label(&c, "Chore", at, &none()), None);
         let taken: HashSet<i64> = [1].into_iter().collect();
-        assert_eq!(match_label(&c, "Bug", &taken), None);
+        assert_eq!(match_label(&c, "Bug", at, &taken), None);
+    }
+
+    #[test]
+    fn label_match_requires_update_after_the_attempt() {
+        let at = "2026-10-30T12:00:00Z";
+        // Same name, but the label was last touched well before the attempt:
+        // an unrelated pre-existing label, not our create.
+        let old = vec![label_dto_at(1, "Bug", "2026-10-29T08:00:00Z")];
+        assert_eq!(match_label(&old, "Bug", at, &none()), None);
+        // Within the clock-skew slack still matches.
+        let skewed = vec![label_dto_at(2, "Bug", "2026-10-30T11:59:30Z")];
+        assert_eq!(match_label(&skewed, "Bug", at, &none()), Some(2));
+        // No timestamp at all never matches.
+        assert_eq!(match_label(&[label_dto(3, "Bug")], "Bug", at, &none()), None);
     }
 
     fn stored_attempt(conn: &Connection, entry: i64) -> String {
