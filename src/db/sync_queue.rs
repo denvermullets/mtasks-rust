@@ -55,6 +55,28 @@ pub fn has_pending_entry(conn: &Connection, entity_type: &str, entity_id: &str) 
     Ok(count > 0)
 }
 
+/// Record that a create's POST is about to be sent. Returns the timestamp of
+/// the *earliest* earlier attempt (None on the first attempt). The stored value
+/// is never moved forward, so the reconciliation window on a later retry still
+/// covers every earlier attempt.
+pub fn begin_attempt(conn: &Connection, entry_id: i64) -> Result<Option<String>> {
+    let previous: Option<String> = conn.query_row(
+        "SELECT attempted_at FROM sync_queue WHERE id = ?1",
+        params![entry_id],
+        |row| row.get(0),
+    )?;
+    if previous.is_none() {
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        conn.execute(
+            "UPDATE sync_queue SET attempted_at = ?1 WHERE id = ?2",
+            params![now, entry_id],
+        )?;
+    }
+    Ok(previous)
+}
+
 pub fn mark_synced(conn: &Connection, entry_id: i64) -> Result<()> {
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")

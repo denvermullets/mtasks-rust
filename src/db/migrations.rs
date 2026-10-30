@@ -342,6 +342,15 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE teams ADD COLUMN access_lost_at TEXT;
         ",
     },
+    Migration {
+        version: 18,
+        name: "sync_queue_attempted_at",
+        up: "
+            -- When a create's POST was first attempted (set before sending), so a
+            -- retry can look for the record the earlier attempt may have made.
+            ALTER TABLE sync_queue ADD COLUMN attempted_at TEXT;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
