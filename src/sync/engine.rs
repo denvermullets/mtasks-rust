@@ -36,6 +36,18 @@ pub struct SyncReport {
     /// offending form, …). Local/transient failures (db errors, ordering waits)
     /// are intentionally omitted — they only populate `last_error`.
     pub failures: Vec<SyncFailure>,
+    /// Set when a push outcome asked to stop pushing for the rest of this
+    /// drain (e.g. a 403). The offending entry and every unattempted entry stay
+    /// pending; pulls are unaffected. The UI can read this to show a banner.
+    pub push_paused: Option<PushPause>,
+}
+
+/// Why pushes were paused for the rest of a drain. Extend with new variants
+/// (e.g. lost team access) rather than adding new outcomes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PushPause {
+    /// 403 — the token lacks the scope for writes.
+    Forbidden,
 }
 
 /// A classified, user-actionable sync failure surfaced back to the UI layer.
@@ -135,6 +147,8 @@ enum Outcome {
     DropAndLog(String),
     /// Transient failure — leave pending so the next drain retries.
     LeavePending(String),
+    /// Keep this entry pending AND skip the remaining pushes this drain.
+    PausePushes(PushPause, String),
 }
 
 /// `Done` short-circuits the API call (e.g. idempotency hit, missing FK).
@@ -170,7 +184,9 @@ impl SyncEngine {
             };
 
             let outcome = process(client, &entry).await;
-            record(&mut report, &entry, entry_id, outcome);
+            if record(&mut report, &entry, entry_id, outcome) {
+                break;
+            }
         }
 
         report
@@ -193,7 +209,14 @@ async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
     }
 }
 
-fn record(report: &mut SyncReport, entry: &SyncQueueEntry, entry_id: i64, outcome: Outcome) {
+/// Apply `outcome` to the report/queue. Returns true when the drain should
+/// stop pushing (remaining entries are left untouched, hence still pending).
+fn record(
+    report: &mut SyncReport,
+    entry: &SyncQueueEntry,
+    entry_id: i64,
+    outcome: Outcome,
+) -> bool {
     match outcome {
         Outcome::Success => {
             if let Err(e) = mark_synced(entry_id) {
@@ -203,6 +226,17 @@ fn record(report: &mut SyncReport, entry: &SyncQueueEntry, entry_id: i64, outcom
                 );
             }
             report.processed += 1;
+        }
+        Outcome::PausePushes(pause, reason) => {
+            eprintln!(
+                "[sync] entry_id={entry_id} type={} action={} outcome=pause reason=\"{reason}\"",
+                entry.entity_type, entry.action
+            );
+            report.failed += 1;
+            record_push_failure(report, entry, &reason);
+            report.last_error = Some(reason);
+            report.push_paused = Some(pause);
+            return true;
         }
         Outcome::DropAndLog(reason) => {
             eprintln!(
@@ -224,6 +258,7 @@ fn record(report: &mut SyncReport, entry: &SyncQueueEntry, entry_id: i64, outcom
             report.last_error = Some(reason);
         }
     }
+    false
 }
 
 /// Record an auth failure from a stringified pull error, if present. Pull is
@@ -993,7 +1028,11 @@ fn classify(err: &ApiError) -> Outcome {
         // user re-enters one in Settings (sync pauses meanwhile) and the next
         // drain pushes the still-queued edit rather than silently losing it.
         ApiError::Unauthorized(m) => Outcome::LeavePending(format!("unauthorized: {m}")),
-        ApiError::Forbidden(m) => Outcome::DropAndLog(format!("forbidden: {m}")),
+        // A 403 means the token lacks the scope, not that the edit is bad.
+        // Keep it queued and stop pushing; a better token can send it later.
+        ApiError::Forbidden(m) => {
+            Outcome::PausePushes(PushPause::Forbidden, format!("forbidden: {m}"))
+        }
         ApiError::NotFound(m) => Outcome::DropAndLog(format!("not found: {m}")),
         ApiError::Decode(m) => Outcome::DropAndLog(format!("decode: {m}")),
         ApiError::EnumMapping(m) => Outcome::DropAndLog(format!("enum: {m}")),
@@ -1651,7 +1690,36 @@ mod tests {
             message: "teapot".into()
         })));
         assert!(is_drop(&classify(&ApiError::NotFound("gone".into()))));
-        assert!(is_drop(&classify(&ApiError::Forbidden("nope".into()))));
+    }
+
+    #[test]
+    fn classify_forbidden_keeps_pending_and_pauses() {
+        match classify(&ApiError::Forbidden("read only".into())) {
+            Outcome::PausePushes(PushPause::Forbidden, m) => assert!(m.starts_with("forbidden:")),
+            other => panic!("expected pause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_pause_stops_drain_and_leaves_entry_pending() {
+        let entry = SyncQueueEntry {
+            id: Some(1),
+            entity_type: "issue".into(),
+            entity_id: "i1".into(),
+            action: "update".into(),
+            payload: None,
+            created_at: String::new(),
+            synced_at: None,
+        };
+        let mut report = SyncReport::default();
+        let outcome = classify(&ApiError::Forbidden("nope".into()));
+        assert!(record(&mut report, &entry, 1, outcome));
+        assert_eq!(report.push_paused, Some(PushPause::Forbidden));
+        assert_eq!(report.processed, 0);
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.kind == SyncErrorKind::Forbidden));
     }
 
     #[test]
