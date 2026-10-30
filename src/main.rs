@@ -15,7 +15,9 @@ mod views;
 use iced::{window, Size};
 
 fn main() -> iced::Result {
-    let font_key = config::load().0.font;
+    let cfg = config::load().0;
+    theme::set_by_key(&cfg.theme);
+    let font_key = cfg.font;
     let mut app = iced::application(app::App::title, app::App::update, app::App::view);
     for bytes in fonts::FONT_BYTES {
         app = app.font(bytes);

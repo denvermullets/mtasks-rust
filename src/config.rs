@@ -27,10 +27,17 @@ pub struct Config {
     /// Board issue filters. Global, not per team (v1).
     #[serde(default)]
     pub filters: Filters,
+    /// Key of the selected color theme (see `theme::THEMES`).
+    #[serde(default = "default_theme")]
+    pub theme: String,
     /// UI font key (see `crate::fonts`). Local-only, never synced; read at
     /// launch, so changes apply after a restart.
     #[serde(default = "default_font")]
     pub font: String,
+}
+
+fn default_theme() -> String {
+    "default".to_string()
 }
 
 fn default_font() -> String {
@@ -51,6 +58,7 @@ impl Default for Config {
             current_user_name: None,
             display: DisplayOptions::default(),
             filters: Filters::default(),
+            theme: default_theme(),
             font: default_font(),
         }
     }
@@ -99,6 +107,25 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     let path = config_path();
     let body = toml::to_string_pretty(cfg).map_err(|e| format!("serialize config: {}", e))?;
     std::fs::write(&path, body).map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn old_config_without_theme_defaults_to_default_key() {
+        let cfg: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert_eq!(cfg.theme, "default");
+    }
+
+    #[test]
+    fn theme_key_round_trips() {
+        let mut cfg = Config::default();
+        cfg.theme = "warm-paper".to_string();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.theme, "warm-paper");
+    }
 }
 
 #[cfg(test)]
