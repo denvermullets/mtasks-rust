@@ -2372,7 +2372,7 @@ fn drop_deleted_comments(dtos: Vec<CommentDto>, deleted: &HashSet<i64>) -> Vec<C
 
 /// Apply feed entries to the local DB (idempotent, so the cursor overlap is
 /// safe). Handles Issue, Comment, Label and Project; other record types
-/// (IssueDependency, RecurringIssue) are ignored. Returns how many entries
+/// (RecurringIssue) are ignored. Returns how many entries
 /// failed to apply.
 fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto]) -> usize {
     let mut failed = 0;
@@ -2383,6 +2383,9 @@ fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto
             "Comment" => queries::apply_server_comment_tombstone(conn, local_team_id, id),
             "Label" => queries::apply_server_label_tombstone(conn, local_team_id, id),
             "Project" => queries::apply_server_project_tombstone(conn, local_team_id, id),
+            "IssueDependency" => {
+                queries::apply_server_dependency_tombstone(conn, local_team_id, id)
+            }
             _ => continue,
         };
         if let Err(e) = result {
@@ -2492,7 +2495,7 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
     let mut skipped = 0;
     // Dependencies are persisted after every issue in this batch exists
     // locally, since an edge may point at an issue later in the batch.
-    let mut pending_links: Vec<Vec<PulledDependency>> = Vec::new();
+    let mut pending_links: Vec<(String, Option<Vec<PulledDependency>>)> = Vec::new();
     for dto in dtos {
         let issue_remote_id = dto.id;
         let result = (|| -> Result<bool, String> {
@@ -2513,6 +2516,12 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
                 }
             }
             let links = dto.dependency_links();
+            // Only a detail payload carries the full edge set; a row with no
+            // dependency lists at all must not prune anything.
+            let is_detail = dto.blocking_issues.is_some()
+                || dto.blocked_issues.is_some()
+                || dto.related_issues.is_some()
+                || dto.duplicates.is_some();
             let dto = relax_issue_fks(conn, dto);
             let existing_uuid = existing.map(|i| i.id);
             // Capture the remote label ids before `into_model` consumes dto.
@@ -2527,7 +2536,7 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
             let local_label_ids = resolve_local_label_ids(conn, &label_remote_ids)?;
             queries::set_issue_labels(conn, &issue.id, &local_label_ids)
                 .map_err(|e| format!("db (set issue labels): {e}"))?;
-            pending_links.push(links);
+            pending_links.push((issue.id.clone(), is_detail.then_some(links)));
             Ok(true)
         })();
         if let Err(e) = result {
@@ -2539,8 +2548,19 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
             skipped += 1;
         }
     }
-    for links in &pending_links {
+    for (issue_id, links) in &pending_links {
+        let Some(links) = links else { continue };
         persist_pulled_dependencies(conn, links);
+        // The server's detail set is authoritative: drop synced edges it no
+        // longer lists (Rails deletes blocking edges on completion).
+        let keep: Vec<i64> = links.iter().map(|l| l.dependency_id).collect();
+        if let Err(e) = queries::prune_issue_dependencies(conn, issue_id, &keep) {
+            sync_log(
+                &format!("phase=pull_issues issue_id={issue_id}"),
+                "prune_dependencies_failed",
+                &e.to_string(),
+            );
+        }
     }
     skipped
 }
@@ -3954,6 +3974,96 @@ mod tests {
             count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE remote_id = 55"),
             1
         );
+    }
+
+    fn dep_count(conn: &Connection) -> i64 {
+        count(conn, "SELECT COUNT(*) FROM issue_dependencies")
+    }
+
+    fn insert_dep(conn: &Connection, id: &str, remote: Option<i64>, blocking: &str, blocked: &str) {
+        conn.execute(
+            "INSERT INTO issue_dependencies
+                (id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'x', 'x')",
+            rusqlite::params![id, remote, blocking, blocked],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dependency_tombstone_removes_edge_and_retires_pending_sync() {
+        let conn = setup_dependency_db();
+        insert_dep(&conn, "d1", Some(6), "i1", "i2");
+        insert_dep(&conn, "d2", Some(7), "i1", "i3");
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, action, created_at)
+             VALUES ('dependency', 'd1', 'delete', 'x')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("IssueDependency", 6)]), 0);
+        assert_eq!(dep_count(&conn), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id = 'd2'"), 1);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_id = 'd1' AND synced_at IS NULL"
+            ),
+            0
+        );
+        // Repeat and unknown ids are safe.
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("IssueDependency", 6)]), 0);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("IssueDependency", 999)]), 0);
+        assert_eq!(dep_count(&conn), 1);
+    }
+
+    fn detail_without_links(id: i64, updated_at: &str) -> IssueDto {
+        let mut dto = detail_dto(id, "two", updated_at);
+        dto.blocking_issues = Some(vec![]);
+        dto
+    }
+
+    #[test]
+    fn pulled_detail_missing_an_edge_removes_it_on_either_side() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        // i2 (remote 2) is pulled. Stale edges on both sides, mixed kinds.
+        insert_dep(&conn, "out", Some(61), "i2", "i3");
+        insert_dep(&conn, "in", Some(62), "i1", "i2");
+        conn.execute(
+            "UPDATE issue_dependencies SET kind='relates', direction='relates' WHERE id='in'",
+            [],
+        )
+        .unwrap();
+        // An edge not touching i2 must survive.
+        insert_dep(&conn, "other", Some(63), "i1", "i3");
+        let dto = detail_without_links(2, "2026-05-01T00:00:00.000Z");
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
+        assert_eq!(dep_count(&conn), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='other'"), 1);
+    }
+
+    #[test]
+    fn pulled_detail_keeps_pending_local_edges_without_remote_id() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        insert_dep(&conn, "pending", None, "i2", "i3");
+        let dto = detail_without_links(2, "2026-05-01T00:00:00.000Z");
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='pending'"), 1);
+    }
+
+    #[test]
+    fn pulled_detail_keeps_edges_the_server_still_has() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        // detail_dto(2) reports remote issue 3 blocking it via dependency 55.
+        insert_dep(&conn, "kept", Some(55), "i3", "i2");
+        insert_dep(&conn, "stale", Some(56), "i2", "i1");
+        let dto = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='kept'"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='stale'"), 0);
     }
 
     #[test]
