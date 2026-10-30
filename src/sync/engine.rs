@@ -1943,21 +1943,50 @@ async fn pull_members_step(
     Ok(())
 }
 
+/// Cursor resource name for the project index in `pull_cursors`.
+const PROJECTS_CURSOR: &str = "projects";
+
+/// Pull a team's projects. With a stored cursor only rows changed since
+/// (cursor minus a small overlap) are fetched; the first sync of a team has
+/// no cursor and fetches every project. The cursor advances to the response's
+/// `X-Server-Time`, and only when every row was applied.
 async fn pull_projects_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = projects::list(client, team_remote_id)
+    let since = {
+        let conn = open()?;
+        queries::get_pull_cursor(&conn, local_team_id, PROJECTS_CURSOR)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
+    };
+    let page = projects::list_page(client, team_remote_id, since.as_deref())
         .await
         .map_err(|e| format!("projects: {e}"))?;
+    eprintln!(
+        "[sync] phase=pull_projects team_remote_id={team_remote_id} mode={} rows={}",
+        if since.is_some() { "incremental" } else { "full" },
+        page.rows.len()
+    );
 
     let conn = open()?;
-    for dto in dtos {
-        let existing = queries::find_project_by_remote_id(&conn, dto.id)
+    apply_pulled_projects(&conn, local_team_id, page.rows, page.server_time.as_deref())
+}
+
+/// Write pulled project rows (idempotent, so overlap re-delivery is safe),
+/// then advance the cursor. An error leaves the cursor so rows are retried.
+fn apply_pulled_projects(
+    conn: &Connection,
+    local_team_id: &str,
+    dtos: Vec<ProjectDto>,
+    server_time: Option<&str>,
+) -> Result<(), String> {
+    for dto in dedupe_by_id(dtos, |d| d.id) {
+        let existing = queries::find_project_by_remote_id(conn, dto.id)
             .map_err(|e| format!("db (find project): {e}"))?;
         let has_pending = match &existing {
-            Some(p) => sync_queue::has_pending_entry(&conn, "project", &p.id)
+            Some(p) => sync_queue::has_pending_entry(conn, "project", &p.id)
                 .map_err(|e| format!("db: {e}"))?,
             None => false,
         };
@@ -1970,12 +1999,16 @@ async fn pull_projects_step(
 
         let existing_uuid = existing.as_ref().map(|p| p.id.clone());
         let project: Project = dto
-            .into_model(&conn, local_team_id.to_string(), existing_uuid)
+            .into_model(conn, local_team_id.to_string(), existing_uuid)
             .map_err(|e| format!("convert project: {e}"))?;
-        queries::upsert_project(&conn, &project)
+        queries::upsert_project(conn, &project)
             .map_err(|e| format!("db (upsert project): {e}"))?;
     }
     // project_labels join not populated in this ticket; documented as TODO.
+    if let Some(t) = server_time {
+        queries::set_pull_cursor(conn, local_team_id, PROJECTS_CURSOR, t)
+            .map_err(|e| format!("db (pull cursor): {e}"))?;
+    }
     Ok(())
 }
 
@@ -2960,6 +2993,46 @@ mod tests {
         assert_eq!(match_issue(&c, 7, "Fix", ATTEMPT, &none()), Some(11));
         let taken: HashSet<i64> = [11].into_iter().collect();
         assert_eq!(match_issue(&c, 7, "Fix", ATTEMPT, &taken), Some(10));
+    }
+
+    #[test]
+    fn project_pull_dedupes_and_advances_cursor() {
+        let conn = setup_labels_db();
+        let a = project_dto(1, "A", "2026-10-30T10:00:00.000Z");
+        let a2 = project_dto(1, "A renamed", "2026-10-30T10:00:01.000Z");
+        apply_pulled_projects(&conn, "t1", vec![a, a2], Some("2026-10-30T12:00:00.000000Z"))
+            .unwrap();
+        let p = queries::find_project_by_remote_id(&conn, 1).unwrap().unwrap();
+        assert_eq!(p.name, "A renamed");
+        assert_eq!(
+            queries::get_pull_cursor(&conn, "t1", "projects").unwrap().as_deref(),
+            Some("2026-10-30T12:00:00.000000Z")
+        );
+        // The issue cursor is independent.
+        assert_eq!(queries::get_pull_cursor(&conn, "t1", "issues").unwrap(), None);
+    }
+
+    #[test]
+    fn project_pull_redelivery_is_idempotent_and_no_header_keeps_cursor() {
+        let conn = setup_labels_db();
+        queries::set_pull_cursor(&conn, "t1", "projects", "OLD").unwrap();
+        for _ in 0..2 {
+            apply_pulled_projects(
+                &conn,
+                "t1",
+                vec![project_dto(1, "A", "2026-10-30T10:00:00.000Z")],
+                None,
+            )
+            .unwrap();
+        }
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            queries::get_pull_cursor(&conn, "t1", "projects").unwrap().as_deref(),
+            Some("OLD")
+        );
     }
 
     #[test]

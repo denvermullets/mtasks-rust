@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::{ApiClient, ApiError, ProjectDto};
+use super::{ApiClient, ApiError, Page, ProjectDto};
 
 /// Body for create/update — fields match Rails `ProjectsController` strong params.
 /// Use [`crate::db::models::Priority::as_rails_str`] to populate `priority`.
@@ -33,9 +33,18 @@ struct ProjectWrap<'a> {
     project: &'a ProjectParams,
 }
 
-pub async fn list(client: &ApiClient, team_id: i64) -> Result<Vec<ProjectDto>, ApiError> {
-    let path = format!("api/v1/teams/{team_id}/projects");
-    client.get_list(&path).await
+/// One response of the project index (not paged) with `X-Server-Time`.
+/// `updated_since` (ISO8601) limits it to rows changed at or after that time.
+pub async fn list_page(
+    client: &ApiClient,
+    team_id: i64,
+    updated_since: Option<&str>,
+) -> Result<Page<ProjectDto>, ApiError> {
+    let path = match updated_since {
+        Some(t) => format!("api/v1/teams/{team_id}/projects?updated_since={t}"),
+        None => format!("api/v1/teams/{team_id}/projects"),
+    };
+    client.get_list_page(&path).await
 }
 
 /// Projects updated at or after `updated_since` (ISO8601).
@@ -44,8 +53,7 @@ pub async fn list_updated_since(
     team_id: i64,
     updated_since: &str,
 ) -> Result<Vec<ProjectDto>, ApiError> {
-    let path = format!("api/v1/teams/{team_id}/projects?updated_since={updated_since}");
-    client.get(&path).await
+    Ok(list_page(client, team_id, Some(updated_since)).await?.rows)
 }
 
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<ProjectDto, ApiError> {
