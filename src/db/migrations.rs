@@ -344,6 +344,15 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 18,
+        name: "sync_queue_attempted_at",
+        up: "
+            -- When a create's POST was first attempted (set before sending), so a
+            -- retry can look for the record the earlier attempt may have made.
+            ALTER TABLE sync_queue ADD COLUMN attempted_at TEXT;
+        ",
+    },
+    Migration {
+        version: 19,
         name: "pull_cursors",
         up: "
             -- Incremental-pull cursor per (team, resource): the X-Server-Time of
