@@ -30,10 +30,18 @@ pub struct Config {
     /// Key of the selected color theme (see `theme::THEMES`).
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// UI font key (see `crate::fonts`). Local-only, never synced; read at
+    /// launch, so changes apply after a restart.
+    #[serde(default = "default_font")]
+    pub font: String,
 }
 
 fn default_theme() -> String {
     "default".to_string()
+}
+
+fn default_font() -> String {
+    crate::fonts::DEFAULT_FONT_KEY.to_string()
 }
 
 fn default_api_base_url() -> String {
@@ -51,6 +59,7 @@ impl Default for Config {
             display: DisplayOptions::default(),
             filters: Filters::default(),
             theme: default_theme(),
+            font: default_font(),
         }
     }
 }
@@ -148,6 +157,17 @@ mod tests {
         assert!(!toml::to_string_pretty(&cfg)
             .unwrap()
             .contains("sync_interval"));
+    }
+
+    #[test]
+    fn font_round_trips_and_old_config_defaults_to_inter() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.font, "inter");
+        cfg.font = "jetbrains-mono".into();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.font, "jetbrains-mono");
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert_eq!(old.font, "inter");
     }
 
     #[test]
