@@ -97,6 +97,8 @@ pub enum Message {
     MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
+    /// Result of the fresh fetch made when an issue detail is opened.
+    IssueFetched(Result<(), String>),
 
     // Issue detail — sub-issues
     /// "+ Add sub-issue" pressed: open the create modal with the parent's local
@@ -995,7 +997,36 @@ impl App {
         self.view = View::IssueDetail(issue.id.clone());
         let conn = self.db();
         self.load_detail_dependencies(&conn);
-        self.fetch_comments_task(&conn, issue)
+        Task::batch([
+            self.fetch_comments_task(&conn, issue),
+            self.fetch_issue_task(&conn, issue),
+        ])
+    }
+
+    /// Build the async task that does the one fresh fetch of `issue` (with
+    /// detail) when it is opened and merges it like a pulled row. No-op unless
+    /// the issue + team are synced and a client can be built.
+    fn fetch_issue_task(&self, conn: &rusqlite::Connection, issue: &Issue) -> Task<Message> {
+        let Some(issue_remote_id) = issue.remote_id else {
+            return Task::none();
+        };
+        let Ok(Some(team_remote_id)) = queries::remote_id_for(conn, "teams", &issue.team_id)
+        else {
+            return Task::none();
+        };
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            return Task::none();
+        };
+        let local_team_id = issue.team_id.clone();
+        Task::perform(
+            async move {
+                SyncEngine::fetch_issue(&client, team_remote_id, &local_team_id, issue_remote_id)
+                    .await
+            },
+            Message::IssueFetched,
+        )
     }
 
     /// Persist a new comment (optionally a reply to local comment `parent_id`) on
@@ -1836,6 +1867,11 @@ impl App {
                         d.reply_composer = iced::widget::text_editor::Content::new();
                         d.suggest = None;
                     }
+                }
+            }
+            Message::IssueFetched(result) => {
+                if result.is_ok() {
+                    self.reload_data();
                 }
             }
             Message::CommentsFetched(issue_id, result) => {

@@ -2545,6 +2545,34 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
     skipped
 }
 
+/// Apply one freshly fetched issue (detail row) through the same path the
+/// pull uses, so local tombstones and pending local edits are respected
+/// (`decide`). A row the pull would skip as unresolvable is an error.
+fn apply_fetched_issue(conn: &Connection, local_team_id: &str, dto: IssueDto) -> Result<(), String> {
+    match apply_pulled_issues(conn, local_team_id, vec![dto]) {
+        0 => Ok(()),
+        _ => Err("issue could not be applied locally (see [sync] log)".into()),
+    }
+}
+
+impl SyncEngine {
+    /// Opening an issue does one fresh fetch of that issue (with detail) and
+    /// merges it exactly like a pulled row. Fetch errors are returned for the
+    /// caller to ignore or surface; local state is untouched on error.
+    pub async fn fetch_issue(
+        client: &ApiClient,
+        team_remote_id: i64,
+        local_team_id: &str,
+        issue_remote_id: i64,
+    ) -> Result<(), String> {
+        let dto = issues::get(client, team_remote_id, issue_remote_id)
+            .await
+            .map_err(|e| format!("issue: {e}"))?;
+        let conn = open()?;
+        apply_fetched_issue(&conn, local_team_id, dto)
+    }
+}
+
 /// Store pulled dependency edges. An edge whose endpoint issue isn't present
 /// locally (e.g. an issue in another team) is skipped and logged.
 fn persist_pulled_dependencies(conn: &Connection, links: &[PulledDependency]) {
@@ -3962,6 +3990,55 @@ mod tests {
         assert_eq!(skipped, 0);
         let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
         assert_eq!(i.title, "local");
+    }
+
+    #[test]
+    fn fetched_issue_updates_a_clean_local_row() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        apply_fetched_issue(&conn, "t1", detail_dto(2, "fresh", "2026-05-01T00:00:00.000Z"))
+            .unwrap();
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(i.title, "fresh");
+    }
+
+    #[test]
+    fn fetched_issue_keeps_pending_local_edit() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        conn.execute(
+            "UPDATE issues SET title = 'local', updated_at = '2026-09-01T00:00:00.000Z' WHERE id = 'i2'",
+            [],
+        )
+        .unwrap();
+        sync_queue::enqueue(&conn, "issue", "i2", "update", None).unwrap();
+        apply_fetched_issue(&conn, "t1", detail_dto(2, "remote", "2026-05-01T00:00:00.000Z"))
+            .unwrap();
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(i.title, "local");
+    }
+
+    #[test]
+    fn fetched_issue_does_not_resurrect_a_local_tombstone() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        queries::delete_issue(&conn, "i2").unwrap();
+        apply_fetched_issue(&conn, "t1", detail_dto(2, "remote", "2026-12-01T00:00:00.000Z"))
+            .unwrap();
+        let (title, deleted): (String, Option<String>) = conn
+            .query_row("SELECT title, deleted_at FROM issues WHERE id = 'i2'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_ne!(title, "remote");
+        assert!(deleted.is_some());
+    }
+
+    #[test]
+    fn fetched_issue_that_cannot_be_applied_is_an_error() {
+        let conn = setup_dependency_db(); // lane has no remote id
+        assert!(apply_fetched_issue(&conn, "t1", detail_dto(2, "x", "2026-05-01T00:00:00.000Z"))
+            .is_err());
     }
 
     #[test]
