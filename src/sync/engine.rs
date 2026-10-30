@@ -21,7 +21,7 @@ use rusqlite::Connection;
 use crate::api::dto::IssueDto;
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
-    ApiError, CommentParams, Direction, IssueParams, LabelParams, ProjectParams,
+    ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, ProjectParams,
 };
 use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -143,6 +143,9 @@ impl FullSyncReport {
 enum Outcome {
     /// Entry pushed successfully, or didn't need pushing.
     Success,
+    /// Create pushed; the remote id and the synced mark were already saved in
+    /// one transaction, so `record` must not mark the entry again.
+    Created,
     /// Permanent failure for this entry — mark synced so we don't retry forever.
     DropAndLog(String),
     /// Transient failure — leave pending so the next drain retries.
@@ -191,7 +194,7 @@ impl SyncEngine {
                 None => continue,
             };
 
-            let outcome = process(client, &entry).await;
+            let outcome = process(client, &entry, entry_id).await;
             if record(&mut report, &entry, entry_id, outcome) {
                 break;
             }
@@ -226,17 +229,17 @@ where
     }
 }
 
-async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
+async fn process(client: &ApiClient, entry: &SyncQueueEntry, entry_id: i64) -> Outcome {
     match (entry.entity_type.as_str(), entry.action.as_str()) {
-        ("issue", "create") => issue_create(client, &entry.entity_id).await,
+        ("issue", "create") => issue_create(client, &entry.entity_id, entry_id).await,
         ("issue", "update") => issue_update(client, &entry.entity_id).await,
         ("issue", "delete") => issue_delete(client, entry.payload.as_deref()).await,
-        ("project", "create") => project_create(client, &entry.entity_id).await,
+        ("project", "create") => project_create(client, &entry.entity_id, entry_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
-        ("label", "create") => label_create(client, &entry.entity_id).await,
-        ("comment", "create") => comment_create(client, &entry.entity_id).await,
-        ("dependency", "create") => dependency_create(client, &entry.entity_id).await,
+        ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
+        ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
+        ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
@@ -260,6 +263,7 @@ fn record(
             }
             report.processed += 1;
         }
+        Outcome::Created => report.processed += 1,
         Outcome::PausePushes(pause, reason) => {
             eprintln!(
                 "[sync] entry_id={entry_id} type={} action={} outcome=pause reason=\"{reason}\"",
@@ -440,14 +444,14 @@ fn prep_issue_update(entity_id: &str) -> Prep<IssueUpdatePrep> {
     })
 }
 
-async fn issue_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn issue_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_issue_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
 
     match issues::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => write_issue_remote_id(&prep.local_id, dto.id),
+        Ok(dto) => commit_create(entry_id, "issues", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -492,15 +496,39 @@ async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
     }
 }
 
-fn write_issue_remote_id(local_id: &str, remote_id: i64) -> Outcome {
-    let conn = match open() {
+/// Save a freshly created record's server id and mark its queue entry synced
+/// in one SQLite transaction. If either write fails both roll back, so the
+/// entry stays pending and is retried on the next drain.
+fn save_remote_id_and_mark_synced(
+    conn: &mut Connection,
+    table: &str,
+    local_id: &str,
+    remote_id: i64,
+    entry_id: i64,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
+    match table {
+        "issues" => queries::set_issue_remote_id(&tx, local_id, remote_id),
+        "projects" => queries::set_project_remote_id(&tx, local_id, remote_id),
+        "labels" => queries::set_label_remote_id(&tx, local_id, remote_id),
+        "comments" => queries::set_comment_remote_id(&tx, local_id, remote_id),
+        "issue_dependencies" => queries::set_issue_dependency_remote_id(&tx, local_id, remote_id),
+        other => return Err(format!("unknown create table {other}")),
+    }
+    .map_err(|e| format!("write remote_id: {e}"))?;
+    sync_queue::mark_synced(&tx, entry_id).map_err(|e| format!("mark_synced: {e}"))?;
+    tx.commit().map_err(|e| format!("commit: {e}"))
+}
+
+fn commit_create(entry_id: i64, table: &str, local_id: &str, remote_id: i64) -> Outcome {
+    let mut conn = match open() {
         Ok(c) => c,
         Err(e) => return Outcome::LeavePending(e),
     };
-    if let Err(e) = queries::set_issue_remote_id(&conn, local_id, remote_id) {
-        return Outcome::LeavePending(format!("write remote_id: {e}"));
+    match save_remote_id_and_mark_synced(&mut conn, table, local_id, remote_id, entry_id) {
+        Ok(()) => Outcome::Created,
+        Err(e) => Outcome::LeavePending(e),
     }
-    Outcome::Success
 }
 
 fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, Outcome> {
@@ -651,22 +679,13 @@ fn prep_project_update(entity_id: &str) -> Prep<ProjectUpdatePrep> {
     })
 }
 
-async fn project_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn project_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_project_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
     match projects::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_project_remote_id(&conn, &prep.local_id, dto.id) {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(dto) => commit_create(entry_id, "projects", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -781,22 +800,13 @@ fn prep_label_create(entity_id: &str) -> Prep<LabelCreatePrep> {
     })
 }
 
-async fn label_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_label_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
     match labels::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_label_remote_id(&conn, &prep.local_id, dto.id) {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(dto) => commit_create(entry_id, "labels", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -879,7 +889,7 @@ fn resolve_comment_parent(
     }
 }
 
-async fn comment_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_comment_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
@@ -896,16 +906,7 @@ async fn comment_create(client: &ApiClient, entity_id: &str) -> Outcome {
     )
     .await
     {
-        Ok(dto) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_comment_remote_id(&conn, &prep.local_id, dto.id) {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(dto) => commit_create(entry_id, "comments", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -967,7 +968,7 @@ fn prep_dependency_create(entity_id: &str) -> Prep<DependencyCreatePrep> {
     })
 }
 
-async fn dependency_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn dependency_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_dependency_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
@@ -981,17 +982,7 @@ async fn dependency_create(client: &ApiClient, entity_id: &str) -> Outcome {
     )
     .await
     {
-        Ok(resp) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_issue_dependency_remote_id(&conn, &prep.local_id, resp.id)
-            {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(resp) => commit_create(entry_id, "issue_dependencies", &prep.local_id, resp.id),
         Err(e) => classify(&e),
     }
 }
@@ -1122,11 +1113,11 @@ impl SyncEngine {
     /// Pull all resources from Rails into the local DB. The set of teams to
     /// fully sync is determined by the token's scope:
     ///
-    /// - **User-scoped token** (`token.team_id == null` from `/me`) — pull
-    ///   every team the user is on, then for each team pull lanes/labels/
+    /// - **Unscoped token** (`token.team_ids` null/absent, no `team_id`) — pull
+    ///   every local non-archived team, then for each team pull lanes/labels/
     ///   members/projects/issues.
-    /// - **Team-scoped token** (`token.team_id == Some(t)`) — pull just that
-    ///   team's resources.
+    /// - **Scoped token** (`token.team_ids` list, or legacy `team_id`) — pull
+    ///   the intersection of that list with the local teams.
     ///
     /// Returns a [`PullOutcome`] summarizing row counts plus the local UUID of
     /// the locally-seeded "My Project" team if pull determined it was redundant
@@ -1172,7 +1163,7 @@ impl SyncEngine {
         }
 
         // Phase 3: figure out which teams to deeply sync.
-        let targets = match collect_pull_targets(me.token.team_id) {
+        let targets = match collect_pull_targets(me.token.scoped_team_ids().as_deref()) {
             Ok(t) => t,
             Err(msg) => {
                 report.last_error = Some(msg);
@@ -1228,37 +1219,35 @@ struct PullTarget {
     remote_id: i64,
 }
 
-fn collect_pull_targets(token_team_id: Option<i64>) -> Result<Vec<PullTarget>, String> {
+fn collect_pull_targets(scoped_ids: Option<&[i64]>) -> Result<Vec<PullTarget>, String> {
     let conn = open()?;
-    match token_team_id {
-        Some(remote_id) => {
-            let local = queries::find_team_by_remote_id(&conn, remote_id)
-                .map_err(|e| format!("db (find team): {e}"))?;
-            match local {
-                Some(t) => Ok(vec![PullTarget {
-                    local_id: t.id,
-                    remote_id,
-                }]),
-                None => Err(format!(
-                    "token is scoped to team remote_id={remote_id}, but it wasn't returned by /api/v1/teams"
-                )),
+    select_pull_targets(&conn, scoped_ids)
+}
+
+/// Choose the teams to deep-sync. `None` (unscoped token) covers every local
+/// non-archived Rails-backed team; `Some(ids)` covers the intersection of those
+/// remote ids with the local non-archived teams (empty list means none).
+fn select_pull_targets(
+    conn: &Connection,
+    scoped_ids: Option<&[i64]>,
+) -> Result<Vec<PullTarget>, String> {
+    let teams = queries::all_teams(conn).map_err(|e| format!("db (all_teams): {e}"))?;
+    Ok(teams
+        .into_iter()
+        .filter(|t| t.archived_at.is_none())
+        .filter_map(|t| {
+            let rid = t.remote_id?;
+            if let Some(ids) = scoped_ids {
+                if !ids.contains(&rid) {
+                    return None;
+                }
             }
-        }
-        None => {
-            // User-scoped token: fully sync every Rails-backed team we know
-            // about. all_teams returns the local rows; we need their remote_id.
-            let teams = queries::all_teams(&conn).map_err(|e| format!("db (all_teams): {e}"))?;
-            Ok(teams
-                .into_iter()
-                .filter_map(|t| {
-                    t.remote_id.map(|rid| PullTarget {
-                        local_id: t.id,
-                        remote_id: rid,
-                    })
-                })
-                .collect())
-        }
-    }
+            Some(PullTarget {
+                local_id: t.id,
+                remote_id: rid,
+            })
+        })
+        .collect())
 }
 
 /// Returns the local UUID of the orphan seed team if one was cleaned up.
@@ -1328,9 +1317,21 @@ async fn pull_lanes_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = lanes::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("lanes: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "lanes").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match lanes::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("lanes: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_lanes team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1368,6 +1369,7 @@ async fn pull_lanes_step(
     // place. Hard-deleting would risk cascading FK violations on issues that
     // still reference the lane locally. Revisit when the schema gains a
     // soft-delete column.
+    store_list_etag(&conn, local_team_id, "lanes", new_etag.as_deref());
     Ok(())
 }
 
@@ -1376,9 +1378,21 @@ async fn pull_labels_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = labels::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("labels: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "labels").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match labels::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("labels: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_labels team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1408,7 +1422,20 @@ async fn pull_labels_step(
         }
         queries::upsert_label(&conn, &label).map_err(|e| format!("db (upsert label): {e}"))?;
     }
+    store_list_etag(&conn, local_team_id, "labels", new_etag.as_deref());
     Ok(())
+}
+
+/// Persist the ETag only after the list was fully applied, so a failed apply
+/// is retried with a full fetch. A response without an ETag clears the stored one.
+fn store_list_etag(conn: &Connection, team_id: &str, list: &str, etag: Option<&str>) {
+    let res = match etag {
+        Some(tag) => queries::set_list_etag(conn, team_id, list, tag),
+        None => queries::clear_list_etag(conn, team_id, list),
+    };
+    if let Err(e) = res {
+        eprintln!("[sync] phase=pull_{list} etag store failed: {e}");
+    }
 }
 
 async fn pull_members_step(
@@ -1416,9 +1443,21 @@ async fn pull_members_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = members::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("members: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "members").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match members::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("members: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_members team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1448,6 +1487,7 @@ async fn pull_members_step(
         }
         queries::upsert_member(&conn, &member).map_err(|e| format!("db (upsert member): {e}"))?;
     }
+    store_list_etag(&conn, local_team_id, "members", new_etag.as_deref());
     Ok(())
 }
 
@@ -1850,6 +1890,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pull_targets_follow_token_team_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        for (id, remote, archived) in [
+            ("a", Some(1), None),
+            ("b", Some(2), None),
+            ("c", Some(3), Some(now)),
+            ("d", None, None),
+        ] {
+            conn.execute(
+                "INSERT INTO teams (id, name, identifier, remote_id, archived_at, created_at, updated_at)
+                 VALUES (?1, ?1, ?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![id, remote, archived, now],
+            )
+            .unwrap();
+        }
+        let ids = |t: Vec<PullTarget>| {
+            let mut v: Vec<i64> = t.into_iter().map(|t| t.remote_id).collect();
+            v.sort();
+            v
+        };
+        // Unscoped: all non-archived Rails-backed teams.
+        assert_eq!(ids(select_pull_targets(&conn, None).unwrap()), vec![1, 2]);
+        // List: intersection with local teams (99 unknown, 3 archived).
+        assert_eq!(
+            ids(select_pull_targets(&conn, Some(&[2, 3, 99])).unwrap()),
+            vec![2]
+        );
+        // Empty list: zero teams.
+        assert!(select_pull_targets(&conn, Some(&[])).unwrap().is_empty());
+    }
+
     fn setup_labels_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -1899,10 +1973,99 @@ mod tests {
     }
 
     #[test]
+    fn list_etag_is_stored_per_team_and_list() {
+        let conn = setup_labels_db();
+        assert_eq!(queries::get_list_etag(&conn, "t1", "labels").unwrap(), None);
+
+        store_list_etag(&conn, "t1", "labels", Some("W/\"a\""));
+        store_list_etag(&conn, "t1", "lanes", Some("W/\"b\""));
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "labels").unwrap().as_deref(),
+            Some("W/\"a\"")
+        );
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "lanes").unwrap().as_deref(),
+            Some("W/\"b\"")
+        );
+        assert_eq!(queries::get_list_etag(&conn, "t2", "labels").unwrap(), None);
+
+        // Overwrite, then clear when the server stops sending an ETag.
+        store_list_etag(&conn, "t1", "labels", Some("W/\"c\""));
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "labels").unwrap().as_deref(),
+            Some("W/\"c\"")
+        );
+        store_list_etag(&conn, "t1", "labels", None);
+        assert_eq!(queries::get_list_etag(&conn, "t1", "labels").unwrap(), None);
+    }
+
+    #[test]
     fn build_label_ids_empty_when_no_labels() {
         let conn = setup_labels_db();
         // No labels attached → assert an empty set (Rails detaches all).
         assert_eq!(build_label_ids(&conn, "i1").unwrap(), Some(vec![]));
+    }
+
+    fn queue_create(conn: &Connection, entity_type: &str, entity_id: &str) -> i64 {
+        sync_queue::enqueue(conn, entity_type, entity_id, "create", None).unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn issue_remote(conn: &Connection) -> Option<i64> {
+        conn.query_row("SELECT remote_id FROM issues WHERE id='i1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn create_saves_remote_id_and_marks_synced_together() {
+        let mut conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 99, entry).unwrap();
+        assert_eq!(issue_remote(&conn), Some(99));
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_rolls_back_remote_id_when_mark_synced_fails() {
+        let mut conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_mark BEFORE UPDATE ON sync_queue
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        assert!(save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 99, entry).is_err());
+        assert_eq!(issue_remote(&conn), None);
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn create_rolls_back_mark_synced_when_remote_id_write_fails() {
+        let mut conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_rid BEFORE UPDATE OF remote_id ON issues
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        assert!(save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 99, entry).is_err());
+        assert_eq!(issue_remote(&conn), None);
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn create_commit_covers_label_table_and_rejects_unknown() {
+        let mut conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", None);
+        let entry = queue_create(&conn, "label", "lab1");
+        save_remote_id_and_mark_synced(&mut conn, "labels", "lab1", 5, entry).unwrap();
+        assert_eq!(
+            queries::remote_id_for(&conn, "labels", "lab1").unwrap(),
+            Some(5)
+        );
+        assert!(save_remote_id_and_mark_synced(&mut conn, "bogus", "x", 1, entry).is_err());
     }
 
     #[test]
@@ -1939,7 +2102,7 @@ mod tests {
                 created_at: "0".into(),
                 synced_at: None,
             };
-            let outcome = process(&client, &entry).await;
+            let outcome = process(&client, &entry, 1).await;
             assert!(matches!(outcome, Outcome::DropAndLog(_)));
         });
     }

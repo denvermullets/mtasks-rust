@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 
+/// Result of a conditional GET (`If-None-Match`).
+#[derive(Debug, PartialEq)]
+pub enum Conditional<T> {
+    /// 304: the server's copy matches the ETag we sent.
+    NotModified,
+    /// 200: fresh body plus the response's `ETag` header, if any.
+    Modified { data: T, etag: Option<String> },
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiClient {
     http: reqwest::Client,
@@ -42,6 +51,39 @@ impl ApiClient {
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let req = self.http.get(self.url(path));
         self.send_json(req).await
+    }
+
+    /// GET with `If-None-Match` when `etag` is known. A 304 is "not modified",
+    /// not an error; a 200 returns the body and the new `ETag` header.
+    pub async fn get_conditional<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+    ) -> Result<Conditional<T>, ApiError> {
+        let mut req = self.http.get(self.url(path));
+        if let Some(tag) = etag {
+            req = req.header(header::IF_NONE_MATCH, tag);
+        }
+        let resp = self.dispatch(req).await?;
+        if resp.status() == StatusCode::NOT_MODIFIED {
+            return Ok(Conditional::NotModified);
+        }
+        if !resp.status().is_success() {
+            return Err(map_error(resp).await);
+        }
+        let new_etag = resp
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let data = resp
+            .json::<T>()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+        Ok(Conditional::Modified {
+            data,
+            etag: new_etag,
+        })
     }
 
     pub async fn post<B: Serialize + ?Sized, T: DeserializeOwned>(
