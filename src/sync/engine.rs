@@ -454,9 +454,11 @@ async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
             return Outcome::DropAndLog("issue delete: missing team_remote_id in payload".into())
         }
     };
+    // No NotFound => Success: the local tombstone must outlive a server that
+    // can't delete yet (404 on a missing route). Real handling is JRST-33.
     match issues::delete(client, team_remote_id, remote_id).await {
         Ok(_) => Outcome::Success,
-        Err(ApiError::NotFound(_)) => Outcome::Success,
+        Err(ApiError::NotFound(m)) => Outcome::LeavePending(format!("not found: {m}")),
         Err(e) => classify(&e),
     }
 }
@@ -1464,6 +1466,11 @@ async fn pull_issues_step(
         let conn = open()?;
         let mut ids = Vec::new();
         for dto in &listings {
+            if queries::is_issue_tombstoned_by_remote_id(&conn, dto.id)
+                .map_err(|e| format!("db (tombstone): {e}"))?
+            {
+                continue;
+            }
             let existing = queries::find_issue_by_remote_id(&conn, dto.id)
                 .map_err(|e| format!("db (find issue): {e}"))?;
             let has_pending = match &existing {
@@ -1507,6 +1514,9 @@ async fn pull_issues_step(
         let conn = open()?;
         for dto in details {
             let issue_remote_id = dto.id;
+            if queries::is_issue_tombstoned_by_remote_id(&conn, issue_remote_id).unwrap_or(false) {
+                continue;
+            }
             let dto = relax_issue_fks(&conn, dto);
 
             let result = (|| -> Result<(), String> {

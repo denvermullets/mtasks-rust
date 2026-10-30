@@ -255,6 +255,15 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE lanes ADD COLUMN category TEXT;
         ",
     },
+    Migration {
+        version: 13,
+        name: "issues_deleted_at",
+        up: "
+            -- Local tombstone: a deleted issue keeps its row (hidden everywhere)
+            -- so a later pull can't resurrect it from the server.
+            ALTER TABLE issues ADD COLUMN deleted_at TEXT;
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -380,7 +389,7 @@ mod tests {
 
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
     }
 
@@ -389,7 +398,10 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(
+            applied_versions(&conn),
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -403,7 +415,10 @@ mod tests {
         run(&conn).unwrap();
 
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(
+            applied_versions(&conn),
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
+        );
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
         assert!(table_exists(&conn, "comments"));
