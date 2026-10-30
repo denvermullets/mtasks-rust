@@ -20,7 +20,7 @@ use std::collections::HashSet;
 
 use rusqlite::Connection;
 
-use crate::api::dto::{IssueDto, LabelDto, PulledDependency, ProjectDto};
+use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
     ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, ProjectParams,
@@ -1641,6 +1641,7 @@ impl SyncEngine {
                 pull_members_step(client, target.remote_id, &target.local_id).await,
                 pull_projects_step(client, target.remote_id, &target.local_id).await,
                 pull_issues_step(client, target.remote_id, &target.local_id).await,
+                pull_comments_step(client, target.remote_id, &target.local_id).await,
             ] {
                 match step {
                     Ok(()) => report.processed += 1,
@@ -2072,6 +2073,117 @@ async fn pull_issues_step(
             .map_err(|e| format!("db (pull cursor): {e}"))?;
     }
     Ok(())
+}
+
+/// Cursor resource name for the team comments feed in `pull_cursors`.
+const COMMENTS_CURSOR: &str = "comments";
+
+/// Pull a team's comments from the flat team feed. Same cursor discipline as
+/// the issue pull: overlap on the stored cursor, dedupe, idempotent apply, and
+/// the cursor moves to the response's `X-Server-Time` only if nothing failed.
+/// Issues are pulled first so comments find their issue.
+async fn pull_comments_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let since = {
+        let conn = open()?;
+        queries::get_pull_cursor(&conn, local_team_id, COMMENTS_CURSOR)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
+    };
+    let page = comments::list_team_updated_since(client, team_remote_id, since.as_deref())
+        .await
+        .map_err(|e| format!("comments: {e}"))?;
+    eprintln!(
+        "[sync] phase=pull_comments team_remote_id={team_remote_id} mode={} rows={}",
+        if since.is_some() { "incremental" } else { "full" },
+        page.rows.len()
+    );
+    let dtos = dedupe_by_id(page.rows, |d| d.id);
+    let total = dtos.len();
+    let conn = open()?;
+    let failed = apply_pulled_comments(&conn, dtos);
+    if failed > 0 {
+        return Err(format!("comments: {failed}/{total} failed (see [sync] log)"));
+    }
+    if let Some(t) = &page.server_time {
+        queries::set_pull_cursor(&conn, local_team_id, COMMENTS_CURSOR, t)
+            .map_err(|e| format!("db (pull cursor): {e}"))?;
+    }
+    Ok(())
+}
+
+/// Write feed comments locally (idempotent). Project comments and comments on
+/// issues we do not have (or have tombstoned) are ignored. Replies are applied
+/// after their parents, however the feed ordered them; a parent that cannot be
+/// found locally leaves the reply top-level rather than blocking the cursor.
+/// Returns how many rows hit a DB error.
+fn apply_pulled_comments(conn: &Connection, dtos: Vec<CommentDto>) -> usize {
+    let mut failed = 0;
+    let mut remaining: Vec<CommentDto> = dtos.into_iter().filter(|d| d.issue_id.is_some()).collect();
+    loop {
+        let before = remaining.len();
+        let mut deferred = Vec::new();
+        for dto in remaining {
+            // Wait for a parent that is in this batch but not applied yet.
+            let parent_local = match dto.parent_id {
+                None => None,
+                Some(pid) => match queries::find_comment_by_remote_id(conn, pid) {
+                    Ok(Some(p)) => Some(p.id),
+                    Ok(None) => {
+                        deferred.push(dto);
+                        continue;
+                    }
+                    Err(_) => None,
+                },
+            };
+            if apply_one_comment(conn, dto, parent_local).is_err() {
+                failed += 1;
+            }
+        }
+        remaining = deferred;
+        if remaining.is_empty() || remaining.len() == before {
+            break;
+        }
+    }
+    // Whatever is left has a parent we never saw: store as top-level.
+    for dto in remaining {
+        eprintln!(
+            "[sync] phase=pull_comments comment_remote_id={} parent {:?} not found locally; storing top-level",
+            dto.id, dto.parent_id
+        );
+        if apply_one_comment(conn, dto, None).is_err() {
+            failed += 1;
+        }
+    }
+    failed
+}
+
+fn apply_one_comment(
+    conn: &Connection,
+    dto: CommentDto,
+    parent_local: Option<String>,
+) -> Result<(), String> {
+    let Some(issue_remote) = dto.issue_id else {
+        return Ok(());
+    };
+    let issue = match queries::find_issue_by_remote_id(conn, issue_remote) {
+        Ok(Some(i)) => i,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(format!("db (find issue): {e}")),
+    };
+    if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote)
+        .map_err(|e| format!("db (tombstone): {e}"))?
+    {
+        return Ok(());
+    }
+    let existing = queries::find_comment_by_remote_id(conn, dto.id)
+        .map_err(|e| format!("db (find comment): {e}"))?
+        .map(|c| c.id);
+    let comment = dto.into_model(conn, issue.id, existing, parent_local);
+    queries::upsert_comment(conn, &comment).map_err(|e| format!("db (upsert comment): {e}"))
 }
 
 /// Keep one row per key (the last delivered wins), in first-seen order. The
@@ -3107,6 +3219,65 @@ mod tests {
             "canceled_at": null
         }))
         .unwrap()
+    }
+
+    fn feed_comment(id: i64, parent: Option<i64>, issue: Option<i64>, body: &str) -> CommentDto {
+        CommentDto {
+            id,
+            body: body.into(),
+            parent_id: parent,
+            user: None,
+            created_at: "2026-02-01T00:00:00.000Z".into(),
+            updated_at: "2026-02-01T00:00:00.000Z".into(),
+            replies: None,
+            issue_id: issue,
+        }
+    }
+
+    #[test]
+    fn feed_comments_link_issue_and_parent_regardless_of_order() {
+        let conn = setup_labels_db();
+        conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
+        // Reply delivered before its parent.
+        let dtos = vec![
+            feed_comment(2, Some(1), Some(50), "reply"),
+            feed_comment(1, None, Some(50), "top"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        let all = queries::comments_for_issue(&conn, "i1").unwrap();
+        assert_eq!(all.len(), 2);
+        let top = all.iter().find(|c| c.remote_id == Some(1)).unwrap();
+        let reply = all.iter().find(|c| c.remote_id == Some(2)).unwrap();
+        assert_eq!(reply.parent_id.as_deref(), Some(top.id.as_str()));
+    }
+
+    #[test]
+    fn feed_comments_are_idempotent_and_update_edits() {
+        let conn = setup_labels_db();
+        conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
+        let dtos = vec![feed_comment(1, None, Some(50), "v1")];
+        assert_eq!(apply_pulled_comments(&conn, dtos.clone()), 0);
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        assert_eq!(apply_pulled_comments(&conn, vec![feed_comment(1, None, Some(50), "v2")]), 0);
+        let all = queries::comments_for_issue(&conn, "i1").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].body, "v2");
+    }
+
+    #[test]
+    fn feed_comments_skip_project_and_unknown_issue_without_failing() {
+        let conn = setup_labels_db();
+        conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
+        let dtos = vec![
+            feed_comment(1, None, None, "project comment"),
+            feed_comment(2, None, Some(999), "unknown issue"),
+            // Parent never seen: stored top-level, not a failure.
+            feed_comment(3, Some(77), Some(50), "orphan reply"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        let all = queries::comments_for_issue(&conn, "i1").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].parent_id, None);
     }
 
     #[test]

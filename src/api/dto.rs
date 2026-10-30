@@ -393,6 +393,10 @@ pub struct CommentDto {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replies: Option<Vec<CommentDto>>,
+    /// Remote issue id. Only the team comments feed sends it (null for
+    /// project comments); the per-issue endpoint omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<i64>,
 }
 
 impl CommentDto {
@@ -956,6 +960,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
             replies,
+            issue_id: None,
         };
         let tree = vec![mk(
             10,
