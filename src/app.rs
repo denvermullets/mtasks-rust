@@ -452,6 +452,8 @@ pub struct App {
     config: Config,
     config_error: Option<String>,
     last_sync_error: Option<String>,
+    /// Token has no write scope: pushes are paused, edits stay local.
+    sync_read_only: bool,
     sync_in_progress: bool,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
@@ -1393,6 +1395,7 @@ impl App {
             config,
             config_error,
             last_sync_error: None,
+            sync_read_only: false,
             sync_in_progress: false,
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -2386,16 +2389,7 @@ impl App {
                         self.sync_in_progress = true;
                         self.last_sync_error = None;
                         return Task::perform(
-                            async move {
-                                let outcome = SyncEngine::pull(&client).await;
-                                let push = SyncEngine::drain(&client).await;
-                                FullSyncReport {
-                                    pull: outcome.report,
-                                    push,
-                                    deleted_orphan_team: outcome.deleted_orphan_team,
-                                    current_user: outcome.current_user,
-                                }
-                            },
+                            async move { SyncEngine::full_cycle(&client).await },
                             Message::SyncCompleted,
                         );
                     }
@@ -2411,7 +2405,13 @@ impl App {
 
             Message::SyncCompleted(report) => {
                 self.sync_in_progress = false;
-                self.last_sync_error = report.last_error().map(str::to_string);
+                // Read-only is a state, not an error: show the banner instead.
+                self.sync_read_only = report.read_only();
+                self.last_sync_error = if self.sync_read_only {
+                    None
+                } else {
+                    report.last_error().map(str::to_string)
+                };
 
                 // If pull deleted the orphan seed team and that's what was
                 // selected, drop the now-dangling selection. reload_data will
@@ -3064,6 +3064,7 @@ impl App {
             self.sync_in_progress,
             self.config.last_synced_at,
             token_configured,
+            self.sync_read_only,
         );
 
         let main_content = column![]

@@ -48,6 +48,8 @@ pub struct SyncReport {
 pub enum PushPause {
     /// 403 — the token lacks the scope for writes.
     Forbidden,
+    /// `/me` reported no `write` scope, so no push was attempted at all.
+    ReadOnly,
 }
 
 /// A classified, user-actionable sync failure surfaced back to the UI layer.
@@ -103,7 +105,7 @@ impl SyncErrorKind {
     }
 }
 
-/// Combined report for one full bidirectional sync (pull then push).
+/// Combined report for one full bidirectional sync (push then pull).
 #[derive(Debug, Default, Clone)]
 pub struct FullSyncReport {
     pub pull: SyncReport,
@@ -115,9 +117,21 @@ pub struct FullSyncReport {
     /// Signed-in user's `(rails_id, name)` from the pull's `/me` call. The app
     /// persists this to config for stamping `creator_id` on new issues.
     pub current_user: Option<(i64, String)>,
+    /// Write scope reported by this sync's `/me` call (`None` if `/me` failed).
+    pub can_write: Option<bool>,
 }
 
 impl FullSyncReport {
+    /// True when the token is read-only: `/me` showed no write scope, or a
+    /// push hit a 403. Drives the status-bar banner.
+    pub fn read_only(&self) -> bool {
+        self.can_write == Some(false)
+            || matches!(
+                self.push.push_paused,
+                Some(PushPause::ReadOnly | PushPause::Forbidden)
+            )
+    }
+
     /// The most actionable error to surface to the user. Push errors take
     /// precedence (they're active operations the user just initiated); pull
     /// errors are reported only when push succeeded.
@@ -168,6 +182,31 @@ impl SyncEngine {
         Self
     }
 
+    /// One full Data sync cycle: drain the push queue first, then pull, so the
+    /// pull reflects the user's own edits. A cheap `/me` preflight reads write
+    /// scope so a read-only token skips the push half (entries stay pending,
+    /// [`PushPause::ReadOnly`]); the pull still runs. A 401 on the push half
+    /// pauses the whole cycle (the pull is skipped).
+    pub async fn full_cycle(client: &ApiClient) -> FullSyncReport {
+        let can_write = users::me(client)
+            .await
+            .ok()
+            .map(|m| m.token.has_write_scope());
+        run_cycle(can_write, Self::drain_if_writable(client, can_write), || {
+            Self::pull(client)
+        })
+        .await
+    }
+
+    /// Drain unless `/me` said the token cannot write; then skip every push
+    /// (entries stay pending) and report [`PushPause::ReadOnly`].
+    pub async fn drain_if_writable(client: &ApiClient, can_write: Option<bool>) -> SyncReport {
+        if can_write == Some(false) {
+            return read_only_report();
+        }
+        Self::drain(client).await
+    }
+
     pub async fn drain(client: &ApiClient) -> SyncReport {
         let mut report = SyncReport::default();
 
@@ -193,6 +232,46 @@ impl SyncEngine {
         }
 
         report
+    }
+}
+
+/// Cycle ordering, separated from the HTTP-bound halves so it can be tested.
+/// `preflight_can_write` is the scope read before the push; the pull's own
+/// `/me` result overrides it when the pull runs.
+async fn run_cycle<D, P, PF>(
+    preflight_can_write: Option<bool>,
+    drain: D,
+    pull: P,
+) -> FullSyncReport
+where
+    D: std::future::Future<Output = SyncReport>,
+    P: FnOnce() -> PF,
+    PF: std::future::Future<Output = PullOutcome>,
+{
+    let push = drain.await;
+    if push.failures.iter().any(|f| f.kind == SyncErrorKind::Auth) {
+        return FullSyncReport {
+            pull: SyncReport::default(),
+            push,
+            deleted_orphan_team: None,
+            current_user: None,
+            can_write: preflight_can_write,
+        };
+    }
+    let outcome = pull().await;
+    FullSyncReport {
+        pull: outcome.report,
+        push,
+        deleted_orphan_team: outcome.deleted_orphan_team,
+        current_user: outcome.current_user,
+        can_write: outcome.can_write.or(preflight_can_write),
+    }
+}
+
+fn read_only_report() -> SyncReport {
+    SyncReport {
+        push_paused: Some(PushPause::ReadOnly),
+        ..SyncReport::default()
     }
 }
 
@@ -1091,6 +1170,8 @@ pub struct PullOutcome {
     /// Signed-in user's `(rails_id, name)` from `/me`, when the call succeeded.
     /// The app persists this to config to stamp `creator_id` on new issues.
     pub current_user: Option<(i64, String)>,
+    /// Whether `/me` reported `write` scope (`None` if `/me` failed).
+    pub can_write: Option<bool>,
 }
 
 impl SyncEngine {
@@ -1123,10 +1204,12 @@ impl SyncEngine {
                     report,
                     deleted_orphan_team,
                     current_user: None,
+                    can_write: None,
                 };
             }
         };
         let current_user = Some((me.id, me.name.clone()));
+        let can_write = Some(me.token.has_write_scope());
 
         // Phase 2: refresh teams (and discover any new ones the token can see).
         match pull_teams(client).await {
@@ -1142,6 +1225,7 @@ impl SyncEngine {
                     report,
                     deleted_orphan_team,
                     current_user,
+                    can_write,
                 };
             }
         }
@@ -1156,6 +1240,7 @@ impl SyncEngine {
                     report,
                     deleted_orphan_team,
                     current_user,
+                    can_write,
                 };
             }
         };
@@ -1166,6 +1251,7 @@ impl SyncEngine {
                 report,
                 deleted_orphan_team,
                 current_user,
+                can_write,
             };
         }
 
@@ -1194,6 +1280,7 @@ impl SyncEngine {
             report,
             deleted_orphan_team,
             current_user,
+            can_write,
         }
     }
 }
@@ -1823,6 +1910,37 @@ mod tests {
     }
 
     #[test]
+    fn read_only_report_pauses_without_failures() {
+        let r = read_only_report();
+        assert_eq!(r.push_paused, Some(PushPause::ReadOnly));
+        assert_eq!((r.processed, r.failed), (0, 0));
+        assert!(r.last_error.is_none());
+    }
+
+    #[test]
+    fn full_report_read_only_from_scope_or_403() {
+        let mk = |can_write, push: SyncReport| FullSyncReport {
+            pull: SyncReport::default(),
+            push,
+            deleted_orphan_team: None,
+            current_user: None,
+            can_write,
+        };
+        assert!(mk(Some(false), read_only_report()).read_only());
+        assert!(mk(
+            Some(true),
+            SyncReport {
+                push_paused: Some(PushPause::Forbidden),
+                ..SyncReport::default()
+            }
+        )
+        .read_only());
+        // Write scope restored and no 403: state clears.
+        assert!(!mk(Some(true), SyncReport::default()).read_only());
+        assert!(!mk(None, SyncReport::default()).read_only());
+    }
+
+    #[test]
     fn classify_forbidden_keeps_pending_and_pauses() {
         match classify(&ApiError::Forbidden("read only".into())) {
             Outcome::PausePushes(PushPause::Forbidden, m) => assert!(m.starts_with("forbidden:")),
@@ -2285,5 +2403,70 @@ mod tests {
             let outcome = process(&client, &entry, 1).await;
             assert!(matches!(outcome, Outcome::DropAndLog(_)));
         });
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn auth_push_report() -> SyncReport {
+        let mut r = SyncReport::default();
+        r.failed = 1;
+        r.failures.push(SyncFailure {
+            entity_type: "issue".into(),
+            entity_id: "x".into(),
+            kind: SyncErrorKind::Auth,
+            message: "unauthorized: nope".into(),
+        });
+        r
+    }
+
+    fn pull_outcome(processed: usize) -> PullOutcome {
+        let mut report = SyncReport::default();
+        report.processed = processed;
+        PullOutcome {
+            report,
+            deleted_orphan_team: None,
+            current_user: None,
+            can_write: None,
+        }
+    }
+
+    #[test]
+    fn cycle_pushes_before_pulling_and_reports_both() {
+        use std::cell::RefCell;
+        let order = RefCell::new(Vec::new());
+        let report = block_on(run_cycle(
+            None,
+            async {
+                order.borrow_mut().push("push");
+                let mut r = SyncReport::default();
+                r.processed = 2;
+                r
+            },
+            || async {
+                order.borrow_mut().push("pull");
+                pull_outcome(5)
+            },
+        ));
+        assert_eq!(*order.borrow(), vec!["push", "pull"]);
+        assert_eq!(report.push.processed, 2);
+        assert_eq!(report.pull.processed, 5);
+    }
+
+    #[test]
+    fn cycle_401_on_push_skips_pull() {
+        let mut pulled = false;
+        let report = block_on(run_cycle(None, async { auth_push_report() }, || {
+            pulled = true;
+            async { pull_outcome(5) }
+        }));
+        assert!(!pulled);
+        assert!(report.auth_failed());
+        assert_eq!(report.pull.processed, 0);
     }
 }
