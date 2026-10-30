@@ -71,7 +71,7 @@ pub async fn list(
     filters: &IssueFilters,
 ) -> Result<Vec<IssueDto>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/issues{}", filters.query_string());
-    client.get(&path).await
+    client.get_list(&path).await
 }
 
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<IssueDto, ApiError> {

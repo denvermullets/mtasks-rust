@@ -16,7 +16,7 @@ struct LabelWrap<'a> {
 
 pub async fn list(client: &ApiClient, team_id: i64) -> Result<Vec<LabelDto>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/labels");
-    client.get(&path).await
+    client.get_list(&path).await
 }
 
 pub async fn create(

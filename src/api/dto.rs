@@ -221,7 +221,7 @@ pub struct ProjectDto {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub status: ProjectStatus,
+    pub status: Option<ProjectStatus>,
     pub priority: String,
     pub lead: Option<RecordRef>,
     pub start_date: Option<String>,
@@ -1336,7 +1336,7 @@ mod tests {
         .unwrap();
 
         let original: ProjectDto = serde_json::from_str(PROJECT_FIXTURE).unwrap();
-        assert_eq!(original.status, ProjectStatus::Started);
+        assert_eq!(original.status, Some(ProjectStatus::Started));
         assert_eq!(original.priority, "medium");
         assert_eq!(original.roadmap_commitment, Some(RoadmapCommitment::Now));
 

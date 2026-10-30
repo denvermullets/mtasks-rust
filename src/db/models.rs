@@ -273,7 +273,8 @@ pub struct Project {
     pub team_id: String,
     pub name: String,
     pub description: Option<String>,
-    pub status: ProjectStatus,
+    /// `None` when Rails sends a null status; never defaulted.
+    pub status: Option<ProjectStatus>,
     pub priority: i32,
     pub lead_id: Option<String>,
     pub start_date: Option<String>,

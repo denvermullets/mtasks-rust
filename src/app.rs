@@ -2654,7 +2654,7 @@ impl App {
 
             // --- Project detail: live-apply pick_lists ---
             Message::ProjectDetailStatusChanged(s) => {
-                self.apply_project_update(|p| p.status = s);
+                self.apply_project_update(|p| p.status = Some(s));
             }
             Message::ProjectDetailPriorityChanged(p) => {
                 self.apply_project_update(|proj| proj.priority = p.to_i32());
@@ -2698,7 +2698,7 @@ impl App {
                         if let Ok(Some(mut project)) = queries::get_project(&conn, project_id) {
                             project.name = form.name.trim().to_string();
                             project.description = description.clone();
-                            project.status = form.status;
+                            project.status = Some(form.status);
                             project.priority = form.priority.to_i32();
                             project.lead_id = form.lead_id.clone();
                             project.start_date = start_date;
@@ -2718,7 +2718,7 @@ impl App {
                             team_id,
                             name: form.name.trim().to_string(),
                             description: description.clone(),
-                            status: form.status,
+                            status: Some(form.status),
                             priority: form.priority.to_i32(),
                             lead_id: form.lead_id.clone(),
                             start_date,
@@ -2966,7 +2966,7 @@ impl App {
                         !self.hide_completed_projects
                             || !matches!(
                                 p.status,
-                                ProjectStatus::Completed | ProjectStatus::Cancelled
+                                Some(ProjectStatus::Completed | ProjectStatus::Cancelled)
                             )
                     })
                     .filter(|p| header::project_matches(p, &needle))
