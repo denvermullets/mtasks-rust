@@ -883,6 +883,40 @@ pub fn clear_list_etag(conn: &Connection, team_id: &str, list: &str) -> Result<(
     Ok(())
 }
 
+/// Incremental-pull cursor (a server timestamp) for a team's resource
+/// ("issues", ...). `None` means never pulled: do a full pull.
+pub fn get_pull_cursor(conn: &Connection, team_id: &str, resource: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT cursor FROM pull_cursors WHERE team_id = ?1 AND resource = ?2",
+        params![team_id, resource],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+pub fn set_pull_cursor(
+    conn: &Connection,
+    team_id: &str,
+    resource: &str,
+    cursor: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO pull_cursors (team_id, resource, cursor) VALUES (?1, ?2, ?3)
+         ON CONFLICT(team_id, resource) DO UPDATE SET cursor = excluded.cursor",
+        params![team_id, resource, cursor],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)] // reused by later sync tickets (e.g. forcing a full re-pull)
+pub fn clear_pull_cursor(conn: &Connection, team_id: &str, resource: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pull_cursors WHERE team_id = ?1 AND resource = ?2",
+        params![team_id, resource],
+    )?;
+    Ok(())
+}
+
 pub fn upsert_label(conn: &Connection, label: &Label) -> Result<()> {
     conn.execute(
         "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)

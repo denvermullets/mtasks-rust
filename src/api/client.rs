@@ -13,6 +13,31 @@ pub enum Conditional<T> {
     Modified { data: T, etag: Option<String> },
 }
 
+/// One page of a keyset-paged list plus the paging/clock response headers.
+#[derive(Debug, PartialEq)]
+pub struct Page<T> {
+    pub rows: Vec<T>,
+    /// `X-Next-After-Id`; absent on the last page.
+    pub next_after_id: Option<i64>,
+    /// `X-Server-Time`, the server clock for use as the next sync cursor.
+    pub server_time: Option<String>,
+}
+
+/// Read `X-Next-After-Id` / `X-Server-Time` from response headers.
+pub(crate) fn page_meta(headers: &header::HeaderMap) -> (Option<i64>, Option<String>) {
+    let get = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    (
+        get("x-next-after-id").and_then(|v| v.parse().ok()),
+        get("x-server-time"),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiClient {
     http: reqwest::Client,
@@ -58,6 +83,28 @@ impl ApiClient {
     pub async fn get_list<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, ApiError> {
         let value: serde_json::Value = self.get(path).await?;
         decode_list_lenient(value, path)
+    }
+
+    /// GET one page of a list endpoint, with the paging/clock headers
+    /// (`X-Next-After-Id`, `X-Server-Time`). Same row-skipping decode.
+    pub async fn get_list_page<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<Page<T>, ApiError> {
+        let resp = self.dispatch(self.http.get(self.url(path))).await?;
+        if !resp.status().is_success() {
+            return Err(map_error(resp).await);
+        }
+        let (next_after_id, server_time) = page_meta(resp.headers());
+        let value = resp
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+        Ok(Page {
+            rows: decode_list_lenient(value, path)?,
+            next_after_id,
+            server_time,
+        })
     }
 
     /// Conditional variant of [`Self::get_list`]: same row-skipping decode.
@@ -258,6 +305,28 @@ pub(crate) fn decode_list_lenient<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_meta_reads_headers_case_insensitively() {
+        let mut h = header::HeaderMap::new();
+        h.insert("X-Next-After-Id", "42".parse().unwrap());
+        h.insert(
+            "x-server-time",
+            "2026-10-30T12:00:00.123456Z".parse().unwrap(),
+        );
+        assert_eq!(
+            page_meta(&h),
+            (Some(42), Some("2026-10-30T12:00:00.123456Z".to_string()))
+        );
+    }
+
+    #[test]
+    fn page_meta_absent_headers_mean_last_page() {
+        assert_eq!(page_meta(&header::HeaderMap::new()), (None, None));
+        let mut h = header::HeaderMap::new();
+        h.insert("x-next-after-id", "junk".parse().unwrap());
+        assert_eq!(page_meta(&h).0, None);
+    }
     use crate::api::ProjectDto;
     use crate::db::models::ProjectStatus;
 
