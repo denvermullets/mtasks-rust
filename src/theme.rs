@@ -10,49 +10,6 @@ const fn c(r: u8, g: u8, b: u8) -> Color {
     Color::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
 }
 
-// Mapped from Rails app CSS variables
-// --color-menu: #000000
-pub const BG_MENU: Color = c(0x00, 0x00, 0x00);
-// --color-background: #0B0A0A
-pub const BG_PRIMARY: Color = c(0x0B, 0x0A, 0x0A);
-// --color-foreground: #121111
-pub const BG_SECONDARY: Color = c(0x12, 0x11, 0x11);
-// --color-context-foreground: #191818
-pub const BG_CARD: Color = c(0x19, 0x18, 0x18);
-// --color-hover-highlight: #1E1D1D
-pub const BG_CARD_FOCUSED: Color = c(0x1E, 0x1D, 0x1D);
-// Modal slightly lighter than background
-pub const BG_MODAL: Color = c(0x14, 0x13, 0x13);
-
-// --color-highlight: #BAD4F7
-pub const HIGHLIGHT: Color = c(0xBA, 0xD4, 0xF7);
-
-pub const TEXT_PRIMARY: Color = Color::from_rgb(0.90, 0.90, 0.92);
-pub const TEXT_SECONDARY: Color = Color::from_rgb(0.55, 0.55, 0.58);
-pub const TEXT_MUTED: Color = Color::from_rgb(0.38, 0.38, 0.42);
-
-// --color-accent: #92E8D4
-pub const ACCENT: Color = c(0x92, 0xE8, 0xD4);
-// --color-accent-hover: #84d5c2
-pub const ACCENT_HOVER: Color = c(0x84, 0xD5, 0xC2);
-
-// --color-stroke: #22242B
-pub const BORDER: Color = c(0x22, 0x24, 0x2B);
-
-pub const PRIORITY_URGENT: Color = Color::from_rgb(0.94, 0.27, 0.27);
-pub const PRIORITY_HIGH: Color = Color::from_rgb(0.96, 0.62, 0.23);
-pub const PRIORITY_MEDIUM: Color = Color::from_rgb(0.96, 0.84, 0.23);
-pub const PRIORITY_LOW: Color = Color::from_rgb(0.23, 0.73, 0.53);
-pub const PRIORITY_NONE: Color = Color::from_rgb(0.42, 0.42, 0.48);
-
-pub const DANGER: Color = Color::from_rgb(0.94, 0.27, 0.27);
-// Progress chart series (mirrors Rails progress_chart_controller.js).
-pub const CHART_SCOPE: Color = Color::from_rgb(0.545, 0.576, 0.655);
-pub const CHART_STARTED: Color = Color::from_rgb(0.961, 0.753, 0.290);
-pub const CHART_COMPLETED: Color = Color::from_rgb(0.369, 0.918, 0.831);
-// Amber — non-blocking warnings (e.g. transient network sync failures).
-pub const WARNING: Color = Color::from_rgb(0.90, 0.62, 0.22);
-
 const fn hx(v: u32) -> Color {
     c((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
