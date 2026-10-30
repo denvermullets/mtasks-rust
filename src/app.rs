@@ -183,6 +183,8 @@ pub enum Message {
     OpenSettings,
     SettingsBaseUrlChanged(String),
     SettingsTokenChanged(String),
+    /// Theme picked in Settings: applies live and saves to config immediately.
+    SettingsThemeChanged(crate::theme::ThemeChoice),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
@@ -2241,6 +2243,22 @@ impl App {
                 if let Some(ref mut form) = self.settings_form {
                     form.api_token = v;
                     form.status = None;
+                }
+            }
+
+            Message::SettingsThemeChanged(choice) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.theme = choice.key.to_string();
+                crate::theme::set_by_key(choice.key);
+                let saved = config::save(&new_cfg);
+                // Applied for this session even if the save fails.
+                self.config = new_cfg;
+                if let Some(ref mut form) = self.settings_form {
+                    form.theme = choice;
+                    form.status = saved.as_ref().err().map(|e| format!("Error: {}", e));
+                }
+                if saved.is_ok() {
+                    self.config_error = None;
                 }
             }
 

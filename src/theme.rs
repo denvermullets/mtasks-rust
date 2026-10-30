@@ -282,6 +282,39 @@ pub fn set_by_key(key: &str) {
     CURRENT.store(i, Ordering::Relaxed);
 }
 
+/// A catalog entry for pick lists: displays as the theme name, carries the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeChoice {
+    pub key: &'static str,
+    pub name: &'static str,
+}
+
+impl std::fmt::Display for ThemeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+/// All themes in catalog order, for a picker.
+pub fn choices() -> Vec<ThemeChoice> {
+    THEMES
+        .iter()
+        .map(|t| ThemeChoice {
+            key: t.key,
+            name: t.name,
+        })
+        .collect()
+}
+
+/// The choice for a config key; an unknown key resolves to `default`.
+pub fn choice_for_key(key: &str) -> ThemeChoice {
+    let t = THEMES.iter().find(|t| t.key == key).unwrap_or(&THEMES[0]);
+    ThemeChoice {
+        key: t.key,
+        name: t.name,
+    }
+}
+
 /// The built-in Iced theme (text inputs, scrollbars, pick lists) derived from the current tokens.
 pub fn iced_theme() -> Theme {
     let tk = tok();
@@ -437,6 +470,23 @@ mod tests {
         "chalk",
         "dusk-redux",
     ];
+
+    #[test]
+    fn choices_list_all_themes_in_catalog_order_by_name() {
+        let c = choices();
+        assert_eq!(c.len(), 15);
+        for (choice, t) in c.iter().zip(THEMES.iter()) {
+            assert_eq!(choice.key, t.key);
+            assert_eq!(choice.to_string(), t.name);
+        }
+        assert_eq!(c[0].key, "default");
+    }
+
+    #[test]
+    fn choice_for_key_resolves_known_and_falls_back_to_default() {
+        assert_eq!(choice_for_key("ink").key, "ink");
+        assert_eq!(choice_for_key("nope").key, "default");
+    }
 
     fn lum(c: Color) -> f32 {
         0.299 * c.r + 0.587 * c.g + 0.114 * c.b

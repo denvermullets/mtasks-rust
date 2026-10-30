@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, text, text_input};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
@@ -9,6 +9,7 @@ use crate::theme as t;
 pub struct SettingsFormState {
     pub api_base_url: String,
     pub api_token: String,
+    pub theme: t::ThemeChoice,
     pub status: Option<String>,
     pub testing: bool,
 }
@@ -18,6 +19,7 @@ impl SettingsFormState {
         Self {
             api_base_url: cfg.api_base_url.clone(),
             api_token: cfg.api_token.clone().unwrap_or_default(),
+            theme: t::choice_for_key(&cfg.theme),
             status: None,
             testing: false,
         }
@@ -62,6 +64,21 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                         .secure(true)
                         .padding(10)
                         .size(14),
+                ),
+        )
+        .push(
+            column![]
+                .spacing(4)
+                .push(text("Theme").size(12).color(t::text_secondary()))
+                .push(
+                    pick_list(
+                        t::choices(),
+                        Some(form.theme),
+                        Message::SettingsThemeChanged,
+                    )
+                    .padding(10)
+                    .text_size(14)
+                    .width(Length::Fill),
                 ),
         )
         .push(status_line)
