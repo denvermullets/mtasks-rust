@@ -55,6 +55,7 @@ pub enum Event {
     /// The `s` shortcut.
     ManualSync,
     /// A local write was queued.
+    #[allow(dead_code)] // sent by the local-write trigger (JRST-28) via App::drive_sync
     LocalWrite,
     /// The running cycle ended.
     CycleFinished {
