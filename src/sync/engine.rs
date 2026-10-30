@@ -1427,6 +1427,15 @@ fn is_team_access_message(m: &str) -> bool {
     m.trim() == TEAM_ACCESS_MESSAGE
 }
 
+/// Rails' 403 message when the API token lacks the scope for the request
+/// (base_controller `authorize_api_token_scope!`). Other 403s carry
+/// per-record messages.
+const TOKEN_SCOPE_MESSAGE: &str = "Token lacks required scope";
+
+fn is_token_scope_message(m: &str) -> bool {
+    m.trim() == TOKEN_SCOPE_MESSAGE
+}
+
 /// Like [`classify`], but a team-access 404 flags `team_remote_id` as lost.
 fn classify_in_team(err: &ApiError, team_remote_id: i64) -> Outcome {
     match err {
@@ -1495,11 +1504,15 @@ fn classify(err: &ApiError) -> Outcome {
         // user re-enters one in Settings (sync pauses meanwhile) and the next
         // drain pushes the still-queued edit rather than silently losing it.
         ApiError::Unauthorized(m) => Outcome::LeavePending(format!("unauthorized: {m}")),
-        // A 403 means the token lacks the scope, not that the edit is bad.
-        // Keep it queued and stop pushing; a better token can send it later.
-        ApiError::Forbidden(m) => {
+        // Only Rails' "Token lacks required scope" 403 means the whole token
+        // cannot write: keep it queued and stop pushing; a better token can
+        // send it later. Any other 403 (e.g. "Only the author or a team admin
+        // can ...") is about this one entry: keep it pending, never drop it,
+        // and carry on with the rest of the queue.
+        ApiError::Forbidden(m) if is_token_scope_message(m) => {
             Outcome::PausePushes(PushPause::Forbidden, format!("forbidden: {m}"))
         }
+        ApiError::Forbidden(m) => Outcome::LeavePending(format!("forbidden: {m}")),
         ApiError::NotFound(m) => Outcome::DropAndLog(format!("not found: {m}")),
         ApiError::Decode(m) => Outcome::DropAndLog(format!("decode: {m}")),
         ApiError::EnumMapping(m) => Outcome::DropAndLog(format!("enum: {m}")),
@@ -2636,8 +2649,34 @@ mod tests {
     }
 
     #[test]
+    fn classify_non_scope_forbidden_stays_pending_without_pausing() {
+        for m in [
+            "Only the author or a team admin can delete this",
+            "Bootstrap token required",
+        ] {
+            match classify(&ApiError::Forbidden(m.into())) {
+                Outcome::LeavePending(r) => assert_eq!(r, format!("forbidden: {m}")),
+                other => panic!("expected leave-pending for {m:?}, got {other:?}"),
+            }
+        }
+        let entry = SyncQueueEntry {
+            id: Some(1),
+            entity_type: "comment".into(),
+            entity_id: "c1".into(),
+            action: "delete".into(),
+            payload: None,
+            created_at: String::new(),
+            synced_at: None,
+        };
+        let mut report = SyncReport::default();
+        let outcome = classify(&ApiError::Forbidden("Only the author can".into()));
+        assert!(!record(&mut report, &entry, 1, outcome));
+        assert_eq!(report.push_paused, None);
+    }
+
+    #[test]
     fn classify_forbidden_keeps_pending_and_pauses() {
-        match classify(&ApiError::Forbidden("read only".into())) {
+        match classify(&ApiError::Forbidden("Token lacks required scope".into())) {
             Outcome::PausePushes(PushPause::Forbidden, m) => assert!(m.starts_with("forbidden:")),
             other => panic!("expected pause, got {other:?}"),
         }
@@ -2655,7 +2694,7 @@ mod tests {
             synced_at: None,
         };
         let mut report = SyncReport::default();
-        let outcome = classify(&ApiError::Forbidden("nope".into()));
+        let outcome = classify(&ApiError::Forbidden("Token lacks required scope".into()));
         assert!(record(&mut report, &entry, 1, outcome));
         assert_eq!(report.push_paused, Some(PushPause::Forbidden));
         assert_eq!(report.processed, 0);
