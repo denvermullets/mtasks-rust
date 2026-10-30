@@ -99,9 +99,59 @@ pub fn font_name(key: &str) -> &'static str {
     lookup(key).name
 }
 
+/// A catalog entry for pick lists: displays as the font name, carries the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontChoice {
+    pub key: &'static str,
+    pub name: &'static str,
+}
+
+impl std::fmt::Display for FontChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+/// All fonts in catalog order, for a picker.
+pub fn choices() -> Vec<FontChoice> {
+    FONTS
+        .iter()
+        .map(|f| FontChoice {
+            key: f.key,
+            name: f.name,
+        })
+        .collect()
+}
+
+/// The choice for a config key; an unknown key resolves to the default font.
+pub fn choice_for_key(key: &str) -> FontChoice {
+    let f = lookup(key);
+    FontChoice {
+        key: f.key,
+        name: f.name,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choices_list_all_fonts_in_catalog_order_by_name() {
+        let c = choices();
+        assert_eq!(c.len(), FONTS.len());
+        for (choice, f) in c.iter().zip(FONTS.iter()) {
+            assert_eq!(choice.key, f.key);
+            assert_eq!(choice.to_string(), f.name);
+        }
+        assert_eq!(c[0].key, DEFAULT_FONT_KEY);
+    }
+
+    #[test]
+    fn choice_for_key_resolves_known_and_falls_back_to_default() {
+        assert_eq!(choice_for_key("fira-code").key, "fira-code");
+        assert_eq!(choice_for_key("nope").key, DEFAULT_FONT_KEY);
+    }
 
     #[test]
     fn catalog_has_all_rails_keys() {

@@ -10,6 +10,7 @@ pub struct SettingsFormState {
     pub api_base_url: String,
     pub api_token: String,
     pub theme: t::ThemeChoice,
+    pub font: crate::fonts::FontChoice,
     pub status: Option<String>,
     pub testing: bool,
 }
@@ -20,6 +21,7 @@ impl SettingsFormState {
             api_base_url: cfg.api_base_url.clone(),
             api_token: cfg.api_token.clone().unwrap_or_default(),
             theme: t::choice_for_key(&cfg.theme),
+            font: crate::fonts::choice_for_key(&cfg.font),
             status: None,
             testing: false,
         }
@@ -79,6 +81,26 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                     .padding(10)
                     .text_size(14)
                     .width(Length::Fill),
+                ),
+        )
+        .push(
+            column![]
+                .spacing(4)
+                .push(text("Font").size(12).color(t::text_secondary()))
+                .push(
+                    pick_list(
+                        crate::fonts::choices(),
+                        Some(form.font),
+                        Message::SettingsFontChanged,
+                    )
+                    .padding(10)
+                    .text_size(14)
+                    .width(Length::Fill),
+                )
+                .push(
+                    text("Applies after restart")
+                        .size(11)
+                        .color(t::text_muted()),
                 ),
         )
         .push(status_line)
