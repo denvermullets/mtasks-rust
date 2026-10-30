@@ -179,6 +179,45 @@ pub fn purge_tombstoned_issue(conn: &Connection, issue_id: &str) -> Result<()> {
     tx.commit()
 }
 
+/// Apply a server tombstone for an issue: hard-delete the local issue (with
+/// everything attached), clear any local delete marker, and retire its pending
+/// sync entries (a queued delete or edit has nothing left to act on). Returns
+/// whether a local issue existed in this team. Idempotent.
+pub fn apply_server_issue_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT id FROM issues WHERE remote_id = ?1 AND team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    // purge_tombstoned_issue only acts on marked rows; the server delete wins
+    // whether or not the user had already deleted it locally.
+    conn.execute(
+        "UPDATE issues SET deleted_at = COALESCE(deleted_at, ?2) WHERE id = ?1",
+        params![local_id, "1970-01-01T00:00:00.000Z"],
+    )?;
+    purge_tombstoned_issue(conn, &local_id)?;
+    conn.execute(
+        "UPDATE sync_queue SET synced_at = ?2
+         WHERE entity_type = 'issue' AND entity_id = ?1 AND synced_at IS NULL",
+        params![
+            local_id,
+            chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string()
+        ],
+    )?;
+    Ok(true)
+}
+
 /// True when a local row for this remote id carries the delete tombstone.
 pub fn is_issue_tombstoned_by_remote_id(conn: &Connection, remote_id: i64) -> Result<bool> {
     let n: i64 = conn.query_row(

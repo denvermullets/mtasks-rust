@@ -20,6 +20,7 @@ use std::collections::HashSet;
 
 use rusqlite::Connection;
 
+use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
@@ -1641,6 +1642,7 @@ impl SyncEngine {
                 pull_members_step(client, target.remote_id, &target.local_id).await,
                 pull_projects_step(client, target.remote_id, &target.local_id).await,
                 pull_issues_step(client, target.remote_id, &target.local_id).await,
+                pull_tombstones_step(client, target.remote_id, &target.local_id).await,
             ] {
                 match step {
                     Ok(()) => report.processed += 1,
@@ -2072,6 +2074,63 @@ async fn pull_issues_step(
             .map_err(|e| format!("db (pull cursor): {e}"))?;
     }
     Ok(())
+}
+
+/// Cursor resource name for the tombstone feed in `pull_cursors`.
+const DELETED_CURSOR: &str = "deleted";
+
+/// Pull the team's deleted-records feed and apply it. Runs after the issue
+/// pull. The cursor advances to the response's `X-Server-Time` only when every
+/// entry was applied or deliberately ignored.
+async fn pull_tombstones_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let since = {
+        let conn = open()?;
+        queries::get_pull_cursor(&conn, local_team_id, DELETED_CURSOR)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
+    };
+    let page = deleted::list(client, team_remote_id, since.as_deref())
+        .await
+        .map_err(|e| format!("deleted: {e}"))?;
+    eprintln!(
+        "[sync] phase=pull_deleted team_remote_id={team_remote_id} mode={} rows={}",
+        if since.is_some() { "incremental" } else { "full" },
+        page.rows.len()
+    );
+    let conn = open()?;
+    let failed = apply_tombstones(&conn, local_team_id, &page.rows);
+    if failed > 0 {
+        return Err(format!("deleted: {failed} failed (see [sync] log)"));
+    }
+    if let Some(t) = &page.server_time {
+        queries::set_pull_cursor(&conn, local_team_id, DELETED_CURSOR, t)
+            .map_err(|e| format!("db (pull cursor): {e}"))?;
+    }
+    Ok(())
+}
+
+/// Apply feed entries to the local DB (idempotent, so the cursor overlap is
+/// safe). Only `Issue` is handled; other record types are ignored for now.
+/// Returns how many entries failed to apply.
+fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto]) -> usize {
+    let mut failed = 0;
+    for row in rows {
+        if row.record_type == "Issue" {
+            if let Err(e) = queries::apply_server_issue_tombstone(conn, local_team_id, row.record_id)
+            {
+                eprintln!(
+                    "[sync] phase=pull_deleted issue_remote_id={} apply_failed reason=\"{e}\"",
+                    row.record_id
+                );
+                failed += 1;
+            }
+        }
+    }
+    failed
 }
 
 /// Keep one row per key (the last delivered wins), in first-seen order. The
@@ -2732,6 +2791,58 @@ mod tests {
             count(conn, "SELECT COUNT(*) FROM issues WHERE id='i2' AND parent_issue_id IS NULL"),
             1
         );
+    }
+
+    fn tomb(kind: &str, id: i64) -> TombstoneDto {
+        TombstoneDto {
+            record_type: kind.into(),
+            record_id: id,
+            deleted_at: None,
+        }
+    }
+
+    fn give_i1_remote_id(conn: &Connection) {
+        conn.execute("UPDATE issues SET remote_id = 500 WHERE id = 'i1'", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn issue_tombstone_purges_live_issue_and_attachments() {
+        let conn = setup_tombstoned_issue();
+        conn.execute("UPDATE issues SET deleted_at = NULL WHERE id = 'i1'", [])
+            .unwrap();
+        give_i1_remote_id(&conn);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Issue", 500)]), 0);
+        assert_purged(&conn);
+    }
+
+    #[test]
+    fn issue_tombstone_clears_local_marker_and_pending_delete() {
+        let conn = setup_tombstoned_issue();
+        give_i1_remote_id(&conn);
+        sync_queue::enqueue(&conn, "issue", "i1", "delete", Some("{}")).unwrap();
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Issue", 500)]), 0);
+        assert_purged(&conn);
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn tombstone_for_unknown_issue_or_other_team_is_a_noop() {
+        let conn = setup_tombstoned_issue();
+        give_i1_remote_id(&conn);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Issue", 999)]), 0);
+        assert_eq!(apply_tombstones(&conn, "other", &[tomb("Issue", 500)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issues WHERE id='i1'"), 1);
+    }
+
+    #[test]
+    fn non_issue_tombstones_are_ignored_and_repeats_are_safe() {
+        let conn = setup_tombstoned_issue();
+        give_i1_remote_id(&conn);
+        let rows = [tomb("Comment", 500), tomb("Label", 11), tomb("Issue", 500)];
+        assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
+        assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
+        assert_purged(&conn);
     }
 
     #[test]
