@@ -197,7 +197,9 @@ async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
     match (entry.entity_type.as_str(), entry.action.as_str()) {
         ("issue", "create") => issue_create(client, &entry.entity_id).await,
         ("issue", "update") => issue_update(client, &entry.entity_id).await,
-        ("issue", "delete") => issue_delete(client, entry.payload.as_deref()).await,
+        ("issue", "delete") => {
+            issue_delete(client, &entry.entity_id, entry.payload.as_deref()).await
+        }
         ("project", "create") => project_create(client, &entry.entity_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
@@ -431,7 +433,7 @@ async fn issue_update(client: &ApiClient, entity_id: &str) -> Outcome {
     }
 }
 
-async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+async fn issue_delete(client: &ApiClient, local_id: &str, payload: Option<&str>) -> Outcome {
     let raw = match payload {
         Some(s) => s,
         None => return Outcome::DropAndLog("issue delete: no payload (legacy entry)".into()),
@@ -450,12 +452,39 @@ async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
             return Outcome::DropAndLog("issue delete: missing team_remote_id in payload".into())
         }
     };
-    // No NotFound => Success: the local tombstone must outlive a server that
-    // can't delete yet (404 on a missing route). Real handling is JRST-33.
-    match issues::delete(client, team_remote_id, remote_id).await {
-        Ok(_) => Outcome::Success,
-        Err(ApiError::NotFound(m)) => Outcome::LeavePending(format!("not found: {m}")),
+    let result = issues::delete(client, team_remote_id, remote_id).await;
+    let conn = match open() {
+        Ok(c) => c,
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    issue_delete_outcome(&conn, local_id, result)
+}
+
+/// A resource 404 ("Issue not found") means the issue is already gone, which
+/// is what the delete wanted. A team-access 404 is a different failure and
+/// goes through `classify`.
+fn is_team_access_404(message: &str) -> bool {
+    message.starts_with("Team not found")
+}
+
+/// Map the DELETE result to an outcome; on success (or already gone) purge the
+/// local tombstone and its attached rows before the entry is marked synced.
+fn issue_delete_outcome(
+    conn: &Connection,
+    local_id: &str,
+    result: Result<(), ApiError>,
+) -> Outcome {
+    match result {
+        Ok(_) => purge_local_issue(conn, local_id),
+        Err(ApiError::NotFound(m)) if !is_team_access_404(&m) => purge_local_issue(conn, local_id),
         Err(e) => classify(&e),
+    }
+}
+
+fn purge_local_issue(conn: &Connection, local_id: &str) -> Outcome {
+    match queries::purge_tombstoned_issue(conn, local_id) {
+        Ok(()) => Outcome::Success,
+        Err(e) => Outcome::LeavePending(format!("purge issue: {e}")),
     }
 }
 
@@ -1973,6 +2002,79 @@ mod tests {
         );
         store_list_etag(&conn, "t1", "labels", None);
         assert_eq!(queries::get_list_etag(&conn, "t1", "labels").unwrap(), None);
+    }
+
+    fn setup_tombstoned_issue() -> Connection {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", Some(11));
+        queries::set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, parent_issue_id, created_at, updated_at)
+               VALUES ('i2', 'Other', 4, 'l1', 't1', 'i1', '2026-01-01', '2026-01-01');
+             INSERT INTO comments (id, issue_id, body, created_at, updated_at)
+               VALUES ('c1', 'i1', 'hi', '2026-01-01', '2026-01-01');
+             INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+               VALUES ('d1', 'i1', 'i2', '2026-01-01', '2026-01-01');",
+        )
+        .unwrap();
+        queries::delete_issue(&conn, "i1").unwrap();
+        conn
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    fn assert_purged(conn: &Connection) {
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM issues WHERE id='i1'"), 0);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM comments"), 0);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM issue_labels"), 0);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM issue_dependencies"), 0);
+        // Sub-issue survives, detached.
+        assert_eq!(
+            count(conn, "SELECT COUNT(*) FROM issues WHERE id='i2' AND parent_issue_id IS NULL"),
+            1
+        );
+    }
+
+    #[test]
+    fn issue_delete_204_purges_tombstone_and_attachments() {
+        let conn = setup_tombstoned_issue();
+        assert!(matches!(
+            issue_delete_outcome(&conn, "i1", Ok(())),
+            Outcome::Success
+        ));
+        assert_purged(&conn);
+    }
+
+    #[test]
+    fn issue_delete_resource_404_counts_as_gone() {
+        let conn = setup_tombstoned_issue();
+        let r = Err(ApiError::NotFound("Issue not found".into()));
+        assert!(matches!(issue_delete_outcome(&conn, "i1", r), Outcome::Success));
+        assert_purged(&conn);
+    }
+
+    #[test]
+    fn issue_delete_403_pauses_and_keeps_tombstone() {
+        let conn = setup_tombstoned_issue();
+        let r = Err(ApiError::Forbidden("Token lacks required scope".into()));
+        assert!(matches!(
+            issue_delete_outcome(&conn, "i1", r),
+            Outcome::PausePushes(PushPause::Forbidden, _)
+        ));
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issues WHERE id='i1'"), 1);
+    }
+
+    #[test]
+    fn issue_delete_team_access_404_is_not_success_and_keeps_tombstone() {
+        let conn = setup_tombstoned_issue();
+        let r = Err(ApiError::NotFound("Team not found or access denied".into()));
+        assert!(!matches!(
+            issue_delete_outcome(&conn, "i1", r),
+            Outcome::Success
+        ));
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issues WHERE id='i1'"), 1);
     }
 
     #[test]

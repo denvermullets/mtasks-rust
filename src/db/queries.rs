@@ -142,6 +142,43 @@ pub fn delete_issue(conn: &Connection, issue_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hard-delete a tombstoned issue and everything attached to it (comments,
+/// labels, dependencies, events). Sub-issues are detached, mirroring Rails'
+/// nullify. No-op unless the row carries the tombstone.
+pub fn purge_tombstoned_issue(conn: &Connection, issue_id: &str) -> Result<()> {
+    let tombstoned: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issues WHERE id = ?1 AND deleted_at IS NOT NULL",
+        params![issue_id],
+        |r| r.get(0),
+    )?;
+    if tombstoned == 0 {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE issues SET parent_issue_id = NULL WHERE parent_issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM comments WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM issue_labels WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM issue_dependencies WHERE blocking_issue_id = ?1 OR blocked_issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM issue_events WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
+    tx.commit()
+}
+
 /// True when a local row for this remote id carries the delete tombstone.
 pub fn is_issue_tombstoned_by_remote_id(conn: &Connection, remote_id: i64) -> Result<bool> {
     let n: i64 = conn.query_row(
