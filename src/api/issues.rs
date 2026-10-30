@@ -1,48 +1,6 @@
 use serde::Serialize;
 
-use super::{ApiClient, ApiError, IssueDto, Page};
-
-#[derive(Debug, Default, Clone)]
-pub struct IssueFilters {
-    pub lane_id: Option<i64>,
-    pub assignee_id: Option<i64>,
-    pub project_id: Option<i64>,
-    /// Use [`crate::db::models::Priority::as_rails_str`] for valid values.
-    pub priority: Option<String>,
-    /// ISO8601; only issues updated at or after this instant.
-    pub updated_since: Option<String>,
-    /// Page size (Rails caps at 500).
-    pub limit: Option<i64>,
-}
-
-impl IssueFilters {
-    fn query_string(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(v) = self.lane_id {
-            parts.push(format!("lane_id={v}"));
-        }
-        if let Some(v) = self.assignee_id {
-            parts.push(format!("assignee_id={v}"));
-        }
-        if let Some(v) = self.project_id {
-            parts.push(format!("project_id={v}"));
-        }
-        if let Some(v) = &self.priority {
-            parts.push(format!("priority={v}"));
-        }
-        if let Some(v) = &self.updated_since {
-            parts.push(format!("updated_since={v}"));
-        }
-        if let Some(v) = self.limit {
-            parts.push(format!("limit={v}"));
-        }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", parts.join("&"))
-        }
-    }
-}
+use super::{encode_query_value, ApiClient, ApiError, IssueDto, Page};
 
 /// Body for create/update — fields match Rails `IssuesController` strong params.
 /// Use [`crate::db::models::Priority::as_rails_str`] to populate `priority`.
@@ -73,15 +31,6 @@ pub struct IssueParams {
 #[derive(Debug, Serialize)]
 struct IssueWrap<'a> {
     issue: &'a IssueParams,
-}
-
-pub async fn list(
-    client: &ApiClient,
-    team_id: i64,
-    filters: &IssueFilters,
-) -> Result<Vec<IssueDto>, ApiError> {
-    let path = format!("api/v1/teams/{team_id}/issues{}", filters.query_string());
-    client.get_list(&path).await
 }
 
 /// Query for the incremental, keyset-paged issue index.
@@ -124,20 +73,6 @@ impl IssuePageQuery {
             format!("?{}", parts.join("&"))
         }
     }
-}
-
-/// Percent-encode a query value (timestamps carry `:` and possibly `+`).
-pub(crate) fn encode_query_value(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    for b in v.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// One page of the paged issue index plus `X-Next-After-Id` / `X-Server-Time`.
@@ -198,38 +133,6 @@ mod tests {
             "?updated_since=2026-10-30T12%3A00%3A00Z&include=detail&include_archived=1&limit=500&after_id=9"
         );
         assert_eq!(IssuePageQuery::default().query_string(), "");
-    }
-
-    #[test]
-    fn empty_filters_produce_no_query_string() {
-        assert_eq!(IssueFilters::default().query_string(), "");
-    }
-
-    #[test]
-    fn populated_filters_join_with_ampersand() {
-        let f = IssueFilters {
-            lane_id: Some(1),
-            assignee_id: Some(2),
-            project_id: Some(3),
-            priority: Some(Priority::High.as_rails_str().into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            f.query_string(),
-            "?lane_id=1&assignee_id=2&project_id=3&priority=high"
-        );
-    }
-
-    #[test]
-    fn partial_filters_only_emit_set_keys() {
-        let f = IssueFilters {
-            priority: Some(Priority::Urgent.as_rails_str().into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            f.query_string(),
-            format!("?priority={}", Priority::Urgent.as_rails_str())
-        );
     }
 
     #[test]

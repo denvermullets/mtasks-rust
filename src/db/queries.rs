@@ -1044,7 +1044,7 @@ pub fn set_pull_cursor(
     Ok(())
 }
 
-#[allow(dead_code)] // reused by later sync tickets (e.g. forcing a full re-pull)
+#[cfg(test)]
 pub fn clear_pull_cursor(conn: &Connection, team_id: &str, resource: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM pull_cursors WHERE team_id = ?1 AND resource = ?2",

@@ -564,7 +564,7 @@ async fn issue_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
         Prep::Done(o) => return o,
     };
 
-    let attempt = match begin_attempt(entry_id, "issues") {
+    let attempt = match record_attempt(entry_id, "issues") {
         Ok(a) => a,
         Err(o) => return o,
     };
@@ -720,7 +720,7 @@ fn commit_create(entry_id: i64, table: &str, local_id: &str, remote_id: i64) -> 
 // rather than POSTing blind.
 
 const CLOCK_SKEW_SLACK_SECS: i64 = 60;
-const RECONCILE_PAGE_LIMIT: i64 = 500;
+const RECONCILE_PAGE_LIMIT: u32 = 500;
 
 /// State read before a create's POST: when an earlier attempt began (if any)
 /// and the server ids already linked locally for the entity's table.
@@ -729,12 +729,12 @@ struct Attempt {
     taken: HashSet<i64>,
 }
 
-fn begin_attempt(entry_id: i64, table: &str) -> Result<Attempt, Outcome> {
+fn record_attempt(entry_id: i64, table: &str) -> Result<Attempt, Outcome> {
     let conn = open().map_err(Outcome::LeavePending)?;
-    begin_attempt_on(&conn, entry_id, table).map_err(Outcome::LeavePending)
+    record_attempt_on(&conn, entry_id, table).map_err(Outcome::LeavePending)
 }
 
-fn begin_attempt_on(conn: &Connection, entry_id: i64, table: &str) -> Result<Attempt, String> {
+fn record_attempt_on(conn: &Connection, entry_id: i64, table: &str) -> Result<Attempt, String> {
     let taken = linked_remote_ids(conn, table)?;
     let previous =
         sync_queue::begin_attempt(conn, entry_id).map_err(|e| format!("begin_attempt: {e}"))?;
@@ -825,12 +825,12 @@ async fn find_issue_on_server(
         return Ok(None);
     };
     let me = users::me(client).await?;
-    let filters = issues::IssueFilters {
+    let query = issues::IssuePageQuery {
         updated_since: Some(attempted_at.to_string()),
         limit: Some(RECONCILE_PAGE_LIMIT),
         ..Default::default()
     };
-    let candidates = issues::list(client, team_remote_id, &filters).await?;
+    let candidates = issues::list_page(client, team_remote_id, &query).await?.rows;
     Ok(match_issue(
         &candidates,
         me.id,
@@ -850,7 +850,9 @@ async fn find_project_on_server(
     let Some(name) = params.name.as_deref() else {
         return Ok(None);
     };
-    let candidates = projects::list_updated_since(client, team_remote_id, attempted_at).await?;
+    let candidates = projects::list_page(client, team_remote_id, Some(attempted_at))
+        .await?
+        .rows;
     Ok(match_project(&candidates, name, attempted_at, &attempt.taken))
 }
 
@@ -1020,7 +1022,7 @@ async fn project_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
-    let attempt = match begin_attempt(entry_id, "projects") {
+    let attempt = match record_attempt(entry_id, "projects") {
         Ok(a) => a,
         Err(o) => return o,
     };
@@ -1156,7 +1158,7 @@ async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
-    let attempt = match begin_attempt(entry_id, "labels") {
+    let attempt = match record_attempt(entry_id, "labels") {
         Ok(a) => a,
         Err(o) => return o,
     };
@@ -3680,34 +3682,34 @@ mod tests {
     }
 
     #[test]
-    fn begin_attempt_records_time_once_and_reports_earlier_attempt() {
+    fn record_attempt_records_time_once_and_reports_earlier_attempt() {
         let conn = setup_labels_db();
         let entry = queue_create(&conn, "issue", "i1");
-        let first = begin_attempt_on(&conn, entry, "issues").unwrap();
+        let first = record_attempt_on(&conn, entry, "issues").unwrap();
         assert!(first.previous.is_none());
         let stored = stored_attempt(&conn, entry);
-        let second = begin_attempt_on(&conn, entry, "issues").unwrap();
+        let second = record_attempt_on(&conn, entry, "issues").unwrap();
         assert_eq!(second.previous.as_deref(), Some(stored.as_str()));
         assert_eq!(stored_attempt(&conn, entry), stored);
     }
 
     #[test]
-    fn begin_attempt_collects_linked_remote_ids() {
+    fn record_attempt_collects_linked_remote_ids() {
         let conn = setup_labels_db();
         insert_test_label(&conn, "a", Some(41));
         insert_test_label(&conn, "b", None);
         let entry = queue_create(&conn, "label", "b");
-        let a = begin_attempt_on(&conn, entry, "labels").unwrap();
+        let a = record_attempt_on(&conn, entry, "labels").unwrap();
         assert_eq!(a.taken, [41].into_iter().collect::<HashSet<_>>());
-        assert!(begin_attempt_on(&conn, entry, "comments").is_err());
+        assert!(record_attempt_on(&conn, entry, "comments").is_err());
     }
 
     #[test]
     fn adopting_a_match_links_and_marks_synced_without_posting() {
         let mut conn = setup_labels_db();
         let entry = queue_create(&conn, "issue", "i1");
-        let _ = begin_attempt_on(&conn, entry, "issues").unwrap();
-        let retry = begin_attempt_on(&conn, entry, "issues").unwrap();
+        let _ = record_attempt_on(&conn, entry, "issues").unwrap();
+        let retry = record_attempt_on(&conn, entry, "issues").unwrap();
         let since = retry.previous.unwrap();
         let c = vec![issue_dto(55, "Issue", Some(7), "2999-01-01T00:00:00.000Z")];
         let id = match_issue(&c, 7, "Issue", &since, &retry.taken).unwrap();
