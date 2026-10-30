@@ -34,7 +34,7 @@ pub async fn create(
     target_issue_id: i64,
     direction: Direction,
 ) -> Result<IssueDependencyResponse, ApiError> {
-    let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/dependencies");
+    let path = collection_path(team_id, issue_id);
     let body = CreateBody {
         target_issue_id,
         direction,
@@ -48,13 +48,33 @@ pub async fn delete(
     issue_id: i64,
     dep_id: i64,
 ) -> Result<(), ApiError> {
-    let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/dependencies/{dep_id}");
+    let path = member_path(team_id, issue_id, dep_id);
     client.delete(&path).await
+}
+
+fn collection_path(team_id: i64, issue_id: i64) -> String {
+    format!("api/v1/teams/{team_id}/issues/{issue_id}/issue_dependencies")
+}
+
+fn member_path(team_id: i64, issue_id: i64, dep_id: i64) -> String {
+    format!("{}/{dep_id}", collection_path(team_id, issue_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_and_delete_use_issue_dependencies_path() {
+        assert_eq!(
+            collection_path(3, 5),
+            "api/v1/teams/3/issues/5/issue_dependencies"
+        );
+        assert_eq!(
+            member_path(3, 5, 9),
+            "api/v1/teams/3/issues/5/issue_dependencies/9"
+        );
+    }
 
     #[test]
     fn create_body_is_flat_with_snake_case_direction() {
