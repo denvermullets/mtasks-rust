@@ -18,7 +18,7 @@ pub fn all_teams(conn: &Connection) -> Result<Vec<Team>> {
 
 pub fn lanes_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Lane>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+        "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
          FROM lanes WHERE team_id = ?1 ORDER BY position",
     )?;
     let rows = stmt.query_map(params![team_id], Lane::from_row)?;
@@ -622,7 +622,7 @@ pub fn find_team_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Optio
 
 pub fn find_lane_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Lane>> {
     conn.query_row(
-        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+        "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
          FROM lanes WHERE remote_id = ?1",
         params![remote_id],
         Lane::from_row,
@@ -706,14 +706,15 @@ pub fn upsert_team(conn: &Connection, team: &Team) -> Result<()> {
 
 pub fn upsert_lane(conn: &Connection, lane: &Lane) -> Result<()> {
     conn.execute(
-        "INSERT INTO lanes (id, name, color, position, team_id, remote_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO lanes (id, name, color, position, team_id, remote_id, category, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             color = excluded.color,
             position = excluded.position,
             team_id = excluded.team_id,
             remote_id = excluded.remote_id,
+            category = excluded.category,
             updated_at = excluded.updated_at",
         params![
             lane.id,
@@ -722,6 +723,7 @@ pub fn upsert_lane(conn: &Connection, lane: &Lane) -> Result<()> {
             lane.position,
             lane.team_id,
             lane.remote_id,
+            lane.category,
             lane.created_at,
             lane.updated_at
         ],
