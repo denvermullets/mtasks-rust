@@ -336,12 +336,12 @@ impl canvas::Program<Message> for ProgressChart {
                 let width = if v == 0.0 { 1.0 } else { 0.75 };
                 frame.stroke(
                     &line,
-                    Stroke::default().with_color(t::BORDER).with_width(width),
+                    Stroke::default().with_color(t::border()).with_width(width),
                 );
                 frame.fill_text(canvas::Text {
                     content: format!("{}", v.round() as i64),
                     position: Point::new(pl - 10.0, y(v) - 6.0),
-                    color: t::TEXT_MUTED,
+                    color: t::text_muted(),
                     size: 11.0.into(),
                     horizontal_alignment: iced::alignment::Horizontal::Right,
                     ..Default::default()
@@ -351,7 +351,7 @@ impl canvas::Program<Message> for ProgressChart {
                 frame.fill_text(canvas::Text {
                     content: snaps[i].date.format("%b %-d").to_string(),
                     position: Point::new(x(i), bounds.height - 17.0),
-                    color: t::TEXT_MUTED,
+                    color: t::text_muted(),
                     size: 11.0.into(),
                     horizontal_alignment: iced::alignment::Horizontal::Center,
                     ..Default::default()
@@ -361,9 +361,9 @@ impl canvas::Program<Message> for ProgressChart {
 
         // Top-of-gradient fill opacities = Rails SERIES fillOpacity (0.22/0.22/0.3).
         let series: [(Color, Getter, f32); 3] = [
-            (t::CHART_SCOPE, |s| s.scope, 0.22),
-            (t::CHART_STARTED, |s| s.started, 0.22),
-            (t::CHART_COMPLETED, |s| s.completed, 0.3),
+            (t::chart_scope(), |s| s.scope, 0.22),
+            (t::chart_started(), |s| s.started, 0.22),
+            (t::chart_completed(), |s| s.completed, 0.3),
         ];
         let width = if self.mini { 1.2 } else { 2.0 };
         let mut ends: Vec<(Color, u32, f32)> = Vec::new();
@@ -395,11 +395,11 @@ impl canvas::Program<Message> for ProgressChart {
         if let Some(exp) = &self.data.expected {
             // Rails draws the expected line piecewise (straight) in #f87171.
             let color = if self.data.behind {
-                t::DANGER
+                t::danger()
             } else {
                 Color {
                     a: 0.7,
-                    ..t::DANGER
+                    ..t::danger()
                 }
             };
             let line = Path::new(|b| {
@@ -432,7 +432,7 @@ impl canvas::Program<Message> for ProgressChart {
             let ys: Vec<f32> = ends.iter().map(|e| e.2).collect();
             let label_ys = spread_labels(&ys, 20.0, pt + 8.0, base);
             for ((color, last, ey), ly) in ends.iter().zip(label_ys) {
-                frame.fill(&Path::circle(Point::new(ex, *ey), 6.5), t::BG_PRIMARY);
+                frame.fill(&Path::circle(Point::new(ex, *ey), 6.5), t::bg_primary());
                 frame.fill(&Path::circle(Point::new(ex, *ey), 4.5), *color);
                 let bw = 14.0 + last.to_string().len() as f32 * 7.0;
                 frame.fill_rectangle(
@@ -443,7 +443,7 @@ impl canvas::Program<Message> for ProgressChart {
                 frame.fill_text(canvas::Text {
                     content: last.to_string(),
                     position: Point::new(ex + 10.0 + bw / 2.0, ly - 6.0),
-                    color: t::TEXT_PRIMARY,
+                    color: t::text_primary(),
                     size: 11.0.into(),
                     horizontal_alignment: iced::alignment::Horizontal::Center,
                     ..Default::default()
@@ -454,7 +454,7 @@ impl canvas::Program<Message> for ProgressChart {
         // Behind schedule on a mini chart: red marker bar on the left edge
         // (desktop-only affordance; Rails' sparkline has no behind indicator).
         if self.mini && self.data.behind {
-            frame.fill_rectangle(Point::ORIGIN, Size::new(2.0, bounds.height), t::DANGER);
+            frame.fill_rectangle(Point::ORIGIN, Size::new(2.0, bounds.height), t::danger());
         }
         vec![frame.into_geometry()]
     }
