@@ -257,6 +257,15 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 13,
+        name: "issues_deleted_at",
+        up: "
+            -- Local tombstone: a deleted issue keeps its row (hidden everywhere)
+            -- so a later pull can't resurrect it from the server.
+            ALTER TABLE issues ADD COLUMN deleted_at TEXT;
+        ",
+    },
+    Migration {
+        version: 14,
         name: "projects_status_nullable",
         // SQLite cannot drop NOT NULL in place, so rebuild the table. Runs with
         // foreign keys off (see FK_OFF_MIGRATIONS) so the DROP doesn't cascade
@@ -305,7 +314,7 @@ const MIGRATIONS: &[Migration] = &[
 /// Migrations that rebuild a table other tables reference. They must run with
 /// `PRAGMA foreign_keys=OFF`, which is a no-op inside a transaction, so `run`
 /// toggles it around the transaction.
-const FK_OFF_MIGRATIONS: &[u32] = &[13];
+const FK_OFF_MIGRATIONS: &[u32] = &[14];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -445,7 +454,7 @@ mod tests {
 
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
     }
 
@@ -454,7 +463,10 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            applied_versions(&conn),
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -468,7 +480,10 @@ mod tests {
         run(&conn).unwrap();
 
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            applied_versions(&conn),
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
+        );
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
         assert!(table_exists(&conn, "comments"));
@@ -547,7 +562,7 @@ mod tests {
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
         )
         .unwrap();
-        for m in MIGRATIONS.iter().filter(|m| m.version < 13) {
+        for m in MIGRATIONS.iter().filter(|m| m.version < 14) {
             conn.execute_batch(m.up).unwrap();
             conn.execute(
                 "INSERT INTO schema_migrations VALUES (?1, 'x')",
