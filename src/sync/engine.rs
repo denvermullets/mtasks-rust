@@ -48,6 +48,8 @@ pub struct SyncReport {
 pub enum PushPause {
     /// 403 — the token lacks the scope for writes.
     Forbidden,
+    /// `/me` reported no `write` scope, so no push was attempted at all.
+    ReadOnly,
 }
 
 /// A classified, user-actionable sync failure surfaced back to the UI layer.
@@ -115,9 +117,21 @@ pub struct FullSyncReport {
     /// Signed-in user's `(rails_id, name)` from the pull's `/me` call. The app
     /// persists this to config for stamping `creator_id` on new issues.
     pub current_user: Option<(i64, String)>,
+    /// Write scope reported by this sync's `/me` call (`None` if `/me` failed).
+    pub can_write: Option<bool>,
 }
 
 impl FullSyncReport {
+    /// True when the token is read-only: `/me` showed no write scope, or a
+    /// push hit a 403. Drives the status-bar banner.
+    pub fn read_only(&self) -> bool {
+        self.can_write == Some(false)
+            || matches!(
+                self.push.push_paused,
+                Some(PushPause::ReadOnly | PushPause::Forbidden)
+            )
+    }
+
     /// The most actionable error to surface to the user. Push errors take
     /// precedence (they're active operations the user just initiated); pull
     /// errors are reported only when push succeeded.
@@ -165,6 +179,15 @@ impl SyncEngine {
         Self
     }
 
+    /// Drain unless `/me` said the token cannot write; then skip every push
+    /// (entries stay pending) and report [`PushPause::ReadOnly`].
+    pub async fn drain_if_writable(client: &ApiClient, can_write: Option<bool>) -> SyncReport {
+        if can_write == Some(false) {
+            return read_only_report();
+        }
+        Self::drain(client).await
+    }
+
     pub async fn drain(client: &ApiClient) -> SyncReport {
         let mut report = SyncReport::default();
 
@@ -190,6 +213,13 @@ impl SyncEngine {
         }
 
         report
+    }
+}
+
+fn read_only_report() -> SyncReport {
+    SyncReport {
+        push_paused: Some(PushPause::ReadOnly),
+        ..SyncReport::default()
     }
 }
 
@@ -1081,6 +1111,8 @@ pub struct PullOutcome {
     /// Signed-in user's `(rails_id, name)` from `/me`, when the call succeeded.
     /// The app persists this to config to stamp `creator_id` on new issues.
     pub current_user: Option<(i64, String)>,
+    /// Whether `/me` reported `write` scope (`None` if `/me` failed).
+    pub can_write: Option<bool>,
 }
 
 impl SyncEngine {
@@ -1113,10 +1145,12 @@ impl SyncEngine {
                     report,
                     deleted_orphan_team,
                     current_user: None,
+                    can_write: None,
                 };
             }
         };
         let current_user = Some((me.id, me.name.clone()));
+        let can_write = Some(me.token.has_write_scope());
 
         // Phase 2: refresh teams (and discover any new ones the token can see).
         match pull_teams(client).await {
@@ -1132,6 +1166,7 @@ impl SyncEngine {
                     report,
                     deleted_orphan_team,
                     current_user,
+                    can_write,
                 };
             }
         }
@@ -1146,6 +1181,7 @@ impl SyncEngine {
                     report,
                     deleted_orphan_team,
                     current_user,
+                    can_write,
                 };
             }
         };
@@ -1156,6 +1192,7 @@ impl SyncEngine {
                 report,
                 deleted_orphan_team,
                 current_user,
+                can_write,
             };
         }
 
@@ -1184,6 +1221,7 @@ impl SyncEngine {
             report,
             deleted_orphan_team,
             current_user,
+            can_write,
         }
     }
 }
@@ -1690,6 +1728,37 @@ mod tests {
             message: "teapot".into()
         })));
         assert!(is_drop(&classify(&ApiError::NotFound("gone".into()))));
+    }
+
+    #[test]
+    fn read_only_report_pauses_without_failures() {
+        let r = read_only_report();
+        assert_eq!(r.push_paused, Some(PushPause::ReadOnly));
+        assert_eq!((r.processed, r.failed), (0, 0));
+        assert!(r.last_error.is_none());
+    }
+
+    #[test]
+    fn full_report_read_only_from_scope_or_403() {
+        let mk = |can_write, push: SyncReport| FullSyncReport {
+            pull: SyncReport::default(),
+            push,
+            deleted_orphan_team: None,
+            current_user: None,
+            can_write,
+        };
+        assert!(mk(Some(false), read_only_report()).read_only());
+        assert!(mk(
+            Some(true),
+            SyncReport {
+                push_paused: Some(PushPause::Forbidden),
+                ..SyncReport::default()
+            }
+        )
+        .read_only());
+        // Write scope restored and no 403: state clears.
+        assert!(!mk(Some(true), SyncReport::default()).read_only());
+        assert!(!mk(None, SyncReport::default()).read_only());
     }
 
     #[test]

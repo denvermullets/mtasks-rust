@@ -14,6 +14,7 @@ pub fn view<'a>(
     sync_in_progress: bool,
     last_synced_at: Option<DateTime<Utc>>,
     token_configured: bool,
+    read_only: bool,
 ) -> Element<'a, Message> {
     let (sync_text, sync_color) = if let Some(err) = last_sync_error {
         // Transient network failures are non-fatal (sync retries) — surface them
@@ -67,6 +68,16 @@ pub fn view<'a>(
                 .color(t::DANGER),
         );
     }
+
+    let bar = if read_only {
+        bar.push(
+            text("Read-only token \u{2014} edits are saved locally and will sync once a write token is set")
+                .size(12)
+                .color(t::WARNING),
+        )
+    } else {
+        bar
+    };
 
     let bar = bar.push(text(sync_text).size(12).color(sync_color));
 
