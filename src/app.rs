@@ -454,6 +454,8 @@ pub struct App {
     last_sync_error: Option<String>,
     /// Identifiers of teams flagged inaccessible (team-access 404 on push).
     inaccessible_teams: Vec<String>,
+    /// Token has no write scope: pushes are paused, edits stay local.
+    sync_read_only: bool,
     sync_in_progress: bool,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
@@ -1394,6 +1396,7 @@ impl App {
             config_error,
             last_sync_error: None,
             inaccessible_teams: queries::inaccessible_team_identifiers(&conn).unwrap_or_default(),
+            sync_read_only: false,
             sync_in_progress: false,
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -2403,7 +2406,13 @@ impl App {
 
             Message::SyncCompleted(report) => {
                 self.sync_in_progress = false;
-                self.last_sync_error = report.last_error().map(str::to_string);
+                // Read-only is a state, not an error: show the banner instead.
+                self.sync_read_only = report.read_only();
+                self.last_sync_error = if self.sync_read_only {
+                    None
+                } else {
+                    report.last_error().map(str::to_string)
+                };
                 self.inaccessible_teams =
                     queries::inaccessible_team_identifiers(&self.db()).unwrap_or_default();
 
@@ -3059,6 +3068,7 @@ impl App {
             self.config.last_synced_at,
             token_configured,
             &self.inaccessible_teams,
+            self.sync_read_only,
         );
 
         let main_content = column![]
