@@ -461,7 +461,8 @@ pub fn set_issue_labels(conn: &Connection, issue_id: &str, label_ids: &[String])
 
 pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<IssueDependency>> {
     conn.query_row(
-        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at
+        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+                created_at, updated_at
          FROM issue_dependencies WHERE id = ?1",
         params![dep_id],
         IssueDependency::from_row,
@@ -475,13 +476,16 @@ pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<Is
 pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Result<()> {
     conn.execute(
         "INSERT INTO issue_dependencies
-            (id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             dep.id,
             dep.remote_id,
             dep.blocking_issue_id,
             dep.blocked_issue_id,
+            dep.kind,
+            dep.direction,
             dep.created_at,
             dep.updated_at,
         ],
@@ -596,14 +600,68 @@ pub fn set_label_remote_id(conn: &Connection, label_id: &str, remote_id: i64) ->
     Ok(())
 }
 
-pub fn set_issue_dependency_remote_id(
+/// Record the server's identity for a pushed dependency: its id plus the
+/// `kind` / normalized `direction` Rails echoed back.
+pub fn set_issue_dependency_sync_fields(
     conn: &Connection,
     dep_id: &str,
     remote_id: i64,
+    kind: &str,
+    direction: &str,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE issue_dependencies SET remote_id = ?1 WHERE id = ?2",
-        params![remote_id, dep_id],
+        "UPDATE issue_dependencies SET remote_id = ?1, kind = ?2, direction = ?3 WHERE id = ?4",
+        params![remote_id, kind, direction, dep_id],
+    )?;
+    Ok(())
+}
+
+/// Persist one dependency received from a pull. `source_id` / `target_id` are
+/// local issue UUIDs (source = Rails `blocking_issue`).
+///
+/// - Known `remote_id`: refresh kind/direction only (endpoints keep the
+///   orientation they were first stored with).
+/// - Same edge already exists locally without a remote id (pushed, response
+///   not yet recorded): adopt the remote id.
+/// - Otherwise insert. Writes no issue events and no sync_queue entry.
+pub fn upsert_pulled_dependency(
+    conn: &Connection,
+    remote_id: i64,
+    source_id: &str,
+    target_id: &str,
+    kind: &str,
+    direction: &str,
+) -> Result<()> {
+    let now = now_ts();
+    let updated = conn.execute(
+        "UPDATE issue_dependencies SET kind = ?1, direction = ?2 WHERE remote_id = ?3",
+        params![kind, direction, remote_id],
+    )?;
+    if updated > 0 {
+        return Ok(());
+    }
+    let adopted = conn.execute(
+        "UPDATE issue_dependencies SET remote_id = ?1, kind = ?2, direction = ?3
+         WHERE blocking_issue_id = ?4 AND blocked_issue_id = ?5 AND remote_id IS NULL",
+        params![remote_id, kind, direction, source_id, target_id],
+    )?;
+    if adopted > 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO issue_dependencies
+            (id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            remote_id,
+            source_id,
+            target_id,
+            kind,
+            direction,
+            now
+        ],
     )?;
     Ok(())
 }
@@ -1264,6 +1322,8 @@ mod tests {
             remote_id: None,
             blocking_issue_id: blocking.to_string(),
             blocked_issue_id: blocked.to_string(),
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: NOW.to_string(),
             updated_at: NOW.to_string(),
         }

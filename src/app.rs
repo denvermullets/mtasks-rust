@@ -1116,6 +1116,8 @@ impl App {
             remote_id: None,
             blocking_issue_id,
             blocked_issue_id,
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: now.clone(),
             updated_at: now,
         };

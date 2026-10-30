@@ -33,6 +33,24 @@ pub struct IssueRef {
     pub id: i64,
     pub identifier: String,
     pub title: String,
+    /// IssueDependency id; present on issue-detail dependency entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_id: Option<i64>,
+    /// Link direction relative to the detailed issue; present on
+    /// `related_issues` / `duplicates` entries only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+}
+
+/// One dependency edge decoded from an issue-detail payload, oriented so
+/// `source` is Rails' `blocking_issue` side. `direction` is relative to source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulledDependency {
+    pub dependency_id: i64,
+    pub kind: &'static str,
+    pub direction: &'static str,
+    pub source_remote_id: i64,
+    pub target_remote_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +88,10 @@ pub struct IssueDto {
     pub blocking_issues: Option<Vec<IssueRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_issues: Option<Vec<IssueRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_issues: Option<Vec<IssueRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicates: Option<Vec<IssueRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,10 +157,48 @@ impl IssueDto {
             parent_issue,
             blocking_issues: Some(blocking),
             blocked_issues: Some(blocked),
+            related_issues: None,
+            duplicates: None,
             started_at: issue.started_at.clone(),
             completed_at: issue.completed_at.clone(),
             canceled_at: issue.canceled_at.clone(),
         })
+    }
+
+    /// Every dependency edge in this (detail) payload, oriented source ->
+    /// target. Entries without a `dependency_id` are skipped.
+    pub fn dependency_links(&self) -> Vec<PulledDependency> {
+        let me = self.id;
+        let mut out = Vec::new();
+        let mut push = |r: &IssueRef, kind, direction, me_is_source: bool| {
+            if let Some(dependency_id) = r.dependency_id {
+                let (s, t) = if me_is_source { (me, r.id) } else { (r.id, me) };
+                out.push(PulledDependency {
+                    dependency_id,
+                    kind,
+                    direction,
+                    source_remote_id: s,
+                    target_remote_id: t,
+                });
+            }
+        };
+        // blocking_issues: these issues block me (they are the source).
+        for r in self.blocking_issues.iter().flatten() {
+            push(r, "blocks", "blocking", false);
+        }
+        for r in self.blocked_issues.iter().flatten() {
+            push(r, "blocks", "blocking", true);
+        }
+        // `relates` is symmetric; orient with this issue as source.
+        for r in self.related_issues.iter().flatten() {
+            push(r, "relates", "relates", true);
+        }
+        for r in self.duplicates.iter().flatten() {
+            // "duplicated_by": the other issue is the duplicate (source).
+            let me_is_source = r.direction.as_deref() != Some("duplicated_by");
+            push(r, "duplicates", "duplicates", me_is_source);
+        }
+        out
     }
 
     /// Convert a DTO into a local Issue model. Resolves nested Rails ids to
@@ -620,6 +680,8 @@ impl IssueDependencyDto {
             remote_id: Some(self.id),
             blocking_issue_id,
             blocked_issue_id,
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -829,6 +891,8 @@ fn issue_ref_query(
             id: require_remote(remote, "issue")?,
             identifier: format!("{team_identifier}-{tn}"),
             title,
+            dependency_id: None,
+            direction: None,
         })
     })
     .collect()
@@ -1082,6 +1146,8 @@ mod tests {
             remote_id: Some(44),
             blocking_issue_id: issue_a.clone(),
             blocked_issue_id: issue_b.clone(),
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: now(),
             updated_at: now(),
         };
@@ -1160,6 +1226,78 @@ mod tests {
         "completed_at": null,
         "canceled_at": null
     }"#;
+
+    /// Detail dependency entries as emitted by `Api::V1::IssueSerializer`
+    /// (`serialize_dependency_issue` / `serialize_links`) for issue 7001.
+    fn detail_fixture_with_links() -> IssueDto {
+        let mut v: serde_json::Value = serde_json::from_str(ISSUE_FIXTURE).unwrap();
+        v["blocking_issues"] = serde_json::json!([
+            {"id": 7002, "identifier": "APO-43", "title": "B", "dependency_id": 11}
+        ]);
+        v["blocked_issues"] = serde_json::json!([
+            {"id": 7003, "identifier": "APO-44", "title": "C", "dependency_id": 12}
+        ]);
+        v["related_issues"] = serde_json::json!([
+            {"id": 7004, "identifier": "APO-45", "title": "D", "dependency_id": 13, "direction": "relates"}
+        ]);
+        v["duplicates"] = serde_json::json!([
+            {"id": 7005, "identifier": "APO-46", "title": "E", "dependency_id": 14, "direction": "duplicates"},
+            {"id": 7006, "identifier": "APO-47", "title": "F", "dependency_id": 15, "direction": "duplicated_by"}
+        ]);
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn detail_parses_dependency_ids_and_link_directions() {
+        let dto = detail_fixture_with_links();
+        assert_eq!(
+            dto.blocking_issues.as_ref().unwrap()[0].dependency_id,
+            Some(11)
+        );
+        let rel = &dto.related_issues.as_ref().unwrap()[0];
+        assert_eq!(rel.dependency_id, Some(13));
+        assert_eq!(rel.direction.as_deref(), Some("relates"));
+        let dups = dto.duplicates.as_ref().unwrap();
+        assert_eq!(dups[1].direction.as_deref(), Some("duplicated_by"));
+    }
+
+    #[test]
+    fn detail_without_dependency_fields_still_decodes() {
+        let dto: IssueDto = serde_json::from_str(ISSUE_FIXTURE).unwrap();
+        assert!(dto.related_issues.is_none() && dto.duplicates.is_none());
+        assert!(dto.dependency_links().is_empty());
+    }
+
+    #[test]
+    fn dependency_links_are_oriented_source_to_target() {
+        let l = detail_fixture_with_links().dependency_links();
+        let by_id = |id| l.iter().find(|d| d.dependency_id == id).unwrap();
+        // 7002 blocks 7001
+        assert_eq!(
+            (by_id(11).source_remote_id, by_id(11).target_remote_id),
+            (7002, 7001)
+        );
+        assert_eq!(by_id(11).kind, "blocks");
+        // 7001 blocks 7003
+        assert_eq!(
+            (by_id(12).source_remote_id, by_id(12).target_remote_id),
+            (7001, 7003)
+        );
+        assert_eq!(
+            (by_id(13).kind, by_id(13).direction),
+            ("relates", "relates")
+        );
+        // 7001 duplicates 7005; 7006 duplicates 7001
+        assert_eq!(
+            (by_id(14).source_remote_id, by_id(14).target_remote_id),
+            (7001, 7005)
+        );
+        assert_eq!(
+            (by_id(15).source_remote_id, by_id(15).target_remote_id),
+            (7006, 7001)
+        );
+        assert_eq!(by_id(15).direction, "duplicates");
+    }
 
     fn seed_issue_fixture_db(conn: &Connection) -> (String, String, String, String, String) {
         let team_uuid = Uuid::new_v4().to_string();

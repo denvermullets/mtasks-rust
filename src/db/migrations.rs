@@ -247,6 +247,17 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE issue_events ADD COLUMN new_ref TEXT;
         ",
     },
+    Migration {
+        version: 12,
+        name: "issue_dependencies_kind_direction",
+        up: "
+            -- kind mirrors Rails (blocks | relates | duplicates). direction is
+            -- stored relative to blocking_issue_id (the link's source side):
+            -- blocking | relates | duplicates.
+            ALTER TABLE issue_dependencies ADD COLUMN kind TEXT NOT NULL DEFAULT 'blocks';
+            ALTER TABLE issue_dependencies ADD COLUMN direction TEXT NOT NULL DEFAULT 'blocking';
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -372,7 +383,7 @@ mod tests {
 
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
     }
 
@@ -381,7 +392,10 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            applied_versions(&conn),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
     }
 
     #[test]
@@ -395,7 +409,10 @@ mod tests {
         run(&conn).unwrap();
 
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            applied_versions(&conn),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
         assert!(table_exists(&conn, "comments"));

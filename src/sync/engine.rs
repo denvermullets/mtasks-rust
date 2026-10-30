@@ -18,7 +18,7 @@
 
 use rusqlite::Connection;
 
-use crate::api::dto::IssueDto;
+use crate::api::dto::{IssueDto, PulledDependency};
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
     ApiError, CommentParams, Direction, IssueParams, LabelParams, ProjectParams,
@@ -916,8 +916,15 @@ async fn dependency_create(client: &ApiClient, entity_id: &str) -> Outcome {
                 Ok(c) => c,
                 Err(e) => return Outcome::LeavePending(e),
             };
-            if let Err(e) = queries::set_issue_dependency_remote_id(&conn, &prep.local_id, resp.id)
-            {
+            // The desktop only sends `blocking`, so the response direction is
+            // already relative to the source side; store what Rails echoed.
+            if let Err(e) = queries::set_issue_dependency_sync_fields(
+                &conn,
+                &prep.local_id,
+                resp.id,
+                &resp.kind,
+                &resp.direction,
+            ) {
                 return Outcome::LeavePending(format!("write remote_id: {e}"));
             }
             Outcome::Success
@@ -1006,7 +1013,7 @@ fn classify(err: &ApiError) -> Outcome {
 // using a last-write-wins policy keyed on `updated_at`.
 //
 // Order: teams → lanes / labels / members → projects → issues. Issue
-// dependencies are not pulled (Rails has no index endpoint for that resource).
+// dependencies come from each issue-detail payload (no index endpoint).
 //
 // The merge rule per row (see `decide`):
 // - No local row with this `remote_id` → INSERT.
@@ -1475,8 +1482,12 @@ async fn pull_issues_step(
     // Phase 3 (sync): write each detail to the local DB.
     {
         let conn = open()?;
+        // Dependencies are persisted after every issue in this batch exists
+        // locally, since an edge may point at an issue later in the batch.
+        let mut pending_links: Vec<Vec<PulledDependency>> = Vec::new();
         for dto in details {
             let issue_remote_id = dto.id;
+            pending_links.push(dto.dependency_links());
             let dto = relax_issue_fks(&conn, dto);
 
             let result = (|| -> Result<(), String> {
@@ -1505,6 +1516,9 @@ async fn pull_issues_step(
                 skipped += 1;
             }
         }
+        for links in &pending_links {
+            persist_pulled_dependencies(&conn, links);
+        }
     }
 
     let conn = open()?;
@@ -1516,6 +1530,37 @@ async fn pull_issues_step(
         ))
     } else {
         Ok(())
+    }
+}
+
+/// Store pulled dependency edges. An edge whose endpoint issue isn't present
+/// locally (e.g. an issue in another team) is skipped and logged.
+fn persist_pulled_dependencies(conn: &Connection, links: &[PulledDependency]) {
+    for l in links {
+        let find = |remote| queries::find_issue_by_remote_id(conn, remote);
+        let (source, target) = match (find(l.source_remote_id), find(l.target_remote_id)) {
+            (Ok(Some(s)), Ok(Some(t))) => (s, t),
+            _ => {
+                eprintln!(
+                    "[sync] phase=pull_issues dependency remote_id={} endpoint not found locally; skipping",
+                    l.dependency_id
+                );
+                continue;
+            }
+        };
+        if let Err(e) = queries::upsert_pulled_dependency(
+            conn,
+            l.dependency_id,
+            &source.id,
+            &target.id,
+            l.kind,
+            l.direction,
+        ) {
+            eprintln!(
+                "[sync] phase=pull_issues dependency remote_id={} write_failed reason=\"{e}\"",
+                l.dependency_id
+            );
+        }
     }
 }
 
@@ -1805,6 +1850,118 @@ mod tests {
             Err(Outcome::LeavePending(msg)) => assert!(msg.contains("labels lab1")),
             other => panic!("expected LeavePending, got {other:?}"),
         }
+    }
+
+    fn setup_dependency_db() -> Connection {
+        let conn = setup_labels_db();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("UPDATE issues SET remote_id = 1 WHERE id = 'i1'", [])
+            .unwrap();
+        for (id, remote) in [("i2", 2), ("i3", 3)] {
+            conn.execute(
+                "INSERT INTO issues (id, title, priority, lane_id, team_id, remote_id, created_at, updated_at)
+                 VALUES (?1, 'x', 4, 'l1', 't1', ?2, ?3, ?3)",
+                rusqlite::params![id, remote, now],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn link(dep: i64, kind: &'static str, s: i64, t: i64) -> PulledDependency {
+        PulledDependency {
+            dependency_id: dep,
+            kind,
+            direction: if kind == "blocks" { "blocking" } else { kind },
+            source_remote_id: s,
+            target_remote_id: t,
+        }
+    }
+
+    fn dep_row(conn: &Connection, remote: i64) -> (String, String, String, String) {
+        conn.query_row(
+            "SELECT blocking_issue_id, blocked_issue_id, kind, direction
+             FROM issue_dependencies WHERE remote_id = ?1",
+            [remote],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pull_persists_dependencies_with_remote_id_kind_direction() {
+        let conn = setup_dependency_db();
+        persist_pulled_dependencies(
+            &conn,
+            &[link(11, "blocks", 2, 1), link(12, "relates", 1, 3)],
+        );
+        assert_eq!(
+            dep_row(&conn, 11),
+            ("i2".into(), "i1".into(), "blocks".into(), "blocking".into())
+        );
+        assert_eq!(
+            dep_row(&conn, 12),
+            ("i1".into(), "i3".into(), "relates".into(), "relates".into())
+        );
+    }
+
+    #[test]
+    fn pull_is_idempotent_and_does_not_duplicate_across_both_issues() {
+        let conn = setup_dependency_db();
+        persist_pulled_dependencies(&conn, &[link(12, "relates", 1, 3)]);
+        // The other issue's detail reports the same edge with flipped orientation.
+        persist_pulled_dependencies(&conn, &[link(12, "relates", 3, 1)]);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_dependencies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn pull_adopts_remote_id_for_locally_created_edge() {
+        let conn = setup_dependency_db();
+        conn.execute(
+            "INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+             VALUES ('d1', 'i1', 'i2', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        persist_pulled_dependencies(&conn, &[link(40, "blocks", 1, 2)]);
+        let remote: Option<i64> = conn
+            .query_row(
+                "SELECT remote_id FROM issue_dependencies WHERE id = 'd1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remote, Some(40));
+    }
+
+    #[test]
+    fn pull_skips_edges_to_unknown_issues() {
+        let conn = setup_dependency_db();
+        persist_pulled_dependencies(&conn, &[link(50, "blocks", 1, 999)]);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_dependencies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn create_response_fields_are_stored() {
+        let conn = setup_dependency_db();
+        conn.execute(
+            "INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+             VALUES ('d1', 'i1', 'i2', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        queries::set_issue_dependency_sync_fields(&conn, "d1", 77, "blocks", "blocking").unwrap();
+        let d = queries::get_issue_dependency(&conn, "d1").unwrap().unwrap();
+        assert_eq!(
+            (d.remote_id, d.kind.as_str(), d.direction.as_str()),
+            (Some(77), "blocks", "blocking")
+        );
     }
 
     #[test]
