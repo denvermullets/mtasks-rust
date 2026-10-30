@@ -150,6 +150,13 @@ pub fn purge_tombstoned_issue(conn: &Connection, issue_id: &str) -> Result<()> {
     if tombstoned == 0 {
         return Ok(());
     }
+    purge_issue_rows(conn, issue_id)
+}
+
+/// Hard-delete an issue and everything attached to it, whether or not it
+/// carries the local tombstone. Callers decide that the issue must go
+/// (a confirmed server delete, or a local delete the server has accepted).
+fn purge_issue_rows(conn: &Connection, issue_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "UPDATE issues SET parent_issue_id = NULL WHERE parent_issue_id = ?1",
@@ -194,13 +201,9 @@ pub fn apply_server_issue_tombstone(
     let Some(local_id) = local else {
         return Ok(false);
     };
-    // purge_tombstoned_issue only acts on marked rows; the server delete wins
-    // whether or not the user had already deleted it locally.
-    conn.execute(
-        "UPDATE issues SET deleted_at = COALESCE(deleted_at, ?2) WHERE id = ?1",
-        params![local_id, "1970-01-01T00:00:00.000Z"],
-    )?;
-    purge_tombstoned_issue(conn, &local_id)?;
+    // The server delete wins whether or not the user had already deleted it
+    // locally, so purge without requiring the local marker.
+    purge_issue_rows(conn, &local_id)?;
     conn.execute(
         "UPDATE sync_queue SET synced_at = ?2
          WHERE entity_type = 'issue' AND entity_id = ?1 AND synced_at IS NULL",
