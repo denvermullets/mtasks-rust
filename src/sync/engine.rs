@@ -152,6 +152,18 @@ impl FullSyncReport {
         self.pull.failures.iter().chain(self.push.failures.iter())
     }
 
+    /// Whether the server looked healthy this cycle, for the scheduler's
+    /// backoff. Network/server errors and unclassified pull errors count as
+    /// failures; per-entry rejections (422/403) and 401 (which pauses sync
+    /// instead) do not.
+    pub fn cycle_succeeded(&self) -> bool {
+        let unhealthy = self
+            .failures()
+            .any(|f| matches!(f.kind, SyncErrorKind::Network | SyncErrorKind::Other));
+        let unclassified = self.pull.last_error.is_some() && self.pull.failures.is_empty();
+        !unhealthy && !unclassified && !self.auth_failed()
+    }
+
     /// True if either side hit a 401 — the trigger for the re-auth prompt.
     pub fn auth_failed(&self) -> bool {
         self.failures().any(|f| f.kind == SyncErrorKind::Auth)
@@ -1861,6 +1873,45 @@ fn relax_issue_fks(conn: &Connection, mut dto: IssueDto) -> IssueDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failure(kind: SyncErrorKind) -> SyncFailure {
+        SyncFailure {
+            entity_type: "issue".into(),
+            entity_id: "x".into(),
+            kind,
+            message: "m".into(),
+        }
+    }
+
+    fn report_with(kind: Option<SyncErrorKind>) -> FullSyncReport {
+        let mut r = FullSyncReport::default();
+        if let Some(k) = kind {
+            r.push.failed = 1;
+            r.push.last_error = Some("e".into());
+            r.push.failures.push(failure(k));
+        }
+        r
+    }
+
+    #[test]
+    fn cycle_succeeded_reflects_server_health_for_backoff() {
+        assert!(report_with(None).cycle_succeeded());
+        assert!(!report_with(Some(SyncErrorKind::Network)).cycle_succeeded());
+        assert!(!report_with(Some(SyncErrorKind::Other)).cycle_succeeded());
+        assert!(!report_with(Some(SyncErrorKind::Auth)).cycle_succeeded());
+        // Per-entry rejections don't mean the server is unhealthy.
+        assert!(report_with(Some(SyncErrorKind::Forbidden)).cycle_succeeded());
+        assert!(report_with(Some(SyncErrorKind::Validation(vec![]))).cycle_succeeded());
+        // A read-only pause is a healthy cycle, not a failure.
+        let mut ro = FullSyncReport::default();
+        ro.push = read_only_report();
+        ro.can_write = Some(false);
+        assert!(ro.cycle_succeeded());
+        // Pull error with no structured failure counts as unhealthy.
+        let mut r = FullSyncReport::default();
+        r.pull.last_error = Some("boom".into());
+        assert!(!r.cycle_succeeded());
+    }
 
     fn is_drop(o: &Outcome) -> bool {
         matches!(o, Outcome::DropAndLog(_))

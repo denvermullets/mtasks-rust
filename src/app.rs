@@ -18,6 +18,7 @@ use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup
 use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
+use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
@@ -186,8 +187,14 @@ pub enum Message {
     SaveSettings,
 
     // Sync
+    /// Manual sync (`s`, toast retry): runs immediately.
     SyncNow,
+    /// Scheduler timer fired.
     SyncTick,
+    /// Keyboard/mouse activity, for idle tracking.
+    UserInput,
+    WindowFocused,
+    WindowUnfocused,
     SyncCompleted(FullSyncReport),
 
     // Toasts
@@ -457,6 +464,9 @@ pub struct App {
     /// Token has no write scope: pushes are paused, edits stay local.
     sync_read_only: bool,
     sync_in_progress: bool,
+    scheduler: Scheduler,
+    /// Delay until the scheduler's next timed check; `None` = no timer armed.
+    sync_next_delay: Option<std::time::Duration>,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
@@ -1398,6 +1408,8 @@ impl App {
             inaccessible_teams: queries::inaccessible_team_identifiers(&conn).unwrap_or_default(),
             sync_read_only: false,
             sync_in_progress: false,
+            scheduler: Scheduler::new(std::time::Instant::now()),
+            sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
             next_toast_id: 0,
             sync_paused_auth: false,
@@ -1429,12 +1441,27 @@ impl App {
                 None
             }
         });
-        let tick = iced::time::every(std::time::Duration::from_secs(
-            self.config.sync_interval_secs.max(1),
-        ))
-        .map(|_| Message::SyncTick);
+        // Any key press (even one a text field captured), click or scroll
+        // counts as activity for idle detection; window focus drives cadence.
+        let activity = event::listen_with(|event, _status, _id| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
+            | iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+            | iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
+                Some(Message::UserInput)
+            }
+            iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused),
+            iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused),
+            _ => None,
+        });
 
-        let mut subs = vec![keys, tick];
+        let mut subs = vec![keys, activity];
+        // The scheduler picks the delay; the timer restarts whenever it changes.
+        if let Some(delay) = self.sync_next_delay {
+            subs.push(
+                iced::time::every(delay.max(std::time::Duration::from_millis(250)))
+                    .map(|_| Message::SyncTick),
+            );
+        }
         // Only run the 1s toast-expiry timer while toasts are on screen.
         if !self.toasts.is_empty() {
             subs.push(
@@ -1442,6 +1469,45 @@ impl App {
             );
         }
         Subscription::batch(subs)
+    }
+
+    /// Feed the sync scheduler an event, re-arm its timer, and start the cycle
+    /// it asks for. Future triggers (e.g. a local write -> `LocalWrite`) call
+    /// this too.
+    fn drive_sync(&mut self, event: SchedEvent) -> Task<Message> {
+        let decision = self.scheduler.handle(event, std::time::Instant::now());
+        self.sync_next_delay = decision.next_delay;
+        match decision.run {
+            Some(kind) => self.start_sync(kind),
+            None => Task::none(),
+        }
+    }
+
+    /// Start a sync cycle the scheduler already admitted. If it can't start
+    /// (no token), report the cycle as failed so the scheduler backs off.
+    fn start_sync(&mut self, kind: CycleKind) -> Task<Message> {
+        // PushOnly (drain without pull) has no trigger yet; run a full cycle.
+        let _ = kind;
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        match ApiClient::new(base_url, token) {
+            Ok(client) => {
+                self.sync_in_progress = true;
+                self.last_sync_error = None;
+                return Task::perform(
+                    async move { SyncEngine::full_cycle(&client).await },
+                    Message::SyncCompleted,
+                );
+            }
+            Err(ApiError::MissingToken) => {
+                self.last_sync_error = Some("set an API token in Settings".into());
+            }
+            Err(e) => {
+                self.last_sync_error = Some(e.to_string());
+            }
+        }
+        self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
+        self.drive_sync(SchedEvent::CycleFinished { success: false })
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -2353,6 +2419,8 @@ impl App {
                             self.sync_paused_auth = false;
                             self.last_sync_error = None;
                             self.push_toast("Settings saved", ToastKind::Info, false);
+                            // Un-pausing the scheduler runs a full cycle now.
+                            return self.drive_sync(SchedEvent::AuthPaused(false));
                         }
                         Err(e) => {
                             if let Some(ref mut f) = self.settings_form {
@@ -2363,48 +2431,14 @@ impl App {
                 }
             }
 
-            Message::SyncTick => {
-                if self.sync_in_progress || self.sync_paused_auth {
-                    return Task::none();
-                }
-                let has_token = self
-                    .config
-                    .api_token
-                    .as_deref()
-                    .map(|t| !t.trim().is_empty())
-                    .unwrap_or(false);
-                if !has_token {
-                    return Task::none();
-                }
-                return self.update(Message::SyncNow);
-            }
-
-            Message::SyncNow => {
-                if self.sync_in_progress {
-                    return Task::none();
-                }
-                let base_url = self.config.api_base_url.trim().to_string();
-                let token = self.config.api_token.clone().unwrap_or_default();
-                match ApiClient::new(base_url, token) {
-                    Ok(client) => {
-                        self.sync_in_progress = true;
-                        self.last_sync_error = None;
-                        return Task::perform(
-                            async move { SyncEngine::full_cycle(&client).await },
-                            Message::SyncCompleted,
-                        );
-                    }
-                    Err(ApiError::MissingToken) => {
-                        self.last_sync_error = Some("set an API token in Settings".into());
-                    }
-                    Err(e) => {
-                        self.last_sync_error = Some(e.to_string());
-                    }
-                }
-                self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
-            }
+            Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
+            Message::UserInput => return self.drive_sync(SchedEvent::Input),
+            Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
+            Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
+            Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
             Message::SyncCompleted(report) => {
+                let cycle_ok = report.cycle_succeeded();
                 self.sync_in_progress = false;
                 // Read-only is a state, not an error: show the banner instead.
                 self.sync_read_only = report.read_only();
@@ -2512,6 +2546,13 @@ impl App {
                         self.push_toast(msg, ToastKind::Error, retry);
                     }
                 }
+
+                // Tell the scheduler how the cycle went (backoff / follow-up).
+                let finish = self.drive_sync(SchedEvent::CycleFinished { success: cycle_ok });
+                if self.sync_paused_auth {
+                    return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
+                }
+                return finish;
             }
 
             Message::DismissToast(id) => {
@@ -2527,7 +2568,7 @@ impl App {
 
             Message::RetrySyncFromToast(id) => {
                 self.toasts.retain(|t| t.id != id);
-                return self.update(Message::SyncNow);
+                return self.drive_sync(SchedEvent::ManualSync);
             }
 
             Message::CreateProject => {
