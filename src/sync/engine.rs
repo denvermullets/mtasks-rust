@@ -103,7 +103,7 @@ impl SyncErrorKind {
     }
 }
 
-/// Combined report for one full bidirectional sync (pull then push).
+/// Combined report for one full bidirectional sync (push then pull).
 #[derive(Debug, Default, Clone)]
 pub struct FullSyncReport {
     pub pull: SyncReport,
@@ -165,6 +165,14 @@ impl SyncEngine {
         Self
     }
 
+    /// One full Data sync cycle: drain the push queue first, then pull, so the
+    /// pull reflects the user's own edits. A 401 on the push half pauses the
+    /// whole cycle (the pull is skipped); the pull half's own 401 is reported
+    /// as before.
+    pub async fn full_cycle(client: &ApiClient) -> FullSyncReport {
+        run_cycle(Self::drain(client), || Self::pull(client)).await
+    }
+
     pub async fn drain(client: &ApiClient) -> SyncReport {
         let mut report = SyncReport::default();
 
@@ -190,6 +198,31 @@ impl SyncEngine {
         }
 
         report
+    }
+}
+
+/// Cycle ordering, separated from the HTTP-bound halves so it can be tested.
+async fn run_cycle<D, P, PF>(drain: D, pull: P) -> FullSyncReport
+where
+    D: std::future::Future<Output = SyncReport>,
+    P: FnOnce() -> PF,
+    PF: std::future::Future<Output = PullOutcome>,
+{
+    let push = drain.await;
+    if push.failures.iter().any(|f| f.kind == SyncErrorKind::Auth) {
+        return FullSyncReport {
+            pull: SyncReport::default(),
+            push,
+            deleted_orphan_team: None,
+            current_user: None,
+        };
+    }
+    let outcome = pull().await;
+    FullSyncReport {
+        pull: outcome.report,
+        push,
+        deleted_orphan_team: outcome.deleted_orphan_team,
+        current_user: outcome.current_user,
     }
 }
 
@@ -1909,5 +1942,68 @@ mod tests {
             let outcome = process(&client, &entry).await;
             assert!(matches!(outcome, Outcome::DropAndLog(_)));
         });
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn auth_push_report() -> SyncReport {
+        let mut r = SyncReport::default();
+        r.failed = 1;
+        r.failures.push(SyncFailure {
+            entity_type: "issue".into(),
+            entity_id: "x".into(),
+            kind: SyncErrorKind::Auth,
+            message: "unauthorized: nope".into(),
+        });
+        r
+    }
+
+    fn pull_outcome(processed: usize) -> PullOutcome {
+        let mut report = SyncReport::default();
+        report.processed = processed;
+        PullOutcome {
+            report,
+            deleted_orphan_team: None,
+            current_user: None,
+        }
+    }
+
+    #[test]
+    fn cycle_pushes_before_pulling_and_reports_both() {
+        use std::cell::RefCell;
+        let order = RefCell::new(Vec::new());
+        let report = block_on(run_cycle(
+            async {
+                order.borrow_mut().push("push");
+                let mut r = SyncReport::default();
+                r.processed = 2;
+                r
+            },
+            || async {
+                order.borrow_mut().push("pull");
+                pull_outcome(5)
+            },
+        ));
+        assert_eq!(*order.borrow(), vec!["push", "pull"]);
+        assert_eq!(report.push.processed, 2);
+        assert_eq!(report.pull.processed, 5);
+    }
+
+    #[test]
+    fn cycle_401_on_push_skips_pull() {
+        let mut pulled = false;
+        let report = block_on(run_cycle(async { auth_push_report() }, || {
+            pulled = true;
+            async { pull_outcome(5) }
+        }));
+        assert!(!pulled);
+        assert!(report.auth_failed());
+        assert_eq!(report.pull.processed, 0);
     }
 }
