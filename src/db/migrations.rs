@@ -264,6 +264,19 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE issues ADD COLUMN deleted_at TEXT;
         ",
     },
+    Migration {
+        version: 14,
+        name: "list_etags",
+        up: "
+            -- Last ETag seen per (team, list) so unchanged lists return 304.
+            CREATE TABLE IF NOT EXISTS list_etags (
+                team_id TEXT NOT NULL,
+                list TEXT NOT NULL,
+                etag TEXT NOT NULL,
+                PRIMARY KEY (team_id, list)
+            );
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

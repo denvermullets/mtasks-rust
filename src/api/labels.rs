@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::{ApiClient, ApiError, LabelDto};
+use super::{ApiClient, ApiError, Conditional, LabelDto};
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct LabelParams {
@@ -14,9 +14,14 @@ struct LabelWrap<'a> {
     label: &'a LabelParams,
 }
 
-pub async fn list(client: &ApiClient, team_id: i64) -> Result<Vec<LabelDto>, ApiError> {
+/// Conditional list: pass the stored ETag; a 304 yields `NotModified`.
+pub async fn list_conditional(
+    client: &ApiClient,
+    team_id: i64,
+    etag: Option<&str>,
+) -> Result<Conditional<Vec<LabelDto>>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/labels");
-    client.get(&path).await
+    client.get_conditional(&path, etag).await
 }
 
 pub async fn create(
