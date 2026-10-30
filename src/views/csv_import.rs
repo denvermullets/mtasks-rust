@@ -30,14 +30,14 @@ fn problem_list<'a>(
         col = col.push(
             text(format!("{prefix}{}", p.message))
                 .size(12)
-                .color(t::TEXT_SECONDARY),
+                .color(t::text_secondary()),
         );
     }
     if problems.len() > MAX_LISTED {
         col = col.push(
             text(format!("… and {} more", problems.len() - MAX_LISTED))
                 .size(12)
-                .color(t::TEXT_MUTED),
+                .color(t::text_muted()),
         );
     }
     col.into()
@@ -53,7 +53,7 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
             p.errors.len()
         ))
         .size(13)
-        .color(t::TEXT_PRIMARY),
+        .color(t::text_primary()),
     );
 
     if !p.new_projects.is_empty() {
@@ -64,7 +64,7 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
                 p.new_projects.join(", ")
             ))
             .size(12)
-            .color(t::TEXT_SECONDARY),
+            .color(t::text_secondary()),
         );
     }
 
@@ -75,14 +75,14 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
             list = list.push(
                 text(format!("• {}", r.title))
                     .size(12)
-                    .color(t::TEXT_SECONDARY),
+                    .color(t::text_secondary()),
             );
         }
         if p.rows.len() > 8 {
             list = list.push(
                 text(format!("… and {} more", p.rows.len() - 8))
                     .size(12)
-                    .color(t::TEXT_MUTED),
+                    .color(t::text_muted()),
             );
         }
         body = body.push(list);
@@ -94,21 +94,21 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
                 p.duplicates.len()
             ),
             &p.duplicates,
-            t::TEXT_MUTED,
+            t::text_muted(),
         ));
     }
     if !p.errors.is_empty() {
         body = body.push(problem_list(
             format!("Errors ({}) — these rows are skipped", p.errors.len()),
             &p.errors,
-            t::DANGER,
+            t::danger(),
         ));
     }
     if !p.warnings.is_empty() {
         body = body.push(problem_list(
             format!("Warnings ({})", p.warnings.len()),
             &p.warnings,
-            t::WARNING,
+            t::warning(),
         ));
     }
 
@@ -116,8 +116,8 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
     let content = column![]
         .spacing(14)
         .width(Length::Fixed(560.0))
-        .push(text("Import CSV").size(18).color(t::TEXT_PRIMARY))
-        .push(text(&state.file_name).size(12).color(t::TEXT_MUTED))
+        .push(text("Import CSV").size(18).color(t::text_primary()))
+        .push(text(&state.file_name).size(12).color(t::text_muted()))
         .push(scrollable(body).height(Length::Shrink).spacing(8))
         .push(
             row![]
@@ -130,16 +130,16 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
                         .style(button::secondary),
                 )
                 .push(
-                    button(text("Import").size(14).color(t::BG_PRIMARY))
+                    button(text("Import").size(14).color(t::bg_primary()))
                         .on_press_maybe(can_import.then_some(Message::ConfirmCsvImport))
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
                             background: Some(iced::Background::Color(if can_import {
-                                t::ACCENT
+                                t::accent()
                             } else {
-                                t::TEXT_MUTED
+                                t::text_muted()
                             })),
-                            text_color: t::BG_PRIMARY,
+                            text_color: t::bg_primary(),
                             border: Border {
                                 radius: 4.0.into(),
                                 ..Default::default()
@@ -153,9 +153,9 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
         .padding(28)
         .max_height(560)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::bg_modal())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 8.0.into(),
             },
