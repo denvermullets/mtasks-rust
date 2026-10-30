@@ -6,6 +6,7 @@ use crate::app::Message;
 use crate::theme as t;
 use crate::views::util::format_age;
 
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     pending_sync_count: i32,
     show_help: bool,
