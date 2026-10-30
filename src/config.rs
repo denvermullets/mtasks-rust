@@ -13,8 +13,6 @@ pub struct Config {
     pub api_token: Option<String>,
     #[serde(default)]
     pub last_synced_at: Option<DateTime<Utc>>,
-    #[serde(default = "default_sync_interval_secs")]
-    pub sync_interval_secs: u64,
     /// Rails user id of the signed-in user, captured from `/me` on sync. Used to
     /// stamp `creator_id` on locally-created issues (resolved to the local member
     /// row via its `remote_id`).
@@ -35,17 +33,12 @@ fn default_api_base_url() -> String {
     "http://localhost:3005".to_string()
 }
 
-fn default_sync_interval_secs() -> u64 {
-    60
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
             api_base_url: default_api_base_url(),
             api_token: None,
             last_synced_at: None,
-            sync_interval_secs: default_sync_interval_secs(),
             current_user_remote_id: None,
             current_user_name: None,
             display: DisplayOptions::default(),
@@ -118,6 +111,16 @@ mod tests {
         let back: Config = toml::from_str(&body).unwrap();
         assert_eq!(back.display, cfg.display);
         assert_eq!(back.filters, cfg.filters);
+    }
+
+    #[test]
+    fn old_config_with_sync_interval_secs_loads_and_drops_it_on_save() {
+        let cfg: Config =
+            toml::from_str("api_base_url = \"http://x\"\nsync_interval_secs = 30\n").unwrap();
+        assert_eq!(cfg.api_base_url, "http://x");
+        assert!(!toml::to_string_pretty(&cfg)
+            .unwrap()
+            .contains("sync_interval"));
     }
 
     #[test]
