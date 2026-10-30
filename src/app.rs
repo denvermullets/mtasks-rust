@@ -2384,16 +2384,7 @@ impl App {
                         self.sync_in_progress = true;
                         self.last_sync_error = None;
                         return Task::perform(
-                            async move {
-                                let outcome = SyncEngine::pull(&client).await;
-                                let push = SyncEngine::drain(&client).await;
-                                FullSyncReport {
-                                    pull: outcome.report,
-                                    push,
-                                    deleted_orphan_team: outcome.deleted_orphan_team,
-                                    current_user: outcome.current_user,
-                                }
-                            },
+                            async move { SyncEngine::full_cycle(&client).await },
                             Message::SyncCompleted,
                         );
                     }
