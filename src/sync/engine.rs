@@ -21,7 +21,7 @@ use rusqlite::Connection;
 use crate::api::dto::IssueDto;
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
-    ApiError, CommentParams, Direction, IssueParams, LabelParams, ProjectParams,
+    ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, ProjectParams,
 };
 use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -1255,9 +1255,21 @@ async fn pull_lanes_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = lanes::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("lanes: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "lanes").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match lanes::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("lanes: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_lanes team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1295,6 +1307,7 @@ async fn pull_lanes_step(
     // place. Hard-deleting would risk cascading FK violations on issues that
     // still reference the lane locally. Revisit when the schema gains a
     // soft-delete column.
+    store_list_etag(&conn, local_team_id, "lanes", new_etag.as_deref());
     Ok(())
 }
 
@@ -1303,9 +1316,21 @@ async fn pull_labels_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = labels::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("labels: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "labels").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match labels::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("labels: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_labels team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1335,7 +1360,20 @@ async fn pull_labels_step(
         }
         queries::upsert_label(&conn, &label).map_err(|e| format!("db (upsert label): {e}"))?;
     }
+    store_list_etag(&conn, local_team_id, "labels", new_etag.as_deref());
     Ok(())
+}
+
+/// Persist the ETag only after the list was fully applied, so a failed apply
+/// is retried with a full fetch. A response without an ETag clears the stored one.
+fn store_list_etag(conn: &Connection, team_id: &str, list: &str, etag: Option<&str>) {
+    let res = match etag {
+        Some(tag) => queries::set_list_etag(conn, team_id, list, tag),
+        None => queries::clear_list_etag(conn, team_id, list),
+    };
+    if let Err(e) = res {
+        eprintln!("[sync] phase=pull_{list} etag store failed: {e}");
+    }
 }
 
 async fn pull_members_step(
@@ -1343,9 +1381,21 @@ async fn pull_members_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = members::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("members: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "members").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match members::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("members: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_members team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1375,6 +1425,7 @@ async fn pull_members_step(
         }
         queries::upsert_member(&conn, &member).map_err(|e| format!("db (upsert member): {e}"))?;
     }
+    store_list_etag(&conn, local_team_id, "members", new_etag.as_deref());
     Ok(())
 }
 
@@ -1786,6 +1837,33 @@ mod tests {
         let mut ids = build_label_ids(&conn, "i1").unwrap().unwrap();
         ids.sort();
         assert_eq!(ids, vec![11, 22]);
+    }
+
+    #[test]
+    fn list_etag_is_stored_per_team_and_list() {
+        let conn = setup_labels_db();
+        assert_eq!(queries::get_list_etag(&conn, "t1", "labels").unwrap(), None);
+
+        store_list_etag(&conn, "t1", "labels", Some("W/\"a\""));
+        store_list_etag(&conn, "t1", "lanes", Some("W/\"b\""));
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "labels").unwrap().as_deref(),
+            Some("W/\"a\"")
+        );
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "lanes").unwrap().as_deref(),
+            Some("W/\"b\"")
+        );
+        assert_eq!(queries::get_list_etag(&conn, "t2", "labels").unwrap(), None);
+
+        // Overwrite, then clear when the server stops sending an ETag.
+        store_list_etag(&conn, "t1", "labels", Some("W/\"c\""));
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "labels").unwrap().as_deref(),
+            Some("W/\"c\"")
+        );
+        store_list_etag(&conn, "t1", "labels", None);
+        assert_eq!(queries::get_list_etag(&conn, "t1", "labels").unwrap(), None);
     }
 
     #[test]

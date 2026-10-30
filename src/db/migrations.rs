@@ -247,6 +247,19 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE issue_events ADD COLUMN new_ref TEXT;
         ",
     },
+    Migration {
+        version: 12,
+        name: "list_etags",
+        up: "
+            -- Last ETag seen per (team, list) so unchanged lists return 304.
+            CREATE TABLE IF NOT EXISTS list_etags (
+                team_id TEXT NOT NULL,
+                list TEXT NOT NULL,
+                etag TEXT NOT NULL,
+                PRIMARY KEY (team_id, list)
+            );
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -372,7 +385,7 @@ mod tests {
 
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
     }
 
@@ -381,7 +394,7 @@ mod tests {
         let conn = open_mem();
         run(&conn).unwrap();
         run(&conn).unwrap();
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     }
 
     #[test]
@@ -395,7 +408,7 @@ mod tests {
         run(&conn).unwrap();
 
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
-        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(applied_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
         assert!(table_exists(&conn, "comments"));

@@ -729,6 +729,33 @@ pub fn upsert_lane(conn: &Connection, lane: &Lane) -> Result<()> {
     Ok(())
 }
 
+/// Stored ETag for a team's list ("lanes" | "labels" | "members").
+pub fn get_list_etag(conn: &Connection, team_id: &str, list: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT etag FROM list_etags WHERE team_id = ?1 AND list = ?2",
+        params![team_id, list],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+pub fn set_list_etag(conn: &Connection, team_id: &str, list: &str, etag: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO list_etags (team_id, list, etag) VALUES (?1, ?2, ?3)
+         ON CONFLICT(team_id, list) DO UPDATE SET etag = excluded.etag",
+        params![team_id, list, etag],
+    )?;
+    Ok(())
+}
+
+pub fn clear_list_etag(conn: &Connection, team_id: &str, list: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM list_etags WHERE team_id = ?1 AND list = ?2",
+        params![team_id, list],
+    )?;
+    Ok(())
+}
+
 pub fn upsert_label(conn: &Connection, label: &Label) -> Result<()> {
     conn.execute(
         "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
