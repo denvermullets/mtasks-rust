@@ -2190,6 +2190,19 @@ fn apply_pulled_projects(
 /// Cursor resource name for the issue index in `pull_cursors`.
 const ISSUES_CURSOR: &str = "issues";
 
+/// The request for one page of the issue pull. A full pull (no cursor) is the
+/// same request as an incremental one minus `updated_since`: detail rows,
+/// archived issues included, so `archived_at` on the rows drives archive state.
+fn issue_pull_query(since: Option<&str>, after_id: Option<i64>) -> issues::IssuePageQuery {
+    issues::IssuePageQuery {
+        updated_since: since.map(str::to_string),
+        include_detail: true,
+        include_archived: true,
+        limit: Some(cursor::PAGE_LIMIT),
+        after_id,
+    }
+}
+
 /// Pull a team's issues with full detail in paged requests. With a stored
 /// cursor only rows changed since (cursor minus a small overlap) are fetched;
 /// without one the whole team is fetched the same way. The cursor advances to
@@ -2207,16 +2220,7 @@ async fn pull_issues_step(
     };
 
     let collected = cursor::collect_pages(|after_id| {
-        let query = issues::IssuePageQuery {
-            updated_since: since.clone(),
-            include_detail: true,
-            // Incremental pulls learn about archive/unarchive from
-            // `archived_at` on the rows; a full pull stays active-only and
-            // relies on the missing-row sweep below.
-            include_archived: since.is_some(),
-            limit: Some(cursor::PAGE_LIMIT),
-            after_id,
-        };
+        let query = issue_pull_query(since.as_deref(), after_id);
         async move { issues::list_page(client, team_remote_id, &query).await }
     })
     .await
@@ -2244,8 +2248,10 @@ async fn pull_issues_step(
         ));
     }
     if since.is_none() {
-        // A full (unfiltered) listing is the complete set of active issues, so
-        // anything missing from it was archived or removed server-side.
+        // A full (unfiltered) listing includes archived issues, so the rows
+        // carry their own `archived_at`. A local issue the listing does not
+        // return at all is no longer visible server-side (deleted or moved
+        // out of reach); archive it rather than leave it looking live.
         let active_ids: Vec<i64> = dtos.iter().map(|d| d.id).collect();
         let _ = queries::archive_missing_issues(&conn, local_team_id, &active_ids);
     }
@@ -3872,6 +3878,23 @@ mod tests {
         queries::clear_pull_cursor(&conn, "t1", "issues").unwrap();
         assert_eq!(queries::get_pull_cursor(&conn, "t1", "issues").unwrap(), None);
         assert!(queries::get_pull_cursor(&conn, "t1", "comments").unwrap().is_some());
+    }
+
+    #[test]
+    fn full_issue_pull_is_the_incremental_request_without_updated_since() {
+        let full = issue_pull_query(None, Some(9));
+        let incremental = issue_pull_query(Some("2026-10-30T12:00:00Z"), Some(9));
+        assert!(full.include_archived && full.include_detail);
+        assert_eq!(full.updated_since, None);
+        assert_eq!(
+            issues::IssuePageQuery {
+                updated_since: None,
+                ..incremental
+            }
+            .query_string(),
+            full.query_string()
+        );
+        assert!(full.query_string().contains("include_archived=1"));
     }
 
     #[test]
