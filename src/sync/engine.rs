@@ -24,7 +24,7 @@ use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
-    ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, ProjectParams,
+    ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
 };
 use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -210,18 +210,19 @@ impl SyncEngine {
     }
 
     /// One full Data sync cycle: drain the push queue first, then pull, so the
-    /// pull reflects the user's own edits. A cheap `/me` preflight reads write
-    /// scope so a read-only token skips the push half (entries stay pending,
-    /// [`PushPause::ReadOnly`]); the pull still runs. A 401 on the push half
-    /// pauses the whole cycle (the pull is skipped).
+    /// pull reflects the user's own edits. One `/me` call opens the cycle; its
+    /// result ([`CycleCtx`]) feeds the write-scope gate, the push half, the
+    /// reconciliation lookups and the pull. A read-only token skips the push
+    /// half (entries stay pending, [`PushPause::ReadOnly`]); the pull still
+    /// runs. A 401 on the push half pauses the whole cycle (the pull is
+    /// skipped).
     pub async fn full_cycle(client: &ApiClient) -> FullSyncReport {
-        let can_write = users::me(client)
-            .await
-            .ok()
-            .map(|m| m.token.has_write_scope());
-        run_cycle(can_write, Self::drain_if_writable(client, can_write), || {
-            Self::pull(client)
-        })
+        let ctx = CycleCtx::fetch(client).await;
+        run_cycle(
+            ctx.can_write(),
+            Self::drain_if_writable(client, &ctx),
+            || Self::pull(client, &ctx),
+        )
         .await
     }
 
@@ -229,52 +230,87 @@ impl SyncEngine {
     /// gate as [`Self::full_cycle`], then drain the queue. No pull, so a burst
     /// of edits costs one `/me` plus the pushes.
     pub async fn push_cycle(client: &ApiClient) -> FullSyncReport {
-        let can_write = users::me(client)
-            .await
-            .ok()
-            .map(|m| m.token.has_write_scope());
-        let push = Self::drain_if_writable(client, can_write).await;
-        push_only_report(can_write, push)
+        let ctx = CycleCtx::fetch(client).await;
+        let push = Self::drain_if_writable(client, &ctx).await;
+        push_only_report(ctx.can_write(), push)
     }
 
     /// Drain unless `/me` said the token cannot write; then skip every push
-    /// (entries stay pending) and report [`PushPause::ReadOnly`].
-    pub async fn drain_if_writable(client: &ApiClient, can_write: Option<bool>) -> SyncReport {
-        if can_write == Some(false) {
+    /// (entries stay pending, one `parked` log line each) and report
+    /// [`PushPause::ReadOnly`].
+    pub async fn drain_if_writable(client: &ApiClient, ctx: &CycleCtx) -> SyncReport {
+        if ctx.can_write() == Some(false) {
+            park_all(read_pending().unwrap_or_default().iter(), READ_ONLY_REASON);
             return read_only_report();
         }
-        Self::drain(client).await
+        Self::drain(client, ctx).await
     }
 
-    pub async fn drain(client: &ApiClient) -> SyncReport {
+    pub async fn drain(client: &ApiClient, ctx: &CycleCtx) -> SyncReport {
         let mut report = SyncReport::default();
 
         let entries = match read_pending() {
             Ok(v) => v,
             Err(msg) => {
-                eprintln!("[sync] outcome=fatal reason=\"{msg}\"");
+                sync_log("drain", "fatal", &msg);
                 report.last_error = Some(msg);
                 return report;
             }
         };
 
-        for entry in entries {
+        for (i, entry) in entries.iter().enumerate() {
             let entry_id = match entry.id {
                 Some(id) => id,
                 None => continue,
             };
 
-            if entry_team_is_inaccessible(&entry) {
+            if entry_team_is_inaccessible(entry) {
+                sync_log(
+                    &entry_scope(entry_id, entry),
+                    "parked",
+                    "team access lost; entry stays pending",
+                );
                 continue;
             }
 
-            let outcome = process(client, &entry, entry_id).await;
-            if record(&mut report, &entry, entry_id, outcome) {
+            let outcome = process(client, ctx, entry, entry_id).await;
+            if record(&mut report, entry, entry_id, outcome) {
+                // Pushes are paused: everything after this entry is skipped
+                // untouched, so say so for each of them.
+                let reason = match &report.push_paused {
+                    Some(PushPause::ReadOnly) => READ_ONLY_REASON,
+                    _ => PAUSED_REASON,
+                };
+                park_all(entries[i + 1..].iter(), reason);
                 break;
             }
         }
 
         report
+    }
+}
+
+/// What one sync cycle learned from its single `/me` call. Every part of the
+/// cycle (write-scope gate, push, create reconciliation, pull) reads this
+/// instead of calling `/me` again.
+pub struct CycleCtx {
+    me: Result<MeDto, ApiError>,
+}
+
+impl CycleCtx {
+    pub async fn fetch(client: &ApiClient) -> Self {
+        Self {
+            me: users::me(client).await,
+        }
+    }
+
+    pub fn from_me(me: Result<MeDto, ApiError>) -> Self {
+        Self { me }
+    }
+
+    /// `Some(true/false)` from the token's write scope; `None` when `/me` failed.
+    pub fn can_write(&self) -> Option<bool> {
+        self.me.as_ref().ok().map(|m| m.token.has_write_scope())
     }
 }
 
@@ -329,9 +365,14 @@ fn read_only_report() -> SyncReport {
     }
 }
 
-async fn process(client: &ApiClient, entry: &SyncQueueEntry, entry_id: i64) -> Outcome {
+async fn process(
+    client: &ApiClient,
+    ctx: &CycleCtx,
+    entry: &SyncQueueEntry,
+    entry_id: i64,
+) -> Outcome {
     match (entry.entity_type.as_str(), entry.action.as_str()) {
-        ("issue", "create") => issue_create(client, &entry.entity_id, entry_id).await,
+        ("issue", "create") => issue_create(client, ctx, &entry.entity_id, entry_id).await,
         ("issue", "update") => issue_update(client, &entry.entity_id).await,
         ("issue", "delete") => {
             issue_delete(client, &entry.entity_id, entry.payload.as_deref()).await
@@ -347,30 +388,98 @@ async fn process(client: &ApiClient, entry: &SyncQueueEntry, entry_id: i64) -> O
     }
 }
 
-/// Apply `outcome` to the report/queue. Returns true when the drain should
-/// stop pushing (remaining entries are left untouched, hence still pending).
+// ── Sync log lines ────────────────────────────────────────────────────────
+//
+// Every `[sync]` line has one shape: `[sync] <scope> outcome=<o> reason="<r>"`.
+// The scope is `entry_id=<n> type=<t> action=<a>` for a queue entry or
+// `phase=<p> [team=<remote id>]` for a pull step. A queue entry gets exactly
+// one line per drain, whatever happened to it:
+//   synced  - pushed (or nothing to push); the entry is done
+//   pending - will be retried on the next drain
+//   parked  - kept pending without being retried (paused pushes, read-only
+//             token, lost team access)
+//   dropped - permanently rejected; marked synced so it is not retried
+
+const READ_ONLY_REASON: &str = "read-only token; push skipped";
+const PAUSED_REASON: &str = "pushes paused earlier in this drain";
+
+fn pull_mode(since: &Option<String>) -> &'static str {
+    if since.is_some() {
+        "incremental"
+    } else {
+        "full"
+    }
+}
+
+fn log_line(scope: &str, outcome: &str, reason: &str) -> String {
+    format!(
+        "[sync] {scope} outcome={outcome} reason=\"{}\"",
+        reason.replace('"', "'")
+    )
+}
+
+fn sync_log(scope: &str, outcome: &str, reason: &str) {
+    eprintln!("{}", log_line(scope, outcome, reason));
+}
+
+fn entry_scope(entry_id: i64, entry: &SyncQueueEntry) -> String {
+    format!(
+        "entry_id={entry_id} type={} action={}",
+        entry.entity_type, entry.action
+    )
+}
+
+fn phase_scope(phase: &str, team_remote_id: Option<i64>) -> String {
+    match team_remote_id {
+        Some(t) => format!("phase={phase} team={t}"),
+        None => format!("phase={phase}"),
+    }
+}
+
+/// Outcome label and reason for an entry's log line.
+fn describe(outcome: &Outcome) -> (&'static str, &str) {
+    match outcome {
+        Outcome::Success | Outcome::Created => ("synced", "ok"),
+        Outcome::DropAndLog(r) => ("dropped", r),
+        Outcome::LeavePending(r) => ("pending", r),
+        Outcome::PausePushes(_, r) | Outcome::TeamAccessLost(_, r) => ("parked", r),
+    }
+}
+
+/// One `parked` line per entry that is skipped without being attempted.
+fn park_all<'a>(entries: impl Iterator<Item = &'a SyncQueueEntry>, reason: &str) {
+    for entry in entries {
+        if let Some(id) = entry.id {
+            sync_log(&entry_scope(id, entry), "parked", reason);
+        }
+    }
+}
+
+/// Apply `outcome` to the report/queue and log exactly one line for the entry.
+/// Returns true when the drain should stop pushing (remaining entries are
+/// left untouched, hence still pending).
 fn record(
     report: &mut SyncReport,
     entry: &SyncQueueEntry,
     entry_id: i64,
     outcome: Outcome,
 ) -> bool {
+    let scope = entry_scope(entry_id, entry);
+    let (label, reason) = describe(&outcome);
     match outcome {
         Outcome::Success => {
-            if let Err(e) = mark_synced(entry_id) {
-                eprintln!(
-                    "[sync] entry_id={entry_id} type={} action={} outcome=mark_synced_failed reason=\"{e}\"",
-                    entry.entity_type, entry.action
-                );
+            match mark_synced(entry_id) {
+                Ok(()) => sync_log(&scope, label, reason),
+                Err(e) => sync_log(&scope, "pending", &format!("mark_synced failed: {e}")),
             }
             report.processed += 1;
         }
-        Outcome::Created => report.processed += 1,
+        Outcome::Created => {
+            sync_log(&scope, label, reason);
+            report.processed += 1;
+        }
         Outcome::PausePushes(pause, reason) => {
-            eprintln!(
-                "[sync] entry_id={entry_id} type={} action={} outcome=pause reason=\"{reason}\"",
-                entry.entity_type, entry.action
-            );
+            sync_log(&scope, "parked", &reason);
             report.failed += 1;
             record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
@@ -378,10 +487,7 @@ fn record(
             return true;
         }
         Outcome::TeamAccessLost(team_remote_id, reason) => {
-            eprintln!(
-                "[sync] entry_id={entry_id} type={} action={} outcome=team_access_lost team={team_remote_id} reason=\"{reason}\"",
-                entry.entity_type, entry.action
-            );
+            sync_log(&scope, "parked", &reason);
             if let Ok(conn) = open() {
                 let _ = queries::set_team_access_lost(&conn, team_remote_id, true);
             }
@@ -390,20 +496,14 @@ fn record(
             report.last_error = Some(reason);
         }
         Outcome::DropAndLog(reason) => {
-            eprintln!(
-                "[sync] entry_id={entry_id} type={} action={} outcome=drop reason=\"{reason}\"",
-                entry.entity_type, entry.action
-            );
+            sync_log(&scope, "dropped", &reason);
             let _ = mark_synced(entry_id);
             report.failed += 1;
             record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
         }
         Outcome::LeavePending(reason) => {
-            eprintln!(
-                "[sync] entry_id={entry_id} type={} action={} outcome=retry reason=\"{reason}\"",
-                entry.entity_type, entry.action
-            );
+            sync_log(&scope, "pending", &reason);
             report.failed += 1;
             record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
@@ -558,7 +658,12 @@ fn prep_issue_update(entity_id: &str) -> Prep<IssueUpdatePrep> {
     })
 }
 
-async fn issue_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
+async fn issue_create(
+    client: &ApiClient,
+    ctx: &CycleCtx,
+    entity_id: &str,
+    entry_id: i64,
+) -> Outcome {
     let prep = match prep_issue_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
@@ -569,14 +674,21 @@ async fn issue_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
         Err(o) => return o,
     };
     if let Some(since) = &attempt.previous {
-        match find_issue_on_server(client, prep.team_remote_id, &prep.params, since, &attempt)
-            .await
+        match find_issue_on_server(
+            client,
+            ctx,
+            prep.team_remote_id,
+            &prep.params,
+            since,
+            &attempt,
+        )
+        .await
         {
             Ok(Some(remote_id)) => {
                 return commit_create(entry_id, "issues", &prep.local_id, remote_id)
             }
             Ok(None) => {}
-            Err(e) => return classify(&e),
+            Err(o) => return o,
         }
     }
 
@@ -816,21 +928,30 @@ fn match_label(candidates: &[LabelDto], name: &str, taken: &HashSet<i64>) -> Opt
 
 async fn find_issue_on_server(
     client: &ApiClient,
+    ctx: &CycleCtx,
     team_remote_id: i64,
     params: &IssueParams,
     attempted_at: &str,
     attempt: &Attempt,
-) -> Result<Option<i64>, ApiError> {
+) -> Result<Option<i64>, Outcome> {
     let Some(title) = params.title.as_deref() else {
         return Ok(None);
     };
-    let me = users::me(client).await?;
+    // The cycle's one `/me` result. Without it the creator can't be matched,
+    // so keep the entry pending rather than POSTing blind.
+    let me = match &ctx.me {
+        Ok(me) => me,
+        Err(e) => return Err(Outcome::LeavePending(format!("/me unavailable: {e}"))),
+    };
     let query = issues::IssuePageQuery {
         updated_since: Some(attempted_at.to_string()),
         limit: Some(RECONCILE_PAGE_LIMIT),
         ..Default::default()
     };
-    let candidates = issues::list_page(client, team_remote_id, &query).await?.rows;
+    let candidates = issues::list_page(client, team_remote_id, &query)
+        .await
+        .map_err(|e| classify(&e))?
+        .rows;
     Ok(match_issue(
         &candidates,
         me.id,
@@ -1580,16 +1701,16 @@ impl SyncEngine {
     /// Returns a [`PullOutcome`] summarizing row counts plus the local UUID of
     /// the locally-seeded "My Project" team if pull determined it was redundant
     /// (the caller uses this to repoint `selected_team_id`).
-    pub async fn pull(client: &ApiClient) -> PullOutcome {
+    pub async fn pull(client: &ApiClient, ctx: &CycleCtx) -> PullOutcome {
         let mut report = SyncReport::default();
         let mut deleted_orphan_team = None;
 
-        // Phase 1: identify the token's scope.
-        let me = match users::me(client).await {
+        // Phase 1: the token's scope, from the cycle's single `/me` call.
+        let me = match &ctx.me {
             Ok(m) => m,
             Err(e) => {
                 let msg = format!("/me: {e}");
-                eprintln!("[sync] outcome=fatal phase=pull reason=\"{msg}\"");
+                sync_log("phase=pull", "fatal", &msg);
                 report.failed += 1;
                 note_pull_failure(&mut report, &msg);
                 report.last_error = Some(msg);
@@ -1789,7 +1910,7 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
         match queries::cleanup_orphan_seed_team(&conn) {
             Ok(opt) => opt,
             Err(e) => {
-                eprintln!("[sync] phase=pull_teams cleanup_orphan reason=\"db: {e}\"");
+                sync_log("phase=pull_teams", "cleanup_orphan_failed", &format!("db: {e}"));
                 None
             }
         }
@@ -1800,65 +1921,106 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
     Ok(deleted_orphan)
 }
 
+/// Conditional (ETag) pull shared by the lane, label and member lists: send
+/// the stored ETag, skip on 304, merge each row by the usual pending-edit rule
+/// (`decide`), then store the new ETag only after every row was applied.
+///
+/// - `entity` is the sync-queue entity type (`"lane"`), `list` the list and
+///   ETag name (`"lanes"`).
+/// - `fetch` performs the conditional GET with the stored ETag.
+/// - `find` returns the local row for a DTO as `(local id, local updated_at)`.
+/// - `store` converts the DTO (reusing the local id when there is one) and
+///   upserts it under `local_team_id`.
+#[allow(clippy::too_many_arguments)]
+async fn pull_etag_list<D, Fut>(
+    entity: &str,
+    list: &str,
+    team_remote_id: i64,
+    local_team_id: &str,
+    fetch: impl FnOnce(Option<String>) -> Fut,
+    set_team: impl Fn(&mut D, i64),
+    remote_updated: impl Fn(&D) -> String,
+    find: impl Fn(&Connection, &D) -> Result<Option<(String, String)>, String>,
+    store: impl Fn(&Connection, D, Option<String>, &str) -> Result<(), String>,
+) -> Result<(), String>
+where
+    Fut: std::future::Future<Output = Result<Conditional<Vec<D>>, ApiError>>,
+{
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, list).unwrap_or(None)
+    };
+    let (dtos, new_etag) = match fetch(stored)
+        .await
+        .map_err(|e| format!("{list}: {e}"))?
+    {
+        Conditional::NotModified => {
+            sync_log(
+                &phase_scope(&format!("pull_{list}"), Some(team_remote_id)),
+                "not_modified",
+                "304",
+            );
+            return Ok(());
+        }
+        Conditional::Modified { data, etag } => (data, etag),
+    };
+
+    let conn = open()?;
+    for mut dto in dtos {
+        // Rails omits team_id on the wire; inject from the URL path.
+        set_team(&mut dto, team_remote_id);
+
+        let existing = find(&conn, &dto)?;
+        let has_pending = match &existing {
+            Some((local_id, _)) => sync_queue::has_pending_entry(&conn, entity, local_id)
+                .map_err(|e| format!("db: {e}"))?,
+            None => false,
+        };
+
+        if let Some((_, local_updated)) = &existing {
+            if decide(local_updated, &remote_updated(&dto), has_pending)
+                == MergeDecision::KeepLocal
+            {
+                continue;
+            }
+        }
+        store(&conn, dto, existing.map(|(id, _)| id), local_team_id)?;
+    }
+    store_list_etag(&conn, local_team_id, list, new_etag.as_deref());
+    Ok(())
+}
+
 async fn pull_lanes_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let stored = {
-        let conn = open()?;
-        queries::get_list_etag(&conn, local_team_id, "lanes").unwrap_or(None)
-    };
-    let (dtos, new_etag) =
-        match lanes::list_conditional(client, team_remote_id, stored.as_deref())
-            .await
-            .map_err(|e| format!("lanes: {e}"))?
-        {
-            Conditional::NotModified => {
-                eprintln!("[sync] phase=pull_lanes team={team_remote_id} 304 not modified");
-                return Ok(());
-            }
-            Conditional::Modified { data, etag } => (data, etag),
-        };
-
-    let conn = open()?;
-    for mut dto in dtos {
-        // Rails omits team_id on the wire; inject from the URL path.
-        dto.team_id = team_remote_id;
-
-        let existing = queries::find_lane_by_remote_id(&conn, dto.id)
-            .map_err(|e| format!("db (find lane): {e}"))?;
-        let has_pending = match &existing {
-            Some(l) => sync_queue::has_pending_entry(&conn, "lane", &l.id)
-                .map_err(|e| format!("db: {e}"))?,
-            None => false,
-        };
-        let remote_updated = dto.updated_at.clone().unwrap_or_default();
-
-        if let Some(local) = &existing {
-            if decide(&local.updated_at, &remote_updated, has_pending) == MergeDecision::KeepLocal {
-                continue;
-            }
-        }
-
-        let existing_uuid = existing.as_ref().map(|l| l.id.clone());
-        let mut lane = dto
-            .into_model(&conn, existing_uuid)
-            .map_err(|e| format!("convert lane: {e}"))?;
-        // into_model resolves team via local_uuid_for on the dto's team_id;
-        // sanity-check we landed on the team we expected.
-        if lane.team_id != local_team_id {
-            lane.team_id = local_team_id.to_string();
-        }
-        queries::upsert_lane(&conn, &lane).map_err(|e| format!("db (upsert lane): {e}"))?;
-    }
-
     // Lanes table has no archived_at column, so missing lanes are left in
     // place. Hard-deleting would risk cascading FK violations on issues that
     // still reference the lane locally. Revisit when the schema gains a
     // soft-delete column.
-    store_list_etag(&conn, local_team_id, "lanes", new_etag.as_deref());
-    Ok(())
+    pull_etag_list(
+        "lane",
+        "lanes",
+        team_remote_id,
+        local_team_id,
+        |etag| async move { lanes::list_conditional(client, team_remote_id, etag.as_deref()).await },
+        |dto, team| dto.team_id = team,
+        |dto| dto.updated_at.clone().unwrap_or_default(),
+        |conn, dto| {
+            let found = queries::find_lane_by_remote_id(conn, dto.id)
+                .map_err(|e| format!("db (find lane): {e}"))?;
+            Ok(found.map(|l| (l.id, l.updated_at)))
+        },
+        |conn, dto, existing, local_team_id| {
+            let mut lane = dto
+                .into_model(conn, existing)
+                .map_err(|e| format!("convert lane: {e}"))?;
+            lane.team_id = local_team_id.to_string();
+            queries::upsert_lane(conn, &lane).map_err(|e| format!("db (upsert lane): {e}"))
+        },
+    )
+    .await
 }
 
 async fn pull_labels_step(
@@ -1866,52 +2028,57 @@ async fn pull_labels_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let stored = {
-        let conn = open()?;
-        queries::get_list_etag(&conn, local_team_id, "labels").unwrap_or(None)
-    };
-    let (dtos, new_etag) =
-        match labels::list_conditional(client, team_remote_id, stored.as_deref())
-            .await
-            .map_err(|e| format!("labels: {e}"))?
-        {
-            Conditional::NotModified => {
-                eprintln!("[sync] phase=pull_labels team={team_remote_id} 304 not modified");
-                return Ok(());
-            }
-            Conditional::Modified { data, etag } => (data, etag),
-        };
-
-    let conn = open()?;
-    for mut dto in dtos {
-        dto.team_id = team_remote_id;
-
-        let existing = queries::find_label_by_remote_id(&conn, dto.id)
-            .map_err(|e| format!("db (find label): {e}"))?;
-        let has_pending = match &existing {
-            Some(l) => sync_queue::has_pending_entry(&conn, "label", &l.id)
-                .map_err(|e| format!("db: {e}"))?,
-            None => false,
-        };
-        let remote_updated = dto.updated_at.clone().unwrap_or_default();
-
-        if let Some(local) = &existing {
-            if decide(&local.updated_at, &remote_updated, has_pending) == MergeDecision::KeepLocal {
-                continue;
-            }
-        }
-
-        let existing_uuid = existing.as_ref().map(|l| l.id.clone());
-        let mut label = dto
-            .into_model(&conn, existing_uuid)
-            .map_err(|e| format!("convert label: {e}"))?;
-        if label.team_id != local_team_id {
+    pull_etag_list(
+        "label",
+        "labels",
+        team_remote_id,
+        local_team_id,
+        |etag| async move { labels::list_conditional(client, team_remote_id, etag.as_deref()).await },
+        |dto, team| dto.team_id = team,
+        |dto| dto.updated_at.clone().unwrap_or_default(),
+        |conn, dto| {
+            let found = queries::find_label_by_remote_id(conn, dto.id)
+                .map_err(|e| format!("db (find label): {e}"))?;
+            Ok(found.map(|l| (l.id, l.updated_at)))
+        },
+        |conn, dto, existing, local_team_id| {
+            let mut label = dto
+                .into_model(conn, existing)
+                .map_err(|e| format!("convert label: {e}"))?;
             label.team_id = local_team_id.to_string();
-        }
-        queries::upsert_label(&conn, &label).map_err(|e| format!("db (upsert label): {e}"))?;
-    }
-    store_list_etag(&conn, local_team_id, "labels", new_etag.as_deref());
-    Ok(())
+            queries::upsert_label(conn, &label).map_err(|e| format!("db (upsert label): {e}"))
+        },
+    )
+    .await
+}
+
+async fn pull_members_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    pull_etag_list(
+        "member",
+        "members",
+        team_remote_id,
+        local_team_id,
+        |etag| async move { members::list_conditional(client, team_remote_id, etag.as_deref()).await },
+        |dto, team| dto.team_id = team,
+        |dto| dto.updated_at.clone().unwrap_or_default(),
+        |conn, dto| {
+            let found = queries::find_member_by_remote_id(conn, dto.id)
+                .map_err(|e| format!("db (find member): {e}"))?;
+            Ok(found.map(|m| (m.id, m.updated_at)))
+        },
+        |conn, dto, existing, local_team_id| {
+            let mut member = dto
+                .into_model(conn, existing)
+                .map_err(|e| format!("convert member: {e}"))?;
+            member.team_id = local_team_id.to_string();
+            queries::upsert_member(conn, &member).map_err(|e| format!("db (upsert member): {e}"))
+        },
+    )
+    .await
 }
 
 /// Persist the ETag only after the list was fully applied, so a failed apply
@@ -1922,61 +2089,12 @@ fn store_list_etag(conn: &Connection, team_id: &str, list: &str, etag: Option<&s
         None => queries::clear_list_etag(conn, team_id, list),
     };
     if let Err(e) = res {
-        eprintln!("[sync] phase=pull_{list} etag store failed: {e}");
+        sync_log(
+            &format!("phase=pull_{list}"),
+            "etag_store_failed",
+            &e.to_string(),
+        );
     }
-}
-
-async fn pull_members_step(
-    client: &ApiClient,
-    team_remote_id: i64,
-    local_team_id: &str,
-) -> Result<(), String> {
-    let stored = {
-        let conn = open()?;
-        queries::get_list_etag(&conn, local_team_id, "members").unwrap_or(None)
-    };
-    let (dtos, new_etag) =
-        match members::list_conditional(client, team_remote_id, stored.as_deref())
-            .await
-            .map_err(|e| format!("members: {e}"))?
-        {
-            Conditional::NotModified => {
-                eprintln!("[sync] phase=pull_members team={team_remote_id} 304 not modified");
-                return Ok(());
-            }
-            Conditional::Modified { data, etag } => (data, etag),
-        };
-
-    let conn = open()?;
-    for mut dto in dtos {
-        dto.team_id = team_remote_id;
-
-        let existing = queries::find_member_by_remote_id(&conn, dto.id)
-            .map_err(|e| format!("db (find member): {e}"))?;
-        let has_pending = match &existing {
-            Some(m) => sync_queue::has_pending_entry(&conn, "member", &m.id)
-                .map_err(|e| format!("db: {e}"))?,
-            None => false,
-        };
-        let remote_updated = dto.updated_at.clone().unwrap_or_default();
-
-        if let Some(local) = &existing {
-            if decide(&local.updated_at, &remote_updated, has_pending) == MergeDecision::KeepLocal {
-                continue;
-            }
-        }
-
-        let existing_uuid = existing.as_ref().map(|m| m.id.clone());
-        let mut member = dto
-            .into_model(&conn, existing_uuid)
-            .map_err(|e| format!("convert member: {e}"))?;
-        if member.team_id != local_team_id {
-            member.team_id = local_team_id.to_string();
-        }
-        queries::upsert_member(&conn, &member).map_err(|e| format!("db (upsert member): {e}"))?;
-    }
-    store_list_etag(&conn, local_team_id, "members", new_etag.as_deref());
-    Ok(())
 }
 
 /// Cursor resource name for the project index in `pull_cursors`.
@@ -2000,10 +2118,10 @@ async fn pull_projects_step(
     let page = projects::list_page(client, team_remote_id, since.as_deref())
         .await
         .map_err(|e| format!("projects: {e}"))?;
-    eprintln!(
-        "[sync] phase=pull_projects team_remote_id={team_remote_id} mode={} rows={}",
-        if since.is_some() { "incremental" } else { "full" },
-        page.rows.len()
+    sync_log(
+        &phase_scope("pull_projects", Some(team_remote_id)),
+        "ok",
+        &format!("mode={} rows={}", pull_mode(&since), page.rows.len()),
     );
 
     let conn = open()?;
@@ -2082,11 +2200,15 @@ async fn pull_issues_step(
     })
     .await
     .map_err(|e| format!("issues: {e}"))?;
-    eprintln!(
-        "[sync] phase=pull_issues team_remote_id={team_remote_id} mode={} requests={} rows={}",
-        if since.is_some() { "incremental" } else { "full" },
-        collected.requests,
-        collected.rows.len()
+    sync_log(
+        &phase_scope("pull_issues", Some(team_remote_id)),
+        "ok",
+        &format!(
+            "mode={} requests={} rows={}",
+            pull_mode(&since),
+            collected.requests,
+            collected.rows.len()
+        ),
     );
 
     let dtos = dedupe_by_id(collected.rows, |d| d.id);
@@ -2133,10 +2255,10 @@ async fn pull_tombstones_step(
     let page = deleted::list(client, team_remote_id, since.as_deref())
         .await
         .map_err(|e| format!("deleted: {e}"))?;
-    eprintln!(
-        "[sync] phase=pull_deleted team_remote_id={team_remote_id} mode={} rows={}",
-        if since.is_some() { "incremental" } else { "full" },
-        page.rows.len()
+    sync_log(
+        &phase_scope("pull_deleted", Some(team_remote_id)),
+        "ok",
+        &format!("mode={} rows={}", pull_mode(&since), page.rows.len()),
     );
     let conn = open()?;
     let failed = apply_tombstones(&conn, local_team_id, &page.rows);
@@ -2181,10 +2303,10 @@ async fn pull_comments_step(
     let page = comments::list_team_updated_since(client, team_remote_id, since.as_deref())
         .await
         .map_err(|e| format!("comments: {e}"))?;
-    eprintln!(
-        "[sync] phase=pull_comments team_remote_id={team_remote_id} mode={} rows={}",
-        if since.is_some() { "incremental" } else { "full" },
-        page.rows.len()
+    sync_log(
+        &phase_scope("pull_comments", Some(team_remote_id)),
+        "ok",
+        &format!("mode={} rows={}", pull_mode(&since), page.rows.len()),
     );
     let dtos = drop_deleted_comments(dedupe_by_id(page.rows, |d| d.id), deleted_comments);
     let total = dtos.len();
@@ -2237,9 +2359,10 @@ fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto
             _ => continue,
         };
         if let Err(e) = result {
-            eprintln!(
-                "[sync] phase=pull_deleted type={} remote_id={id} apply_failed reason=\"{e}\"",
-                row.record_type
+            sync_log(
+                &format!("phase=pull_deleted type={} remote_id={id}", row.record_type),
+                "apply_failed",
+                &e.to_string(),
             );
             failed += 1;
         }
@@ -2282,9 +2405,10 @@ fn apply_pulled_comments(conn: &Connection, dtos: Vec<CommentDto>) -> usize {
     }
     // Whatever is left has a parent we never saw: store as top-level.
     for dto in remaining {
-        eprintln!(
-            "[sync] phase=pull_comments comment_remote_id={} parent {:?} not found locally; storing top-level",
-            dto.id, dto.parent_id
+        sync_log(
+            &format!("phase=pull_comments comment_remote_id={}", dto.id),
+            "stored_top_level",
+            &format!("parent {:?} not found locally", dto.parent_id),
         );
         if apply_one_comment(conn, dto, None).is_err() {
             failed += 1;
@@ -2380,8 +2504,10 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
             Ok(true)
         })();
         if let Err(e) = result {
-            eprintln!(
-                "[sync] phase=pull_issues issue_remote_id={issue_remote_id} skipped reason=\"{e}\""
+            sync_log(
+                &format!("phase=pull_issues issue_remote_id={issue_remote_id}"),
+                "skipped",
+                &e.to_string(),
             );
             skipped += 1;
         }
@@ -2400,9 +2526,10 @@ fn persist_pulled_dependencies(conn: &Connection, links: &[PulledDependency]) {
         let (source, target) = match (find(l.source_remote_id), find(l.target_remote_id)) {
             (Ok(Some(s)), Ok(Some(t))) => (s, t),
             _ => {
-                eprintln!(
-                    "[sync] phase=pull_issues dependency remote_id={} endpoint not found locally; skipping",
-                    l.dependency_id
+                sync_log(
+                    &format!("phase=pull_issues dependency_remote_id={}", l.dependency_id),
+                    "skipped",
+                    "endpoint not found locally",
                 );
                 continue;
             }
@@ -2415,9 +2542,10 @@ fn persist_pulled_dependencies(conn: &Connection, links: &[PulledDependency]) {
             l.kind,
             l.direction,
         ) {
-            eprintln!(
-                "[sync] phase=pull_issues dependency remote_id={} write_failed reason=\"{e}\"",
-                l.dependency_id
+            sync_log(
+                &format!("phase=pull_issues dependency_remote_id={}", l.dependency_id),
+                "write_failed",
+                &e.to_string(),
             );
         }
     }
@@ -2439,8 +2567,10 @@ fn resolve_local_label_ids(conn: &Connection, remote_ids: &[i64]) -> Result<Vec<
         match queries::find_label_by_remote_id(conn, *remote_id) {
             Ok(Some(label)) => local.push(label.id),
             Ok(None) => {
-                eprintln!(
-                    "[sync] phase=pull_issues label remote_id={remote_id} not found locally; skipping"
+                sync_log(
+                    &format!("phase=pull_issues label_remote_id={remote_id}"),
+                    "skipped",
+                    "not found locally",
                 );
             }
             Err(e) => return Err(format!("db (find label): {e}")),
@@ -2531,10 +2661,66 @@ mod tests {
         assert!(ro.cycle_succeeded());
     }
 
+    fn ctx_with_scopes(scopes: &[&str]) -> CycleCtx {
+        let me: MeDto = serde_json::from_value(serde_json::json!({
+            "id": 7, "name": "Me", "email": "me@example.com",
+            "token": { "name": "t", "scopes": scopes }
+        }))
+        .unwrap();
+        CycleCtx::from_me(Ok(me))
+    }
+
+    #[test]
+    fn cycle_ctx_reads_write_scope_from_the_one_me_result() {
+        assert_eq!(ctx_with_scopes(&["read"]).can_write(), Some(false));
+        assert_eq!(ctx_with_scopes(&["read", "write"]).can_write(), Some(true));
+        assert_eq!(
+            CycleCtx::from_me(Err(ApiError::MissingToken)).can_write(),
+            None
+        );
+    }
+
+    #[test]
+    fn every_outcome_logs_one_line_naming_outcome_and_reason() {
+        let entry = SyncQueueEntry {
+            id: Some(4),
+            entity_type: "issue".into(),
+            entity_id: "i1".into(),
+            action: "update".into(),
+            payload: None,
+            created_at: String::new(),
+            synced_at: None,
+        };
+        let scope = entry_scope(4, &entry);
+        let cases = [
+            (Outcome::Success, "synced"),
+            (Outcome::Created, "synced"),
+            (Outcome::DropAndLog("bad".into()), "dropped"),
+            (Outcome::LeavePending("later".into()), "pending"),
+            (
+                Outcome::PausePushes(PushPause::Forbidden, "no scope".into()),
+                "parked",
+            ),
+            (Outcome::TeamAccessLost(3, "gone".into()), "parked"),
+        ];
+        for (outcome, label) in cases {
+            let (l, reason) = describe(&outcome);
+            assert_eq!(l, label);
+            let line = log_line(&scope, l, reason);
+            assert!(line.starts_with("[sync] entry_id=4 type=issue action=update outcome="));
+            assert!(line.contains(&format!("outcome={label} reason=\"")));
+            assert_eq!(line.lines().count(), 1);
+        }
+        assert_eq!(
+            log_line(&phase_scope("pull_issues", Some(3)), "ok", "rows=2"),
+            "[sync] phase=pull_issues team=3 outcome=ok reason=\"rows=2\""
+        );
+    }
+
     #[tokio::test]
     async fn read_only_token_never_drains() {
         let client = ApiClient::new("http://127.0.0.1:9", "t").unwrap();
-        let r = SyncEngine::drain_if_writable(&client, Some(false)).await;
+        let r = SyncEngine::drain_if_writable(&client, &ctx_with_scopes(&["read"])).await;
         assert_eq!(r.push_paused, Some(PushPause::ReadOnly));
     }
 
@@ -3778,7 +3964,7 @@ mod tests {
                 created_at: "0".into(),
                 synced_at: None,
             };
-            let outcome = process(&client, &entry, 1).await;
+            let outcome = process(&client, &ctx_with_scopes(&["write"]), &entry, 1).await;
             assert!(matches!(outcome, Outcome::DropAndLog(_)));
         });
     }
