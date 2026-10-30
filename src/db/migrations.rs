@@ -266,6 +266,19 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 14,
+        name: "list_etags",
+        up: "
+            -- Last ETag seen per (team, list) so unchanged lists return 304.
+            CREATE TABLE IF NOT EXISTS list_etags (
+                team_id TEXT NOT NULL,
+                list TEXT NOT NULL,
+                etag TEXT NOT NULL,
+                PRIMARY KEY (team_id, list)
+            );
+        ",
+    },
+    Migration {
+        version: 15,
         name: "projects_status_nullable",
         // SQLite cannot drop NOT NULL in place, so rebuild the table. Runs with
         // foreign keys off (see FK_OFF_MIGRATIONS) so the DROP doesn't cascade
@@ -314,7 +327,7 @@ const MIGRATIONS: &[Migration] = &[
 /// Migrations that rebuild a table other tables reference. They must run with
 /// `PRAGMA foreign_keys=OFF`, which is a no-op inside a transaction, so `run`
 /// toggles it around the transaction.
-const FK_OFF_MIGRATIONS: &[u32] = &[14];
+const FK_OFF_MIGRATIONS: &[u32] = &[15];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -562,7 +575,7 @@ mod tests {
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
         )
         .unwrap();
-        for m in MIGRATIONS.iter().filter(|m| m.version < 14) {
+        for m in MIGRATIONS.iter().filter(|m| m.version < 15) {
             conn.execute_batch(m.up).unwrap();
             conn.execute(
                 "INSERT INTO schema_migrations VALUES (?1, 'x')",

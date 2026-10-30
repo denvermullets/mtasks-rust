@@ -21,7 +21,7 @@ use rusqlite::Connection;
 use crate::api::dto::IssueDto;
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
-    ApiError, CommentParams, Direction, IssueParams, LabelParams, ProjectParams,
+    ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, ProjectParams,
 };
 use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -1089,11 +1089,11 @@ impl SyncEngine {
     /// Pull all resources from Rails into the local DB. The set of teams to
     /// fully sync is determined by the token's scope:
     ///
-    /// - **User-scoped token** (`token.team_id == null` from `/me`) — pull
-    ///   every team the user is on, then for each team pull lanes/labels/
+    /// - **Unscoped token** (`token.team_ids` null/absent, no `team_id`) — pull
+    ///   every local non-archived team, then for each team pull lanes/labels/
     ///   members/projects/issues.
-    /// - **Team-scoped token** (`token.team_id == Some(t)`) — pull just that
-    ///   team's resources.
+    /// - **Scoped token** (`token.team_ids` list, or legacy `team_id`) — pull
+    ///   the intersection of that list with the local teams.
     ///
     /// Returns a [`PullOutcome`] summarizing row counts plus the local UUID of
     /// the locally-seeded "My Project" team if pull determined it was redundant
@@ -1139,7 +1139,7 @@ impl SyncEngine {
         }
 
         // Phase 3: figure out which teams to deeply sync.
-        let targets = match collect_pull_targets(me.token.team_id) {
+        let targets = match collect_pull_targets(me.token.scoped_team_ids().as_deref()) {
             Ok(t) => t,
             Err(msg) => {
                 report.last_error = Some(msg);
@@ -1195,37 +1195,35 @@ struct PullTarget {
     remote_id: i64,
 }
 
-fn collect_pull_targets(token_team_id: Option<i64>) -> Result<Vec<PullTarget>, String> {
+fn collect_pull_targets(scoped_ids: Option<&[i64]>) -> Result<Vec<PullTarget>, String> {
     let conn = open()?;
-    match token_team_id {
-        Some(remote_id) => {
-            let local = queries::find_team_by_remote_id(&conn, remote_id)
-                .map_err(|e| format!("db (find team): {e}"))?;
-            match local {
-                Some(t) => Ok(vec![PullTarget {
-                    local_id: t.id,
-                    remote_id,
-                }]),
-                None => Err(format!(
-                    "token is scoped to team remote_id={remote_id}, but it wasn't returned by /api/v1/teams"
-                )),
+    select_pull_targets(&conn, scoped_ids)
+}
+
+/// Choose the teams to deep-sync. `None` (unscoped token) covers every local
+/// non-archived Rails-backed team; `Some(ids)` covers the intersection of those
+/// remote ids with the local non-archived teams (empty list means none).
+fn select_pull_targets(
+    conn: &Connection,
+    scoped_ids: Option<&[i64]>,
+) -> Result<Vec<PullTarget>, String> {
+    let teams = queries::all_teams(conn).map_err(|e| format!("db (all_teams): {e}"))?;
+    Ok(teams
+        .into_iter()
+        .filter(|t| t.archived_at.is_none())
+        .filter_map(|t| {
+            let rid = t.remote_id?;
+            if let Some(ids) = scoped_ids {
+                if !ids.contains(&rid) {
+                    return None;
+                }
             }
-        }
-        None => {
-            // User-scoped token: fully sync every Rails-backed team we know
-            // about. all_teams returns the local rows; we need their remote_id.
-            let teams = queries::all_teams(&conn).map_err(|e| format!("db (all_teams): {e}"))?;
-            Ok(teams
-                .into_iter()
-                .filter_map(|t| {
-                    t.remote_id.map(|rid| PullTarget {
-                        local_id: t.id,
-                        remote_id: rid,
-                    })
-                })
-                .collect())
-        }
-    }
+            Some(PullTarget {
+                local_id: t.id,
+                remote_id: rid,
+            })
+        })
+        .collect())
 }
 
 /// Returns the local UUID of the orphan seed team if one was cleaned up.
@@ -1295,9 +1293,21 @@ async fn pull_lanes_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = lanes::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("lanes: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "lanes").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match lanes::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("lanes: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_lanes team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1335,6 +1345,7 @@ async fn pull_lanes_step(
     // place. Hard-deleting would risk cascading FK violations on issues that
     // still reference the lane locally. Revisit when the schema gains a
     // soft-delete column.
+    store_list_etag(&conn, local_team_id, "lanes", new_etag.as_deref());
     Ok(())
 }
 
@@ -1343,9 +1354,21 @@ async fn pull_labels_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = labels::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("labels: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "labels").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match labels::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("labels: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_labels team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1375,7 +1398,20 @@ async fn pull_labels_step(
         }
         queries::upsert_label(&conn, &label).map_err(|e| format!("db (upsert label): {e}"))?;
     }
+    store_list_etag(&conn, local_team_id, "labels", new_etag.as_deref());
     Ok(())
+}
+
+/// Persist the ETag only after the list was fully applied, so a failed apply
+/// is retried with a full fetch. A response without an ETag clears the stored one.
+fn store_list_etag(conn: &Connection, team_id: &str, list: &str, etag: Option<&str>) {
+    let res = match etag {
+        Some(tag) => queries::set_list_etag(conn, team_id, list, tag),
+        None => queries::clear_list_etag(conn, team_id, list),
+    };
+    if let Err(e) = res {
+        eprintln!("[sync] phase=pull_{list} etag store failed: {e}");
+    }
 }
 
 async fn pull_members_step(
@@ -1383,9 +1419,21 @@ async fn pull_members_step(
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    let dtos = members::list(client, team_remote_id)
-        .await
-        .map_err(|e| format!("members: {e}"))?;
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "members").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match members::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("members: {e}"))?
+        {
+            Conditional::NotModified => {
+                eprintln!("[sync] phase=pull_members team={team_remote_id} 304 not modified");
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
 
     let conn = open()?;
     for mut dto in dtos {
@@ -1415,6 +1463,7 @@ async fn pull_members_step(
         }
         queries::upsert_member(&conn, &member).map_err(|e| format!("db (upsert member): {e}"))?;
     }
+    store_list_etag(&conn, local_team_id, "members", new_etag.as_deref());
     Ok(())
 }
 
@@ -1817,6 +1866,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pull_targets_follow_token_team_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        for (id, remote, archived) in [
+            ("a", Some(1), None),
+            ("b", Some(2), None),
+            ("c", Some(3), Some(now)),
+            ("d", None, None),
+        ] {
+            conn.execute(
+                "INSERT INTO teams (id, name, identifier, remote_id, archived_at, created_at, updated_at)
+                 VALUES (?1, ?1, ?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![id, remote, archived, now],
+            )
+            .unwrap();
+        }
+        let ids = |t: Vec<PullTarget>| {
+            let mut v: Vec<i64> = t.into_iter().map(|t| t.remote_id).collect();
+            v.sort();
+            v
+        };
+        // Unscoped: all non-archived Rails-backed teams.
+        assert_eq!(ids(select_pull_targets(&conn, None).unwrap()), vec![1, 2]);
+        // List: intersection with local teams (99 unknown, 3 archived).
+        assert_eq!(
+            ids(select_pull_targets(&conn, Some(&[2, 3, 99])).unwrap()),
+            vec![2]
+        );
+        // Empty list: zero teams.
+        assert!(select_pull_targets(&conn, Some(&[])).unwrap().is_empty());
+    }
+
     fn setup_labels_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -1863,6 +1946,33 @@ mod tests {
         let mut ids = build_label_ids(&conn, "i1").unwrap().unwrap();
         ids.sort();
         assert_eq!(ids, vec![11, 22]);
+    }
+
+    #[test]
+    fn list_etag_is_stored_per_team_and_list() {
+        let conn = setup_labels_db();
+        assert_eq!(queries::get_list_etag(&conn, "t1", "labels").unwrap(), None);
+
+        store_list_etag(&conn, "t1", "labels", Some("W/\"a\""));
+        store_list_etag(&conn, "t1", "lanes", Some("W/\"b\""));
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "labels").unwrap().as_deref(),
+            Some("W/\"a\"")
+        );
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "lanes").unwrap().as_deref(),
+            Some("W/\"b\"")
+        );
+        assert_eq!(queries::get_list_etag(&conn, "t2", "labels").unwrap(), None);
+
+        // Overwrite, then clear when the server stops sending an ETag.
+        store_list_etag(&conn, "t1", "labels", Some("W/\"c\""));
+        assert_eq!(
+            queries::get_list_etag(&conn, "t1", "labels").unwrap().as_deref(),
+            Some("W/\"c\"")
+        );
+        store_list_etag(&conn, "t1", "labels", None);
+        assert_eq!(queries::get_list_etag(&conn, "t1", "labels").unwrap(), None);
     }
 
     #[test]

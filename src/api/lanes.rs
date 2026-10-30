@@ -1,6 +1,11 @@
-use super::{ApiClient, ApiError, LaneDto};
+use super::{ApiClient, ApiError, Conditional, LaneDto};
 
-pub async fn list(client: &ApiClient, team_id: i64) -> Result<Vec<LaneDto>, ApiError> {
+/// Conditional list: pass the stored ETag; a 304 yields `NotModified`.
+pub async fn list_conditional(
+    client: &ApiClient,
+    team_id: i64,
+    etag: Option<&str>,
+) -> Result<Conditional<Vec<LaneDto>>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/lanes");
-    client.get_list(&path).await
+    client.get_list_conditional(&path, etag).await
 }
