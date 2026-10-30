@@ -532,6 +532,14 @@ mod tests {
         assert_eq!(project_status_color(ProjectStatus::Cancelled), danger());
         assert_eq!(bg_modal(), bg_secondary());
 
+        let p = iced_theme().palette();
+        assert_eq!(p.background, bg_primary());
+        assert_eq!(p.text, text_primary());
+        assert_eq!(p.primary, accent());
+        assert_eq!(p.danger, danger());
+        set_by_key("default");
+        assert_ne!(iced_theme().palette().background, p.background);
+
         set_by_key("no-such-theme");
         assert_eq!(tok().key, "default");
         assert_eq!(accent(), dark_acc);
