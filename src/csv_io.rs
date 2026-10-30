@@ -36,7 +36,7 @@ pub const HEADERS: [&str; 20] = [
     "Parent issue",
 ];
 
-const TS_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
+use crate::db::TS_FORMAT;
 
 /// Colors for labels created during import (same swatches as the label modal).
 const LABEL_PALETTE: [&str; 6] = [
@@ -623,7 +623,7 @@ pub fn apply_import(
     team_id: &str,
     rows: &[ImportRow],
 ) -> rusqlite::Result<ImportOutcome> {
-    let now = Utc::now().format(TS_FORMAT).to_string();
+    let now = crate::db::now_iso();
     let mut outcome = ImportOutcome::default();
 
     let mut label_ids: HashMap<String, String> = queries::labels_for_team(conn, team_id)?

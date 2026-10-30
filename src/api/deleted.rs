@@ -12,7 +12,6 @@ use super::{ApiClient, ApiError, Page};
 pub struct TombstoneDto {
     pub record_type: String,
     pub record_id: i64,
-    #[allow(dead_code)]
     pub deleted_at: Option<String>,
 }
 

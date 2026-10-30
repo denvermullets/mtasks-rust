@@ -471,12 +471,6 @@ pub fn merge_comment_tree(
 // doesn't fail when the server elides them; conversions back to local models
 // fall back to `now()` if absent.
 
-fn now_iso8601() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TeamDto {
     pub id: i64,
@@ -490,7 +484,7 @@ pub struct TeamDto {
 
 impl From<TeamDto> for Team {
     fn from(dto: TeamDto) -> Self {
-        let created_at = dto.created_at.unwrap_or_else(now_iso8601);
+        let created_at = dto.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = dto.updated_at.unwrap_or_else(|| created_at.clone());
         Team {
             id: Uuid::new_v4().to_string(),
@@ -545,7 +539,7 @@ impl LaneDto {
         existing_uuid: Option<String>,
     ) -> Result<Lane, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
-        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let created_at = self.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Lane {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -598,7 +592,7 @@ impl LabelDto {
         existing_uuid: Option<String>,
     ) -> Result<Label, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
-        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let created_at = self.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Label {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -645,7 +639,7 @@ impl MemberDto {
         existing_uuid: Option<String>,
     ) -> Result<Member, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
-        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let created_at = self.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Member {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),

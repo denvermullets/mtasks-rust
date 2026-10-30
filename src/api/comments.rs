@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::{ApiClient, ApiError, CommentDto, Page};
+use super::{updated_since_query, ApiClient, ApiError, CommentDto, Page};
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CommentParams {
@@ -39,10 +39,10 @@ pub async fn list_team_updated_since(
 }
 
 fn team_comments_path(team_id: i64, updated_since: Option<&str>) -> String {
-    match updated_since {
-        Some(since) => format!("api/v1/teams/{team_id}/comments?updated_since={since}"),
-        None => format!("api/v1/teams/{team_id}/comments"),
-    }
+    format!(
+        "api/v1/teams/{team_id}/comments{}",
+        updated_since_query(updated_since)
+    )
 }
 
 /// Create a comment. `idempotency_key` (the local UUID) is sent as the
@@ -74,7 +74,7 @@ mod tests {
     fn team_comments_path_includes_cursor_only_when_given() {
         assert_eq!(
             team_comments_path(3, Some("2026-10-30T12:00:00.000000Z")),
-            "api/v1/teams/3/comments?updated_since=2026-10-30T12:00:00.000000Z"
+            "api/v1/teams/3/comments?updated_since=2026-10-30T12%3A00%3A00.000000Z"
         );
         assert_eq!(team_comments_path(3, None), "api/v1/teams/3/comments");
     }

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::{ApiClient, ApiError, Page, ProjectDto};
+use super::{updated_since_query, ApiClient, ApiError, Page, ProjectDto};
 
 /// Body for create/update — fields match Rails `ProjectsController` strong params.
 /// Use [`crate::db::models::Priority::as_rails_str`] to populate `priority`.
@@ -40,20 +40,11 @@ pub async fn list_page(
     team_id: i64,
     updated_since: Option<&str>,
 ) -> Result<Page<ProjectDto>, ApiError> {
-    let path = match updated_since {
-        Some(t) => format!("api/v1/teams/{team_id}/projects?updated_since={t}"),
-        None => format!("api/v1/teams/{team_id}/projects"),
-    };
+    let path = format!(
+        "api/v1/teams/{team_id}/projects{}",
+        updated_since_query(updated_since)
+    );
     client.get_list_page(&path).await
-}
-
-/// Projects updated at or after `updated_since` (ISO8601).
-pub async fn list_updated_since(
-    client: &ApiClient,
-    team_id: i64,
-    updated_since: &str,
-) -> Result<Vec<ProjectDto>, ApiError> {
-    Ok(list_page(client, team_id, Some(updated_since)).await?.rows)
 }
 
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<ProjectDto, ApiError> {
@@ -88,6 +79,15 @@ pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), Api
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updated_since_query_is_encoded_and_optional() {
+        assert_eq!(updated_since_query(None), "");
+        assert_eq!(
+            updated_since_query(Some("2026-10-30T12:00:00+00:00")),
+            "?updated_since=2026-10-30T12%3A00%3A00%2B00%3A00"
+        );
+    }
 
     #[test]
     fn project_params_wrap_under_project_key() {
