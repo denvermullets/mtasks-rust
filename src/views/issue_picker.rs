@@ -64,10 +64,10 @@ pub fn view<'a>(
                     .push(
                         text(ident)
                             .size(12)
-                            .color(t::TEXT_MUTED)
+                            .color(t::text_muted())
                             .width(Length::Fixed(90.0)),
                     )
-                    .push(text(&issue.title).size(13).color(t::TEXT_PRIMARY)),
+                    .push(text(&issue.title).size(13).color(t::text_primary())),
             )
             .on_press(Message::DependencyPickerSelected(issue.id.clone()))
             .padding([6, 8])
@@ -79,7 +79,7 @@ pub fn view<'a>(
     let results: Element<'a, Message> = if shown == 0 {
         text("No matching issues")
             .size(13)
-            .color(t::TEXT_MUTED)
+            .color(t::text_muted())
             .into()
     } else {
         scrollable(list).height(Length::Fixed(320.0)).into()
@@ -88,7 +88,7 @@ pub fn view<'a>(
     let content = column![]
         .spacing(14)
         .width(Length::Fixed(440.0))
-        .push(text(title).size(18).color(t::TEXT_PRIMARY))
+        .push(text(title).size(18).color(t::text_primary()))
         .push(
             text_input("Search issues…", &state.query)
                 .on_input(Message::DependencyPickerSearchChanged)
@@ -107,9 +107,9 @@ pub fn view<'a>(
     let modal = container(content)
         .padding(28)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::bg_modal())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 8.0.into(),
             },

@@ -10,8 +10,8 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{
-    merged_status_options, CardProperty, CompletedFilter, DisplayOptions, FilterField, Filters, GroupBy, OrderBy,
-    SubGroup, ViewMode, PRIORITY_TITLES,
+    merged_status_options, CardProperty, CompletedFilter, DisplayOptions, FilterField, Filters,
+    GroupBy, OrderBy, SubGroup, ViewMode, PRIORITY_TITLES,
 };
 use crate::theme as t;
 use crate::views::header;
@@ -42,9 +42,9 @@ pub fn popover<'a>(panel: Element<'a, Message>) -> Element<'a, Message> {
 
 fn panel_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(t::BG_MODAL)),
+        background: Some(iced::Background::Color(t::bg_modal())),
         border: Border {
-            color: t::BORDER,
+            color: t::border(),
             width: 1.0,
             radius: 8.0.into(),
         },
@@ -53,7 +53,7 @@ fn panel_style(_theme: &Theme) -> container::Style {
 }
 
 fn heading<'a>(label: &'a str) -> Element<'a, Message> {
-    text(label).size(11).color(t::TEXT_MUTED).into()
+    text(label).size(11).color(t::text_muted()).into()
 }
 
 /// A pill-style single-select: highlights `current`, emits `msg(value)`.
@@ -74,28 +74,26 @@ fn chips<'a, T: Copy + PartialEq + 'a>(
             if !off {
                 b = b.on_press(msg(*value));
             }
-            r = r.push(
-                b.style(move |_theme: &Theme, _status| button::Style {
-                        background: Some(iced::Background::Color(if active {
-                            t::BG_CARD_FOCUSED
-                        } else {
-                            t::BG_CARD
-                        })),
-                        text_color: if off {
-                            t::TEXT_MUTED
-                        } else if active {
-                            t::ACCENT
-                        } else {
-                            t::TEXT_SECONDARY
-                        },
-                        border: Border {
-                            color: if active { t::ACCENT } else { t::BORDER },
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        },
-                        ..Default::default()
-                    }),
-            );
+            r = r.push(b.style(move |_theme: &Theme, _status| button::Style {
+                background: Some(iced::Background::Color(if active {
+                    t::bg_card_focused()
+                } else {
+                    t::bg_card()
+                })),
+                text_color: if off {
+                    t::text_muted()
+                } else if active {
+                    t::accent()
+                } else {
+                    t::text_secondary()
+                },
+                border: Border {
+                    color: if active { t::accent() } else { t::border() },
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            }));
         }
         col = col.push(r);
     }
@@ -116,7 +114,7 @@ pub fn display_view<'a>(opts: &'a DisplayOptions) -> Element<'a, Message> {
 
     let body = column![]
         .spacing(12)
-        .push(text("Display").size(14).color(t::TEXT_PRIMARY))
+        .push(text("Display").size(14).color(t::text_primary()))
         .push(heading("VIEW"))
         .push(chips(
             &ViewMode::ALL,
@@ -202,7 +200,7 @@ fn option_group<'a>(
 ) -> Element<'a, Message> {
     let mut col: Column<'a, Message> = column![].spacing(4).push(heading(title));
     if options.is_empty() {
-        col = col.push(text("None available").size(12).color(t::TEXT_MUTED));
+        col = col.push(text("None available").size(12).color(t::text_muted()));
     }
     for (value, label) in options {
         let selected = filters.is_selected(field, &value);
@@ -271,7 +269,7 @@ pub fn filter_view<'a>(
 
     let top = row![]
         .align_y(Alignment::Center)
-        .push(text("Filters").size(14).color(t::TEXT_PRIMARY))
+        .push(text("Filters").size(14).color(t::text_primary()))
         .push(horizontal_space())
         .push(clear.style(button::secondary));
 
@@ -297,8 +295,7 @@ pub fn filter_view<'a>(
             FilterField::Status,
             filters,
             statuses,
-        ))
-        ;
+        ));
     let groups = if data.scoped_to_project {
         groups
     } else {

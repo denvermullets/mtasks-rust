@@ -74,7 +74,7 @@ fn cell_text<'a>(s: impl text::IntoFragment<'a>, width: f32) -> Element<'a, Mess
     cell(
         text(s)
             .size(12)
-            .color(t::TEXT_MUTED)
+            .color(t::text_muted())
             .wrapping(text::Wrapping::None),
         width,
     )
@@ -92,7 +92,7 @@ fn header_row<'a>(d: &DisplayOptions) -> Element<'a, Message> {
     if d.shows(CardProperty::Status) {
         r = r.push(cell_text("Status", W_STATUS));
     }
-    r = r.push(container(text("Title").size(12).color(t::TEXT_MUTED)).width(Length::Fill));
+    r = r.push(container(text("Title").size(12).color(t::text_muted())).width(Length::Fill));
     if d.shows(CardProperty::Labels) {
         r = r.push(cell_text("Labels", W_LABELS));
     }
@@ -131,7 +131,7 @@ pub fn view<'a>(
         } else {
             "No sections to show"
         };
-        return container(text(msg).size(14).color(t::TEXT_MUTED))
+        return container(text(msg).size(14).color(t::text_muted()))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into();
@@ -151,12 +151,12 @@ pub fn view<'a>(
                     row![]
                         .spacing(8)
                         .align_y(Alignment::Center)
-                        .push(text(marker).size(12).color(t::TEXT_MUTED))
-                        .push(text(col.title.clone()).size(14).color(t::TEXT_PRIMARY))
+                        .push(text(marker).size(12).color(t::text_muted()))
+                        .push(text(col.title.clone()).size(14).color(t::text_primary()))
                         .push(
                             text(format!("{}", col.issues.len()))
                                 .size(13)
-                                .color(t::TEXT_MUTED),
+                                .color(t::text_muted()),
                         ),
                 )
                 .padding([0, 4])
@@ -178,12 +178,12 @@ pub fn view<'a>(
                             .push(
                                 text(section.title.clone())
                                     .size(12)
-                                    .color(t::TEXT_SECONDARY),
+                                    .color(t::text_secondary()),
                             )
                             .push(
                                 text(format!("{}", section.end - section.start))
                                     .size(12)
-                                    .color(t::TEXT_MUTED),
+                                    .color(t::text_muted()),
                             ),
                     )
                     .padding([4, 16])
@@ -209,7 +209,7 @@ pub fn view<'a>(
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::BG_PRIMARY)),
+        background: Some(iced::Background::Color(t::bg_primary())),
         ..Default::default()
     })
     .into()
@@ -256,7 +256,7 @@ fn issue_row<'a>(
         r = r.push(cell(
             text(name)
                 .size(12)
-                .color(t::TEXT_SECONDARY)
+                .color(t::text_secondary())
                 .wrapping(text::Wrapping::None),
             W_STATUS,
         ));
@@ -265,7 +265,7 @@ fn issue_row<'a>(
         container(
             text(&issue.title)
                 .size(14)
-                .color(t::TEXT_PRIMARY)
+                .color(t::text_primary())
                 .wrapping(text::Wrapping::None),
         )
         .width(Length::Fill)
@@ -326,11 +326,11 @@ fn issue_row<'a>(
     }
 
     let bg = if focused {
-        t::BG_CARD_FOCUSED
+        t::bg_card_focused()
     } else {
-        t::BG_PRIMARY
+        t::bg_primary()
     };
-    let border_color = if focused { t::ACCENT } else { t::BORDER };
+    let border_color = if focused { t::accent() } else { t::border() };
 
     mouse_area(
         container(r)
