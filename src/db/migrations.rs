@@ -249,6 +249,36 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 12,
+        name: "lane_category",
+        up: "
+            -- Rails workflow category: backlog, unstarted, started, completed, canceled.
+            ALTER TABLE lanes ADD COLUMN category TEXT;
+        ",
+    },
+    Migration {
+        version: 13,
+        name: "issues_deleted_at",
+        up: "
+            -- Local tombstone: a deleted issue keeps its row (hidden everywhere)
+            -- so a later pull can't resurrect it from the server.
+            ALTER TABLE issues ADD COLUMN deleted_at TEXT;
+        ",
+    },
+    Migration {
+        version: 14,
+        name: "list_etags",
+        up: "
+            -- Last ETag seen per (team, list) so unchanged lists return 304.
+            CREATE TABLE IF NOT EXISTS list_etags (
+                team_id TEXT NOT NULL,
+                list TEXT NOT NULL,
+                etag TEXT NOT NULL,
+                PRIMARY KEY (team_id, list)
+            );
+        ",
+    },
+    Migration {
+        version: 15,
         name: "issue_dependencies_kind_direction",
         up: "
             -- kind mirrors Rails (blocks | relates | duplicates). direction is
@@ -383,7 +413,7 @@ mod tests {
 
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
     }
 
@@ -394,7 +424,7 @@ mod tests {
         run(&conn).unwrap();
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
     }
 
@@ -411,7 +441,7 @@ mod tests {
         // v1 should be marked applied without re-running, and v2..v8 newly applied.
         assert_eq!(
             applied_versions(&conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
         assert!(table_exists(&conn, "projects"));
         assert!(table_exists(&conn, "issue_dependencies"));
