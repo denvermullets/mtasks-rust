@@ -2036,6 +2036,10 @@ async fn pull_issues_step(
         let query = issues::IssuePageQuery {
             updated_since: since.clone(),
             include_detail: true,
+            // Incremental pulls learn about archive/unarchive from
+            // `archived_at` on the rows; a full pull stays active-only and
+            // relies on the missing-row sweep below.
+            include_archived: since.is_some(),
             limit: Some(cursor::PAGE_LIMIT),
             after_id,
         };
@@ -3158,6 +3162,22 @@ mod tests {
             count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE remote_id = 55"),
             1
         );
+    }
+
+    #[test]
+    fn archived_at_on_pulled_rows_archives_and_unarchives() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        let mut dto = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
+        dto.archived_at = Some("2026-05-01T00:00:00.000Z".into());
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(i.archived_at.as_deref(), Some("2026-05-01T00:00:00.000Z"));
+
+        let back = detail_dto(2, "two", "2026-06-01T00:00:00.000Z");
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![back]), 0);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(i.archived_at, None);
     }
 
     #[test]
