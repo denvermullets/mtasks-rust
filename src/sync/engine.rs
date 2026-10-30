@@ -143,6 +143,9 @@ impl FullSyncReport {
 enum Outcome {
     /// Entry pushed successfully, or didn't need pushing.
     Success,
+    /// Create pushed; the remote id and the synced mark were already saved in
+    /// one transaction, so `record` must not mark the entry again.
+    Created,
     /// Permanent failure for this entry — mark synced so we don't retry forever.
     DropAndLog(String),
     /// Transient failure — leave pending so the next drain retries.
@@ -183,7 +186,7 @@ impl SyncEngine {
                 None => continue,
             };
 
-            let outcome = process(client, &entry).await;
+            let outcome = process(client, &entry, entry_id).await;
             if record(&mut report, &entry, entry_id, outcome) {
                 break;
             }
@@ -193,17 +196,17 @@ impl SyncEngine {
     }
 }
 
-async fn process(client: &ApiClient, entry: &SyncQueueEntry) -> Outcome {
+async fn process(client: &ApiClient, entry: &SyncQueueEntry, entry_id: i64) -> Outcome {
     match (entry.entity_type.as_str(), entry.action.as_str()) {
-        ("issue", "create") => issue_create(client, &entry.entity_id).await,
+        ("issue", "create") => issue_create(client, &entry.entity_id, entry_id).await,
         ("issue", "update") => issue_update(client, &entry.entity_id).await,
         ("issue", "delete") => issue_delete(client, entry.payload.as_deref()).await,
-        ("project", "create") => project_create(client, &entry.entity_id).await,
+        ("project", "create") => project_create(client, &entry.entity_id, entry_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
-        ("label", "create") => label_create(client, &entry.entity_id).await,
-        ("comment", "create") => comment_create(client, &entry.entity_id).await,
-        ("dependency", "create") => dependency_create(client, &entry.entity_id).await,
+        ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
+        ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
+        ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
@@ -227,6 +230,7 @@ fn record(
             }
             report.processed += 1;
         }
+        Outcome::Created => report.processed += 1,
         Outcome::PausePushes(pause, reason) => {
             eprintln!(
                 "[sync] entry_id={entry_id} type={} action={} outcome=pause reason=\"{reason}\"",
@@ -407,14 +411,14 @@ fn prep_issue_update(entity_id: &str) -> Prep<IssueUpdatePrep> {
     })
 }
 
-async fn issue_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn issue_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_issue_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
 
     match issues::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => write_issue_remote_id(&prep.local_id, dto.id),
+        Ok(dto) => commit_create(entry_id, "issues", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -459,15 +463,39 @@ async fn issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
     }
 }
 
-fn write_issue_remote_id(local_id: &str, remote_id: i64) -> Outcome {
-    let conn = match open() {
+/// Save a freshly created record's server id and mark its queue entry synced
+/// in one SQLite transaction. If either write fails both roll back, so the
+/// entry stays pending and is retried on the next drain.
+fn save_remote_id_and_mark_synced(
+    conn: &mut Connection,
+    table: &str,
+    local_id: &str,
+    remote_id: i64,
+    entry_id: i64,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
+    match table {
+        "issues" => queries::set_issue_remote_id(&tx, local_id, remote_id),
+        "projects" => queries::set_project_remote_id(&tx, local_id, remote_id),
+        "labels" => queries::set_label_remote_id(&tx, local_id, remote_id),
+        "comments" => queries::set_comment_remote_id(&tx, local_id, remote_id),
+        "issue_dependencies" => queries::set_issue_dependency_remote_id(&tx, local_id, remote_id),
+        other => return Err(format!("unknown create table {other}")),
+    }
+    .map_err(|e| format!("write remote_id: {e}"))?;
+    sync_queue::mark_synced(&tx, entry_id).map_err(|e| format!("mark_synced: {e}"))?;
+    tx.commit().map_err(|e| format!("commit: {e}"))
+}
+
+fn commit_create(entry_id: i64, table: &str, local_id: &str, remote_id: i64) -> Outcome {
+    let mut conn = match open() {
         Ok(c) => c,
         Err(e) => return Outcome::LeavePending(e),
     };
-    if let Err(e) = queries::set_issue_remote_id(&conn, local_id, remote_id) {
-        return Outcome::LeavePending(format!("write remote_id: {e}"));
+    match save_remote_id_and_mark_synced(&mut conn, table, local_id, remote_id, entry_id) {
+        Ok(()) => Outcome::Created,
+        Err(e) => Outcome::LeavePending(e),
     }
-    Outcome::Success
 }
 
 fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, Outcome> {
@@ -618,22 +646,13 @@ fn prep_project_update(entity_id: &str) -> Prep<ProjectUpdatePrep> {
     })
 }
 
-async fn project_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn project_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_project_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
     match projects::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_project_remote_id(&conn, &prep.local_id, dto.id) {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(dto) => commit_create(entry_id, "projects", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -748,22 +767,13 @@ fn prep_label_create(entity_id: &str) -> Prep<LabelCreatePrep> {
     })
 }
 
-async fn label_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_label_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
     match labels::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_label_remote_id(&conn, &prep.local_id, dto.id) {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(dto) => commit_create(entry_id, "labels", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -846,7 +856,7 @@ fn resolve_comment_parent(
     }
 }
 
-async fn comment_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_comment_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
@@ -863,16 +873,7 @@ async fn comment_create(client: &ApiClient, entity_id: &str) -> Outcome {
     )
     .await
     {
-        Ok(dto) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_comment_remote_id(&conn, &prep.local_id, dto.id) {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(dto) => commit_create(entry_id, "comments", &prep.local_id, dto.id),
         Err(e) => classify(&e),
     }
 }
@@ -934,7 +935,7 @@ fn prep_dependency_create(entity_id: &str) -> Prep<DependencyCreatePrep> {
     })
 }
 
-async fn dependency_create(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn dependency_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
     let prep = match prep_dependency_create(entity_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
@@ -948,17 +949,7 @@ async fn dependency_create(client: &ApiClient, entity_id: &str) -> Outcome {
     )
     .await
     {
-        Ok(resp) => {
-            let conn = match open() {
-                Ok(c) => c,
-                Err(e) => return Outcome::LeavePending(e),
-            };
-            if let Err(e) = queries::set_issue_dependency_remote_id(&conn, &prep.local_id, resp.id)
-            {
-                return Outcome::LeavePending(format!("write remote_id: {e}"));
-            }
-            Outcome::Success
-        }
+        Ok(resp) => commit_create(entry_id, "issue_dependencies", &prep.local_id, resp.id),
         Err(e) => classify(&e),
     }
 }
@@ -1982,6 +1973,68 @@ mod tests {
         assert_eq!(build_label_ids(&conn, "i1").unwrap(), Some(vec![]));
     }
 
+    fn queue_create(conn: &Connection, entity_type: &str, entity_id: &str) -> i64 {
+        sync_queue::enqueue(conn, entity_type, entity_id, "create", None).unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn issue_remote(conn: &Connection) -> Option<i64> {
+        conn.query_row("SELECT remote_id FROM issues WHERE id='i1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn create_saves_remote_id_and_marks_synced_together() {
+        let mut conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 99, entry).unwrap();
+        assert_eq!(issue_remote(&conn), Some(99));
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_rolls_back_remote_id_when_mark_synced_fails() {
+        let mut conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_mark BEFORE UPDATE ON sync_queue
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        assert!(save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 99, entry).is_err());
+        assert_eq!(issue_remote(&conn), None);
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn create_rolls_back_mark_synced_when_remote_id_write_fails() {
+        let mut conn = setup_labels_db();
+        let entry = queue_create(&conn, "issue", "i1");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_rid BEFORE UPDATE OF remote_id ON issues
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        assert!(save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 99, entry).is_err());
+        assert_eq!(issue_remote(&conn), None);
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn create_commit_covers_label_table_and_rejects_unknown() {
+        let mut conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", None);
+        let entry = queue_create(&conn, "label", "lab1");
+        save_remote_id_and_mark_synced(&mut conn, "labels", "lab1", 5, entry).unwrap();
+        assert_eq!(
+            queries::remote_id_for(&conn, "labels", "lab1").unwrap(),
+            Some(5)
+        );
+        assert!(save_remote_id_and_mark_synced(&mut conn, "bogus", "x", 1, entry).is_err());
+    }
+
     #[test]
     fn build_label_ids_leaves_pending_for_unsynced_label() {
         let conn = setup_labels_db();
@@ -2016,7 +2069,7 @@ mod tests {
                 created_at: "0".into(),
                 synced_at: None,
             };
-            let outcome = process(&client, &entry).await;
+            let outcome = process(&client, &entry, 1).await;
             assert!(matches!(outcome, Outcome::DropAndLog(_)));
         });
     }
