@@ -1049,11 +1049,11 @@ impl SyncEngine {
     /// Pull all resources from Rails into the local DB. The set of teams to
     /// fully sync is determined by the token's scope:
     ///
-    /// - **User-scoped token** (`token.team_id == null` from `/me`) — pull
-    ///   every team the user is on, then for each team pull lanes/labels/
+    /// - **Unscoped token** (`token.team_ids` null/absent, no `team_id`) — pull
+    ///   every local non-archived team, then for each team pull lanes/labels/
     ///   members/projects/issues.
-    /// - **Team-scoped token** (`token.team_id == Some(t)`) — pull just that
-    ///   team's resources.
+    /// - **Scoped token** (`token.team_ids` list, or legacy `team_id`) — pull
+    ///   the intersection of that list with the local teams.
     ///
     /// Returns a [`PullOutcome`] summarizing row counts plus the local UUID of
     /// the locally-seeded "My Project" team if pull determined it was redundant
@@ -1099,7 +1099,7 @@ impl SyncEngine {
         }
 
         // Phase 3: figure out which teams to deeply sync.
-        let targets = match collect_pull_targets(me.token.team_id) {
+        let targets = match collect_pull_targets(me.token.scoped_team_ids().as_deref()) {
             Ok(t) => t,
             Err(msg) => {
                 report.last_error = Some(msg);
@@ -1155,37 +1155,35 @@ struct PullTarget {
     remote_id: i64,
 }
 
-fn collect_pull_targets(token_team_id: Option<i64>) -> Result<Vec<PullTarget>, String> {
+fn collect_pull_targets(scoped_ids: Option<&[i64]>) -> Result<Vec<PullTarget>, String> {
     let conn = open()?;
-    match token_team_id {
-        Some(remote_id) => {
-            let local = queries::find_team_by_remote_id(&conn, remote_id)
-                .map_err(|e| format!("db (find team): {e}"))?;
-            match local {
-                Some(t) => Ok(vec![PullTarget {
-                    local_id: t.id,
-                    remote_id,
-                }]),
-                None => Err(format!(
-                    "token is scoped to team remote_id={remote_id}, but it wasn't returned by /api/v1/teams"
-                )),
+    select_pull_targets(&conn, scoped_ids)
+}
+
+/// Choose the teams to deep-sync. `None` (unscoped token) covers every local
+/// non-archived Rails-backed team; `Some(ids)` covers the intersection of those
+/// remote ids with the local non-archived teams (empty list means none).
+fn select_pull_targets(
+    conn: &Connection,
+    scoped_ids: Option<&[i64]>,
+) -> Result<Vec<PullTarget>, String> {
+    let teams = queries::all_teams(conn).map_err(|e| format!("db (all_teams): {e}"))?;
+    Ok(teams
+        .into_iter()
+        .filter(|t| t.archived_at.is_none())
+        .filter_map(|t| {
+            let rid = t.remote_id?;
+            if let Some(ids) = scoped_ids {
+                if !ids.contains(&rid) {
+                    return None;
+                }
             }
-        }
-        None => {
-            // User-scoped token: fully sync every Rails-backed team we know
-            // about. all_teams returns the local rows; we need their remote_id.
-            let teams = queries::all_teams(&conn).map_err(|e| format!("db (all_teams): {e}"))?;
-            Ok(teams
-                .into_iter()
-                .filter_map(|t| {
-                    t.remote_id.map(|rid| PullTarget {
-                        local_id: t.id,
-                        remote_id: rid,
-                    })
-                })
-                .collect())
-        }
-    }
+            Some(PullTarget {
+                local_id: t.id,
+                remote_id: rid,
+            })
+        })
+        .collect())
 }
 
 /// Returns the local UUID of the orphan seed team if one was cleaned up.
@@ -1738,6 +1736,40 @@ mod tests {
             decide("2026-04-27T12:00:00Z", "not-a-date", true),
             MergeDecision::Overwrite
         );
+    }
+
+    #[test]
+    fn pull_targets_follow_token_team_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        for (id, remote, archived) in [
+            ("a", Some(1), None),
+            ("b", Some(2), None),
+            ("c", Some(3), Some(now)),
+            ("d", None, None),
+        ] {
+            conn.execute(
+                "INSERT INTO teams (id, name, identifier, remote_id, archived_at, created_at, updated_at)
+                 VALUES (?1, ?1, ?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![id, remote, archived, now],
+            )
+            .unwrap();
+        }
+        let ids = |t: Vec<PullTarget>| {
+            let mut v: Vec<i64> = t.into_iter().map(|t| t.remote_id).collect();
+            v.sort();
+            v
+        };
+        // Unscoped: all non-archived Rails-backed teams.
+        assert_eq!(ids(select_pull_targets(&conn, None).unwrap()), vec![1, 2]);
+        // List: intersection with local teams (99 unknown, 3 archived).
+        assert_eq!(
+            ids(select_pull_targets(&conn, Some(&[2, 3, 99])).unwrap()),
+            vec![2]
+        );
+        // Empty list: zero teams.
+        assert!(select_pull_targets(&conn, Some(&[])).unwrap().is_empty());
     }
 
     fn setup_labels_db() -> Connection {
