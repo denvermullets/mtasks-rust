@@ -33,7 +33,7 @@ pub fn issues_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Issue>> {
                 started_at, completed_at, canceled_at, lane_id, team_id,
                 project_id, parent_issue_id, assignee_id, creator_id, archived_at,
                 remote_id, created_at, updated_at
-         FROM issues WHERE team_id = ?1 ORDER BY priority, created_at",
+         FROM issues WHERE team_id = ?1 AND deleted_at IS NULL ORDER BY priority, created_at",
     )?;
     let rows = stmt.query_map(params![team_id], Issue::from_row)?;
     rows.collect()
@@ -45,7 +45,7 @@ pub fn issues_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Iss
                 started_at, completed_at, canceled_at, lane_id, team_id,
                 project_id, parent_issue_id, assignee_id, creator_id, archived_at,
                 remote_id, created_at, updated_at
-         FROM issues WHERE project_id = ?1 ORDER BY priority, created_at",
+         FROM issues WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY priority, created_at",
     )?;
     let rows = stmt.query_map(params![project_id], Issue::from_row)?;
     rows.collect()
@@ -129,9 +129,27 @@ pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     Ok(())
 }
 
+/// Soft-delete: stamp the local tombstone instead of removing the row, so a
+/// later pull can't recreate the issue while the server delete is pending.
 pub fn delete_issue(conn: &Connection, issue_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    conn.execute(
+        "UPDATE issues SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+        params![issue_id, now],
+    )?;
     Ok(())
+}
+
+/// True when a local row for this remote id carries the delete tombstone.
+pub fn is_issue_tombstoned_by_remote_id(conn: &Connection, remote_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issues WHERE remote_id = ?1 AND deleted_at IS NOT NULL",
+        params![remote_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> Result<()> {
@@ -166,7 +184,7 @@ pub fn get_issue(conn: &Connection, issue_id: &str) -> Result<Option<Issue>> {
                 started_at, completed_at, canceled_at, lane_id, team_id,
                 project_id, parent_issue_id, assignee_id, creator_id, archived_at,
                 remote_id, created_at, updated_at
-         FROM issues WHERE id = ?1",
+         FROM issues WHERE id = ?1 AND deleted_at IS NULL",
         params![issue_id],
         Issue::from_row,
     )
@@ -227,7 +245,7 @@ pub fn comments_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Comment
     let mut stmt = conn.prepare(
         "SELECT c.id, c.remote_id, c.issue_id, c.author_id, c.body, c.parent_id, c.created_at, c.updated_at
          FROM comments c JOIN issues i ON i.id = c.issue_id
-         WHERE i.team_id = ?1 ORDER BY c.created_at",
+         WHERE i.team_id = ?1 AND i.deleted_at IS NULL ORDER BY c.created_at",
     )?;
     let rows = stmt.query_map(params![team_id], Comment::from_row)?;
     rows.collect()
@@ -418,7 +436,7 @@ pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(St
          FROM issue_labels il
          JOIN labels l ON l.id = il.label_id
          JOIN issues i ON i.id = il.issue_id
-         WHERE i.team_id = ?1
+         WHERE i.team_id = ?1 AND i.deleted_at IS NULL
          ORDER BY l.name",
     )?;
     let rows = stmt.query_map(params![team_id], |row| {
@@ -539,7 +557,7 @@ fn dependency_links(
          FROM issue_dependencies d
          JOIN issues i ON i.id = d.{return_column}
          JOIN teams t ON t.id = i.team_id
-         WHERE d.{join_column} = ?1
+         WHERE d.{join_column} = ?1 AND i.deleted_at IS NULL
          ORDER BY i.created_at"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -825,6 +843,15 @@ pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
 }
 
 pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
+    // Tombstoned rows are never overwritten by pull.
+    let tombstoned: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issues WHERE id = ?1 AND deleted_at IS NOT NULL",
+        params![issue.id],
+        |r| r.get(0),
+    )?;
+    if tombstoned > 0 {
+        return Ok(());
+    }
     let old = get_issue(conn, &issue.id)?;
     conn.execute(
         "INSERT INTO issues
@@ -974,7 +1001,7 @@ pub fn cleanup_orphan_seed_team(conn: &Connection) -> Result<Option<String>> {
     };
 
     let issue_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM issues WHERE team_id = ?1",
+        "SELECT COUNT(*) FROM issues WHERE team_id = ?1 AND deleted_at IS NULL",
         params![team_id],
         |row| row.get(0),
     )?;
@@ -1132,6 +1159,31 @@ mod tests {
             .map(|c| c.body)
             .collect();
         assert_eq!(bodies, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn delete_issue_tombstones_and_pull_leaves_it_alone() {
+        let conn = setup();
+        let mut issue = make_issue("i2", None, None);
+        issue.remote_id = Some(77);
+        issue.title = "keep me gone".into();
+        upsert_issue(&conn, &issue).unwrap();
+        delete_issue(&conn, "i2").unwrap();
+        // Row survives (tombstone) but is hidden from every read.
+        assert!(get_issue(&conn, "i2").unwrap().is_none());
+        assert!(issues_for_team(&conn, "t1")
+            .unwrap()
+            .iter()
+            .all(|i| i.id != "i2"));
+        assert!(is_issue_tombstoned_by_remote_id(&conn, 77).unwrap());
+        // A pull of the same remote issue must not overwrite or revive it.
+        issue.title = "remote edit".into();
+        upsert_issue(&conn, &issue).unwrap();
+        let title: String = conn
+            .query_row("SELECT title FROM issues WHERE id = 'i2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "keep me gone");
+        assert!(get_issue(&conn, "i2").unwrap().is_none());
     }
 
     #[test]
