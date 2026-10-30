@@ -39,7 +39,7 @@ pub fn view<'a>(
         } else {
             "No columns to show"
         };
-        return container(text(msg).size(14).color(t::TEXT_MUTED))
+        return container(text(msg).size(14).color(t::text_muted()))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into();
@@ -49,9 +49,9 @@ pub fn view<'a>(
     let mut header_row = row![].spacing(0).width(Length::Fill);
     for (col_idx, col) in columns.iter().enumerate() {
         let name_color = if col_idx == focused_lane {
-            t::TEXT_PRIMARY
+            t::text_primary()
         } else {
-            t::TEXT_SECONDARY
+            t::text_secondary()
         };
 
         let header = row![]
@@ -60,7 +60,7 @@ pub fn view<'a>(
             .push(
                 text(format!("{}", col.issues.len()))
                     .size(13)
-                    .color(t::TEXT_MUTED),
+                    .color(t::text_muted()),
             );
 
         header_row = header_row.push(container(header).padding([10, 12]).width(Length::Fill));
@@ -85,12 +85,12 @@ pub fn view<'a>(
                             .push(
                                 text(section.title.clone())
                                     .size(12)
-                                    .color(t::TEXT_SECONDARY),
+                                    .color(t::text_secondary()),
                             )
                             .push(
                                 text(format!("{}", section.end - section.start))
                                     .size(12)
-                                    .color(t::TEXT_MUTED),
+                                    .color(t::text_muted()),
                             ),
                     )
                     .padding([4, 2])
@@ -113,9 +113,9 @@ pub fn view<'a>(
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::BG_PRIMARY)),
+                background: Some(iced::Background::Color(t::bg_primary())),
                 border: Border {
-                    color: t::BORDER,
+                    color: t::border(),
                     width: 0.0,
                     radius: 0.0.into(),
                 },
@@ -129,7 +129,7 @@ pub fn view<'a>(
         .push(header_row)
         .push(
             container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::BORDER)),
+                background: Some(iced::Background::Color(t::border())),
                 ..Default::default()
             }),
         )
@@ -141,7 +141,7 @@ pub fn view<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_PRIMARY)),
+            background: Some(iced::Background::Color(t::bg_primary())),
             ..Default::default()
         })
         .into()
@@ -241,12 +241,12 @@ fn issue_card<'a>(
             .team_number
             .map(|n| format!("{ident}-{n}"))
             .unwrap_or_default();
-        card_content = card_content.push(text(tag).size(12).color(t::TEXT_MUTED));
+        card_content = card_content.push(text(tag).size(12).color(t::text_muted()));
     }
     card_content = card_content.push(
         text(&issue.title)
             .size(14)
-            .color(t::TEXT_PRIMARY)
+            .color(t::text_primary())
             .wrapping(text::Wrapping::None),
     );
 
@@ -281,7 +281,7 @@ fn issue_card<'a>(
                 .push(
                     text(format!("{}", issue.priority))
                         .size(11)
-                        .color(t::TEXT_MUTED),
+                        .color(t::text_muted()),
                 ),
         );
     }
@@ -290,7 +290,7 @@ fn issue_card<'a>(
         meta = meta.push(
             text(f)
                 .size(11)
-                .color(t::TEXT_MUTED)
+                .color(t::text_muted())
                 .wrapping(text::Wrapping::None),
         );
     }
@@ -299,12 +299,12 @@ fn issue_card<'a>(
     }
 
     let bg = if focused {
-        t::BG_CARD_FOCUSED
+        t::bg_card_focused()
     } else {
-        t::BG_CARD
+        t::bg_card()
     };
 
-    let border_color = if focused { t::ACCENT } else { t::BORDER };
+    let border_color = if focused { t::accent() } else { t::border() };
 
     let card = container(card_content)
         .padding([10, 12])
