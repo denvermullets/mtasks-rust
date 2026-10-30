@@ -969,7 +969,6 @@ async fn dependency_delete(client: &ApiClient, payload: Option<&str>) -> Outcome
     };
     match dependencies::delete(client, team_remote_id, issue_remote_id, remote_id).await {
         Ok(_) => Outcome::Success,
-        Err(ApiError::NotFound(_)) => Outcome::Success,
         Err(e) => classify(&e),
     }
 }
