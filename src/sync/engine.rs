@@ -1508,7 +1508,9 @@ fn classify(err: &ApiError) -> Outcome {
 // using a last-write-wins policy keyed on `updated_at`.
 //
 // Order: teams → lanes / labels / members → projects → issues. Issue
-// dependencies come from each issue-detail payload (no index endpoint).
+// dependencies come from each issue-detail payload. Rails also has
+// `GET .../issues/:id/issue_dependencies` (see docs/rails-api.md), but the
+// detail payload already carries the same links, so pull does not call it.
 //
 // The merge rule per row (see `decide`):
 // - No local row with this `remote_id` → INSERT.
