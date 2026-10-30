@@ -35,10 +35,15 @@ Read it as in **Read an issue** above.
 
 Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
 
-- **Map**: one issue labelled `wayfinder:map`, holding Destination / Notes / Decisions-so-far /
-  Not yet specified / Out of scope.
-- **Child ticket**: `create_issue` with `parent_issue_id` = the map. Label `wayfinder:<type>`
-  (`research` / `prototype` / `grilling` / `task`). No triage labels on map tickets.
+- **Map project**: every map gets its own JAIT project, named `Wayfinder: <effort>` (lead user 3,
+  status `started`), created **before** the map issue. The map and every child ticket carry its
+  `project_id` so the effort reads as one board. It holds planning only — the roadmap/implementation
+  projects a map produces are separate projects.
+- **Map**: one issue labelled `wayfinder:map`, in the map project, holding Destination / Notes /
+  Decisions-so-far / Not yet specified / Out of scope.
+- **Child ticket**: `create_issue` with `parent_issue_id` = the map and `project_id` = the map
+  project. Label `wayfinder:<type>` (`research` / `prototype` / `grilling` / `task`). No triage
+  labels on map tickets. Tickets graduated from fog later get the same `project_id`.
 - **Blocking**: native dependencies. `create_issue_dependency` with
   `issue_id=<child>, target_issue_id=<blocker>, direction=blocked_by`.
   Inspect with `list_issue_dependencies`; remove with `remove_issue_dependency`.
