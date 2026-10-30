@@ -1444,7 +1444,7 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        crate::theme::iced_theme()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
