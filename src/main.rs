@@ -14,6 +14,7 @@ mod views;
 use iced::{window, Size};
 
 fn main() -> iced::Result {
+    theme::set_by_key(&config::load().0.theme);
     iced::application(app::App::title, app::App::update, app::App::view)
         .subscription(app::App::subscription)
         .theme(app::App::theme)
