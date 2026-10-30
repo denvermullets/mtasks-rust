@@ -813,6 +813,7 @@ mod tests {
             position: pos,
             team_id: "t1".into(),
             remote_id: None,
+            category: None,
             created_at: NOW.into(),
             updated_at: NOW.into(),
         }
