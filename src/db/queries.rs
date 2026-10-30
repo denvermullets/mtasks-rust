@@ -1112,6 +1112,43 @@ pub fn archive_missing_teams(conn: &Connection, active_remote_ids: &[i64]) -> Re
     conn.execute(&sql, params_from_iter(bound))
 }
 
+/// Flag (or clear) a team as inaccessible after Rails answered a push with a
+/// team-access 404. Pending edits stay queued; pushes for the team are skipped.
+pub fn set_team_access_lost(conn: &Connection, remote_id: i64, lost: bool) -> Result<usize> {
+    if lost {
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        conn.execute(
+            "UPDATE teams SET access_lost_at = ?1 WHERE remote_id = ?2 AND access_lost_at IS NULL",
+            params![now, remote_id],
+        )
+    } else {
+        conn.execute(
+            "UPDATE teams SET access_lost_at = NULL WHERE remote_id = ?1 AND access_lost_at IS NOT NULL",
+            params![remote_id],
+        )
+    }
+}
+
+pub fn team_access_lost(conn: &Connection, remote_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM teams WHERE remote_id = ?1 AND access_lost_at IS NOT NULL",
+        params![remote_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Identifiers (e.g. "PROJ") of teams currently flagged inaccessible.
+pub fn inaccessible_team_identifiers(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT identifier FROM teams WHERE access_lost_at IS NOT NULL ORDER BY identifier",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
 /// Detect and remove the locally-seeded "My Project" team if it still looks
 /// untouched: matches the seed signature (name="My Project", identifier="PROJ"),
 /// has no `remote_id`, and has zero issues attached. Returns the local UUID of

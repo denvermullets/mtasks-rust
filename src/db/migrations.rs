@@ -333,6 +333,15 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE issue_dependencies ADD COLUMN direction TEXT NOT NULL DEFAULT 'blocking';
         ",
     },
+    Migration {
+        version: 17,
+        name: "team_access_lost",
+        up: "
+            -- Set when Rails answered a push with a team-access 404 (team archived
+            -- or dropped from the token). Cleared when a pull sees the team again.
+            ALTER TABLE teams ADD COLUMN access_lost_at TEXT;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
