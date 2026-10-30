@@ -126,6 +126,9 @@ pub struct FullSyncReport {
     pub current_user: Option<(i64, String)>,
     /// Write scope reported by this sync's `/me` call (`None` if `/me` failed).
     pub can_write: Option<bool>,
+    /// True for a push-only cycle (local-write trigger): nothing was pulled,
+    /// so the app must not treat it as a completed pull.
+    pub push_only: bool,
 }
 
 impl FullSyncReport {
@@ -220,6 +223,18 @@ impl SyncEngine {
         .await
     }
 
+    /// Push-only cycle for the local-write trigger: the same `/me` write-scope
+    /// gate as [`Self::full_cycle`], then drain the queue. No pull, so a burst
+    /// of edits costs one `/me` plus the pushes.
+    pub async fn push_cycle(client: &ApiClient) -> FullSyncReport {
+        let can_write = users::me(client)
+            .await
+            .ok()
+            .map(|m| m.token.has_write_scope());
+        let push = Self::drain_if_writable(client, can_write).await;
+        push_only_report(can_write, push)
+    }
+
     /// Drain unless `/me` said the token cannot write; then skip every push
     /// (entries stay pending) and report [`PushPause::ReadOnly`].
     pub async fn drain_if_writable(client: &ApiClient, can_write: Option<bool>) -> SyncReport {
@@ -282,6 +297,7 @@ where
             deleted_orphan_team: None,
             current_user: None,
             can_write: preflight_can_write,
+            push_only: false,
         };
     }
     let outcome = pull().await;
@@ -291,6 +307,16 @@ where
         deleted_orphan_team: outcome.deleted_orphan_team,
         current_user: outcome.current_user,
         can_write: outcome.can_write.or(preflight_can_write),
+        push_only: false,
+    }
+}
+
+fn push_only_report(can_write: Option<bool>, push: SyncReport) -> FullSyncReport {
+    FullSyncReport {
+        push,
+        can_write,
+        push_only: true,
+        ..FullSyncReport::default()
     }
 }
 
@@ -2222,6 +2248,26 @@ mod tests {
         assert!(!r.cycle_succeeded());
     }
 
+    #[test]
+    fn push_only_report_does_not_claim_a_pull() {
+        let r = push_only_report(Some(true), SyncReport::default());
+        assert!(r.push_only);
+        assert_eq!(r.pull.failed, 0);
+        assert!(r.deleted_orphan_team.is_none() && r.current_user.is_none());
+        assert!(r.cycle_succeeded());
+        // A read-only token never pushes and shows the banner.
+        let ro = push_only_report(Some(false), read_only_report());
+        assert!(ro.read_only());
+        assert!(ro.cycle_succeeded());
+    }
+
+    #[tokio::test]
+    async fn read_only_token_never_drains() {
+        let client = ApiClient::new("http://127.0.0.1:9", "t").unwrap();
+        let r = SyncEngine::drain_if_writable(&client, Some(false)).await;
+        assert_eq!(r.push_paused, Some(PushPause::ReadOnly));
+    }
+
     fn is_drop(o: &Outcome) -> bool {
         matches!(o, Outcome::DropAndLog(_))
     }
@@ -2316,6 +2362,7 @@ mod tests {
             deleted_orphan_team: None,
             current_user: None,
             can_write,
+            push_only: false,
         };
         assert!(mk(Some(false), read_only_report()).read_only());
         assert!(mk(

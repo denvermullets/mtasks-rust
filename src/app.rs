@@ -1474,8 +1474,7 @@ impl App {
     }
 
     /// Feed the sync scheduler an event, re-arm its timer, and start the cycle
-    /// it asks for. Future triggers (e.g. a local write -> `LocalWrite`) call
-    /// this too.
+    /// it asks for. Local writes arrive here as `LocalWrite` (see `update`).
     fn drive_sync(&mut self, event: SchedEvent) -> Task<Message> {
         let decision = self.scheduler.handle(event, std::time::Instant::now());
         self.sync_next_delay = decision.next_delay;
@@ -1488,18 +1487,22 @@ impl App {
     /// Start a sync cycle the scheduler already admitted. If it can't start
     /// (no token), report the cycle as failed so the scheduler backs off.
     fn start_sync(&mut self, kind: CycleKind) -> Task<Message> {
-        // PushOnly (drain without pull) has no trigger yet; run a full cycle.
-        let _ = kind;
         let base_url = self.config.api_base_url.trim().to_string();
         let token = self.config.api_token.clone().unwrap_or_default();
         match ApiClient::new(base_url, token) {
             Ok(client) => {
                 self.sync_in_progress = true;
                 self.last_sync_error = None;
-                return Task::perform(
-                    async move { SyncEngine::full_cycle(&client).await },
-                    Message::SyncCompleted,
-                );
+                return match kind {
+                    CycleKind::Full => Task::perform(
+                        async move { SyncEngine::full_cycle(&client).await },
+                        Message::SyncCompleted,
+                    ),
+                    CycleKind::PushOnly => Task::perform(
+                        async move { SyncEngine::push_cycle(&client).await },
+                        Message::SyncCompleted,
+                    ),
+                };
             }
             Err(ApiError::MissingToken) => {
                 self.last_sync_error = Some("set an API token in Settings".into());
@@ -1513,6 +1516,16 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Discard stale signals so only writes made by this message count.
+        sync_queue::take_local_write();
+        let task = self.update_inner(message);
+        if sync_queue::take_local_write() && self.config.api_token.is_some() {
+            return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
+        }
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         // My Issues spans several teams: create and lane moves need a single
         // team's lanes, so they're no-ops here. Priority and delete act on the
         // issue's own row/team, so they work cross-team.
@@ -2505,7 +2518,7 @@ impl App {
                         config_dirty = true;
                     }
                 }
-                if report.pull.failed == 0 {
+                if !report.push_only && report.pull.failed == 0 {
                     self.config.last_synced_at = Some(chrono::Utc::now());
                     config_dirty = true;
                 }
