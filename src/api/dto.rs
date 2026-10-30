@@ -460,6 +460,9 @@ pub struct LaneDto {
     pub name: String,
     pub color: Option<String>,
     pub position: i32,
+    /// Workflow category: backlog, unstarted, started, completed or canceled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -483,6 +486,7 @@ impl LaneDto {
             position: self.position,
             team_id,
             remote_id: Some(self.id),
+            category: self.category,
             created_at,
             updated_at,
         })
@@ -498,6 +502,7 @@ impl LaneDto {
             name: lane.name.clone(),
             color: lane.color.clone(),
             position: lane.position,
+            category: lane.category.clone(),
             created_at: Some(lane.created_at.clone()),
             updated_at: Some(lane.updated_at.clone()),
         })
@@ -668,7 +673,7 @@ fn lookup_team_by_local_id(conn: &Connection, id: &str) -> Result<Team, ApiError
 
 fn lookup_lane_by_local_id(conn: &Connection, id: &str) -> Result<Lane, ApiError> {
     conn.query_row(
-        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+        "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
          FROM lanes WHERE id = ?1",
         params![id],
         Lane::from_row,
@@ -973,6 +978,18 @@ mod tests {
     }
 
     #[test]
+    fn lane_dto_decodes_optional_category() {
+        let with: LaneDto = serde_json::from_str(
+            r##"{"id":1,"name":"Done","color":"#fff","position":2,"category":"canceled"}"##,
+        )
+        .unwrap();
+        assert_eq!(with.category.as_deref(), Some("canceled"));
+        let without: LaneDto =
+            serde_json::from_str(r##"{"id":1,"name":"Done","color":null,"position":2}"##).unwrap();
+        assert_eq!(without.category, None);
+    }
+
+    #[test]
     fn flat_dto_roundtrip_lane_label_member_dependency() {
         let conn = fresh_conn();
         // seed a team so foreign keys resolve when we round-trip through the DB
@@ -992,13 +1009,14 @@ mod tests {
             position: 0,
             team_id: team_uuid.clone(),
             remote_id: Some(11),
+            category: Some("canceled".into()),
             created_at: now(),
             updated_at: now(),
         };
         conn.execute(
-            "INSERT INTO lanes (id, name, color, position, team_id, remote_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![lane.id, lane.name, lane.color, lane.position, lane.team_id, lane.remote_id, lane.created_at, lane.updated_at],
+            "INSERT INTO lanes (id, name, color, position, team_id, remote_id, category, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![lane.id, lane.name, lane.color, lane.position, lane.team_id, lane.remote_id, lane.category, lane.created_at, lane.updated_at],
         ).unwrap();
 
         let lane_dto = LaneDto::from_model(&conn, &lane).unwrap();
@@ -1011,6 +1029,7 @@ mod tests {
         assert_eq!(lane_back.id, lane.id);
         assert_eq!(lane_back.team_id, lane.team_id);
         assert_eq!(lane_back.position, lane.position);
+        assert_eq!(lane_back.category.as_deref(), Some("canceled"));
 
         // Label
         let label = Label {
