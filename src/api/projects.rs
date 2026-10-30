@@ -38,6 +38,16 @@ pub async fn list(client: &ApiClient, team_id: i64) -> Result<Vec<ProjectDto>, A
     client.get(&path).await
 }
 
+/// Projects updated at or after `updated_since` (ISO8601).
+pub async fn list_updated_since(
+    client: &ApiClient,
+    team_id: i64,
+    updated_since: &str,
+) -> Result<Vec<ProjectDto>, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/projects?updated_since={updated_since}");
+    client.get(&path).await
+}
+
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<ProjectDto, ApiError> {
     let path = format!("api/v1/teams/{team_id}/projects/{id}");
     client.get(&path).await

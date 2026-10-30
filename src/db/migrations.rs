@@ -277,6 +277,15 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 15,
+        name: "sync_queue_attempted_at",
+        up: "
+            -- When a create's POST was first attempted (set before sending), so a
+            -- retry can look for the record the earlier attempt may have made.
+            ALTER TABLE sync_queue ADD COLUMN attempted_at TEXT;
+        ",
+    },
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
