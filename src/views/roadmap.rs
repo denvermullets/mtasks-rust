@@ -66,7 +66,7 @@ pub fn view<'a>(
     let behind = on_roadmap.iter().filter(|p| p.behind_schedule).count();
     let in_progress = on_roadmap
         .iter()
-        .filter(|p| !p.behind_schedule && p.status == ProjectStatus::Started)
+        .filter(|p| !p.behind_schedule && p.status == Some(ProjectStatus::Started))
         .count();
     let planned = on_roadmap
         .iter()
@@ -74,7 +74,11 @@ pub fn view<'a>(
             !p.behind_schedule
                 && !matches!(
                     p.status,
-                    ProjectStatus::Started | ProjectStatus::Completed | ProjectStatus::Cancelled
+                    Some(
+                        ProjectStatus::Started
+                            | ProjectStatus::Completed
+                            | ProjectStatus::Cancelled
+                    )
                 )
         })
         .count();
@@ -261,17 +265,17 @@ fn card_status(project: &Project) -> (&'static str, Color) {
         return ("Behind", BEHIND);
     }
     match project.status {
-        ProjectStatus::Completed => ("Completed", GOOD),
-        ProjectStatus::Cancelled => ("Cancelled", NEUTRAL),
-        ProjectStatus::Paused => ("Paused", AMBER),
-        ProjectStatus::Started => {
+        Some(ProjectStatus::Completed) => ("Completed", GOOD),
+        Some(ProjectStatus::Cancelled) => ("Cancelled", NEUTRAL),
+        Some(ProjectStatus::Paused) => ("Paused", AMBER),
+        Some(ProjectStatus::Started) => {
             if project.progress_percentage > 0 {
                 ("In progress", GOOD)
             } else {
                 ("Started", AMBER)
             }
         }
-        ProjectStatus::Backlog => ("Planned", NEUTRAL),
+        Some(ProjectStatus::Backlog) | None => ("Planned", NEUTRAL),
     }
 }
 
@@ -280,7 +284,7 @@ fn progress_bar<'a>(project: &Project) -> Element<'a, Message> {
     let pct = project.progress_percentage.clamp(0, 100);
     let bar_color = if project.behind_schedule {
         BAR_BEHIND
-    } else if project.status == ProjectStatus::Started && pct < 50 {
+    } else if project.status == Some(ProjectStatus::Started) && pct < 50 {
         AMBER
     } else {
         GOOD
@@ -435,7 +439,7 @@ fn divider<'a>() -> Element<'a, Message> {
 fn roadmap_scope(projects: &[Project]) -> impl Iterator<Item = &Project> {
     projects
         .iter()
-        .filter(|p| p.status != ProjectStatus::Completed)
+        .filter(|p| p.status != Some(ProjectStatus::Completed))
 }
 
 /// Compare two optional due dates for ascending sort with NULLs last.

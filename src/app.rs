@@ -18,6 +18,7 @@ use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup
 use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
+use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
@@ -96,6 +97,8 @@ pub enum Message {
     MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
+    /// Result of the fresh fetch made when an issue detail is opened.
+    IssueFetched(Result<(), String>),
 
     // Issue detail — sub-issues
     /// "+ Add sub-issue" pressed: open the create modal with the parent's local
@@ -186,8 +189,14 @@ pub enum Message {
     SaveSettings,
 
     // Sync
+    /// Manual sync (`s`, toast retry): runs immediately.
     SyncNow,
+    /// Scheduler timer fired.
     SyncTick,
+    /// Keyboard/mouse activity, for idle tracking.
+    UserInput,
+    WindowFocused,
+    WindowUnfocused,
     SyncCompleted(FullSyncReport),
 
     // Toasts
@@ -452,7 +461,14 @@ pub struct App {
     config: Config,
     config_error: Option<String>,
     last_sync_error: Option<String>,
+    /// Identifiers of teams flagged inaccessible (team-access 404 on push).
+    inaccessible_teams: Vec<String>,
+    /// Token has no write scope: pushes are paused, edits stay local.
+    sync_read_only: bool,
     sync_in_progress: bool,
+    scheduler: Scheduler,
+    /// Delay until the scheduler's next timed check; `None` = no timer armed.
+    sync_next_delay: Option<std::time::Duration>,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
@@ -981,7 +997,36 @@ impl App {
         self.view = View::IssueDetail(issue.id.clone());
         let conn = self.db();
         self.load_detail_dependencies(&conn);
-        self.fetch_comments_task(&conn, issue)
+        Task::batch([
+            self.fetch_comments_task(&conn, issue),
+            self.fetch_issue_task(&conn, issue),
+        ])
+    }
+
+    /// Build the async task that does the one fresh fetch of `issue` (with
+    /// detail) when it is opened and merges it like a pulled row. No-op unless
+    /// the issue + team are synced and a client can be built.
+    fn fetch_issue_task(&self, conn: &rusqlite::Connection, issue: &Issue) -> Task<Message> {
+        let Some(issue_remote_id) = issue.remote_id else {
+            return Task::none();
+        };
+        let Ok(Some(team_remote_id)) = queries::remote_id_for(conn, "teams", &issue.team_id)
+        else {
+            return Task::none();
+        };
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            return Task::none();
+        };
+        let local_team_id = issue.team_id.clone();
+        Task::perform(
+            async move {
+                SyncEngine::fetch_issue(&client, team_remote_id, &local_team_id, issue_remote_id)
+                    .await
+            },
+            Message::IssueFetched,
+        )
     }
 
     /// Persist a new comment (optionally a reply to local comment `parent_id`) on
@@ -1013,9 +1058,7 @@ impl App {
                 .flatten()
                 .map(|m| m.id)
         });
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let now = crate::db::now_iso();
         let comment = Comment {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
@@ -1075,9 +1118,7 @@ impl App {
         };
         if let Some(mut issue) = self.issues.iter().find(|i| i.id == id).cloned() {
             mutate(&mut issue);
-            issue.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            issue.updated_at = crate::db::now_iso();
             let conn = self.db();
             let _ = queries::update_issue(&conn, &issue);
             let payload = serde_json::to_string(&issue).ok();
@@ -1108,14 +1149,14 @@ impl App {
             DepDirection::Blocking => (current_id, target_id.to_string()),
             DepDirection::BlockedBy => (target_id.to_string(), current_id),
         };
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let now = crate::db::now_iso();
         let dep = IssueDependency {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
             blocking_issue_id,
             blocked_issue_id,
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: now.clone(),
             updated_at: now,
         };
@@ -1218,9 +1259,7 @@ impl App {
             issue.description = description;
             issue.estimate = estimate;
             issue.due_date = due_date;
-            issue.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            issue.updated_at = crate::db::now_iso();
             let conn = self.db();
             let _ = queries::update_issue(&conn, &issue);
             let payload = serde_json::to_string(&issue).ok();
@@ -1252,9 +1291,7 @@ impl App {
         let conn = self.db();
         if let Ok(Some(mut project)) = queries::get_project(&conn, &id) {
             mutate(&mut project);
-            project.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            project.updated_at = crate::db::now_iso();
             let _ = queries::update_project(&conn, &project);
             let payload = serde_json::to_string(&project).ok();
             self.enqueue_sync("project", &project.id, "update", payload.as_deref());
@@ -1303,9 +1340,7 @@ impl App {
             project.description = description;
             project.start_date = start_date;
             project.due_date = due_date;
-            project.updated_at = chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string();
+            project.updated_at = crate::db::now_iso();
             let _ = queries::update_project(&conn, &project);
             let payload = serde_json::to_string(&project).ok();
             self.enqueue_sync("project", &project.id, "update", payload.as_deref());
@@ -1391,7 +1426,11 @@ impl App {
             config,
             config_error,
             last_sync_error: None,
+            inaccessible_teams: queries::inaccessible_team_identifiers(&conn).unwrap_or_default(),
+            sync_read_only: false,
             sync_in_progress: false,
+            scheduler: Scheduler::new(std::time::Instant::now()),
+            sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
             next_toast_id: 0,
             sync_paused_auth: false,
@@ -1423,12 +1462,27 @@ impl App {
                 None
             }
         });
-        let tick = iced::time::every(std::time::Duration::from_secs(
-            self.config.sync_interval_secs.max(1),
-        ))
-        .map(|_| Message::SyncTick);
+        // Any key press (even one a text field captured), click or scroll
+        // counts as activity for idle detection; window focus drives cadence.
+        let activity = event::listen_with(|event, _status, _id| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
+            | iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+            | iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
+                Some(Message::UserInput)
+            }
+            iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused),
+            iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused),
+            _ => None,
+        });
 
-        let mut subs = vec![keys, tick];
+        let mut subs = vec![keys, activity];
+        // The scheduler picks the delay; the timer restarts whenever it changes.
+        if let Some(delay) = self.sync_next_delay {
+            subs.push(
+                iced::time::every(delay.max(std::time::Duration::from_millis(250)))
+                    .map(|_| Message::SyncTick),
+            );
+        }
         // Only run the 1s toast-expiry timer while toasts are on screen.
         if !self.toasts.is_empty() {
             subs.push(
@@ -1438,7 +1492,59 @@ impl App {
         Subscription::batch(subs)
     }
 
+    /// Feed the sync scheduler an event, re-arm its timer, and start the cycle
+    /// it asks for. Local writes arrive here as `LocalWrite` (see `update`).
+    fn drive_sync(&mut self, event: SchedEvent) -> Task<Message> {
+        let decision = self.scheduler.handle(event, std::time::Instant::now());
+        self.sync_next_delay = decision.next_delay;
+        match decision.run {
+            Some(kind) => self.start_sync(kind),
+            None => Task::none(),
+        }
+    }
+
+    /// Start a sync cycle the scheduler already admitted. If it can't start
+    /// (no token), report the cycle as failed so the scheduler backs off.
+    fn start_sync(&mut self, kind: CycleKind) -> Task<Message> {
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        match ApiClient::new(base_url, token) {
+            Ok(client) => {
+                self.sync_in_progress = true;
+                self.last_sync_error = None;
+                return match kind {
+                    CycleKind::Full => Task::perform(
+                        async move { SyncEngine::full_cycle(&client).await },
+                        Message::SyncCompleted,
+                    ),
+                    CycleKind::PushOnly => Task::perform(
+                        async move { SyncEngine::push_cycle(&client).await },
+                        Message::SyncCompleted,
+                    ),
+                };
+            }
+            Err(ApiError::MissingToken) => {
+                self.last_sync_error = Some("set an API token in Settings".into());
+            }
+            Err(e) => {
+                self.last_sync_error = Some(e.to_string());
+            }
+        }
+        self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
+        self.drive_sync(SchedEvent::CycleFinished { success: false })
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Discard stale signals so only writes made by this message count.
+        sync_queue::take_local_write();
+        let task = self.update_inner(message);
+        if sync_queue::take_local_write() && self.config.api_token.is_some() {
+            return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
+        }
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         // My Issues spans several teams: create and lane moves need a single
         // team's lanes, so they're no-ops here. Priority and delete act on the
         // issue's own row/team, so they work cross-team.
@@ -1611,9 +1717,7 @@ impl App {
                 }
                 if let Some(ref form) = self.issue_form {
                     let conn = self.db();
-                    let now = chrono::Utc::now()
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                        .to_string();
+                    let now = crate::db::now_iso();
 
                     let description_body = form.description_text();
                     let description = if description_body.trim().is_empty() {
@@ -1763,6 +1867,11 @@ impl App {
                         d.reply_composer = iced::widget::text_editor::Content::new();
                         d.suggest = None;
                     }
+                }
+            }
+            Message::IssueFetched(result) => {
+                if result.is_ok() {
+                    self.reload_data();
                 }
             }
             Message::CommentsFetched(issue_id, result) => {
@@ -2347,6 +2456,8 @@ impl App {
                             self.sync_paused_auth = false;
                             self.last_sync_error = None;
                             self.push_toast("Settings saved", ToastKind::Info, false);
+                            // Un-pausing the scheduler runs a full cycle now.
+                            return self.drive_sync(SchedEvent::AuthPaused(false));
                         }
                         Err(e) => {
                             if let Some(ref mut f) = self.settings_form {
@@ -2357,59 +2468,24 @@ impl App {
                 }
             }
 
-            Message::SyncTick => {
-                if self.sync_in_progress || self.sync_paused_auth {
-                    return Task::none();
-                }
-                let has_token = self
-                    .config
-                    .api_token
-                    .as_deref()
-                    .map(|t| !t.trim().is_empty())
-                    .unwrap_or(false);
-                if !has_token {
-                    return Task::none();
-                }
-                return self.update(Message::SyncNow);
-            }
-
-            Message::SyncNow => {
-                if self.sync_in_progress {
-                    return Task::none();
-                }
-                let base_url = self.config.api_base_url.trim().to_string();
-                let token = self.config.api_token.clone().unwrap_or_default();
-                match ApiClient::new(base_url, token) {
-                    Ok(client) => {
-                        self.sync_in_progress = true;
-                        self.last_sync_error = None;
-                        return Task::perform(
-                            async move {
-                                let outcome = SyncEngine::pull(&client).await;
-                                let push = SyncEngine::drain(&client).await;
-                                FullSyncReport {
-                                    pull: outcome.report,
-                                    push,
-                                    deleted_orphan_team: outcome.deleted_orphan_team,
-                                    current_user: outcome.current_user,
-                                }
-                            },
-                            Message::SyncCompleted,
-                        );
-                    }
-                    Err(ApiError::MissingToken) => {
-                        self.last_sync_error = Some("set an API token in Settings".into());
-                    }
-                    Err(e) => {
-                        self.last_sync_error = Some(e.to_string());
-                    }
-                }
-                self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
-            }
+            Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
+            Message::UserInput => return self.drive_sync(SchedEvent::Input),
+            Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
+            Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
+            Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
             Message::SyncCompleted(report) => {
+                let cycle_ok = report.cycle_succeeded();
                 self.sync_in_progress = false;
-                self.last_sync_error = report.last_error().map(str::to_string);
+                // Read-only is a state, not an error: show the banner instead.
+                self.sync_read_only = report.read_only();
+                self.last_sync_error = if self.sync_read_only {
+                    None
+                } else {
+                    report.last_error().map(str::to_string)
+                };
+                self.inaccessible_teams =
+                    queries::inaccessible_team_identifiers(&self.db()).unwrap_or_default();
 
                 // If pull deleted the orphan seed team and that's what was
                 // selected, drop the now-dangling selection. reload_data will
@@ -2433,7 +2509,7 @@ impl App {
                 if !auth_failed {
                     for f in report.failures() {
                         match &f.kind {
-                            SyncErrorKind::Auth | SyncErrorKind::Network => {}
+                            SyncErrorKind::Auth | SyncErrorKind::Network | SyncErrorKind::TeamAccess => {}
                             SyncErrorKind::Validation(errs) if f.entity_type == "issue" => {
                                 validation_issue = Some((f.entity_id.clone(), errs.clone()));
                             }
@@ -2464,7 +2540,7 @@ impl App {
                         config_dirty = true;
                     }
                 }
-                if report.pull.failed == 0 {
+                if !report.push_only && report.pull.failed == 0 {
                     self.config.last_synced_at = Some(chrono::Utc::now());
                     config_dirty = true;
                 }
@@ -2507,6 +2583,13 @@ impl App {
                         self.push_toast(msg, ToastKind::Error, retry);
                     }
                 }
+
+                // Tell the scheduler how the cycle went (backoff / follow-up).
+                let finish = self.drive_sync(SchedEvent::CycleFinished { success: cycle_ok });
+                if self.sync_paused_auth {
+                    return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
+                }
+                return finish;
             }
 
             Message::DismissToast(id) => {
@@ -2522,7 +2605,7 @@ impl App {
 
             Message::RetrySyncFromToast(id) => {
                 self.toasts.retain(|t| t.id != id);
-                return self.update(Message::SyncNow);
+                return self.drive_sync(SchedEvent::ManualSync);
             }
 
             Message::CreateProject => {
@@ -2615,9 +2698,7 @@ impl App {
                     let conn = self.db();
                     if let Ok(Some(mut project)) = queries::get_project(&conn, &project_id) {
                         project.roadmap_commitment = Some(commitment);
-                        project.updated_at = chrono::Utc::now()
-                            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                            .to_string();
+                        project.updated_at = crate::db::now_iso();
                         let _ = queries::update_project(&conn, &project);
                         let payload = serde_json::to_string(&project).ok();
                         self.enqueue_sync("project", &project.id, "update", payload.as_deref());
@@ -2654,7 +2735,7 @@ impl App {
 
             // --- Project detail: live-apply pick_lists ---
             Message::ProjectDetailStatusChanged(s) => {
-                self.apply_project_update(|p| p.status = s);
+                self.apply_project_update(|p| p.status = Some(s));
             }
             Message::ProjectDetailPriorityChanged(p) => {
                 self.apply_project_update(|proj| proj.priority = p.to_i32());
@@ -2673,9 +2754,7 @@ impl App {
                 }
                 if let Some(ref form) = self.project_form {
                     let conn = self.db();
-                    let now = chrono::Utc::now()
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                        .to_string();
+                    let now = crate::db::now_iso();
 
                     let description_body = form.description_text();
                     let description = if description_body.trim().is_empty() {
@@ -2698,7 +2777,7 @@ impl App {
                         if let Ok(Some(mut project)) = queries::get_project(&conn, project_id) {
                             project.name = form.name.trim().to_string();
                             project.description = description.clone();
-                            project.status = form.status;
+                            project.status = Some(form.status);
                             project.priority = form.priority.to_i32();
                             project.lead_id = form.lead_id.clone();
                             project.start_date = start_date;
@@ -2718,7 +2797,7 @@ impl App {
                             team_id,
                             name: form.name.trim().to_string(),
                             description: description.clone(),
-                            status: form.status,
+                            status: Some(form.status),
                             priority: form.priority.to_i32(),
                             lead_id: form.lead_id.clone(),
                             start_date,
@@ -2823,9 +2902,7 @@ impl App {
                         return Task::none();
                     };
                     let conn = self.db();
-                    let now = chrono::Utc::now()
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                        .to_string();
+                    let now = crate::db::now_iso();
                     let label = Label {
                         id: uuid::Uuid::new_v4().to_string(),
                         remote_id: None,
@@ -2966,7 +3043,7 @@ impl App {
                         !self.hide_completed_projects
                             || !matches!(
                                 p.status,
-                                ProjectStatus::Completed | ProjectStatus::Cancelled
+                                Some(ProjectStatus::Completed | ProjectStatus::Cancelled)
                             )
                     })
                     .filter(|p| header::project_matches(p, &needle))
@@ -3062,6 +3139,8 @@ impl App {
             self.sync_in_progress,
             self.config.last_synced_at,
             token_configured,
+            &self.inaccessible_teams,
+            self.sync_read_only,
         );
 
         let main_content = column![]

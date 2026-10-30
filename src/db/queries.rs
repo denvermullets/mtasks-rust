@@ -18,7 +18,7 @@ pub fn all_teams(conn: &Connection) -> Result<Vec<Team>> {
 
 pub fn lanes_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Lane>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+        "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
          FROM lanes WHERE team_id = ?1 ORDER BY position",
     )?;
     let rows = stmt.query_map(params![team_id], Lane::from_row)?;
@@ -33,7 +33,7 @@ pub fn issues_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Issue>> {
                 started_at, completed_at, canceled_at, lane_id, team_id,
                 project_id, parent_issue_id, assignee_id, creator_id, archived_at,
                 remote_id, created_at, updated_at
-         FROM issues WHERE team_id = ?1 ORDER BY priority, created_at",
+         FROM issues WHERE team_id = ?1 AND deleted_at IS NULL ORDER BY priority, created_at",
     )?;
     let rows = stmt.query_map(params![team_id], Issue::from_row)?;
     rows.collect()
@@ -45,7 +45,7 @@ pub fn issues_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Iss
                 started_at, completed_at, canceled_at, lane_id, team_id,
                 project_id, parent_issue_id, assignee_id, creator_id, archived_at,
                 remote_id, created_at, updated_at
-         FROM issues WHERE project_id = ?1 ORDER BY priority, created_at",
+         FROM issues WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY priority, created_at",
     )?;
     let rows = stmt.query_map(params![project_id], Issue::from_row)?;
     rows.collect()
@@ -91,9 +91,7 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
 }
 
 fn now_ts() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
+    crate::db::now_iso()
 }
 
 /// Record local activity events for a write that turned `old` into the
@@ -129,16 +127,276 @@ pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     Ok(())
 }
 
+/// Soft-delete: stamp the local tombstone instead of removing the row, so a
+/// later pull can't recreate the issue while the server delete is pending.
 pub fn delete_issue(conn: &Connection, issue_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
+    let now = crate::db::now_iso();
+    conn.execute(
+        "UPDATE issues SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+        params![issue_id, now],
+    )?;
     Ok(())
+}
+
+/// Hard-delete a tombstoned issue and everything attached to it (comments,
+/// labels, dependencies, events). Sub-issues are detached, mirroring Rails'
+/// nullify. No-op unless the row carries the tombstone.
+pub fn purge_tombstoned_issue(conn: &Connection, issue_id: &str) -> Result<()> {
+    let tombstoned: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issues WHERE id = ?1 AND deleted_at IS NOT NULL",
+        params![issue_id],
+        |r| r.get(0),
+    )?;
+    if tombstoned == 0 {
+        return Ok(());
+    }
+    purge_issue_rows(conn, issue_id)
+}
+
+/// Hard-delete an issue and everything attached to it, whether or not it
+/// carries the local tombstone. Callers decide that the issue must go
+/// (a confirmed server delete, or a local delete the server has accepted).
+fn purge_issue_rows(conn: &Connection, issue_id: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE issues SET parent_issue_id = NULL WHERE parent_issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM comments WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM issue_labels WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM issue_dependencies WHERE blocking_issue_id = ?1 OR blocked_issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM issue_events WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
+    tx.commit()
+}
+
+/// Apply a server tombstone for an issue: hard-delete the local issue (with
+/// everything attached), clear any local delete marker, and retire its pending
+/// sync entries (a queued delete or edit has nothing left to act on). Returns
+/// whether a local issue existed in this team. Idempotent.
+pub fn apply_server_issue_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT id FROM issues WHERE remote_id = ?1 AND team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    // The server delete wins whether or not the user had already deleted it
+    // locally, so purge without requiring the local marker.
+    purge_issue_rows(conn, &local_id)?;
+    conn.execute(
+        "UPDATE sync_queue SET synced_at = ?2
+         WHERE entity_type = 'issue' AND entity_id = ?1 AND synced_at IS NULL",
+        params![
+            local_id,
+            crate::db::now_iso()
+        ],
+    )?;
+    Ok(true)
+}
+
+fn retire_pending_sync(conn: &Connection, entity_type: &str, local_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sync_queue SET synced_at = ?3
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
+        params![
+            entity_type,
+            local_id,
+            crate::db::now_iso()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Apply a server tombstone for a comment: hard-delete it and its replies
+/// (children first, any depth), and retire pending sync entries for them.
+/// Scoped to the team through the comment's issue. Idempotent; returns whether
+/// a local comment existed.
+pub fn apply_server_comment_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT c.id FROM comments c JOIN issues i ON i.id = c.issue_id
+             WHERE c.remote_id = ?1 AND i.team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    let mut ids = vec![local_id];
+    let mut i = 0;
+    while i < ids.len() {
+        let mut stmt = tx.prepare("SELECT id FROM comments WHERE parent_id = ?1")?;
+        let kids: Vec<String> = stmt
+            .query_map(params![ids[i]], |r| r.get(0))?
+            .collect::<Result<_>>()?;
+        drop(stmt);
+        ids.extend(kids);
+        i += 1;
+    }
+    for id in ids.iter().rev() {
+        tx.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "comment", id)?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Apply a server tombstone for an issue dependency (Rails destroys blocking
+/// edges when an issue completes): delete the local edge with this remote id
+/// and retire its pending sync entries. Edges are team-scoped through their
+/// issues. Idempotent; returns whether a local edge existed.
+pub fn apply_server_dependency_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT d.id FROM issue_dependencies d
+             JOIN issues i ON i.id = d.blocking_issue_id
+             WHERE d.remote_id = ?1 AND i.team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_dependencies WHERE id = ?1", params![local_id])?;
+    retire_pending_sync(&tx, "dependency", &local_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Delete an issue's local dependency edges (either side) that carry a
+/// remote id the server's detail payload no longer lists. Edges with a NULL
+/// remote id are local creates still pending push and are never touched.
+/// Returns how many edges were removed.
+pub fn prune_issue_dependencies(
+    conn: &Connection,
+    issue_id: &str,
+    keep_remote_ids: &[i64],
+) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id FROM issue_dependencies
+         WHERE (blocking_issue_id = ?1 OR blocked_issue_id = ?1) AND remote_id IS NOT NULL",
+    )?;
+    let stale: Vec<String> = stmt
+        .query_map(params![issue_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, remote)| !keep_remote_ids.contains(remote))
+        .map(|(id, _)| id)
+        .collect();
+    drop(stmt);
+    let tx = conn.unchecked_transaction()?;
+    for id in &stale {
+        tx.execute("DELETE FROM issue_dependencies WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "dependency", id)?;
+    }
+    tx.commit()?;
+    Ok(stale.len())
+}
+
+/// Apply a server tombstone for a label: detach it from issues and projects,
+/// then delete it. Idempotent; returns whether a local label existed.
+pub fn apply_server_label_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT id FROM labels WHERE remote_id = ?1 AND team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_labels WHERE label_id = ?1", params![local_id])?;
+    tx.execute("DELETE FROM project_labels WHERE label_id = ?1", params![local_id])?;
+    tx.execute("DELETE FROM labels WHERE id = ?1", params![local_id])?;
+    retire_pending_sync(&tx, "label", &local_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Apply a server tombstone for a project: issues lose their project link
+/// (Rails nullifies), project labels are detached, then the project is
+/// deleted. Idempotent; returns whether a local project existed.
+pub fn apply_server_project_tombstone(
+    conn: &Connection,
+    team_id: &str,
+    remote_id: i64,
+) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT id FROM projects WHERE remote_id = ?1 AND team_id = ?2",
+            params![remote_id, team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE issues SET project_id = NULL WHERE project_id = ?1",
+        params![local_id],
+    )?;
+    tx.execute("DELETE FROM project_labels WHERE project_id = ?1", params![local_id])?;
+    tx.execute("DELETE FROM projects WHERE id = ?1", params![local_id])?;
+    retire_pending_sync(&tx, "project", &local_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// True when a local row for this remote id carries the delete tombstone.
+pub fn is_issue_tombstoned_by_remote_id(conn: &Connection, remote_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issues WHERE remote_id = ?1 AND deleted_at IS NOT NULL",
+        params![remote_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> Result<()> {
     let old = get_issue(conn, issue_id)?;
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "UPDATE issues SET lane_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![lane_id, now, issue_id],
@@ -149,9 +407,7 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
 
 pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> Result<()> {
     let old = get_issue(conn, issue_id)?;
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     conn.execute(
         "UPDATE issues SET priority = ?1, updated_at = ?2 WHERE id = ?3",
         params![priority, now, issue_id],
@@ -166,7 +422,7 @@ pub fn get_issue(conn: &Connection, issue_id: &str) -> Result<Option<Issue>> {
                 started_at, completed_at, canceled_at, lane_id, team_id,
                 project_id, parent_issue_id, assignee_id, creator_id, archived_at,
                 remote_id, created_at, updated_at
-         FROM issues WHERE id = ?1",
+         FROM issues WHERE id = ?1 AND deleted_at IS NULL",
         params![issue_id],
         Issue::from_row,
     )
@@ -227,7 +483,7 @@ pub fn comments_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Comment
     let mut stmt = conn.prepare(
         "SELECT c.id, c.remote_id, c.issue_id, c.author_id, c.body, c.parent_id, c.created_at, c.updated_at
          FROM comments c JOIN issues i ON i.id = c.issue_id
-         WHERE i.team_id = ?1 ORDER BY c.created_at",
+         WHERE i.team_id = ?1 AND i.deleted_at IS NULL ORDER BY c.created_at",
     )?;
     let rows = stmt.query_map(params![team_id], Comment::from_row)?;
     rows.collect()
@@ -418,7 +674,7 @@ pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(St
          FROM issue_labels il
          JOIN labels l ON l.id = il.label_id
          JOIN issues i ON i.id = il.issue_id
-         WHERE i.team_id = ?1
+         WHERE i.team_id = ?1 AND i.deleted_at IS NULL
          ORDER BY l.name",
     )?;
     let rows = stmt.query_map(params![team_id], |row| {
@@ -440,9 +696,7 @@ pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(St
 /// Replace the full set of labels attached to `issue_id` with `label_ids`.
 /// Mirrors Rails' `label_ids=` collection setter (delete + insert to match).
 pub fn set_issue_labels(conn: &Connection, issue_id: &str, label_ids: &[String]) -> Result<()> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "DELETE FROM issue_labels WHERE issue_id = ?1",
@@ -461,7 +715,8 @@ pub fn set_issue_labels(conn: &Connection, issue_id: &str, label_ids: &[String])
 
 pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<IssueDependency>> {
     conn.query_row(
-        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at
+        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+                created_at, updated_at
          FROM issue_dependencies WHERE id = ?1",
         params![dep_id],
         IssueDependency::from_row,
@@ -475,13 +730,16 @@ pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<Is
 pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Result<()> {
     conn.execute(
         "INSERT INTO issue_dependencies
-            (id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             dep.id,
             dep.remote_id,
             dep.blocking_issue_id,
             dep.blocked_issue_id,
+            dep.kind,
+            dep.direction,
             dep.created_at,
             dep.updated_at,
         ],
@@ -539,7 +797,7 @@ fn dependency_links(
          FROM issue_dependencies d
          JOIN issues i ON i.id = d.{return_column}
          JOIN teams t ON t.id = i.team_id
-         WHERE d.{join_column} = ?1
+         WHERE d.{join_column} = ?1 AND i.deleted_at IS NULL
          ORDER BY i.created_at"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -608,6 +866,72 @@ pub fn set_issue_dependency_remote_id(
     Ok(())
 }
 
+/// Record the server's identity for a pushed dependency: its id plus the
+/// `kind` / normalized `direction` Rails echoed back.
+pub fn set_issue_dependency_sync_fields(
+    conn: &Connection,
+    dep_id: &str,
+    remote_id: i64,
+    kind: &str,
+    direction: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE issue_dependencies SET remote_id = ?1, kind = ?2, direction = ?3 WHERE id = ?4",
+        params![remote_id, kind, direction, dep_id],
+    )?;
+    Ok(())
+}
+
+/// Persist one dependency received from a pull. `source_id` / `target_id` are
+/// local issue UUIDs (source = Rails `blocking_issue`).
+///
+/// - Known `remote_id`: refresh kind/direction only (endpoints keep the
+///   orientation they were first stored with).
+/// - Same edge already exists locally without a remote id (pushed, response
+///   not yet recorded): adopt the remote id.
+/// - Otherwise insert. Writes no issue events and no sync_queue entry.
+pub fn upsert_pulled_dependency(
+    conn: &Connection,
+    remote_id: i64,
+    source_id: &str,
+    target_id: &str,
+    kind: &str,
+    direction: &str,
+) -> Result<()> {
+    let now = now_ts();
+    let updated = conn.execute(
+        "UPDATE issue_dependencies SET kind = ?1, direction = ?2 WHERE remote_id = ?3",
+        params![kind, direction, remote_id],
+    )?;
+    if updated > 0 {
+        return Ok(());
+    }
+    let adopted = conn.execute(
+        "UPDATE issue_dependencies SET remote_id = ?1, kind = ?2, direction = ?3
+         WHERE blocking_issue_id = ?4 AND blocked_issue_id = ?5 AND remote_id IS NULL",
+        params![remote_id, kind, direction, source_id, target_id],
+    )?;
+    if adopted > 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO issue_dependencies
+            (id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            remote_id,
+            source_id,
+            target_id,
+            kind,
+            direction,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
 // ── Find by remote_id (used by pull-side merge) ──
 
 pub fn find_team_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Team>> {
@@ -622,7 +946,7 @@ pub fn find_team_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Optio
 
 pub fn find_lane_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Lane>> {
     conn.query_row(
-        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+        "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
          FROM lanes WHERE remote_id = ?1",
         params![remote_id],
         Lane::from_row,
@@ -706,14 +1030,15 @@ pub fn upsert_team(conn: &Connection, team: &Team) -> Result<()> {
 
 pub fn upsert_lane(conn: &Connection, lane: &Lane) -> Result<()> {
     conn.execute(
-        "INSERT INTO lanes (id, name, color, position, team_id, remote_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO lanes (id, name, color, position, team_id, remote_id, category, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             color = excluded.color,
             position = excluded.position,
             team_id = excluded.team_id,
             remote_id = excluded.remote_id,
+            category = excluded.category,
             updated_at = excluded.updated_at",
         params![
             lane.id,
@@ -722,9 +1047,71 @@ pub fn upsert_lane(conn: &Connection, lane: &Lane) -> Result<()> {
             lane.position,
             lane.team_id,
             lane.remote_id,
+            lane.category,
             lane.created_at,
             lane.updated_at
         ],
+    )?;
+    Ok(())
+}
+
+/// Stored ETag for a team's list ("lanes" | "labels" | "members").
+pub fn get_list_etag(conn: &Connection, team_id: &str, list: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT etag FROM list_etags WHERE team_id = ?1 AND list = ?2",
+        params![team_id, list],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+pub fn set_list_etag(conn: &Connection, team_id: &str, list: &str, etag: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO list_etags (team_id, list, etag) VALUES (?1, ?2, ?3)
+         ON CONFLICT(team_id, list) DO UPDATE SET etag = excluded.etag",
+        params![team_id, list, etag],
+    )?;
+    Ok(())
+}
+
+pub fn clear_list_etag(conn: &Connection, team_id: &str, list: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM list_etags WHERE team_id = ?1 AND list = ?2",
+        params![team_id, list],
+    )?;
+    Ok(())
+}
+
+/// Incremental-pull cursor (a server timestamp) for a team's resource
+/// ("issues", ...). `None` means never pulled: do a full pull.
+pub fn get_pull_cursor(conn: &Connection, team_id: &str, resource: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT cursor FROM pull_cursors WHERE team_id = ?1 AND resource = ?2",
+        params![team_id, resource],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+pub fn set_pull_cursor(
+    conn: &Connection,
+    team_id: &str,
+    resource: &str,
+    cursor: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO pull_cursors (team_id, resource, cursor) VALUES (?1, ?2, ?3)
+         ON CONFLICT(team_id, resource) DO UPDATE SET cursor = excluded.cursor",
+        params![team_id, resource, cursor],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn clear_pull_cursor(conn: &Connection, team_id: &str, resource: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pull_cursors WHERE team_id = ?1 AND resource = ?2",
+        params![team_id, resource],
     )?;
     Ok(())
 }
@@ -825,6 +1212,15 @@ pub fn upsert_project(conn: &Connection, project: &Project) -> Result<()> {
 }
 
 pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
+    // Tombstoned rows are never overwritten by pull.
+    let tombstoned: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issues WHERE id = ?1 AND deleted_at IS NOT NULL",
+        params![issue.id],
+        |r| r.get(0),
+    )?;
+    if tombstoned > 0 {
+        return Ok(());
+    }
     let old = get_issue(conn, &issue.id)?;
     conn.execute(
         "INSERT INTO issues
@@ -897,9 +1293,7 @@ pub fn archive_missing_issues(
     team_id: &str,
     active_remote_ids: &[i64],
 ) -> Result<usize> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     if active_remote_ids.is_empty() {
         return conn.execute(
             "UPDATE issues SET archived_at = ?1
@@ -926,9 +1320,7 @@ pub fn archive_missing_issues(
 /// Intentionally conservative: only flips `archived_at` when the column is NULL,
 /// never resurrects.
 pub fn archive_missing_teams(conn: &Connection, active_remote_ids: &[i64]) -> Result<usize> {
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string();
+    let now = crate::db::now_iso();
     if active_remote_ids.is_empty() {
         return conn.execute(
             "UPDATE teams SET archived_at = ?1
@@ -947,6 +1339,41 @@ pub fn archive_missing_teams(conn: &Connection, active_remote_ids: &[i64]) -> Re
     let mut bound: Vec<Value> = vec![now.into()];
     bound.extend(active_remote_ids.iter().map(|id| (*id).into()));
     conn.execute(&sql, params_from_iter(bound))
+}
+
+/// Flag (or clear) a team as inaccessible after Rails answered a push with a
+/// team-access 404. Pending edits stay queued; pushes for the team are skipped.
+pub fn set_team_access_lost(conn: &Connection, remote_id: i64, lost: bool) -> Result<usize> {
+    if lost {
+        let now = crate::db::now_iso();
+        conn.execute(
+            "UPDATE teams SET access_lost_at = ?1 WHERE remote_id = ?2 AND access_lost_at IS NULL",
+            params![now, remote_id],
+        )
+    } else {
+        conn.execute(
+            "UPDATE teams SET access_lost_at = NULL WHERE remote_id = ?1 AND access_lost_at IS NOT NULL",
+            params![remote_id],
+        )
+    }
+}
+
+pub fn team_access_lost(conn: &Connection, remote_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM teams WHERE remote_id = ?1 AND access_lost_at IS NOT NULL",
+        params![remote_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Identifiers (e.g. "PROJ") of teams currently flagged inaccessible.
+pub fn inaccessible_team_identifiers(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT identifier FROM teams WHERE access_lost_at IS NOT NULL ORDER BY identifier",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
 }
 
 /// Detect and remove the locally-seeded "My Project" team if it still looks
@@ -974,7 +1401,7 @@ pub fn cleanup_orphan_seed_team(conn: &Connection) -> Result<Option<String>> {
     };
 
     let issue_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM issues WHERE team_id = ?1",
+        "SELECT COUNT(*) FROM issues WHERE team_id = ?1 AND deleted_at IS NULL",
         params![team_id],
         |row| row.get(0),
     )?;
@@ -1135,6 +1562,31 @@ mod tests {
     }
 
     #[test]
+    fn delete_issue_tombstones_and_pull_leaves_it_alone() {
+        let conn = setup();
+        let mut issue = make_issue("i2", None, None);
+        issue.remote_id = Some(77);
+        issue.title = "keep me gone".into();
+        upsert_issue(&conn, &issue).unwrap();
+        delete_issue(&conn, "i2").unwrap();
+        // Row survives (tombstone) but is hidden from every read.
+        assert!(get_issue(&conn, "i2").unwrap().is_none());
+        assert!(issues_for_team(&conn, "t1")
+            .unwrap()
+            .iter()
+            .all(|i| i.id != "i2"));
+        assert!(is_issue_tombstoned_by_remote_id(&conn, 77).unwrap());
+        // A pull of the same remote issue must not overwrite or revive it.
+        issue.title = "remote edit".into();
+        upsert_issue(&conn, &issue).unwrap();
+        let title: String = conn
+            .query_row("SELECT title FROM issues WHERE id = 'i2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "keep me gone");
+        assert!(get_issue(&conn, "i2").unwrap().is_none());
+    }
+
+    #[test]
     fn upsert_comment_sets_remote_id_and_is_idempotent() {
         let conn = setup();
         insert_comment(&conn, &make_comment("c1", None, "hi", NOW)).unwrap();
@@ -1264,6 +1716,8 @@ mod tests {
             remote_id: None,
             blocking_issue_id: blocking.to_string(),
             blocked_issue_id: blocked.to_string(),
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: NOW.to_string(),
             updated_at: NOW.to_string(),
         }

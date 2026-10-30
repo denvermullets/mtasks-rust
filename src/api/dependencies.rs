@@ -16,6 +16,11 @@ pub enum Direction {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IssueDependencyResponse {
     pub id: i64,
+    /// `blocks` | `relates` | `duplicates`.
+    pub kind: String,
+    /// Relative to the issue in the URL: `blocking` | `blocked_by` | `relates`
+    /// | `duplicates` | `duplicated_by`.
+    pub direction: String,
     pub blocking_issue: IssueRef,
     pub blocked_issue: IssueRef,
     pub created_at: String,
@@ -34,7 +39,7 @@ pub async fn create(
     target_issue_id: i64,
     direction: Direction,
 ) -> Result<IssueDependencyResponse, ApiError> {
-    let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/dependencies");
+    let path = collection_path(team_id, issue_id);
     let body = CreateBody {
         target_issue_id,
         direction,
@@ -48,13 +53,33 @@ pub async fn delete(
     issue_id: i64,
     dep_id: i64,
 ) -> Result<(), ApiError> {
-    let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/dependencies/{dep_id}");
+    let path = member_path(team_id, issue_id, dep_id);
     client.delete(&path).await
+}
+
+fn collection_path(team_id: i64, issue_id: i64) -> String {
+    format!("api/v1/teams/{team_id}/issues/{issue_id}/issue_dependencies")
+}
+
+fn member_path(team_id: i64, issue_id: i64, dep_id: i64) -> String {
+    format!("{}/{dep_id}", collection_path(team_id, issue_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_and_delete_use_issue_dependencies_path() {
+        assert_eq!(
+            collection_path(3, 5),
+            "api/v1/teams/3/issues/5/issue_dependencies"
+        );
+        assert_eq!(
+            member_path(3, 5, 9),
+            "api/v1/teams/3/issues/5/issue_dependencies/9"
+        );
+    }
 
     #[test]
     fn create_body_is_flat_with_snake_case_direction() {
@@ -81,12 +106,16 @@ mod tests {
     fn response_deserializes_from_rails_shape() {
         let raw = serde_json::json!({
             "id": 9,
+            "kind": "blocks",
+            "direction": "blocking",
             "blocking_issue": { "id": 1, "identifier": "TEAM-1", "title": "A" },
             "blocked_issue":  { "id": 2, "identifier": "TEAM-2", "title": "B" },
             "created_at": "2026-04-27T10:00:00Z"
         });
         let parsed: IssueDependencyResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(parsed.id, 9);
+        assert_eq!(parsed.kind, "blocks");
+        assert_eq!(parsed.direction, "blocking");
         assert_eq!(parsed.blocking_issue.identifier, "TEAM-1");
         assert_eq!(parsed.blocked_issue.identifier, "TEAM-2");
     }

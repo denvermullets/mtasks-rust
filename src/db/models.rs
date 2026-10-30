@@ -40,6 +40,8 @@ pub struct Lane {
     pub position: i32,
     pub team_id: String,
     pub remote_id: Option<i64>,
+    /// Workflow category from Rails: backlog, unstarted, started, completed, canceled.
+    pub category: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -53,6 +55,7 @@ impl Lane {
             position: row.get("position")?,
             team_id: row.get("team_id")?,
             remote_id: row.get("remote_id")?,
+            category: row.get("category")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -273,7 +276,8 @@ pub struct Project {
     pub team_id: String,
     pub name: String,
     pub description: Option<String>,
-    pub status: ProjectStatus,
+    /// `None` when Rails sends a null status; never defaulted.
+    pub status: Option<ProjectStatus>,
     pub priority: i32,
     pub lead_id: Option<String>,
     pub start_date: Option<String>,
@@ -376,6 +380,10 @@ pub struct IssueDependency {
     pub remote_id: Option<i64>,
     pub blocking_issue_id: String,
     pub blocked_issue_id: String,
+    /// `blocks` | `relates` | `duplicates` (Rails `IssueDependency#kind`).
+    pub kind: String,
+    /// Relative to `blocking_issue_id`: `blocking` | `relates` | `duplicates`.
+    pub direction: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -387,6 +395,8 @@ impl IssueDependency {
             remote_id: row.get("remote_id")?,
             blocking_issue_id: row.get("blocking_issue_id")?,
             blocked_issue_id: row.get("blocked_issue_id")?,
+            kind: row.get("kind")?,
+            direction: row.get("direction")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })

@@ -1,38 +1,6 @@
 use serde::Serialize;
 
-use super::{ApiClient, ApiError, IssueDto};
-
-#[derive(Debug, Default, Clone)]
-pub struct IssueFilters {
-    pub lane_id: Option<i64>,
-    pub assignee_id: Option<i64>,
-    pub project_id: Option<i64>,
-    /// Use [`crate::db::models::Priority::as_rails_str`] for valid values.
-    pub priority: Option<String>,
-}
-
-impl IssueFilters {
-    fn query_string(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(v) = self.lane_id {
-            parts.push(format!("lane_id={v}"));
-        }
-        if let Some(v) = self.assignee_id {
-            parts.push(format!("assignee_id={v}"));
-        }
-        if let Some(v) = self.project_id {
-            parts.push(format!("project_id={v}"));
-        }
-        if let Some(v) = &self.priority {
-            parts.push(format!("priority={v}"));
-        }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", parts.join("&"))
-        }
-    }
-}
+use super::{encode_query_value, ApiClient, ApiError, IssueDto, Page};
 
 /// Body for create/update — fields match Rails `IssuesController` strong params.
 /// Use [`crate::db::models::Priority::as_rails_str`] to populate `priority`.
@@ -65,13 +33,56 @@ struct IssueWrap<'a> {
     issue: &'a IssueParams,
 }
 
-pub async fn list(
+/// Query for the incremental, keyset-paged issue index.
+#[derive(Debug, Default, Clone)]
+pub struct IssuePageQuery {
+    /// ISO8601 lower bound on `updated_at` (inclusive). `None` = everything.
+    pub updated_since: Option<String>,
+    /// Ask for the detailed serializer on every row.
+    pub include_detail: bool,
+    /// Also return archived issues (`include_archived=1`) so archive and
+    /// unarchive transitions arrive through the pull.
+    pub include_archived: bool,
+    /// Page size; Rails caps at 500 and defaults to 200.
+    pub limit: Option<u32>,
+    /// Resume after this issue id (from the previous page's `X-Next-After-Id`).
+    pub after_id: Option<i64>,
+}
+
+impl IssuePageQuery {
+    pub(crate) fn query_string(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(s) = &self.updated_since {
+            parts.push(format!("updated_since={}", encode_query_value(s)));
+        }
+        if self.include_detail {
+            parts.push("include=detail".to_string());
+        }
+        if self.include_archived {
+            parts.push("include_archived=1".to_string());
+        }
+        if let Some(l) = self.limit {
+            parts.push(format!("limit={l}"));
+        }
+        if let Some(a) = self.after_id {
+            parts.push(format!("after_id={a}"));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", parts.join("&"))
+        }
+    }
+}
+
+/// One page of the paged issue index plus `X-Next-After-Id` / `X-Server-Time`.
+pub async fn list_page(
     client: &ApiClient,
     team_id: i64,
-    filters: &IssueFilters,
-) -> Result<Vec<IssueDto>, ApiError> {
-    let path = format!("api/v1/teams/{team_id}/issues{}", filters.query_string());
-    client.get(&path).await
+    query: &IssuePageQuery,
+) -> Result<Page<IssueDto>, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/issues{}", query.query_string());
+    client.get_list_page(&path).await
 }
 
 pub async fn get(client: &ApiClient, team_id: i64, id: i64) -> Result<IssueDto, ApiError> {
@@ -109,34 +120,19 @@ mod tests {
     use crate::db::models::Priority;
 
     #[test]
-    fn empty_filters_produce_no_query_string() {
-        assert_eq!(IssueFilters::default().query_string(), "");
-    }
-
-    #[test]
-    fn populated_filters_join_with_ampersand() {
-        let f = IssueFilters {
-            lane_id: Some(1),
-            assignee_id: Some(2),
-            project_id: Some(3),
-            priority: Some(Priority::High.as_rails_str().into()),
+    fn page_query_encodes_cursor_and_paging() {
+        let q = IssuePageQuery {
+            updated_since: Some("2026-10-30T12:00:00Z".into()),
+            include_detail: true,
+            include_archived: true,
+            limit: Some(500),
+            after_id: Some(9),
         };
         assert_eq!(
-            f.query_string(),
-            "?lane_id=1&assignee_id=2&project_id=3&priority=high"
+            q.query_string(),
+            "?updated_since=2026-10-30T12%3A00%3A00Z&include=detail&include_archived=1&limit=500&after_id=9"
         );
-    }
-
-    #[test]
-    fn partial_filters_only_emit_set_keys() {
-        let f = IssueFilters {
-            priority: Some(Priority::Urgent.as_rails_str().into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            f.query_string(),
-            format!("?priority={}", Priority::Urgent.as_rails_str())
-        );
+        assert_eq!(IssuePageQuery::default().query_string(), "");
     }
 
     #[test]

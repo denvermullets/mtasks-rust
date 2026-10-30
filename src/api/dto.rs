@@ -33,6 +33,24 @@ pub struct IssueRef {
     pub id: i64,
     pub identifier: String,
     pub title: String,
+    /// IssueDependency id; present on issue-detail dependency entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_id: Option<i64>,
+    /// Link direction relative to the detailed issue; present on
+    /// `related_issues` / `duplicates` entries only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+}
+
+/// One dependency edge decoded from an issue-detail payload, oriented so
+/// `source` is Rails' `blocking_issue` side. `direction` is relative to source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulledDependency {
+    pub dependency_id: i64,
+    pub kind: &'static str,
+    pub direction: &'static str,
+    pub source_remote_id: i64,
+    pub target_remote_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +78,9 @@ pub struct IssueDto {
     pub labels: Vec<LabelRef>,
     pub created_at: String,
     pub updated_at: String,
+    /// Set when the issue is archived upstream; absent/null when active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
 
     // detail-only (None when the Rails serializer ran with detailed: false)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +91,10 @@ pub struct IssueDto {
     pub blocking_issues: Option<Vec<IssueRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_issues: Option<Vec<IssueRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_issues: Option<Vec<IssueRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicates: Option<Vec<IssueRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,14 +156,53 @@ impl IssueDto {
             labels,
             created_at: issue.created_at.clone(),
             updated_at: issue.updated_at.clone(),
+            archived_at: None,
             description: issue.description.clone(),
             parent_issue,
             blocking_issues: Some(blocking),
             blocked_issues: Some(blocked),
+            related_issues: None,
+            duplicates: None,
             started_at: issue.started_at.clone(),
             completed_at: issue.completed_at.clone(),
             canceled_at: issue.canceled_at.clone(),
         })
+    }
+
+    /// Every dependency edge in this (detail) payload, oriented source ->
+    /// target. Entries without a `dependency_id` are skipped.
+    pub fn dependency_links(&self) -> Vec<PulledDependency> {
+        let me = self.id;
+        let mut out = Vec::new();
+        let mut push = |r: &IssueRef, kind, direction, me_is_source: bool| {
+            if let Some(dependency_id) = r.dependency_id {
+                let (s, t) = if me_is_source { (me, r.id) } else { (r.id, me) };
+                out.push(PulledDependency {
+                    dependency_id,
+                    kind,
+                    direction,
+                    source_remote_id: s,
+                    target_remote_id: t,
+                });
+            }
+        };
+        // blocking_issues: these issues block me (they are the source).
+        for r in self.blocking_issues.iter().flatten() {
+            push(r, "blocks", "blocking", false);
+        }
+        for r in self.blocked_issues.iter().flatten() {
+            push(r, "blocks", "blocking", true);
+        }
+        // `relates` is symmetric; orient with this issue as source.
+        for r in self.related_issues.iter().flatten() {
+            push(r, "relates", "relates", true);
+        }
+        for r in self.duplicates.iter().flatten() {
+            // "duplicated_by": the other issue is the duplicate (source).
+            let me_is_source = r.direction.as_deref() != Some("duplicated_by");
+            push(r, "duplicates", "duplicates", me_is_source);
+        }
+        out
     }
 
     /// Convert a DTO into a local Issue model. Resolves nested Rails ids to
@@ -206,7 +270,7 @@ impl IssueDto {
             parent_issue_id,
             assignee_id,
             creator_id,
-            archived_at: None,
+            archived_at: self.archived_at,
             remote_id: Some(self.id),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -221,7 +285,7 @@ pub struct ProjectDto {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub status: ProjectStatus,
+    pub status: Option<ProjectStatus>,
     pub priority: String,
     pub lead: Option<RecordRef>,
     pub start_date: Option<String>,
@@ -333,6 +397,10 @@ pub struct CommentDto {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replies: Option<Vec<CommentDto>>,
+    /// Remote issue id. Only the team comments feed sends it (null for
+    /// project comments); the per-issue endpoint omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<i64>,
 }
 
 impl CommentDto {
@@ -403,12 +471,6 @@ pub fn merge_comment_tree(
 // doesn't fail when the server elides them; conversions back to local models
 // fall back to `now()` if absent.
 
-fn now_iso8601() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TeamDto {
     pub id: i64,
@@ -422,7 +484,7 @@ pub struct TeamDto {
 
 impl From<TeamDto> for Team {
     fn from(dto: TeamDto) -> Self {
-        let created_at = dto.created_at.unwrap_or_else(now_iso8601);
+        let created_at = dto.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = dto.updated_at.unwrap_or_else(|| created_at.clone());
         Team {
             id: Uuid::new_v4().to_string(),
@@ -460,6 +522,9 @@ pub struct LaneDto {
     pub name: String,
     pub color: Option<String>,
     pub position: i32,
+    /// Workflow category: backlog, unstarted, started, completed or canceled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -474,7 +539,7 @@ impl LaneDto {
         existing_uuid: Option<String>,
     ) -> Result<Lane, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
-        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let created_at = self.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Lane {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -483,6 +548,7 @@ impl LaneDto {
             position: self.position,
             team_id,
             remote_id: Some(self.id),
+            category: self.category,
             created_at,
             updated_at,
         })
@@ -498,6 +564,7 @@ impl LaneDto {
             name: lane.name.clone(),
             color: lane.color.clone(),
             position: lane.position,
+            category: lane.category.clone(),
             created_at: Some(lane.created_at.clone()),
             updated_at: Some(lane.updated_at.clone()),
         })
@@ -525,7 +592,7 @@ impl LabelDto {
         existing_uuid: Option<String>,
     ) -> Result<Label, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
-        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let created_at = self.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Label {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -572,7 +639,7 @@ impl MemberDto {
         existing_uuid: Option<String>,
     ) -> Result<Member, ApiError> {
         let team_id = local_uuid_for(conn, "teams", self.team_id)?;
-        let created_at = self.created_at.unwrap_or_else(now_iso8601);
+        let created_at = self.created_at.unwrap_or_else(crate::db::now_iso);
         let updated_at = self.updated_at.unwrap_or_else(|| created_at.clone());
         Ok(Member {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -620,6 +687,8 @@ impl IssueDependencyDto {
             remote_id: Some(self.id),
             blocking_issue_id,
             blocked_issue_id,
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -668,7 +737,7 @@ fn lookup_team_by_local_id(conn: &Connection, id: &str) -> Result<Team, ApiError
 
 fn lookup_lane_by_local_id(conn: &Connection, id: &str) -> Result<Lane, ApiError> {
     conn.query_row(
-        "SELECT id, name, color, position, team_id, remote_id, created_at, updated_at
+        "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
          FROM lanes WHERE id = ?1",
         params![id],
         Lane::from_row,
@@ -829,6 +898,8 @@ fn issue_ref_query(
             id: require_remote(remote, "issue")?,
             identifier: format!("{team_identifier}-{tn}"),
             title,
+            dependency_id: None,
+            direction: None,
         })
     })
     .collect()
@@ -887,6 +958,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
             replies,
+            issue_id: None,
         };
         let tree = vec![mk(
             10,
@@ -973,6 +1045,18 @@ mod tests {
     }
 
     #[test]
+    fn lane_dto_decodes_optional_category() {
+        let with: LaneDto = serde_json::from_str(
+            r##"{"id":1,"name":"Done","color":"#fff","position":2,"category":"canceled"}"##,
+        )
+        .unwrap();
+        assert_eq!(with.category.as_deref(), Some("canceled"));
+        let without: LaneDto =
+            serde_json::from_str(r##"{"id":1,"name":"Done","color":null,"position":2}"##).unwrap();
+        assert_eq!(without.category, None);
+    }
+
+    #[test]
     fn flat_dto_roundtrip_lane_label_member_dependency() {
         let conn = fresh_conn();
         // seed a team so foreign keys resolve when we round-trip through the DB
@@ -992,13 +1076,14 @@ mod tests {
             position: 0,
             team_id: team_uuid.clone(),
             remote_id: Some(11),
+            category: Some("canceled".into()),
             created_at: now(),
             updated_at: now(),
         };
         conn.execute(
-            "INSERT INTO lanes (id, name, color, position, team_id, remote_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![lane.id, lane.name, lane.color, lane.position, lane.team_id, lane.remote_id, lane.created_at, lane.updated_at],
+            "INSERT INTO lanes (id, name, color, position, team_id, remote_id, category, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![lane.id, lane.name, lane.color, lane.position, lane.team_id, lane.remote_id, lane.category, lane.created_at, lane.updated_at],
         ).unwrap();
 
         let lane_dto = LaneDto::from_model(&conn, &lane).unwrap();
@@ -1011,6 +1096,7 @@ mod tests {
         assert_eq!(lane_back.id, lane.id);
         assert_eq!(lane_back.team_id, lane.team_id);
         assert_eq!(lane_back.position, lane.position);
+        assert_eq!(lane_back.category.as_deref(), Some("canceled"));
 
         // Label
         let label = Label {
@@ -1082,6 +1168,8 @@ mod tests {
             remote_id: Some(44),
             blocking_issue_id: issue_a.clone(),
             blocked_issue_id: issue_b.clone(),
+            kind: "blocks".into(),
+            direction: "blocking".into(),
             created_at: now(),
             updated_at: now(),
         };
@@ -1160,6 +1248,78 @@ mod tests {
         "completed_at": null,
         "canceled_at": null
     }"#;
+
+    /// Detail dependency entries as emitted by `Api::V1::IssueSerializer`
+    /// (`serialize_dependency_issue` / `serialize_links`) for issue 7001.
+    fn detail_fixture_with_links() -> IssueDto {
+        let mut v: serde_json::Value = serde_json::from_str(ISSUE_FIXTURE).unwrap();
+        v["blocking_issues"] = serde_json::json!([
+            {"id": 7002, "identifier": "APO-43", "title": "B", "dependency_id": 11}
+        ]);
+        v["blocked_issues"] = serde_json::json!([
+            {"id": 7003, "identifier": "APO-44", "title": "C", "dependency_id": 12}
+        ]);
+        v["related_issues"] = serde_json::json!([
+            {"id": 7004, "identifier": "APO-45", "title": "D", "dependency_id": 13, "direction": "relates"}
+        ]);
+        v["duplicates"] = serde_json::json!([
+            {"id": 7005, "identifier": "APO-46", "title": "E", "dependency_id": 14, "direction": "duplicates"},
+            {"id": 7006, "identifier": "APO-47", "title": "F", "dependency_id": 15, "direction": "duplicated_by"}
+        ]);
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn detail_parses_dependency_ids_and_link_directions() {
+        let dto = detail_fixture_with_links();
+        assert_eq!(
+            dto.blocking_issues.as_ref().unwrap()[0].dependency_id,
+            Some(11)
+        );
+        let rel = &dto.related_issues.as_ref().unwrap()[0];
+        assert_eq!(rel.dependency_id, Some(13));
+        assert_eq!(rel.direction.as_deref(), Some("relates"));
+        let dups = dto.duplicates.as_ref().unwrap();
+        assert_eq!(dups[1].direction.as_deref(), Some("duplicated_by"));
+    }
+
+    #[test]
+    fn detail_without_dependency_fields_still_decodes() {
+        let dto: IssueDto = serde_json::from_str(ISSUE_FIXTURE).unwrap();
+        assert!(dto.related_issues.is_none() && dto.duplicates.is_none());
+        assert!(dto.dependency_links().is_empty());
+    }
+
+    #[test]
+    fn dependency_links_are_oriented_source_to_target() {
+        let l = detail_fixture_with_links().dependency_links();
+        let by_id = |id| l.iter().find(|d| d.dependency_id == id).unwrap();
+        // 7002 blocks 7001
+        assert_eq!(
+            (by_id(11).source_remote_id, by_id(11).target_remote_id),
+            (7002, 7001)
+        );
+        assert_eq!(by_id(11).kind, "blocks");
+        // 7001 blocks 7003
+        assert_eq!(
+            (by_id(12).source_remote_id, by_id(12).target_remote_id),
+            (7001, 7003)
+        );
+        assert_eq!(
+            (by_id(13).kind, by_id(13).direction),
+            ("relates", "relates")
+        );
+        // 7001 duplicates 7005; 7006 duplicates 7001
+        assert_eq!(
+            (by_id(14).source_remote_id, by_id(14).target_remote_id),
+            (7001, 7005)
+        );
+        assert_eq!(
+            (by_id(15).source_remote_id, by_id(15).target_remote_id),
+            (7006, 7001)
+        );
+        assert_eq!(by_id(15).direction, "duplicates");
+    }
 
     fn seed_issue_fixture_db(conn: &Connection) -> (String, String, String, String, String) {
         let team_uuid = Uuid::new_v4().to_string();
@@ -1336,7 +1496,7 @@ mod tests {
         .unwrap();
 
         let original: ProjectDto = serde_json::from_str(PROJECT_FIXTURE).unwrap();
-        assert_eq!(original.status, ProjectStatus::Started);
+        assert_eq!(original.status, Some(ProjectStatus::Started));
         assert_eq!(original.priority, "medium");
         assert_eq!(original.roadmap_commitment, Some(RoadmapCommitment::Now));
 

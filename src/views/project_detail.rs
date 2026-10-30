@@ -90,7 +90,7 @@ pub fn view<'a>(
         .spacing(10)
         .align_y(Alignment::Center)
         .push(
-            container(text("\u{25CF}").size(14).color(t::project_status_color(project.status)))
+            container(text("\u{25CF}").size(14).color(project.status.map_or(t::TEXT_MUTED, t::project_status_color)))
                 .center_x(Length::Fixed(28.0))
                 .center_y(Length::Fixed(28.0))
                 .style(|_theme: &Theme| container::Style {
@@ -159,7 +159,7 @@ pub fn view<'a>(
             "Status",
             pick_list(
                 STATUSES.as_slice(),
-                Some(project.status),
+                project.status,
                 Message::ProjectDetailStatusChanged,
             )
             .width(Length::Fill),

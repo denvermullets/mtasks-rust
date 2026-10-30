@@ -6,6 +6,7 @@ use crate::app::Message;
 use crate::theme as t;
 use crate::views::util::format_age;
 
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     pending_sync_count: i32,
     show_help: bool,
@@ -14,6 +15,8 @@ pub fn view<'a>(
     sync_in_progress: bool,
     last_synced_at: Option<DateTime<Utc>>,
     token_configured: bool,
+    inaccessible_teams: &[String],
+    read_only: bool,
 ) -> Element<'a, Message> {
     let (sync_text, sync_color) = if let Some(err) = last_sync_error {
         // Transient network failures are non-fatal (sync retries) — surface them
@@ -67,6 +70,29 @@ pub fn view<'a>(
                 .color(t::DANGER),
         );
     }
+
+    let bar = if read_only {
+        bar.push(
+            text("Read-only token \u{2014} edits are saved locally and will sync once a write token is set")
+                .size(12)
+                .color(t::WARNING),
+        )
+    } else {
+        bar
+    };
+
+    let bar = if inaccessible_teams.is_empty() {
+        bar
+    } else {
+        bar.push(
+            text(format!(
+                "\u{26A0} No access to team: {} (edits kept pending)",
+                inaccessible_teams.join(", ")
+            ))
+            .size(12)
+            .color(t::WARNING),
+        )
+    };
 
     let bar = bar.push(text(sync_text).size(12).color(sync_color));
 
