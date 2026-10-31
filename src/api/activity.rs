@@ -5,13 +5,14 @@
 
 use serde::Deserialize;
 
-/// One feed entry, tagged by the JSON `type`. Dependency and reference
-/// variants are added alongside `Version` (JRST-125 / JRST-126).
+/// One feed entry, tagged by the JSON `type`: `Version` (field changes),
+/// `Reference` (incoming mention) or `Dependency` (relation added/removed).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActivityEntry {
     Version(VersionEntry),
     Reference(ReferenceEntry),
+    Dependency(DependencyEntry),
 }
 
 /// Person behind an entry; the server sends `null` when unknown.
@@ -60,6 +61,65 @@ pub struct SourceIssue {
     pub title: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DependencyEntry {
+    /// `"dependency:<id>"`.
+    pub cursor: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub actor: Option<ActivityActor>,
+    pub event: DependencyEvent,
+    pub kind: DependencyKind,
+    /// Relation as seen from the viewed issue; word the entry from this, not
+    /// from `description` (which is written from the blocking side).
+    pub direction: DependencyDirection,
+    /// `None` when the other issue no longer exists.
+    #[serde(default)]
+    pub other_issue: Option<OtherIssue>,
+    /// Server-rendered HTML.
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyEvent {
+    Create,
+    Destroy,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyKind {
+    Blocks,
+    Relates,
+    Duplicates,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyDirection {
+    Blocking,
+    BlockedBy,
+    Relates,
+    Duplicates,
+    DuplicatedBy,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OtherIssue {
+    pub id: i64,
+    pub identifier: String,
+    #[serde(default)]
+    pub title: String,
+}
+
 /// A changed field. `from`/`to` are `None` when the server sent `null`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct FieldChange {
@@ -95,6 +155,72 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn version(body: &str) -> VersionEntry {
+        match serde_json::from_str(body).unwrap() {
+            ActivityEntry::Version(v) => v,
+            other => panic!("expected version, got {other:?}"),
+        }
+    }
+
+    fn reference(body: &str) -> ReferenceEntry {
+        match serde_json::from_str(body).unwrap() {
+            ActivityEntry::Reference(r) => r,
+            other => panic!("expected reference, got {other:?}"),
+        }
+    }
+
+    fn dependency(body: &str) -> DependencyEntry {
+        match serde_json::from_str(body).unwrap() {
+            ActivityEntry::Dependency(d) => d,
+            other => panic!("expected dependency, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_dependency_entry() {
+        let d = dependency(
+            r#"{"type":"dependency","id":443,"cursor":"dependency:443",
+            "created_at":"2026-07-06T20:07:55Z","event":"create","kind":"blocks",
+            "direction":"blocked_by",
+            "other_issue":{"id":2,"identifier":"MTK-2","title":"Add password reset"},
+            "actor":{"id":2,"name":"ryan"},"description":"added <strong>MTK-2</strong>"}"#,
+        );
+        assert_eq!(d.cursor, "dependency:443");
+        assert_eq!(d.event, DependencyEvent::Create);
+        assert_eq!(d.kind, DependencyKind::Blocks);
+        assert_eq!(d.direction, DependencyDirection::BlockedBy);
+        assert_eq!(d.actor, Some(ActivityActor { id: 2, name: "ryan".into() }));
+        assert_eq!(
+            d.other_issue,
+            Some(OtherIssue { id: 2, identifier: "MTK-2".into(), title: "Add password reset".into() })
+        );
+    }
+
+    #[test]
+    fn decodes_dependency_with_null_other_issue_and_actor() {
+        let d = dependency(
+            r#"{"type":"dependency","id":9,"cursor":"dependency:9","created_at":"t",
+            "event":"destroy","kind":"duplicates","direction":"duplicated_by",
+            "other_issue":null,"actor":null,"description":""}"#,
+        );
+        assert_eq!(d.event, DependencyEvent::Destroy);
+        assert_eq!(d.kind, DependencyKind::Duplicates);
+        assert_eq!(d.direction, DependencyDirection::DuplicatedBy);
+        assert_eq!(d.other_issue, None);
+        assert_eq!(d.actor, None);
+    }
+
+    #[test]
+    fn unknown_dependency_enum_values_do_not_fail_decoding() {
+        let d = dependency(
+            r#"{"type":"dependency","id":1,"cursor":"dependency:1","created_at":"t",
+            "event":"restore","kind":"x","direction":"y"}"#,
+        );
+        assert_eq!(d.event, DependencyEvent::Unknown);
+        assert_eq!(d.kind, DependencyKind::Unknown);
+        assert_eq!(d.direction, DependencyDirection::Unknown);
+    }
+
     #[test]
     fn decodes_version_entry_with_scalar_change() {
         let body = r#"{"type":"version","id":438,"created_at":"2026-07-06T00:40:47Z",
@@ -102,9 +228,7 @@ mod tests {
             "changes":[{"field":"priority","from":"high","to":"urgent"}],
             "description":"changed priority from <strong>High</strong> to <strong>Urgent</strong>",
             "cursor":"version:438"}"#;
-        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap() else {
-            panic!("expected a version entry")
-        };
+        let v = version(body);
         assert_eq!(v.cursor, "version:438");
         assert_eq!(v.created_at, "2026-07-06T00:40:47Z");
         assert_eq!(v.actor, Some(ActivityActor { id: 2, name: "ryan".into() }));
@@ -126,9 +250,7 @@ mod tests {
               {"field":"project_id","from":{"id":5,"name":null},"to":null},
               {"field":"estimate","from":3,"to":null}],
             "description":"x","cursor":"version:812"}"#;
-        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap() else {
-            panic!("expected a version entry")
-        };
+        let v = version(body);
         assert_eq!(v.actor, None);
         let r = |id, name: Option<&str>, identifier: Option<&str>| {
             Some(ChangeValue::Ref(ActivityRef {
@@ -151,9 +273,7 @@ mod tests {
     fn decodes_empty_changes() {
         let body = r#"{"type":"version","id":1,"created_at":"t","actor":null,
             "event":"update","changes":[],"description":"","cursor":"version:1"}"#;
-        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap() else {
-            panic!("expected a version entry")
-        };
+        let v = version(body);
         assert!(v.changes.is_empty());
     }
 
@@ -163,9 +283,7 @@ mod tests {
             "created_at":"2026-07-08T13:35:39Z",
             "source_issue":{"id":2,"identifier":"MTK-2","title":"Add password reset functionality"},
             "source_type":"comment","user":{"id":2,"name":"ryan"}}"#;
-        let ActivityEntry::Reference(r) = serde_json::from_str(body).unwrap() else {
-            panic!("expected a reference entry")
-        };
+        let r = reference(body);
         assert_eq!(r.cursor, "reference:1");
         assert_eq!(r.created_at, "2026-07-08T13:35:39Z");
         assert_eq!(r.user, Some(ActivityActor { id: 2, name: "ryan".into() }));
@@ -181,9 +299,7 @@ mod tests {
         let body = r#"{"type":"reference","id":7,"cursor":"reference:7",
             "created_at":"t","source_issue":{"id":3,"identifier":"MTK-3","title":"x"},
             "source_type":"issue","user":null}"#;
-        let ActivityEntry::Reference(r) = serde_json::from_str(body).unwrap() else {
-            panic!("expected a reference entry")
-        };
+        let r = reference(body);
         assert_eq!(r.user, None);
     }
 }
