@@ -2723,7 +2723,13 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
         } else {
             team
         };
+        let newly_mirrored = existing.is_none();
         queries::upsert_team(&conn, &team).map_err(|e| format!("db (upsert team): {e}"))?;
+        if newly_mirrored {
+            // Saved views pulled for it earlier were skipped; refetch them all.
+            crate::db::saved_views::on_team_mirrored(&conn)
+                .map_err(|e| format!("db (saved views cursor): {e}"))?;
+        }
     }
     drop(conn);
 

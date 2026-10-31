@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::queries::{find_team_by_remote_id, get_pull_cursor, set_pull_cursor};
+use super::queries::{clear_pull_cursor, find_team_by_remote_id, get_pull_cursor, set_pull_cursor};
 use super::sync_queue;
 
 /// `team_id` value used in `pull_cursors` (Saved views are fetched cross-team).
@@ -332,6 +332,13 @@ pub fn cursor(conn: &Connection) -> Result<Option<String>> {
     get_pull_cursor(conn, SCOPE, RESOURCE)
 }
 
+/// A team was just mirrored for the first time. Views pulled for it earlier
+/// were skipped (unmirrored) while the cursor moved on, so forget the cursor:
+/// the next pull is a full fetch and brings them in.
+pub fn on_team_mirrored(conn: &Connection) -> Result<()> {
+    clear_pull_cursor(conn, SCOPE, RESOURCE)
+}
+
 fn from_row(r: &rusqlite::Row) -> Result<SavedView> {
     Ok(SavedView {
         id: r.get(0)?,
@@ -377,6 +384,29 @@ mod tests {
         conn.execute("UPDATE sync_queue SET synced_at = 'x'", []).unwrap();
         apply_pulled(&conn, &[view(5, 700, "A", json!({}))], None).unwrap();
         assert!(find_by_remote_id(&conn, 5).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_late_mirrored_team_gets_its_views_on_the_next_full_pull() {
+        let conn = setup();
+        // The pull sees a view on a team not mirrored yet; the cursor moves on.
+        let rows = [view(9, 701, "Late", json!({}))];
+        let a = apply_pulled(&conn, &rows, Some("T5")).unwrap();
+        assert_eq!(a.skipped_unmirrored, 1);
+        assert_eq!(cursor(&conn).unwrap().as_deref(), Some("T5"));
+        // The team is mirrored afterwards: the cursor resets so the next pull is full.
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t2', 'U', 'U', 701, '', '')",
+            [],
+        )
+        .unwrap();
+        on_team_mirrored(&conn).unwrap();
+        assert_eq!(cursor(&conn).unwrap(), None);
+        apply_pulled(&conn, &rows, Some("T6")).unwrap();
+        assert!(find_by_remote_id(&conn, 9).unwrap().is_some());
+        // Other cursors are untouched.
+        assert_eq!(deleted_cursor(&conn).unwrap(), None);
     }
 
     #[test]
