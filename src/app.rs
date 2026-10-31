@@ -14,7 +14,9 @@ use crate::db::models::{
 };
 use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
-use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup, ViewMode};
+use crate::display::{
+    self, CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy, SubGroup, ViewMode,
+};
 use crate::fonts;
 use crate::keys;
 use crate::scroll;
@@ -691,12 +693,7 @@ impl App {
         // Filters are global but hold per-team ids; drop the ones this data
         // doesn't contain (My Issues loads every team, so its ids all stay).
         if self.selected_team_id.is_some()
-            && self.config.filters.prune(
-                &self.members,
-                &self.labels,
-                &self.lanes,
-                &self.projects,
-            )
+            && self.prune_board_filters()
         {
             if let Err(e) = config::save(&self.config) {
                 self.config_error = Some(e);
@@ -942,6 +939,37 @@ impl App {
             .and_then(|id| self.teams.iter().find(|t| t.id == *id))
     }
 
+    // --- Active board state -------------------------------------------
+    // The one accessor for the board's display options, filters and view
+    // search. Everything outside this block goes through it; today it
+    // resolves to the local state (the config plus the header search).
+
+    fn board_display(&self) -> &DisplayOptions {
+        &self.config.display
+    }
+
+    fn board_display_mut(&mut self) -> &mut DisplayOptions {
+        &mut self.config.display
+    }
+
+    fn board_filters(&self) -> &Filters {
+        &self.config.filters
+    }
+
+    fn board_filters_mut(&mut self) -> &mut Filters {
+        &mut self.config.filters
+    }
+
+    /// Drop filter ids the loaded data doesn't contain; true if any changed.
+    fn prune_board_filters(&mut self) -> bool {
+        self.config.filters.prune(
+            &self.members,
+            &self.labels,
+            &self.lanes,
+            &self.projects,
+        )
+    }
+
     /// The header search text if it applies to the current view, else "".
     fn active_search(&self) -> &str {
         if self.search_view == self.view {
@@ -950,6 +978,16 @@ impl App {
             ""
         }
     }
+
+    fn set_view_search(&mut self, query: String) {
+        self.search_query = query;
+        self.search_view = self.view.clone();
+    }
+
+    fn clear_view_search(&mut self) {
+        self.search_query.clear();
+    }
+    // --- end active board state ----------------------------------------
 
     fn breadcrumb(&self) -> Vec<String> {
         let mut crumbs = breadcrumb(
@@ -971,7 +1009,7 @@ impl App {
     fn my_issues_empty(&self) -> Option<&'static str> {
         let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
         let visible: usize = self.board_columns().iter().map(|c| c.issues.len()).sum();
-        let narrowed = self.config.filters.count() > self.config.filters.assignees.len()
+        let narrowed = self.board_filters().count() > self.board_filters().assignees.len()
             || !header::needle(self.active_search()).is_empty();
         display::my_issues_empty_message(!ids.is_empty(), visible, narrowed)
     }
@@ -1017,10 +1055,10 @@ impl App {
         let needle = header::needle(self.active_search());
         if my {
             let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
-            let filters = display::my_issues_filters(&self.config.filters, &ids, &self.lanes);
-            return display::build_columns(&data, &self.config.display, &filters, &needle);
+            let filters = display::my_issues_filters(self.board_filters(), &ids, &self.lanes);
+            return display::build_columns(&data, self.board_display(), &filters, &needle);
         }
-        display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
+        display::build_columns(&data, self.board_display(), self.board_filters(), &needle)
     }
 
     /// A project's issues for the detail page: the board's filters (minus the
@@ -1038,14 +1076,14 @@ impl App {
             labels: &self.labels,
             issue_labels: &self.issue_labels,
         };
-        let mut filters = self.config.filters.clone();
+        let mut filters = self.board_filters().clone();
         filters.projects.clear();
         display::visible_from(
             self.issues
                 .iter()
                 .filter(|i| i.project_id.as_deref() == Some(project_id)),
             &data,
-            &self.config.display,
+            self.board_display(),
             &filters,
             needle,
         )
@@ -1083,7 +1121,7 @@ impl App {
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
-        let list = self.config.display.view_mode == ViewMode::List;
+        let list = self.board_display().view_mode == ViewMode::List;
         let (key, id, top, height) = {
             let columns = self.board_columns();
             let Some(col) = columns.get(self.focused_lane) else {
@@ -1110,7 +1148,7 @@ impl App {
                     members: &self.members,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
-                    display: &self.config.display,
+                    display: self.board_display(),
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
                 (
@@ -1196,11 +1234,11 @@ impl App {
         // My Issues pins the assignee, so a saved assignee filter doesn't count.
         // Project detail is scoped to one project, so project filters don't count.
         let ignored = match self.view {
-            View::MyIssues => self.config.filters.assignees.len(),
-            View::ProjectDetail(_) => self.config.filters.projects.len(),
+            View::MyIssues => self.board_filters().assignees.len(),
+            View::ProjectDetail(_) => self.board_filters().projects.len(),
             _ => 0,
         };
-        self.config.filters.count() - ignored
+        self.board_filters().count() - ignored
             + usize::from(!header::needle(self.active_search()).is_empty())
     }
 
@@ -2558,7 +2596,7 @@ impl App {
 
             Message::MoveIssueNextLane => {
                 // Lanes are only columns when grouped by status.
-                if self.config.display.group_by != GroupBy::Status {
+                if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
                         "Moving between lanes needs Display > Group by: Status",
                         ToastKind::Info,
@@ -2585,7 +2623,7 @@ impl App {
 
             Message::MoveIssuePrevLane => {
                 // Lanes are only columns when grouped by status.
-                if self.config.display.group_by != GroupBy::Status {
+                if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
                         "Moving between lanes needs Display > Group by: Status",
                         ToastKind::Info,
@@ -2620,7 +2658,7 @@ impl App {
             }
 
             Message::FocusNextIssue | Message::FocusPrevIssue
-                if self.config.display.view_mode == ViewMode::List =>
+                if self.board_display().view_mode == ViewMode::List =>
             {
                 // List mode: j/k walk rows top-to-bottom across sections.
                 let counts = self.list_nav_counts();
@@ -2634,7 +2672,7 @@ impl App {
                 return self.scroll_to_focus();
             }
             Message::FocusNextLane | Message::FocusPrevLane
-                if self.config.display.view_mode == ViewMode::List =>
+                if self.board_display().view_mode == ViewMode::List =>
             {
                 // List mode: h/l jump to the next/previous non-empty section.
                 let counts = self.list_nav_counts();
@@ -2686,8 +2724,7 @@ impl App {
             }
 
             Message::HeaderSearchChanged(query) => {
-                self.search_query = query;
-                self.search_view = self.view.clone();
+                self.set_view_search(query);
                 if matches!(self.view, View::Board | View::MyIssues) {
                     self.focused_issue = 0;
                     self.clamp_focus();
@@ -2700,12 +2737,12 @@ impl App {
             Message::OpenFilterPanel => self.modal = Modal::FilterPanel,
             Message::Noop => {}
             Message::SetViewMode(m) => {
-                self.config.display.view_mode = m;
+                self.board_display_mut().view_mode = m;
                 self.scroll_state.clear();
                 self.persist_display();
             }
             Message::ToggleViewMode => {
-                let next = match self.config.display.view_mode {
+                let next = match self.board_display().view_mode {
                     ViewMode::Board => ViewMode::List,
                     ViewMode::List => ViewMode::Board,
                 };
@@ -2717,7 +2754,7 @@ impl App {
                 }
             }
             Message::ToggleFocusedSection => {
-                if self.config.display.view_mode == ViewMode::List {
+                if self.board_display().view_mode == ViewMode::List {
                     let title = self
                         .board_columns()
                         .get(self.focused_lane)
@@ -2736,52 +2773,52 @@ impl App {
                 self.scroll_state.insert(key, (offset, viewport));
             }
             Message::SetGroupBy(g) => {
-                self.config.display.group_by = g;
+                self.board_display_mut().group_by = g;
                 // A sub-group repeating the new group-by axis is meaningless.
-                if self.config.display.sub_group_conflicts(self.config.display.sub_group) {
-                    self.config.display.sub_group = SubGroup::None;
+                if self.board_display().sub_group_conflicts(self.board_display().sub_group) {
+                    self.board_display_mut().sub_group = SubGroup::None;
                 }
                 self.focused_lane = 0;
                 self.focused_issue = 0;
                 self.persist_display();
             }
             Message::SetSubGroup(g) => {
-                if !self.config.display.sub_group_conflicts(g) {
-                    self.config.display.sub_group = g;
+                if !self.board_display().sub_group_conflicts(g) {
+                    self.board_display_mut().sub_group = g;
                     self.persist_display();
                 }
             }
             Message::SetOrderBy(o) => {
-                self.config.display.order_by = o;
+                self.board_display_mut().order_by = o;
                 self.persist_display();
             }
             Message::SetCompletedFilter(f) => {
-                self.config.display.set_completed_filter(f);
+                self.board_display_mut().set_completed_filter(f);
                 self.persist_display();
             }
             Message::ToggleShowSubIssues => {
-                let d = &mut self.config.display;
+                let d = self.board_display_mut();
                 d.show_sub_issues = !d.show_sub_issues;
                 self.persist_display();
             }
             Message::ToggleShowEmptyGroups => {
-                let d = &mut self.config.display;
+                let d = self.board_display_mut();
                 d.show_empty_groups = !d.show_empty_groups;
                 self.persist_display();
             }
             Message::ToggleCardProperty(p) => {
-                self.config.display.toggle_property(p);
+                self.board_display_mut().toggle_property(p);
                 self.persist_display();
             }
             Message::ToggleFilter(field, value) => {
-                self.config.filters.toggle(field, &value);
+                self.board_filters_mut().toggle(field, &value);
                 self.focused_issue = 0;
                 self.persist_display();
             }
             Message::ClearFilters => {
-                self.config.filters.clear();
+                self.board_filters_mut().clear();
                 // The panel's search box mirrors the header search; clear it too.
-                self.search_query.clear();
+                self.clear_view_search();
                 self.focused_issue = 0;
                 self.persist_display();
             }
@@ -3803,7 +3840,7 @@ impl App {
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into(),
-            View::Board | View::MyIssues if self.config.display.view_mode == ViewMode::List => {
+            View::Board | View::MyIssues if self.board_display().view_mode == ViewMode::List => {
                 issue_list::view(
                     &columns,
                     board::CardData {
@@ -3812,7 +3849,7 @@ impl App {
                         members: &self.members,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
-                        display: &self.config.display,
+                        display: self.board_display(),
                     },
                     &self.collapsed_sections,
                     self.focused_lane,
@@ -3827,7 +3864,7 @@ impl App {
                     members: &self.members,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
-                    display: &self.config.display,
+                    display: self.board_display(),
                 },
                 self.focused_lane,
                 self.focused_issue,
@@ -3868,7 +3905,7 @@ impl App {
                             &self.members,
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
-                            &self.config.display,
+                            self.board_display(),
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,
@@ -3986,12 +4023,12 @@ impl App {
         // Overlay modals
         let content: Element<'_, Message> = match &self.modal {
             Modal::DisplayOptions => {
-                let panel = display_panel::display_view(&self.config.display);
+                let panel = display_panel::display_view(self.board_display());
                 iced::widget::stack![base, display_panel::popover(panel)].into()
             }
             Modal::FilterPanel => {
                 let panel = display_panel::filter_view(
-                    &self.config.filters,
+                    self.board_filters(),
                     search,
                     display_panel::FilterData {
                         lanes: &self.lanes,
