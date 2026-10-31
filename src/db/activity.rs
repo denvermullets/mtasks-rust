@@ -255,6 +255,7 @@ pub struct ActivityItem {
 /// dependency event or reference becomes its own line.
 pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<ActivityItem>> {
     let mut items = Vec::new();
+    items.extend(created_item(conn, issue_id)?);
     for entry in entries_for_issue(conn, issue_id)? {
         let actor = ActorSlot {
             remote_id: entry.actor_remote_id,
@@ -275,6 +276,30 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
         }
     }
     Ok(items)
+}
+
+/// The desktop-only "created the issue" line, derived from the issue's own
+/// `creator_id` and `created_at` (the server timeline has no create entry).
+/// `None` only if the issue doesn't exist. A missing creator gives an empty actor.
+fn created_item(conn: &Connection, issue_id: &str) -> Result<Option<ActivityItem>> {
+    let row = conn.query_row(
+        "SELECT i.created_at, m.remote_id, m.name
+         FROM issues i LEFT JOIN members m ON m.id = i.creator_id
+         WHERE i.id = ?1",
+        params![issue_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?)),
+    );
+    match row {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+        Ok((at, remote_id, name)) => Ok(Some(ActivityItem {
+            key: "created#0".to_string(),
+            at,
+            actor: ActorSlot { remote_id, name },
+            text: "created the issue".to_string(),
+            origin: ItemOrigin::Server,
+        })),
+    }
 }
 
 /// One line per change in a version entry. Changes this layer can't word yet
@@ -495,7 +520,7 @@ mod display_tests {
                      {"field":"estimate","from":null,"to":3},
                      {"field":"due_date","from":"2026-01-01","to":null},
                      {"field":"priority","from":"high","to":"no_priority"}]}]"#);
-        let items = activity_for_issue(&conn, "i1").unwrap();
+        let items = activity_for_issue(&conn, "i1").unwrap()[1..].to_vec();
         let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, [
             "changed priority from Low to High",
@@ -519,7 +544,7 @@ mod display_tests {
            "changes":[{"field":"title","from":"a","to":"b"}]},
           {"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"",
            "changes":[{"field":"priority","from":"low","to":"urgent"}]}]"#);
-        let items = activity_for_issue(&conn, "i1").unwrap();
+        let items = activity_for_issue(&conn, "i1").unwrap()[1..].to_vec();
         assert_eq!(items[0].text, "changed priority from Low to Urgent");
         assert_eq!(items[1].text, "changed the title");
         assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
@@ -529,6 +554,59 @@ mod display_tests {
     fn empty_changes_yield_no_lines() {
         let conn = mem();
         store(&conn, r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"","changes":[]}]"#);
-        assert!(activity_for_issue(&conn, "i1").unwrap().is_empty());
+        assert_eq!(activity_for_issue(&conn, "i1").unwrap().len(), 1); // created only
+    }
+}
+
+#[cfg(test)]
+mod jrst_140_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO members (id, team_id, name, email, remote_id, created_at, updated_at) VALUES ('m1','t1','Ann','a@x',9,?1,?1)", params![now]).unwrap();
+        conn
+    }
+
+    fn issue(conn: &Connection, id: &str, creator: Option<&str>, remote: Option<i64>) {
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, creator_id, remote_id, created_at, updated_at)
+             VALUES (?1,'i',4,'l1','t1',?2,?3,'2026-02-02T00:00:00.000Z','2026-02-02T00:00:00.000Z')",
+            params![id, creator, remote],
+        ).unwrap();
+    }
+
+    #[test]
+    fn created_entry_is_first_with_member_name() {
+        let conn = mem();
+        issue(&conn, "i1", Some("m1"), Some(5));
+        let batch: Vec<ActivityEntry> = serde_json::from_str(r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-01-01T00:00:00Z","actor":null,"event":"update","description":"","changes":[{"field":"title","from":"a","to":"b"}]}]"#).unwrap();
+        store_batch(&conn, "i1", &batch, None, false).unwrap();
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].text, "created the issue");
+        assert_eq!(items[0].at, "2026-02-02T00:00:00.000Z");
+        assert_eq!(items[0].actor, ActorSlot { remote_id: Some(9), name: Some("Ann".into()) });
+        assert_eq!(items[0].key, "created#0");
+        assert_eq!(items[1].text, "changed the title");
+    }
+
+    #[test]
+    fn missing_creator_and_local_only_issue_still_get_entry() {
+        let conn = mem();
+        issue(&conn, "i2", None, None);
+        let items = activity_for_issue(&conn, "i2").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
+    }
+
+    #[test]
+    fn unknown_issue_has_no_entry() {
+        assert!(activity_for_issue(&mem(), "nope").unwrap().is_empty());
     }
 }
