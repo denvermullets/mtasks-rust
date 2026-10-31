@@ -262,6 +262,16 @@ pub fn update_query_local(
     Ok(n > 0)
 }
 
+/// Rename a view locally. Like `update_query_local`, the queue entry re-reads
+/// the row at push time. Returns whether the view exists.
+pub fn rename_local(conn: &Connection, view_id: &str, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE saved_views SET name = ?2, updated_at = ?3 WHERE id = ?1",
+        params![view_id, name, crate::db::now_iso()],
+    )?;
+    Ok(n > 0)
+}
+
 /// A view by local id.
 pub fn get(conn: &Connection, view_id: &str) -> Result<Option<SavedView>> {
     conn.query_row(
@@ -437,6 +447,18 @@ mod tests {
         let a = apply_pulled(&conn, &[view(1, 700, "Remote edit", json!({}))], None).unwrap();
         assert_eq!(a.skipped_pending, 1);
         assert_eq!(find_by_remote_id(&conn, 1).unwrap().unwrap().name, "Server");
+    }
+
+    #[test]
+    fn rename_local_changes_only_the_name() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({"view_mode":"list"}))], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        assert!(rename_local(&conn, &id, "B").unwrap());
+        let v = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(v.name, "B");
+        assert_eq!(stored_query(&v), json!({"view_mode":"list"}));
+        assert!(!rename_local(&conn, "nope", "B").unwrap());
     }
 
     #[test]

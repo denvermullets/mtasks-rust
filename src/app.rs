@@ -44,6 +44,7 @@ pub enum Message {
     OpenSavedView(String),
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
+    OpenRenameSavedView(String),
     DeleteSavedViewConfirmed,
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
@@ -371,6 +372,8 @@ pub enum Modal {
     DeleteSavedViewConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
     SaveView,
+    /// Name prompt for renaming a Saved view (local id).
+    RenameSavedView(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
     /// Team picker for moving an issue (local UUID); see `team_picker`.
@@ -2279,7 +2282,57 @@ impl App {
                 self.save_view_error = None;
             }
 
+            Message::OpenRenameSavedView(view_id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't rename a view",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(sv) = self.saved_views.values().flatten().find(|v| v.id == view_id)
+                {
+                    self.save_view_name = sv.name.clone();
+                    self.save_view_error = None;
+                    self.modal = Modal::RenameSavedView(view_id);
+                    return text_input::focus(save_view_input_id());
+                }
+            }
+
             Message::SaveViewSubmit => {
+                if let Modal::RenameSavedView(view_id) = self.modal.clone() {
+                    if self.sync_read_only {
+                        self.modal = Modal::None;
+                        self.push_toast(
+                            "Read-only token: can't rename a view",
+                            ToastKind::Error,
+                            false,
+                        );
+                        return Task::none();
+                    }
+                    let name = match crate::saved_view::validate_name(&self.save_view_name) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            self.save_view_error = Some(e.message());
+                            return Task::none();
+                        }
+                    };
+                    match crate::db::saved_views::rename_local(&self.db(), &view_id, &name) {
+                        Ok(true) => {
+                            self.enqueue_sync(
+                                "saved_view",
+                                &view_id,
+                                "update",
+                                Some(crate::sync::engine::SAVED_VIEW_RENAME_PAYLOAD),
+                            );
+                            self.modal = Modal::None;
+                            self.save_view_name.clear();
+                            self.reload_data();
+                        }
+                        Ok(false) => self.modal = Modal::None,
+                        Err(e) => eprintln!("[saved_views] rename failed: {e}"),
+                    }
+                    return Task::none();
+                }
                 if self.modal != Modal::SaveView {
                     return Task::none();
                 }
@@ -4517,7 +4570,12 @@ impl App {
             }
             Modal::SaveView => iced::widget::stack![
                 base,
-                save_view_modal(&self.save_view_name, self.save_view_error)
+                save_view_modal("Save view", &self.save_view_name, self.save_view_error)
+            ]
+            .into(),
+            Modal::RenameSavedView(_) => iced::widget::stack![
+                base,
+                save_view_modal("Rename view", &self.save_view_name, self.save_view_error)
             ]
             .into(),
             Modal::DeleteSavedViewConfirm(view_id) => {
@@ -4811,12 +4869,12 @@ fn save_view_input_id() -> text_input::Id {
 }
 
 /// Name prompt for "Save view…".
-fn save_view_modal<'a>(name: &'a str, error: Option<&'static str>) -> Element<'a, Message> {
+fn save_view_modal<'a>(title: &'a str, name: &'a str, error: Option<&'static str>) -> Element<'a, Message> {
     use iced::widget::{button, text};
 
     let mut content = column![]
         .spacing(12)
-        .push(text("Save view").size(18).color(t::text_primary()))
+        .push(text(title).size(18).color(t::text_primary()))
         .push(
             text_input("View name", name)
                 .id(save_view_input_id())

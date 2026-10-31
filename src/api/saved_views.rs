@@ -50,8 +50,22 @@ pub async fn update_query(
     client.patch(&delete_path(id), &update_body(query)).await
 }
 
+/// `PATCH /api/v1/saved_views/:id {saved_view:{name}}`: renames only; the
+/// query is not sent.
+pub async fn update_name(
+    client: &ApiClient,
+    id: i64,
+    name: &str,
+) -> Result<SavedViewDto, ApiError> {
+    client.patch(&delete_path(id), &rename_body(name)).await
+}
+
 fn update_body(query: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "saved_view": { "query": query } })
+}
+
+fn rename_body(name: &str) -> serde_json::Value {
+    serde_json::json!({ "saved_view": { "name": name } })
 }
 
 fn delete_path(id: i64) -> String {
@@ -72,6 +86,14 @@ mod tests {
         assert_eq!(
             update_body(&q),
             serde_json::json!({"saved_view":{"query":{"view_mode":"list","lane_ids":"1,2"}}})
+        );
+    }
+
+    #[test]
+    fn rename_body_sends_only_the_name() {
+        assert_eq!(
+            rename_body("New"),
+            serde_json::json!({"saved_view":{"name":"New"}})
         );
     }
 
