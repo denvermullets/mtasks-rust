@@ -114,10 +114,42 @@ pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), Api
     client.delete(&path).await
 }
 
+#[derive(Debug, Serialize)]
+struct MoveBody {
+    target_team_id: i64,
+}
+
+fn move_path(team_id: i64, id: i64) -> String {
+    format!("api/v1/teams/{team_id}/issues/{id}/move")
+}
+
+/// Move an issue to another team. `team_id` is the SOURCE team; Rails answers
+/// with the detailed issue (new `identifier`). 404 = target outside the token,
+/// 422 = already in that team or not a member of both.
+pub async fn move_to_team(
+    client: &ApiClient,
+    team_id: i64,
+    id: i64,
+    target_team_id: i64,
+) -> Result<IssueDto, ApiError> {
+    client
+        .patch(&move_path(team_id, id), &MoveBody { target_team_id })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::models::Priority;
+
+    #[test]
+    fn move_path_and_body_target_the_source_team() {
+        assert_eq!(move_path(3, 5), "api/v1/teams/3/issues/5/move");
+        assert_eq!(
+            serde_json::to_value(MoveBody { target_team_id: 9 }).unwrap(),
+            serde_json::json!({ "target_team_id": 9 })
+        );
+    }
 
     #[test]
     fn page_query_encodes_cursor_and_paging() {

@@ -26,7 +26,7 @@ use crate::views::{
     board, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
-    team_list, team_members, toast,
+    team_list, team_members, team_picker, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -79,7 +79,7 @@ pub enum Message {
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
 
-    // Issue detail — comments (flat thread, v1)
+    // Issue and project detail — comments (threaded)
     /// Composer text-editor action.
     CommentComposerChanged(iced::widget::text_editor::Action),
     /// "Comment" button pressed: persist the composer body locally + enqueue push.
@@ -90,6 +90,9 @@ pub enum Message {
     ReplyComposerChanged(iced::widget::text_editor::Action),
     /// Submit the inline reply composer as a child of `reply_to`.
     SubmitReply,
+    /// "Delete" pressed on one of the user's own unsynced comments (local id).
+    ConfirmDeleteComment(String),
+    DeleteCommentConfirmed,
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -98,6 +101,7 @@ pub enum Message {
     MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
+    ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
 
@@ -115,18 +119,35 @@ pub enum Message {
     BackToMyIssues,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
+    /// Step the open picker's link kind (Tab forward, Shift+Tab back).
+    CycleDependencyKind(bool),
+    /// Set the open picker's link kind (clicking a kind chip).
+    SetDependencyKind(DepDirection),
     /// The picker's search box changed.
     DependencyPickerSearchChanged(String),
     /// A target issue (local UUID) was chosen in the picker → create the edge.
     DependencyPickerSelected(String),
     /// Remove a dependency edge by its local dependency-row UUID.
     RemoveDependency(String),
+    /// Open the "Move to team" picker for an issue (local UUID).
+    OpenMoveTeamPicker(String),
+    /// `t` on the board: open the move picker for the focused issue.
+    MoveFocusedIssueToTeam,
+    /// A target team (local UUID) was chosen in the move picker.
+    MoveTeamSelected(String),
 
     // Labels
     OpenLabels,
     LabelNameChanged(String),
     LabelColorChanged(String),
     CreateLabel,
+    /// Open edit mode for a label (by local UUID).
+    SelectLabelForEdit(String),
+    EditLabelNameChanged(String),
+    EditLabelColorChanged(String),
+    SaveLabelEdit,
+    ConfirmDeleteLabel,
+    DeleteLabelConfirmed,
     /// Toggle a label on the issue targeted by the label modal (by local UUID).
     ToggleIssueLabel(String),
     SaveIssueLabels,
@@ -272,6 +293,14 @@ pub enum Message {
     KeyPressed(keyboard::Key, keyboard::Modifiers),
 }
 
+/// The comment composers of the open detail view (issue or project).
+struct CommentDrafts<'a> {
+    comment: &'a mut iced::widget::text_editor::Content,
+    reply_to: &'a mut Option<String>,
+    reply: &'a mut iced::widget::text_editor::Content,
+    suggest: &'a mut Option<crate::mentions::SuggestState>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
     None,
@@ -280,9 +309,15 @@ pub enum Modal {
     Settings,
     ProjectForm,
     DeleteProjectConfirm(String),
+    /// Confirm deleting an unsynced comment (local id) and its replies.
+    DeleteCommentConfirm(String),
     Labels,
+    /// Confirm deleting the label being edited (local id) from the labels panel.
+    DeleteLabelConfirm(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
+    /// Team picker for moving an issue (local UUID); see `team_picker`.
+    MoveTeam(String),
     /// "Add project to roadmap" picker; carries the lane a chosen project lands in.
     RoadmapAdd(RoadmapCommitment),
     /// Read-only members panel for a team (local UUID).
@@ -322,13 +357,57 @@ fn team_web_url(base_url: &str, team_remote_id: i64, section: TeamWebSection) ->
     )
 }
 
-/// Which dependency section a picker/add-action targets, relative to the open
-/// issue. `Blocking` = the open issue blocks the target; `BlockedBy` = the target
-/// blocks the open issue.
+/// The link kind a picker/add-action creates, relative to the open issue.
+/// `Blocking` = the open issue blocks the target; `BlockedBy` = the target
+/// blocks the open issue; the rest read the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepDirection {
     Blocking,
     BlockedBy,
+    Relates,
+    Duplicates,
+    DuplicatedBy,
+}
+
+impl DepDirection {
+    pub const ALL: [DepDirection; 5] = [
+        DepDirection::Blocking,
+        DepDirection::BlockedBy,
+        DepDirection::Relates,
+        DepDirection::Duplicates,
+        DepDirection::DuplicatedBy,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DepDirection::Blocking => "Blocking",
+            DepDirection::BlockedBy => "Blocked by",
+            DepDirection::Relates => "Relates to",
+            DepDirection::Duplicates => "Duplicates",
+            DepDirection::DuplicatedBy => "Duplicated by",
+        }
+    }
+
+    /// The next (or previous) kind, wrapping around.
+    pub fn cycle(self, forward: bool) -> DepDirection {
+        let n = Self::ALL.len();
+        let start = Self::ALL.iter().position(|d| *d == self).unwrap_or(0);
+        let i = if forward { start + 1 } else { start + n - 1 };
+        Self::ALL[i % n]
+    }
+
+    /// The stored edge for linking `current` to `target` in this kind. The link's
+    /// source goes in `blocking_issue_id`. Returns `(source, target, kind)`.
+    pub fn stored_edge(self, current: &str, target: &str) -> (String, String, &'static str) {
+        let (cur, tgt) = (current.to_string(), target.to_string());
+        match self {
+            DepDirection::Blocking => (cur, tgt, "blocks"),
+            DepDirection::BlockedBy => (tgt, cur, "blocks"),
+            DepDirection::Relates => (cur, tgt, "relates"),
+            DepDirection::Duplicates => (cur, tgt, "duplicates"),
+            DepDirection::DuplicatedBy => (tgt, cur, "duplicates"),
+        }
+    }
 }
 
 /// Which screen the right-hand pane renders. `MyIssues` is the board across
@@ -422,8 +501,7 @@ pub struct App {
     issue_labels: HashMap<String, Vec<Label>>,
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
-    detail_blocking: Vec<queries::DependencyLink>,
-    detail_blocked_by: Vec<queries::DependencyLink>,
+    detail_deps: queries::DependencyGroups,
     /// The open issue detail was reached from My Issues, so Back returns there.
     detail_from_my_issues: bool,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
@@ -592,17 +670,21 @@ impl App {
     /// render them; other views don't need this, so keep it cheap.
     fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
         if let View::IssueDetail(ref issue_id) = self.view {
-            self.detail_blocking =
-                queries::blocking_links_for_issue(conn, issue_id).unwrap_or_default();
-            self.detail_blocked_by =
-                queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
+            self.detail_deps =
+                queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
+        } else if let View::ProjectDetail(ref project_id) = self.view {
+            self.detail_references.clear();
+            self.detail_deps = Default::default();
+            self.detail_comments =
+                queries::comments_for_project(conn, project_id).unwrap_or_default();
+            self.detail_events.clear();
+            return;
         } else {
             self.detail_references.clear();
-            self.detail_blocking.clear();
-            self.detail_blocked_by.clear();
+            self.detail_deps = Default::default();
             self.detail_comments.clear();
             self.detail_events.clear();
         }
@@ -629,11 +711,20 @@ impl App {
     /// Recompute the `@`/`#` suggestion list for `target` from its cursor.
     fn refresh_suggestions(&mut self, target: crate::mentions::EditorTarget) {
         use crate::mentions::{self as m, EditorTarget};
-        let Some(d) = &self.issue_detail else { return };
-        let content = match target {
-            EditorTarget::Description => &d.description,
-            EditorTarget::Comment => &d.comment_composer,
-            EditorTarget::Reply => &d.reply_composer,
+        // On project detail only the comment composers exist; the id excluded
+        // from `#` suggestions is the project's, which matches no issue.
+        let (content, exclude_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::ProjectDetail(_), _, Some(p)) => match target {
+                EditorTarget::Comment => (&p.comment_composer, p.project_id.as_str()),
+                EditorTarget::Reply => (&p.reply_composer, p.project_id.as_str()),
+                EditorTarget::Description => return,
+            },
+            (_, Some(d), _) => match target {
+                EditorTarget::Description => (&d.description, d.issue_id.as_str()),
+                EditorTarget::Comment => (&d.comment_composer, d.issue_id.as_str()),
+                EditorTarget::Reply => (&d.reply_composer, d.issue_id.as_str()),
+            },
+            _ => return,
         };
         // Column is a byte offset into the line (iced 0.13 / cosmic-text).
         let (line, col) = content.cursor_position();
@@ -645,12 +736,12 @@ impl App {
                 &self.members,
                 &self.issues,
                 &team.identifier,
-                &d.issue_id,
+                exclude_id,
             ),
             _ => None,
         };
-        if let Some(d) = &mut self.issue_detail {
-            d.suggest = state;
+        if let Some(slot) = self.open_suggest_mut() {
+            *slot = state;
         }
     }
 
@@ -701,7 +792,28 @@ impl App {
         if self.modal == Modal::IssueForm {
             return self.issue_form.as_mut().map(|f| &mut f.suggest);
         }
+        if matches!(self.view, View::ProjectDetail(_)) {
+            return self.project_detail.as_mut().map(|d| &mut d.suggest);
+        }
         self.issue_detail.as_mut().map(|d| &mut d.suggest)
+    }
+
+    /// The comment composers of whichever detail view is open (issue or project).
+    fn comment_drafts_mut(&mut self) -> Option<CommentDrafts<'_>> {
+        if matches!(self.view, View::ProjectDetail(_)) {
+            return self.project_detail.as_mut().map(|d| CommentDrafts {
+                comment: &mut d.comment_composer,
+                reply_to: &mut d.reply_to,
+                reply: &mut d.reply_composer,
+                suggest: &mut d.suggest,
+            });
+        }
+        self.issue_detail.as_mut().map(|d| CommentDrafts {
+            comment: &mut d.comment_composer,
+            reply_to: &mut d.reply_to,
+            reply: &mut d.reply_composer,
+            suggest: &mut d.suggest,
+        })
     }
 
     fn pick_suggestion(&mut self, idx: Option<usize>) {
@@ -710,6 +822,16 @@ impl App {
             if let Some(form) = &mut self.issue_form {
                 if let Some(s) = form.suggest.take() {
                     Self::insert_suggestion(&mut form.description, &s, idx);
+                }
+            }
+        } else if matches!(self.view, View::ProjectDetail(_)) {
+            if let Some(d) = self.comment_drafts_mut() {
+                if let Some(s) = d.suggest.take() {
+                    let content = match s.target {
+                        EditorTarget::Reply => d.reply,
+                        _ => d.comment,
+                    };
+                    Self::insert_suggestion(content, &s, idx);
                 }
             }
         } else if let Some(d) = &mut self.issue_detail {
@@ -1035,12 +1157,13 @@ impl App {
     }
 
     /// Persist a new comment (optionally a reply to local comment `parent_id`) on
-    /// the open detail issue and enqueue its push. Returns whether it was saved.
+    /// the open detail issue or project and enqueue its push. Returns whether it was saved.
     /// Replies beyond `MAX_NESTING_DEPTH` are refused (Rails rejects them too).
     fn create_comment(&mut self, body: String, parent_id: Option<String>) -> bool {
-        let issue_id = match &self.issue_detail {
-            Some(d) => d.issue_id.clone(),
-            None => return false,
+        let (issue_id, project_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::ProjectDetail(_), _, Some(p)) => (None, Some(p.project_id.clone())),
+            (_, Some(d), _) => (Some(d.issue_id.clone()), None),
+            _ => return false,
         };
         if body.is_empty() {
             return false;
@@ -1068,6 +1191,7 @@ impl App {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
             issue_id,
+            project_id,
             author_id,
             body,
             parent_id,
@@ -1149,23 +1273,27 @@ impl App {
             self.push_toast("An issue can't depend on itself", ToastKind::Error, false);
             return;
         }
-        // A row means `blocking_issue_id` blocks `blocked_issue_id`.
-        let (blocking_issue_id, blocked_issue_id) = match direction {
-            DepDirection::Blocking => (current_id, target_id.to_string()),
-            DepDirection::BlockedBy => (target_id.to_string(), current_id),
-        };
+        let conn = self.db();
+        // Rails allows one link per pair, in either order and of any kind.
+        if queries::issue_dependency_pair_exists(&conn, &current_id, target_id).unwrap_or(false) {
+            self.push_toast("Those issues are already linked", ToastKind::Error, false);
+            return;
+        }
+        let (blocking_issue_id, blocked_issue_id, kind) =
+            direction.stored_edge(&current_id, target_id);
         let now = crate::db::now_iso();
         let dep = IssueDependency {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
             blocking_issue_id,
             blocked_issue_id,
-            kind: "blocks".into(),
-            direction: "blocking".into(),
+            kind: kind.into(),
+            direction: crate::api::dependencies::direction_for_edge(kind)
+                .as_str()
+                .into(),
             created_at: now.clone(),
             updated_at: now,
         };
-        let conn = self.db();
         match queries::insert_issue_dependency(&conn, &dep) {
             Ok(()) => {
                 self.enqueue_sync("dependency", &dep.id, "create", None);
@@ -1175,6 +1303,42 @@ impl App {
                 // Almost always the UNIQUE(blocking, blocked) constraint.
                 self.push_toast("Those issues are already linked", ToastKind::Error, false);
             }
+        }
+    }
+
+    /// Move `issue_id` to `target_team_id`: apply the local move rules at once,
+    /// queue `issue/move`, and toast what was cleared. Any open detail edits are
+    /// flushed first so they are queued before the move. The moved issue leaves
+    /// the current team's list, so an open detail for it is closed.
+    fn move_issue_to_team(&mut self, issue_id: &str, target_team_id: &str) {
+        self.commit_issue_detail();
+        let conn = self.db();
+        let Ok(Some(issue)) = queries::get_issue(&conn, issue_id) else {
+            return;
+        };
+        match queries::move_issue_to_team(&conn, issue_id, target_team_id) {
+            Ok(summary) => {
+                let _ = queries::queue_issue_move(&conn, issue_id, &issue.team_id);
+                let name = self
+                    .teams
+                    .iter()
+                    .find(|t| t.id == target_team_id)
+                    .map_or("team", |t| t.name.as_str())
+                    .to_string();
+                self.push_toast(summary.toast(&name), ToastKind::Info, false);
+                if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
+                    let back = if self.detail_from_my_issues {
+                        View::MyIssues
+                    } else {
+                        View::Board
+                    };
+                    self.detail_from_my_issues = false;
+                    self.issue_detail = None;
+                    self.switch_view(back);
+                }
+                self.reload_data();
+            }
+            Err(e) => self.push_toast(format!("Move failed: {e}"), ToastKind::Error, false),
         }
     }
 
@@ -1282,7 +1446,42 @@ impl App {
         self.commit_project_detail();
         self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
         self.view = View::ProjectDetail(project.id.clone());
-        Task::none()
+        let conn = self.db();
+        self.load_detail_dependencies(&conn);
+        self.fetch_project_comments_task(&conn, project)
+    }
+
+    /// Build the async task that fetches a project's comments (nested replies)
+    /// once when it is opened. No-op unless the project + team are synced and a
+    /// client can be built.
+    fn fetch_project_comments_task(
+        &self,
+        conn: &rusqlite::Connection,
+        project: &Project,
+    ) -> Task<Message> {
+        let Some(project_remote_id) = project.remote_id else {
+            return Task::none();
+        };
+        let Ok(Some(team_remote_id)) = queries::remote_id_for(conn, "teams", &project.team_id)
+        else {
+            return Task::none();
+        };
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            return Task::none();
+        };
+        let project_local_id = project.id.clone();
+        Task::perform(
+            async move {
+                let result =
+                    crate::api::comments::list_project(&client, team_remote_id, project_remote_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                (project_local_id, result)
+            },
+            |(id, result)| Message::ProjectCommentsFetched(id, result),
+        )
     }
 
     /// Apply a live sidebar change (Status/Priority/Lead) to the project behind
@@ -1402,8 +1601,7 @@ impl App {
             members,
             labels,
             issue_labels,
-            detail_blocking: Vec::new(),
-            detail_blocked_by: Vec::new(),
+            detail_deps: Default::default(),
             detail_from_my_issues: false,
             detail_comments: Vec::new(),
             detail_events: Vec::new(),
@@ -1583,6 +1781,11 @@ impl App {
                             return Task::none();
                         }
                     }
+                }
+                if self.modal == Modal::IssuePicker
+                    && key == keyboard::Key::Named(keyboard::key::Named::Tab)
+                {
+                    return self.update(Message::CycleDependencyKind(!modifiers.shift()));
                 }
                 let modal_open = self.modal != Modal::None;
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
@@ -1827,8 +2030,8 @@ impl App {
 
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.comment_composer.perform(action);
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.comment.perform(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Comment);
             }
@@ -1840,50 +2043,50 @@ impl App {
                 }
             }
             Message::SubmitComment => {
-                let body = match &self.issue_detail {
-                    Some(d) => d.comment_text().trim().to_string(),
+                let body = match self.comment_drafts_mut() {
+                    Some(d) => d.comment.text().trim().to_string(),
                     None => return Task::none(),
                 };
                 if self.create_comment(body, None) {
-                    if let Some(d) = &mut self.issue_detail {
-                        d.comment_composer = iced::widget::text_editor::Content::new();
-                        d.suggest = None;
+                    if let Some(d) = self.comment_drafts_mut() {
+                        *d.comment = iced::widget::text_editor::Content::new();
+                        *d.suggest = None;
                     }
                 }
             }
             Message::StartReply(parent_id) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_to = Some(parent_id);
-                    d.suggest = None;
-                    d.reply_composer = iced::widget::text_editor::Content::new();
+                if let Some(d) = self.comment_drafts_mut() {
+                    *d.reply_to = Some(parent_id);
+                    *d.suggest = None;
+                    *d.reply = iced::widget::text_editor::Content::new();
                 }
             }
             Message::CancelReply => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_to = None;
-                    d.reply_composer = iced::widget::text_editor::Content::new();
-                    d.suggest = None;
+                if let Some(d) = self.comment_drafts_mut() {
+                    *d.reply_to = None;
+                    *d.reply = iced::widget::text_editor::Content::new();
+                    *d.suggest = None;
                 }
             }
             Message::ReplyComposerChanged(action) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_composer.perform(action);
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.reply.perform(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Reply);
             }
             Message::SubmitReply => {
-                let (body, parent) = match &self.issue_detail {
-                    Some(d) => match &d.reply_to {
-                        Some(p) => (d.reply_text().trim().to_string(), p.clone()),
+                let (body, parent) = match self.comment_drafts_mut() {
+                    Some(d) => match d.reply_to {
+                        Some(p) => (d.reply.text().trim().to_string(), p.clone()),
                         None => return Task::none(),
                     },
                     None => return Task::none(),
                 };
                 if self.create_comment(body, Some(parent)) {
-                    if let Some(d) = &mut self.issue_detail {
-                        d.reply_to = None;
-                        d.reply_composer = iced::widget::text_editor::Content::new();
-                        d.suggest = None;
+                    if let Some(d) = self.comment_drafts_mut() {
+                        *d.reply_to = None;
+                        *d.reply = iced::widget::text_editor::Content::new();
+                        *d.suggest = None;
                     }
                 }
             }
@@ -1895,9 +2098,27 @@ impl App {
             Message::CommentsFetched(issue_id, result) => {
                 if let Ok(dtos) = result {
                     let conn = self.db();
-                    crate::api::dto::merge_comment_tree(&conn, &issue_id, dtos, None);
+                    crate::api::dto::merge_comment_tree(
+                        &conn,
+                        &crate::db::models::CommentOwner::Issue(issue_id),
+                        dtos,
+                        None,
+                    );
                     drop(conn);
                     // Refresh so the open detail's comment list reflects the merge.
+                    self.reload_data();
+                }
+            }
+            Message::ProjectCommentsFetched(project_id, result) => {
+                if let Ok(dtos) = result {
+                    let conn = self.db();
+                    crate::api::dto::merge_comment_tree(
+                        &conn,
+                        &crate::db::models::CommentOwner::Project(project_id),
+                        dtos,
+                        None,
+                    );
+                    drop(conn);
                     self.reload_data();
                 }
             }
@@ -1945,6 +2166,16 @@ impl App {
                 self.issue_picker = Some(issue_picker::IssuePickerState::new(direction));
                 self.modal = Modal::IssuePicker;
             }
+            Message::CycleDependencyKind(forward) => {
+                if let Some(ref mut picker) = self.issue_picker {
+                    picker.direction = picker.direction.cycle(forward);
+                }
+            }
+            Message::SetDependencyKind(kind) => {
+                if let Some(ref mut picker) = self.issue_picker {
+                    picker.direction = kind;
+                }
+            }
             Message::DependencyPickerSearchChanged(query) => {
                 if let Some(ref mut picker) = self.issue_picker {
                     picker.query = query;
@@ -1957,6 +2188,26 @@ impl App {
             }
             Message::RemoveDependency(dep_id) => {
                 self.remove_dependency(&dep_id);
+            }
+            Message::OpenMoveTeamPicker(issue_id) => {
+                self.modal = Modal::MoveTeam(issue_id);
+            }
+            Message::MoveFocusedIssueToTeam => {
+                if let Some(issue) = self.focused_issue() {
+                    self.modal = Modal::MoveTeam(issue.id.clone());
+                }
+            }
+            Message::MoveTeamSelected(target_id) => {
+                if let Modal::MoveTeam(issue_id) = std::mem::replace(&mut self.modal, Modal::None) {
+                    // Same rule as the picker: only synced, live teams.
+                    let ok = self
+                        .teams
+                        .iter()
+                        .any(|t| t.id == target_id && t.remote_id.is_some() && t.archived_at.is_none());
+                    if ok {
+                        self.move_issue_to_team(&issue_id, &target_id);
+                    }
+                }
             }
 
             Message::ConfirmDeleteFocusedIssue => {
@@ -2226,6 +2477,11 @@ impl App {
             }
 
             Message::CloseModal => {
+                // Cancelling the label-delete confirm returns to the panel.
+                if matches!(self.modal, Modal::DeleteLabelConfirm(_)) {
+                    self.modal = Modal::Labels;
+                    return Task::none();
+                }
                 self.modal = Modal::None;
                 self.issue_form = None;
                 self.settings_form = None;
@@ -2549,6 +2805,15 @@ impl App {
                     for f in report.failures() {
                         match &f.kind {
                             SyncErrorKind::Auth | SyncErrorKind::Network | SyncErrorKind::TeamAccess => {}
+                            // A refused move (422/404) is dropped; the next full pull
+                            // restores the issue, so the toast just carries the reason.
+                            SyncErrorKind::Validation(errs) if f.entity_type == "issue_move" => {
+                                error_toasts
+                                    .push((format!("Move rejected: {}", errs.join("; ")), false));
+                            }
+                            SyncErrorKind::Other if f.entity_type == "issue_move" => {
+                                error_toasts.push((format!("Move rejected: {}", f.message), false));
+                            }
                             SyncErrorKind::Validation(errs) if f.entity_type == "issue" => {
                                 validation_issue = Some((f.entity_id.clone(), errs.clone()));
                             }
@@ -2869,6 +3134,26 @@ impl App {
                 }
             }
 
+            Message::ConfirmDeleteComment(comment_id) => {
+                self.modal = Modal::DeleteCommentConfirm(comment_id);
+            }
+
+            Message::DeleteCommentConfirmed => {
+                if let Modal::DeleteCommentConfirm(ref comment_id) = self.modal {
+                    let conn = self.db();
+                    if let Ok((_, Some(payload))) = queries::delete_comment(&conn, comment_id) {
+                        self.enqueue_sync("comment", comment_id, "delete", Some(payload.as_str()));
+                    }
+                    if let Some(d) = &mut self.issue_detail {
+                        if d.reply_to.as_deref() == Some(comment_id.as_str()) {
+                            d.reply_to = None;
+                        }
+                    }
+                }
+                self.modal = Modal::None;
+                self.reload_data();
+            }
+
             Message::DeleteProjectConfirmed => {
                 if let Modal::DeleteProjectConfirm(ref project_id) = self.modal {
                     let conn = self.db();
@@ -2961,6 +3246,79 @@ impl App {
                         self.reload_data();
                     }
                 }
+            }
+
+            Message::SelectLabelForEdit(label_id) => {
+                let label = self.labels.iter().find(|l| l.id == label_id).cloned();
+                if let (Some(form), Some(label)) = (self.label_form.as_mut(), label) {
+                    form.editing_id = Some(label.id);
+                    form.edit_name = label.name;
+                    form.edit_color = label
+                        .color
+                        .unwrap_or_else(|| labels_view::PALETTE[0].to_string());
+                    form.edit_error = None;
+                }
+            }
+
+            Message::EditLabelNameChanged(v) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.edit_name = v;
+                }
+            }
+
+            Message::EditLabelColorChanged(hex) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.edit_color = hex;
+                }
+            }
+
+            Message::SaveLabelEdit => {
+                let Some((id, name, color)) = self
+                    .label_form
+                    .as_ref()
+                    .and_then(|f| Some((f.editing_id.clone()?, f.edit_name.clone(), f.edit_color.clone())))
+                else {
+                    return Task::none();
+                };
+                match queries::edit_label(&self.db(), &id, &name, &color) {
+                    Ok(needs_update) => {
+                        if needs_update {
+                            self.enqueue_sync("label", &id, "update", None);
+                        }
+                        if let Some(ref mut form) = self.label_form {
+                            form.editing_id = None;
+                            form.edit_error = None;
+                        }
+                        self.reload_data();
+                    }
+                    Err(e) => {
+                        if let Some(ref mut form) = self.label_form {
+                            form.edit_error = Some(e.message().into());
+                        }
+                    }
+                }
+            }
+
+            Message::ConfirmDeleteLabel => {
+                if let Some(id) = self.label_form.as_ref().and_then(|f| f.editing_id.clone()) {
+                    self.modal = Modal::DeleteLabelConfirm(id);
+                }
+            }
+
+            Message::DeleteLabelConfirmed => {
+                if let Modal::DeleteLabelConfirm(ref label_id) = self.modal {
+                    let label_id = label_id.clone();
+                    if let Ok(Some(payload)) = queries::delete_label(&self.db(), &label_id) {
+                        self.enqueue_sync("label", &label_id, "delete", Some(payload.as_str()));
+                    }
+                    if let Some(ref mut form) = self.label_form {
+                        form.selected_label_ids.retain(|id| *id != label_id);
+                        form.editing_id = None;
+                        form.edit_error = None;
+                    }
+                }
+                self.modal = Modal::Labels;
+                self.reload_data();
             }
 
             Message::ToggleIssueLabel(label_id) => {
@@ -3112,6 +3470,8 @@ impl App {
                             self.project_detail_issues(project_id, &needle),
                             &self.config.display,
                             &self.lanes,
+                            &self.teams,
+                            &self.detail_comments,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -3138,6 +3498,10 @@ impl App {
                             .iter()
                             .filter(|i| i.parent_issue_id.as_deref() == Some(issue.id.as_str()))
                             .collect();
+                        let my_member_ids = display::my_member_ids(
+                            &self.members,
+                            self.config.current_user_remote_id,
+                        );
                         issue_detail::view(
                             issue,
                             detail,
@@ -3147,14 +3511,14 @@ impl App {
                             &self.projects,
                             &self.members,
                             project_name,
-                            &self.detail_blocking,
-                            &self.detail_blocked_by,
+                            &self.detail_deps,
                             &self.detail_comments,
                             &self.detail_events,
                             &self.detail_references,
                             &self.issues,
                             parent,
                             sub_issues,
+                            &my_member_ids,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
@@ -3295,13 +3659,31 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::DeleteLabelConfirm(label_id) => {
+                let conn = self.db();
+                let name = queries::get_label(&conn, label_id)
+                    .ok()
+                    .flatten()
+                    .map(|l| l.name)
+                    .unwrap_or_default();
+                let count = queries::label_issue_count(&conn, label_id).unwrap_or(0);
+                iced::widget::stack![base, delete_label_confirm_modal(name, count)].into()
+            }
+            Modal::DeleteCommentConfirm(comment_id) => {
+                let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
+                iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
+            }
             Modal::IssuePicker => match (&self.issue_picker, &self.issue_detail) {
                 (Some(picker), Some(detail)) => {
                     // Exclude the open issue itself and any issue already linked
                     // in this direction (a duplicate would hit the UNIQUE edge).
+                    let d = &self.detail_deps;
                     let existing = match picker.direction {
-                        DepDirection::Blocking => &self.detail_blocking,
-                        DepDirection::BlockedBy => &self.detail_blocked_by,
+                        DepDirection::Blocking => &d.blocking,
+                        DepDirection::BlockedBy => &d.blocked_by,
+                        DepDirection::Relates => &d.related,
+                        DepDirection::Duplicates => &d.duplicates,
+                        DepDirection::DuplicatedBy => &d.duplicated_by,
                     };
                     let mut excluded: HashSet<&str> =
                         existing.iter().map(|l| l.issue_id.as_str()).collect();
@@ -3312,6 +3694,15 @@ impl App {
                 }
                 _ => base,
             },
+            Modal::MoveTeam(issue_id) => {
+                let source = self
+                    .issues
+                    .iter()
+                    .find(|i| i.id == *issue_id)
+                    .map(|i| i.team_id.as_str());
+                let targets = team_picker::move_targets(&self.teams, source.unwrap_or_default());
+                iced::widget::stack![base, team_picker::view(&targets)].into()
+            }
             Modal::RoadmapAdd(commitment) => {
                 let modal =
                     roadmap_view::add_modal_view(*commitment, &self.projects, self.selected_team());
@@ -3508,26 +3899,45 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
 }
 
 fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
+    delete_modal(
+        "Delete Project?",
+        format!("Are you sure you want to delete \"{}\"?", project_name),
+        Message::DeleteProjectConfirmed,
+    )
+}
+
+fn delete_label_confirm_modal<'a>(name: String, issues: usize) -> Element<'a, Message> {
+    let body = match issues {
+        0 => format!("Delete the label \"{name}\"? No issues carry it."),
+        1 => format!("Delete the label \"{name}\"? It will be removed from 1 issue."),
+        n => format!("Delete the label \"{name}\"? It will be removed from {n} issues."),
+    };
+    delete_modal("Delete Label?", body, Message::DeleteLabelConfirmed)
+}
+
+fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
+    let body = match replies {
+        0 => "Delete this comment?".to_string(),
+        1 => "Delete this comment and its 1 reply?".to_string(),
+        n => format!("Delete this comment and its {n} replies?"),
+    };
+    delete_modal("Delete Comment?", body, Message::DeleteCommentConfirmed)
+}
+
+fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'a, Message> {
     use iced::widget::{button, column, container, row, text};
     use iced::Border;
 
     let content = column![]
         .spacing(16)
-        .push(text("Delete Project?").size(18).color(t::text_primary()))
-        .push(
-            text(format!(
-                "Are you sure you want to delete \"{}\"?",
-                project_name
-            ))
-            .size(14)
-            .color(t::text_secondary()),
-        )
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(text(body).size(14).color(t::text_secondary()))
         .push(
             row![]
                 .spacing(8)
                 .push(
                     button(text("Delete").size(14).color(iced::Color::WHITE))
-                        .on_press(Message::DeleteProjectConfirmed)
+                        .on_press(confirm)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
                             background: Some(iced::Background::Color(t::danger())),
@@ -3666,5 +4076,26 @@ mod tests {
         let teams = vec![team("a", true)];
         assert_eq!(default_team_id(&teams).as_deref(), Some("a"));
         assert_eq!(default_team_id(&[]), None);
+    }
+
+    #[test]
+    fn dep_direction_stores_source_and_kind() {
+        let edge = |d: DepDirection| d.stored_edge("me", "other");
+        assert_eq!(edge(DepDirection::Blocking), ("me".into(), "other".into(), "blocks"));
+        assert_eq!(edge(DepDirection::BlockedBy), ("other".into(), "me".into(), "blocks"));
+        assert_eq!(edge(DepDirection::Relates), ("me".into(), "other".into(), "relates"));
+        assert_eq!(edge(DepDirection::Duplicates), ("me".into(), "other".into(), "duplicates"));
+        assert_eq!(
+            edge(DepDirection::DuplicatedBy),
+            ("other".into(), "me".into(), "duplicates")
+        );
+    }
+
+    #[test]
+    fn dep_direction_cycles_through_every_kind() {
+        assert_eq!(DepDirection::Relates.cycle(true), DepDirection::Duplicates);
+        assert_eq!(DepDirection::Duplicates.cycle(true), DepDirection::DuplicatedBy);
+        assert_eq!(DepDirection::DuplicatedBy.cycle(true), DepDirection::Blocking);
+        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::DuplicatedBy);
     }
 }

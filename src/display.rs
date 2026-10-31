@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
+use crate::lane_icon::{icon_for, LaneIcon};
 use crate::views::header;
 
 /// Key used for the "none" bucket of an axis (unassigned, no project, ...).
@@ -529,6 +530,8 @@ enum Axis {
 struct Bucket {
     key: String,
     title: String,
+    /// Set for lane (status) buckets.
+    lane_icon: Option<LaneIcon>,
 }
 
 /// A sub-group inside a column: `issues[start..end]` of the column.
@@ -544,6 +547,8 @@ pub struct Section {
 #[derive(Debug, Clone)]
 pub struct Column<'a> {
     pub title: String,
+    /// Lane category icon; `None` unless the column is a lane.
+    pub lane_icon: Option<LaneIcon>,
     pub issues: Vec<&'a Issue>,
     /// Empty when no sub-group is set.
     pub sections: Vec<Section>,
@@ -708,6 +713,11 @@ fn buckets(axis: Axis, data: &Data<'_>, visible: &[&Issue]) -> Vec<Bucket> {
     let b = |key: &str, title: &str| Bucket {
         key: key.to_string(),
         title: title.to_string(),
+        lane_icon: None,
+    };
+    let lane_b = |key: &str, l: &Lane| Bucket {
+        lane_icon: Some(icon_for(l.category.as_deref())),
+        ..b(key, &l.name)
     };
     match axis {
         Axis::Status if data.merge_lanes_by_name => {
@@ -717,10 +727,10 @@ fn buckets(axis: Axis, data: &Data<'_>, visible: &[&Issue]) -> Vec<Bucket> {
             sorted
                 .into_iter()
                 .filter(|l| seen.insert(l.name.to_lowercase()))
-                .map(|l| b(&l.name.to_lowercase(), &l.name))
+                .map(|l| lane_b(&l.name.to_lowercase(), l))
                 .collect()
         }
-        Axis::Status => data.lanes.iter().map(|l| b(&l.id, &l.name)).collect(),
+        Axis::Status => data.lanes.iter().map(|l| lane_b(&l.id, l)).collect(),
         Axis::Priority => PRIORITY_TITLES
             .iter()
             .enumerate()
@@ -823,10 +833,14 @@ pub fn build_columns<'a>(
     let visible = visible_issues(data, opts, filters, needle);
     let sub_axis = opts.sub_group.axis();
 
-    let finish = |title: String, issues: Vec<&'a Issue>| -> Column<'a> {
+    let finish = |title: String,
+                  lane_icon: Option<LaneIcon>,
+                  issues: Vec<&'a Issue>|
+     -> Column<'a> {
         match sub_axis {
             None => Column {
                 title,
+                lane_icon,
                 issues,
                 sections: vec![],
             },
@@ -844,6 +858,7 @@ pub fn build_columns<'a>(
                 }
                 Column {
                     title,
+                    lane_icon,
                     issues: flat,
                     sections,
                 }
@@ -852,7 +867,7 @@ pub fn build_columns<'a>(
     };
 
     let Some(axis) = opts.group_by.axis() else {
-        return vec![finish("All issues".to_string(), visible)];
+        return vec![finish("All issues".to_string(), None, visible)];
     };
 
     let keep_empty = opts.show_empty_groups || matches!(axis, Axis::Status | Axis::Priority);
@@ -864,7 +879,7 @@ pub fn build_columns<'a>(
                 .copied()
                 .filter(|i| keys_for(i, axis, data).contains(&bk.key))
                 .collect();
-            (keep_empty || !members.is_empty()).then(|| finish(bk.title, members))
+            (keep_empty || !members.is_empty()).then(|| finish(bk.title, bk.lane_icon, members))
         })
         .collect()
 }

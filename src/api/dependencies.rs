@@ -9,6 +9,34 @@ pub enum Direction {
     Blocking,
     /// Current issue is blocked by the target issue.
     BlockedBy,
+    /// Current issue relates to the target issue (symmetric).
+    Relates,
+    /// Current issue duplicates the target issue.
+    Duplicates,
+}
+
+impl Direction {
+    /// The wire spelling (matches the serde snake_case form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Direction::Blocking => "blocking",
+            Direction::BlockedBy => "blocked_by",
+            Direction::Relates => "relates",
+            Direction::Duplicates => "duplicates",
+        }
+    }
+}
+
+/// The create `direction` for a stored edge. Edges are stored with the link's
+/// source in `blocking_issue_id`, and the create is posted from that source
+/// issue, so the direction depends only on the edge's `kind`. An unknown kind
+/// falls back to `blocking`, the column default.
+pub fn direction_for_edge(kind: &str) -> Direction {
+    match kind {
+        "relates" => Direction::Relates,
+        "duplicates" => Direction::Duplicates,
+        _ => Direction::Blocking,
+    }
 }
 
 /// Rails returns dependency rows with embedded issue refs (not flat ids).
@@ -100,6 +128,41 @@ mod tests {
             serde_json::to_value(&body).unwrap(),
             serde_json::json!({ "target_issue_id": 7, "direction": "blocking" })
         );
+    }
+
+    #[test]
+    fn create_body_covers_every_direction() {
+        for (d, wire) in [
+            (Direction::Relates, "relates"),
+            (Direction::Duplicates, "duplicates"),
+        ] {
+            let body = CreateBody { target_issue_id: 1, direction: d };
+            assert_eq!(
+                serde_json::to_value(&body).unwrap(),
+                serde_json::json!({ "target_issue_id": 1, "direction": wire })
+            );
+        }
+    }
+
+    #[test]
+    fn stored_edge_kind_maps_to_create_direction() {
+        let dir = |k| direction_for_edge(k).as_str();
+        assert_eq!(dir("blocks"), "blocking");
+        assert_eq!(dir("relates"), "relates");
+        assert_eq!(dir("duplicates"), "duplicates");
+        assert_eq!(dir("mystery"), "blocking");
+    }
+
+    #[test]
+    fn as_str_matches_serde_wire_form() {
+        for d in [
+            Direction::Blocking,
+            Direction::BlockedBy,
+            Direction::Relates,
+            Direction::Duplicates,
+        ] {
+            assert_eq!(serde_json::to_value(d).unwrap(), serde_json::json!(d.as_str()));
+        }
     }
 
     #[test]

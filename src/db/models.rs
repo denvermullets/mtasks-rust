@@ -407,7 +407,9 @@ impl IssueDependency {
 pub struct Comment {
     pub id: String,
     pub remote_id: Option<i64>,
-    pub issue_id: String,
+    /// Exactly one of `issue_id` / `project_id` is set (see `owner`).
+    pub issue_id: Option<String>,
+    pub project_id: Option<String>,
     pub author_id: Option<String>,
     pub body: String,
     pub parent_id: Option<String>,
@@ -415,10 +417,27 @@ pub struct Comment {
     pub updated_at: String,
 }
 
+/// What a comment belongs to: an issue or a project (local UUID).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommentOwner {
+    Issue(String),
+    Project(String),
+}
+
 /// Max reply depth (top-level = 0). Mirrors Rails `Comment::MAX_NESTING_DEPTH`.
 pub const MAX_NESTING_DEPTH: usize = 4;
 
 impl Comment {
+    /// The comment's owner. Rows hold exactly one owner column (CHECK in the
+    /// schema); a row with neither is treated as an empty-id issue owner.
+    pub fn owner(&self) -> CommentOwner {
+        match (&self.issue_id, &self.project_id) {
+            (Some(i), _) => CommentOwner::Issue(i.clone()),
+            (None, Some(p)) => CommentOwner::Project(p.clone()),
+            (None, None) => CommentOwner::Issue(String::new()),
+        }
+    }
+
     /// Whether a comment at `depth` accepts replies (Rails `can_reply?`).
     pub fn can_reply_at(depth: usize) -> bool {
         depth < MAX_NESTING_DEPTH
@@ -458,6 +477,7 @@ impl Comment {
             id: row.get("id")?,
             remote_id: row.get("remote_id")?,
             issue_id: row.get("issue_id")?,
+            project_id: row.get("project_id")?,
             author_id: row.get("author_id")?,
             body: row.get("body")?,
             parent_id: row.get("parent_id")?,
@@ -487,7 +507,8 @@ mod tests {
         Comment {
             id: id.into(),
             remote_id: None,
-            issue_id: "i".into(),
+            issue_id: Some("i".into()),
+            project_id: None,
             author_id: None,
             body: id.into(),
             parent_id: parent.map(String::from),

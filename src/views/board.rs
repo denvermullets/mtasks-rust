@@ -11,6 +11,7 @@ use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
 use crate::scroll;
 use crate::theme as t;
 use crate::views::labels as labels_view;
+use crate::views::lane_icon;
 use crate::views::util;
 
 /// Lookup data cards need for their optional properties.
@@ -56,6 +57,8 @@ pub fn view<'a>(
 
         let header = row![]
             .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .push_maybe(col.lane_icon.map(lane_icon::view))
             .push(text(col.title.clone()).size(14).color(name_color))
             .push(
                 text(format!("{}", col.issues.len()))

@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::db::models::{
-    Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
+    Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
 
@@ -401,21 +401,29 @@ pub struct CommentDto {
     /// project comments); the per-issue endpoint omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_id: Option<i64>,
+    /// Remote project id. Only the team comments feed sends it (set for
+    /// project comments, null for issue comments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
 }
 
 impl CommentDto {
-    /// Merge a fetched comment into a local `Comment`. `issue_local_uuid` is the
-    /// local UUID of the parent issue (already resolved by the caller). The
+    /// Merge a fetched comment into a local `Comment`. `owner` is the local
+    /// UUID of the owning issue or project (already resolved by the caller). The
     /// author is resolved to a local member by `user.id`; if that member isn't
     /// known locally the author is left `None` (falls back to "Unknown" in the
     /// UI). `parent_local_uuid` is the local UUID of the parent comment, if any.
     pub fn into_model(
         self,
         conn: &Connection,
-        issue_local_uuid: String,
+        owner: CommentOwner,
         existing_uuid: Option<String>,
         parent_local_uuid: Option<String>,
     ) -> Comment {
+        let (issue_id, project_id) = match owner {
+            CommentOwner::Issue(i) => (Some(i), None),
+            CommentOwner::Project(p) => (None, Some(p)),
+        };
         let author_id = self
             .user
             .as_ref()
@@ -423,7 +431,8 @@ impl CommentDto {
         Comment {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
             remote_id: Some(self.id),
-            issue_id: issue_local_uuid,
+            issue_id,
+            project_id,
             author_id,
             body: self.body,
             parent_id: parent_local_uuid,
@@ -439,7 +448,7 @@ impl CommentDto {
 /// Returns the number of comments upserted.
 pub fn merge_comment_tree(
     conn: &Connection,
-    issue_local_uuid: &str,
+    owner: &CommentOwner,
     dtos: Vec<CommentDto>,
     parent_local_uuid: Option<&str>,
 ) -> usize {
@@ -454,10 +463,15 @@ pub fn merge_comment_tree(
             dto.parent_id
                 .and_then(|pid| local_uuid_for(conn, "comments", pid).ok())
         });
-        let comment = dto.into_model(conn, issue_local_uuid.to_string(), existing, parent);
+        let comment = dto.into_model(
+            conn,
+            owner.clone(),
+            existing,
+            parent,
+        );
         if crate::db::queries::upsert_comment(conn, &comment).is_ok() {
             count += 1;
-            count += merge_comment_tree(conn, issue_local_uuid, replies, Some(&comment.id));
+            count += merge_comment_tree(conn, owner, replies, Some(&comment.id));
         }
     }
     count
@@ -942,6 +956,18 @@ mod tests {
     }
 
     #[test]
+    fn comment_dto_with_project_id_maps_to_project_owner() {
+        let conn = fresh_conn();
+        let json = r#"{"id":5,"body":"b","parent_id":null,"user":null,
+            "created_at":"x","updated_at":"x","issue_id":null,"project_id":80}"#;
+        let dto: CommentDto = serde_json::from_str(json).unwrap();
+        assert_eq!(dto.project_id, Some(80));
+        let c = dto.into_model(&conn, CommentOwner::Project("p1".into()), None, None);
+        assert_eq!(c.owner(), CommentOwner::Project("p1".into()));
+        assert_eq!(c.issue_id, None);
+    }
+
+    #[test]
     fn merge_comment_tree_flattens_replies_with_parent_links() {
         let conn = fresh_conn();
         conn.execute_batch(
@@ -959,13 +985,14 @@ mod tests {
             updated_at: "2026-01-01T00:00:00.000Z".into(),
             replies,
             issue_id: None,
+            project_id: None,
         };
         let tree = vec![mk(
             10,
             None,
             Some(vec![mk(11, Some(10), Some(vec![mk(12, Some(11), None)]))]),
         )];
-        assert_eq!(merge_comment_tree(&conn, "i1", tree.clone(), None), 3);
+        assert_eq!(merge_comment_tree(&conn, &CommentOwner::Issue("i1".into()), tree.clone(), None), 3);
         let all = crate::db::queries::comments_for_issue(&conn, "i1").unwrap();
         let by_remote = |r: i64| all.iter().find(|c| c.remote_id == Some(r)).unwrap();
         assert_eq!(by_remote(10).parent_id, None);
@@ -978,13 +1005,43 @@ mod tests {
             Some(by_remote(11).id.as_str())
         );
         // Idempotent re-merge.
-        assert_eq!(merge_comment_tree(&conn, "i1", tree, None), 3);
+        assert_eq!(merge_comment_tree(&conn, &CommentOwner::Issue("i1".into()), tree, None), 3);
         assert_eq!(
             crate::db::queries::comments_for_issue(&conn, "i1")
                 .unwrap()
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn merge_comment_tree_stores_a_project_thread_under_the_project() {
+        let conn = fresh_conn();
+        conn.execute_batch(
+            "INSERT INTO teams (id,name,identifier,remote_id,created_at,updated_at) VALUES ('t1','T','TT',1,'x','x');
+             INSERT INTO projects (id,team_id,name,created_at,updated_at) VALUES ('p1','t1','P','x','x');",
+        )
+        .unwrap();
+        let mk = |id: i64, parent: Option<i64>, replies: Option<Vec<CommentDto>>| CommentDto {
+            id,
+            body: format!("c{id}"),
+            parent_id: parent,
+            user: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            replies,
+            issue_id: None,
+            project_id: Some(80),
+        };
+        let tree = vec![mk(10, None, Some(vec![mk(11, Some(10), None)]))];
+        let owner = CommentOwner::Project("p1".into());
+        assert_eq!(merge_comment_tree(&conn, &owner, tree, None), 2);
+        let all = crate::db::queries::comments_for_project(&conn, "p1").unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|c| c.owner() == owner));
+        let top = all.iter().find(|c| c.remote_id == Some(10)).unwrap();
+        let reply = all.iter().find(|c| c.remote_id == Some(11)).unwrap();
+        assert_eq!(reply.parent_id.as_deref(), Some(top.id.as_str()));
     }
 
     fn now() -> String {

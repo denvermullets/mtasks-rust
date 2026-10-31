@@ -24,9 +24,9 @@ use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
-    ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
+    ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
 };
-use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
+use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
 use crate::sync::cursor;
 
@@ -373,15 +373,19 @@ async fn process(
 ) -> Outcome {
     match (entry.entity_type.as_str(), entry.action.as_str()) {
         ("issue", "create") => issue_create(client, ctx, &entry.entity_id, entry_id).await,
-        ("issue", "update") => issue_update(client, &entry.entity_id).await,
+        ("issue", "update") => issue_update(client, &entry.entity_id, entry_id).await,
         ("issue", "delete") => {
-            issue_delete(client, &entry.entity_id, entry.payload.as_deref()).await
+            issue_delete(client, &entry.entity_id, entry.payload.as_deref(), entry_id).await
         }
+        ("issue", "move") => issue_move(client, &entry.entity_id, entry.payload.as_deref()).await,
         ("project", "create") => project_create(client, &entry.entity_id, entry_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
+        ("label", "update") => label_update(client, &entry.entity_id).await,
+        ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
+        ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
@@ -534,8 +538,14 @@ fn note_pull_failure(report: &mut SyncReport, msg: &str) {
 /// local/transient reasons.
 fn record_push_failure(report: &mut SyncReport, entry: &SyncQueueEntry, reason: &str) {
     if let Some(kind) = SyncErrorKind::from_push_reason(reason) {
+        // A refused move is reported apart from issue edits: a 422 on an edit
+        // reopens the form, a refused move only toasts.
+        let entity_type = match (entry.entity_type.as_str(), entry.action.as_str()) {
+            ("issue", "move") => "issue_move".to_string(),
+            _ => entry.entity_type.clone(),
+        };
         report.failures.push(SyncFailure {
-            entity_type: entry.entity_type.clone(),
+            entity_type,
             entity_id: entry.entity_id.clone(),
             kind,
             message: reason.to_string(),
@@ -616,12 +626,16 @@ fn prep_issue_create(entity_id: &str) -> Prep<IssueCreatePrep> {
     })
 }
 
-fn prep_issue_update(entity_id: &str) -> Prep<IssueUpdatePrep> {
+fn prep_issue_update(entity_id: &str, entry_id: i64) -> Prep<IssueUpdatePrep> {
     let conn = match open() {
         Ok(c) => c,
         Err(e) => return Prep::Done(Outcome::LeavePending(e)),
     };
-    let issue = match queries::get_issue(&conn, entity_id) {
+    prep_issue_update_in(&conn, entity_id, entry_id)
+}
+
+fn prep_issue_update_in(conn: &Connection, entity_id: &str, entry_id: i64) -> Prep<IssueUpdatePrep> {
+    let issue = match queries::get_issue(conn, entity_id) {
         Ok(Some(i)) => i,
         Ok(None) => {
             return Prep::Done(Outcome::DropAndLog(format!(
@@ -640,22 +654,88 @@ fn prep_issue_update(entity_id: &str) -> Prep<IssueUpdatePrep> {
         }
     };
 
-    let team_remote_id = match queries::remote_id_for(&conn, "teams", &issue.team_id) {
-        Ok(Some(id)) => id,
-        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
-        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    let source_team = match move_order(conn, entity_id, entry_id) {
+        Ok(s) => s,
+        Err(o) => return Prep::Done(o),
     };
 
-    let params = match build_issue_params(&conn, &issue) {
+    let team_remote_id = match source_team {
+        Some(src) => src,
+        None => match queries::remote_id_for(conn, "teams", &issue.team_id) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+            Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+        },
+    };
+
+    let mut params = match build_issue_params(conn, &issue) {
         Ok(p) => p,
         Err(o) => return Prep::Done(o),
     };
+    if source_team.is_some() {
+        // Queued before a move: the row already shows the post-move lane,
+        // project, labels, assignee and parent, which the source team doesn't
+        // know. The move resets those server-side anyway, so send only the
+        // team-independent fields.
+        params.lane_id = None;
+        params.project_id = None;
+        params.assignee_id = None;
+        params.parent_issue_id = None;
+        params.label_ids = None;
+    }
 
     Prep::Ready(IssueUpdatePrep {
         team_remote_id,
         remote_id,
         params,
     })
+}
+
+/// Where an entry for `issue_id` stands relative to the issue's queued
+/// `issue/move` entries. The drain is FIFO but does not stop at a pending
+/// entry, and the issue's local row already shows the post-move team, so
+/// per-issue entries must check:
+/// - an earlier move is still pending: wait (`LeavePending`), so the entry goes
+///   to the new team's URL only after the server has moved the issue;
+/// - a later move is pending: `Ok(Some(source team remote id))`, so the entry
+///   still goes to the team the server has the issue in;
+/// - otherwise `Ok(None)`: use the row's team.
+///
+/// A move that was dropped (404/422) is no longer pending, so later entries
+/// proceed against the local row's team; if the server still has the issue
+/// elsewhere they 404 and are dropped, and the next full pull restores the
+/// issue to its server state.
+fn move_order(conn: &Connection, issue_id: &str, entry_id: i64) -> Result<Option<i64>, Outcome> {
+    let pending = sync_queue::pending_entries(conn)
+        .map_err(|e| Outcome::LeavePending(format!("db: {e}")))?;
+    let mut moves = pending
+        .iter()
+        .filter(|e| e.entity_type == "issue" && e.action == "move" && e.entity_id == issue_id);
+    if moves.clone().any(|m| m.id.is_some_and(|id| id < entry_id)) {
+        return Err(Outcome::LeavePending(
+            "waiting for an earlier move of this issue".into(),
+        ));
+    }
+    let Some(next) = moves.find(|m| m.id.is_some_and(|id| id > entry_id)) else {
+        return Ok(None);
+    };
+    let payload: serde_json::Value = next
+        .payload
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    if let Some(id) = payload.get("source_team_remote_id").and_then(|v| v.as_i64()) {
+        return Ok(Some(id));
+    }
+    let source_local = payload
+        .get("source_team_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    match queries::remote_id_for(conn, "teams", source_local) {
+        Ok(Some(id)) => Ok(Some(id)),
+        Ok(None) => Err(Outcome::LeavePending("source team not synced yet".into())),
+        Err(e) => Err(Outcome::LeavePending(format!("db: {e}"))),
+    }
 }
 
 async fn issue_create(
@@ -698,8 +778,8 @@ async fn issue_create(
     }
 }
 
-async fn issue_update(client: &ApiClient, entity_id: &str) -> Outcome {
-    let prep = match prep_issue_update(entity_id) {
+async fn issue_update(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
+    let prep = match prep_issue_update(entity_id, entry_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
@@ -710,7 +790,19 @@ async fn issue_update(client: &ApiClient, entity_id: &str) -> Outcome {
     }
 }
 
-async fn issue_delete(client: &ApiClient, local_id: &str, payload: Option<&str>) -> Outcome {
+async fn issue_delete(
+    client: &ApiClient,
+    local_id: &str,
+    payload: Option<&str>,
+    entry_id: i64,
+) -> Outcome {
+    // The payload's team was captured at enqueue; after a pending move it is
+    // the new team, which the server doesn't have the issue in yet.
+    match open().map(|c| move_order(&c, local_id, entry_id)) {
+        Ok(Err(o)) => return o,
+        Ok(Ok(_)) => {}
+        Err(e) => return Outcome::LeavePending(e),
+    }
     let raw = match payload {
         Some(s) => s,
         None => return Outcome::DropAndLog("issue delete: no payload (legacy entry)".into()),
@@ -755,6 +847,144 @@ fn issue_delete_outcome(
         }
         Err(e) => classify_in_team(&e, team_remote_id),
     }
+}
+
+// ── Issue move ────────────────────────────────────────────────────────────
+
+struct IssueMovePrep {
+    source_team_remote_id: i64,
+    issue_remote_id: i64,
+    target_team_remote_id: i64,
+}
+
+/// Resolve the move push from the payload captured at enqueue (the issue's row
+/// has already left the source team). A remote id that was unknown then is
+/// looked up again from the local row; the entry waits until all three exist.
+fn prep_issue_move_in(
+    conn: &Connection,
+    entity_id: &str,
+    payload: Option<&str>,
+) -> Prep<IssueMovePrep> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog("issue move: no payload".into()));
+    };
+    let p: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => return Prep::Done(Outcome::DropAndLog(format!("issue move: bad payload: {e}"))),
+    };
+    match queries::get_issue(conn, entity_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "issue {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    }
+    // Captured remote id if present, else the current remote id of the local row.
+    let resolve = |key: &str, table: &str, local_id: &str, what: &str| -> Result<i64, Outcome> {
+        if let Some(id) = p.get(key).and_then(|v| v.as_i64()) {
+            return Ok(id);
+        }
+        match queries::remote_id_for(conn, table, local_id) {
+            Ok(Some(id)) => Ok(id),
+            Ok(None) => Err(Outcome::LeavePending(format!("{what} not synced yet"))),
+            Err(e) => Err(Outcome::LeavePending(format!("db: {e}"))),
+        }
+    };
+    let local = |key: &str| p.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let source = resolve("source_team_remote_id", "teams", &local("source_team_id"), "source team");
+    let issue = resolve("issue_remote_id", "issues", entity_id, "issue");
+    let target = resolve("target_team_remote_id", "teams", &local("target_team_id"), "target team");
+    match (source, issue, target) {
+        (Ok(s), Ok(i), Ok(t)) => Prep::Ready(IssueMovePrep {
+            source_team_remote_id: s,
+            issue_remote_id: i,
+            target_team_remote_id: t,
+        }),
+        (Err(o), _, _) | (_, Err(o), _) | (_, _, Err(o)) => Prep::Done(o),
+    }
+}
+
+async fn issue_move(client: &ApiClient, entity_id: &str, payload: Option<&str>) -> Outcome {
+    let conn = match open() {
+        Ok(c) => c,
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let prep = match prep_issue_move_in(&conn, entity_id, payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    let result = issues::move_to_team(
+        client,
+        prep.source_team_remote_id,
+        prep.issue_remote_id,
+        prep.target_team_remote_id,
+    )
+    .await;
+    issue_move_outcome(&conn, entity_id, prep.source_team_remote_id, result)
+}
+
+/// 200 applies the response; 404 (target outside the token, or issue gone) and
+/// 422 (already there / not a member of both) drop the entry with the server's
+/// message. The next full pull restores the issue's server state.
+fn issue_move_outcome(
+    conn: &Connection,
+    entity_id: &str,
+    source_team_remote_id: i64,
+    result: Result<IssueDto, ApiError>,
+) -> Outcome {
+    match result {
+        Ok(dto) => match apply_move_response(conn, entity_id, &dto) {
+            Ok(()) => Outcome::Success,
+            Err(e) => Outcome::LeavePending(format!("apply move: {e}")),
+        },
+        Err(ApiError::NotFound(m)) => Outcome::DropAndLog(format!("not found: {m}")),
+        Err(e) => classify_in_team(&e, source_team_remote_id),
+    }
+}
+
+/// Apply a move response as a pull would, but only the fields the move
+/// decides: the server's team number (from `identifier`), lane, assignee and
+/// parent. Other local edits are left alone. A ref that isn't known locally
+/// keeps the local value.
+fn apply_move_response(conn: &Connection, entity_id: &str, dto: &IssueDto) -> Result<(), String> {
+    let issue = queries::get_issue(conn, entity_id)
+        .map_err(|e| format!("db: {e}"))?
+        .ok_or("issue missing locally")?;
+    let team_number = dto
+        .identifier
+        .rsplit_once('-')
+        .and_then(|(_, n)| n.parse::<i32>().ok())
+        .or(issue.team_number);
+    let lane_id = match &dto.lane {
+        Some(r) => queries::find_lane_by_remote_id(conn, r.id)
+            .map_err(|e| format!("db: {e}"))?
+            .map(|l| l.id)
+            .unwrap_or_else(|| issue.lane_id.clone()),
+        None => issue.lane_id.clone(),
+    };
+    let assignee_id = match &dto.assignee {
+        Some(r) => queries::find_member_by_remote_id(conn, r.id)
+            .map_err(|e| format!("db: {e}"))?
+            .map(|m| m.id)
+            .or(issue.assignee_id.clone()),
+        None => None,
+    };
+    let parent_issue_id = match &dto.parent_issue {
+        Some(r) => queries::find_issue_by_remote_id(conn, r.id)
+            .map_err(|e| format!("db: {e}"))?
+            .map(|i| i.id)
+            .or(issue.parent_issue_id.clone()),
+        None => None,
+    };
+    conn.execute(
+        "UPDATE issues SET team_number = ?1, lane_id = ?2, assignee_id = ?3, parent_issue_id = ?4
+         WHERE id = ?5",
+        rusqlite::params![team_number, lane_id, assignee_id, parent_issue_id, entity_id],
+    )
+    .map_err(|e| format!("db: {e}"))?;
+    Ok(())
 }
 
 fn purge_local_issue(conn: &Connection, local_id: &str) -> Outcome {
@@ -1319,21 +1549,125 @@ async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
     }
 }
 
+struct LabelUpdatePrep {
+    team_remote_id: i64,
+    remote_id: i64,
+    params: LabelParams,
+}
+
+fn prep_label_update(entity_id: &str) -> Prep<LabelUpdatePrep> {
+    match open() {
+        Ok(conn) => label_update_prep(&conn, entity_id),
+        Err(e) => Prep::Done(Outcome::LeavePending(e)),
+    }
+}
+
+/// Re-reads the label row so the newest name and color go out, however many
+/// edits were queued.
+fn label_update_prep(conn: &Connection, entity_id: &str) -> Prep<LabelUpdatePrep> {
+    let label = match queries::get_label(conn, entity_id) {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "label {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let Some(remote_id) = label.remote_id else {
+        return Prep::Done(Outcome::LeavePending("label create not yet drained".into()));
+    };
+    let team_remote_id = match queries::remote_id_for(conn, "teams", &label.team_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    Prep::Ready(LabelUpdatePrep {
+        team_remote_id,
+        remote_id,
+        params: LabelParams {
+            name: label.name,
+            color: label.color,
+        },
+    })
+}
+
+async fn label_update(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match prep_label_update(entity_id) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    // A 422 (duplicate name on the server) is dropped; the next label pull
+    // restores the server value.
+    match labels::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
+        Ok(_) => Outcome::Success,
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
+/// The local row is gone by drain time, so the payload captured at enqueue time
+/// (`{team_remote_id, remote_id}`) is all a label delete has.
+fn prep_label_delete(payload: Option<&str>) -> Prep<(i64, i64)> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog(
+            "label delete: no payload (legacy entry)".into(),
+        ));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "label delete: bad payload: {e}"
+            )))
+        }
+    };
+    match (
+        parsed.get("team_remote_id").and_then(|v| v.as_i64()),
+        parsed.get("remote_id").and_then(|v| v.as_i64()),
+    ) {
+        (Some(team), Some(id)) => Prep::Ready((team, id)),
+        _ => Prep::Done(Outcome::DropAndLog(
+            "label delete: missing ids in payload".into(),
+        )),
+    }
+}
+
+async fn label_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let (team_remote_id, remote_id) = match prep_label_delete(payload) {
+        Prep::Ready(ids) => ids,
+        Prep::Done(o) => return o,
+    };
+    // 204 and 404 both mean the label is gone.
+    match labels::delete(client, team_remote_id, remote_id).await {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(e) => classify_in_team(&e, team_remote_id),
+    }
+}
+
 // ── Comments ──────────────────────────────────────────────────────────────
 
 struct CommentCreatePrep {
     team_remote_id: i64,
-    issue_remote_id: i64,
+    target: CommentTarget,
     params: CommentParams,
     local_id: String,
 }
 
-fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
+fn prep_comment_create(entity_id: &str, entry_id: i64) -> Prep<CommentCreatePrep> {
     let conn = match open() {
         Ok(c) => c,
         Err(e) => return Prep::Done(Outcome::LeavePending(e)),
     };
-    let comment = match queries::get_comment(&conn, entity_id) {
+    prep_comment_create_in(&conn, entity_id, entry_id)
+}
+
+fn prep_comment_create_in(
+    conn: &Connection,
+    entity_id: &str,
+    entry_id: i64,
+) -> Prep<CommentCreatePrep> {
+    let comment = match queries::get_comment(conn, entity_id) {
         Ok(Some(c)) => c,
         Ok(None) => {
             return Prep::Done(Outcome::DropAndLog(format!(
@@ -1345,29 +1679,57 @@ fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
     if comment.remote_id.is_some() {
         return Prep::Done(Outcome::Success);
     }
-    // The comment is nested under its issue; both the issue and its team must be
-    // synced before we can address the endpoint.
-    let issue = match queries::get_issue(&conn, &comment.issue_id) {
-        Ok(Some(i)) => i,
-        Ok(None) => return Prep::Done(Outcome::DropAndLog("comment's issue missing".into())),
-        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    // The comment is nested under its issue or project; the owner and its team
+    // must be synced before we can address the endpoint.
+    let (target, team_local_id, source_team) = match comment.owner() {
+        CommentOwner::Issue(id) => {
+            let issue = match queries::get_issue(conn, &id) {
+                Ok(Some(i)) => i,
+                Ok(None) => {
+                    return Prep::Done(Outcome::DropAndLog("comment's issue missing".into()))
+                }
+                Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+            };
+            match issue.remote_id {
+                Some(r) => match move_order(conn, &issue.id, entry_id) {
+                    Ok(src) => (CommentTarget::Issue(r), issue.team_id, src),
+                    Err(o) => return Prep::Done(o),
+                },
+                None => return Prep::Done(Outcome::LeavePending("issue not synced yet".into())),
+            }
+        }
+        CommentOwner::Project(id) => {
+            let project = match queries::get_project(conn, &id) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Prep::Done(Outcome::DropAndLog("comment's project missing".into()))
+                }
+                Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+            };
+            match project.remote_id {
+                Some(r) => (CommentTarget::Project(r), project.team_id, None),
+                None => {
+                    return Prep::Done(Outcome::LeavePending("project not synced yet".into()))
+                }
+            }
+        }
     };
-    let issue_remote_id = match issue.remote_id {
+    // An issue with a pending move is addressed under its source team.
+    let team_remote_id = match source_team {
         Some(id) => id,
-        None => return Prep::Done(Outcome::LeavePending("issue not synced yet".into())),
+        None => match queries::remote_id_for(conn, "teams", &team_local_id) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+            Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+        },
     };
-    let team_remote_id = match queries::remote_id_for(&conn, "teams", &issue.team_id) {
-        Ok(Some(id)) => id,
-        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
-        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
-    };
-    let parent_remote_id = match resolve_comment_parent(&conn, &comment) {
+    let parent_remote_id = match resolve_comment_parent(conn, &comment) {
         Ok(p) => p,
         Err(o) => return Prep::Done(o),
     };
     Prep::Ready(CommentCreatePrep {
         team_remote_id,
-        issue_remote_id,
+        target,
         params: CommentParams {
             body: comment.body,
             parent_id: parent_remote_id,
@@ -1378,6 +1740,63 @@ fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
 
 /// Remote id of a reply's parent. A parent that hasn't synced yet leaves the
 /// reply pending (the queue is FIFO so the parent normally goes first).
+struct CommentDeletePrep {
+    team_remote_id: i64,
+    issue_remote_id: i64,
+    remote_id: i64,
+}
+
+/// Like the other deletes, relies entirely on the payload captured at enqueue
+/// time (`{team_remote_id, issue_remote_id, remote_id}`): the local row is gone.
+fn prep_comment_delete(payload: Option<&str>) -> Prep<CommentDeletePrep> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog(
+            "comment delete: no payload (legacy entry)".into(),
+        ));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => return Prep::Done(Outcome::DropAndLog(format!("comment delete: bad payload: {e}"))),
+    };
+    let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
+    match (field("team_remote_id"), field("issue_remote_id"), field("remote_id")) {
+        (Some(team_remote_id), Some(issue_remote_id), Some(remote_id)) => {
+            Prep::Ready(CommentDeletePrep {
+                team_remote_id,
+                issue_remote_id,
+                remote_id,
+            })
+        }
+        _ => Prep::Done(Outcome::DropAndLog(
+            "comment delete: incomplete payload".into(),
+        )),
+    }
+}
+
+async fn comment_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let prep = match prep_comment_delete(payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    let result =
+        comments::delete(client, prep.team_remote_id, prep.issue_remote_id, prep.remote_id).await;
+    comment_delete_outcome(result, prep.team_remote_id)
+}
+
+/// 204 and a resource 404 both mean the comment is gone. A 403 (not the token
+/// scope one) is dropped with the server's message so the user sees a toast;
+/// the next per-issue comment fetch upserts the comment back.
+fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> Outcome {
+    match result {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(ApiError::Forbidden(m)) if !is_token_scope_message(&m) => {
+            Outcome::DropAndLog(format!("forbidden: {m}"))
+        }
+        Err(e) => classify_in_team(&e, team_remote_id),
+    }
+}
+
 fn resolve_comment_parent(
     conn: &rusqlite::Connection,
     comment: &crate::db::models::Comment,
@@ -1398,7 +1817,7 @@ fn resolve_comment_parent(
 }
 
 async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
-    let prep = match prep_comment_create(entity_id) {
+    let prep = match prep_comment_create(entity_id, entry_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
@@ -1408,7 +1827,7 @@ async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
     match comments::create(
         client,
         prep.team_remote_id,
-        prep.issue_remote_id,
+        prep.target,
         &prep.params,
         &prep.local_id,
     )
@@ -1425,10 +1844,11 @@ struct DependencyCreatePrep {
     team_remote_id: i64,
     issue_remote_id: i64,
     target_remote_id: i64,
+    direction: Direction,
     local_id: String,
 }
 
-fn prep_dependency_create(entity_id: &str) -> Prep<DependencyCreatePrep> {
+fn prep_dependency_create(entity_id: &str, entry_id: i64) -> Prep<DependencyCreatePrep> {
     let conn = match open() {
         Ok(c) => c,
         Err(e) => return Prep::Done(Outcome::LeavePending(e)),
@@ -1463,21 +1883,26 @@ fn prep_dependency_create(entity_id: &str) -> Prep<DependencyCreatePrep> {
             ))
         }
     };
-    let team_remote_id = match queries::remote_id_for(&conn, "teams", &blocking.team_id) {
-        Ok(Some(id)) => id,
-        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
-        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    let team_remote_id = match move_order(&conn, &blocking.id, entry_id) {
+        Ok(Some(src)) => src,
+        Ok(None) => match queries::remote_id_for(&conn, "teams", &blocking.team_id) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+            Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+        },
+        Err(o) => return Prep::Done(o),
     };
     Prep::Ready(DependencyCreatePrep {
         team_remote_id,
         issue_remote_id,
         target_remote_id,
+        direction: dependencies::direction_for_edge(&dep.kind),
         local_id: dep.id,
     })
 }
 
 async fn dependency_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
-    let prep = match prep_dependency_create(entity_id) {
+    let prep = match prep_dependency_create(entity_id, entry_id) {
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
@@ -1486,13 +1911,13 @@ async fn dependency_create(client: &ApiClient, entity_id: &str, entry_id: i64) -
         prep.team_remote_id,
         prep.issue_remote_id,
         prep.target_remote_id,
-        Direction::Blocking,
+        prep.direction,
     )
     .await
     {
         Ok(resp) => {
-            // The desktop only sends `blocking`, so the response direction is
-            // already relative to the source side; store what Rails echoed.
+            // The create is posted from the source side, so the response
+            // direction is already relative to it; store what Rails echoed.
             let conn = match open() {
                 Ok(c) => c,
                 Err(e) => return Outcome::LeavePending(e),
@@ -1614,7 +2039,12 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
         ("label", _) => team_remote(&queries::get_label(conn, id).ok()??.team_id),
         ("comment", _) => {
             let c = queries::get_comment(conn, id).ok()??;
-            team_remote(&queries::get_issue(conn, &c.issue_id).ok()??.team_id)
+            let team_id = match (&c.issue_id, &c.project_id) {
+                (Some(i), _) => queries::get_issue(conn, i).ok()??.team_id,
+                (None, Some(p)) => queries::get_project(conn, p).ok()??.team_id,
+                (None, None) => return None,
+            };
+            team_remote(&team_id)
         }
         ("dependency", _) => {
             let d = queries::get_issue_dependency(conn, id).ok()??;
@@ -1792,14 +2222,25 @@ impl SyncEngine {
 
         // Phase 4: per-team resources. Each helper logs and updates the report
         // independently so one team's failure doesn't block the others.
+        let mut issue_pulls: Vec<IssueTeamPull> = Vec::new();
+        let mut all_issue_pulls_ok = true;
         for target in &targets {
             let mut steps = vec![
                 pull_lanes_step(client, target.remote_id, &target.local_id).await,
                 pull_labels_step(client, target.remote_id, &target.local_id).await,
                 pull_members_step(client, target.remote_id, &target.local_id).await,
                 pull_projects_step(client, target.remote_id, &target.local_id).await,
-                pull_issues_step(client, target.remote_id, &target.local_id).await,
             ];
+            match pull_issues_step(client, target.remote_id, &target.local_id).await {
+                Ok(pull) => {
+                    issue_pulls.push(pull);
+                    steps.push(Ok(()));
+                }
+                Err(e) => {
+                    all_issue_pulls_ok = false;
+                    steps.push(Err(e));
+                }
+            }
             // Tombstones run before comments; the comment ids they removed
             // are handed on so a feed row for one cannot resurrect it.
             let mut deleted_comments = HashSet::new();
@@ -1829,6 +2270,15 @@ impl SyncEngine {
                     }
                 }
             }
+        }
+
+        // A targeted pull (some teams not covered) can't tell "moved to an
+        // unpulled team" from "gone", so archiving needs every team pulled.
+        let covers_all_teams = collect_pull_targets(None)
+            .map(|all| all.len() == targets.len())
+            .unwrap_or(false);
+        if let Ok(conn) = open() {
+            archive_unlisted_issues(&conn, &issue_pulls, all_issue_pulls_ok && covers_all_teams);
         }
 
         PullOutcome {
@@ -2211,7 +2661,7 @@ async fn pull_issues_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
-) -> Result<(), String> {
+) -> Result<IssueTeamPull, String> {
     let since = {
         let conn = open()?;
         queries::get_pull_cursor(&conn, local_team_id, ISSUES_CURSOR)
@@ -2247,19 +2697,39 @@ async fn pull_issues_step(
             "issues: {skipped}/{total} skipped (see [sync] log)"
         ));
     }
-    if since.is_none() {
-        // A full (unfiltered) listing includes archived issues, so the rows
-        // carry their own `archived_at`. A local issue the listing does not
-        // return at all is no longer visible server-side (deleted or moved
-        // out of reach); archive it rather than leave it looking live.
-        let active_ids: Vec<i64> = dtos.iter().map(|d| d.id).collect();
-        let _ = queries::archive_missing_issues(&conn, local_team_id, &active_ids);
-    }
     if let Some(t) = &collected.server_time {
         queries::set_pull_cursor(&conn, local_team_id, ISSUES_CURSOR, t)
             .map_err(|e| format!("db (pull cursor): {e}"))?;
     }
-    Ok(())
+    Ok(IssueTeamPull {
+        local_team_id: local_team_id.to_string(),
+        full_listing: since.is_none(),
+        seen: dtos.iter().map(|d| d.id).collect(),
+    })
+}
+
+/// What one team's issue pull saw in this cycle.
+struct IssueTeamPull {
+    local_team_id: String,
+    /// True when the whole team was listed (no cursor), so absence means gone.
+    full_listing: bool,
+    seen: Vec<i64>,
+}
+
+/// Archive local issues a full listing no longer returns (deleted or out of
+/// reach; full listings carry their own `archived_at` for archived rows). An
+/// issue moved to another team on the web vanishes from its source listing, so
+/// absence is judged against every issue seen this cycle, and only when every
+/// team's issue pull succeeded (`complete`): otherwise the target team may
+/// simply not have been pulled yet.
+fn archive_unlisted_issues(conn: &Connection, pulls: &[IssueTeamPull], complete: bool) {
+    if !complete {
+        return;
+    }
+    let seen: Vec<i64> = pulls.iter().flat_map(|p| p.seen.iter().copied()).collect();
+    for p in pulls.iter().filter(|p| p.full_listing) {
+        let _ = queries::archive_missing_issues(conn, &p.local_team_id, &seen);
+    }
 }
 
 /// Cursor resource name for the tombstone feed in `pull_cursors`.
@@ -2400,14 +2870,14 @@ fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto
     failed
 }
 
-/// Write feed comments locally (idempotent). Project comments and comments on
-/// issues we do not have (or have tombstoned) are ignored. Replies are applied
+/// Write feed comments locally (idempotent). Comments on issues or projects we
+/// do not have (or issues we have tombstoned) are ignored. Replies are applied
 /// after their parents, however the feed ordered them; a parent that cannot be
 /// found locally leaves the reply top-level rather than blocking the cursor.
 /// Returns how many rows hit a DB error.
 fn apply_pulled_comments(conn: &Connection, dtos: Vec<CommentDto>) -> usize {
     let mut failed = 0;
-    let mut remaining: Vec<CommentDto> = dtos.into_iter().filter(|d| d.issue_id.is_some()).collect();
+    let mut remaining: Vec<CommentDto> = dtos.into_iter().filter(|d| d.issue_id.is_some() || d.project_id.is_some()).collect();
     loop {
         let before = remaining.len();
         let mut deferred = Vec::new();
@@ -2452,23 +2922,31 @@ fn apply_one_comment(
     dto: CommentDto,
     parent_local: Option<String>,
 ) -> Result<(), String> {
-    let Some(issue_remote) = dto.issue_id else {
+    let owner = if let Some(issue_remote) = dto.issue_id {
+        let issue = match queries::find_issue_by_remote_id(conn, issue_remote) {
+            Ok(Some(i)) => i,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("db (find issue): {e}")),
+        };
+        if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote)
+            .map_err(|e| format!("db (tombstone): {e}"))?
+        {
+            return Ok(());
+        }
+        CommentOwner::Issue(issue.id)
+    } else if let Some(project_remote) = dto.project_id {
+        match queries::find_project_by_remote_id(conn, project_remote) {
+            Ok(Some(p)) => CommentOwner::Project(p.id),
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("db (find project): {e}")),
+        }
+    } else {
         return Ok(());
     };
-    let issue = match queries::find_issue_by_remote_id(conn, issue_remote) {
-        Ok(Some(i)) => i,
-        Ok(None) => return Ok(()),
-        Err(e) => return Err(format!("db (find issue): {e}")),
-    };
-    if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote)
-        .map_err(|e| format!("db (tombstone): {e}"))?
-    {
-        return Ok(());
-    }
     let existing = queries::find_comment_by_remote_id(conn, dto.id)
         .map_err(|e| format!("db (find comment): {e}"))?
         .map(|c| c.id);
-    let comment = dto.into_model(conn, issue.id, existing, parent_local);
+    let comment = dto.into_model(conn, owner, existing, parent_local);
     queries::upsert_comment(conn, &comment).map_err(|e| format!("db (upsert comment): {e}"))
 }
 
@@ -2816,7 +3294,8 @@ mod tests {
         let mk = |id: &str, remote: Option<i64>, parent: Option<&str>| Comment {
             id: id.into(),
             remote_id: remote,
-            issue_id: "i1".into(),
+            issue_id: Some("i1".into()),
+            project_id: None,
             author_id: None,
             body: id.into(),
             parent_id: parent.map(String::from),
@@ -2827,6 +3306,131 @@ mod tests {
         let reply = mk("r", None, Some("p"));
         queries::insert_comment(&conn, &reply).unwrap();
         (conn, reply)
+    }
+
+    /// A project (remote id `project_remote`) in team t1 (remote 700) with one
+    /// top-level project comment "pc".
+    fn project_comment_fixture(project_remote: Option<i64>) -> Connection {
+        let conn = setup_labels_db();
+        let remote = project_remote.map_or("NULL".to_string(), |r| r.to_string());
+        exec(
+            &conn,
+            &format!(
+                "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+                 VALUES ('p1', {remote}, 't1', 'P', 'x', 'x')"
+            ),
+        );
+        let c = crate::db::models::Comment {
+            id: "pc".into(),
+            remote_id: None,
+            issue_id: None,
+            project_id: Some("p1".into()),
+            author_id: None,
+            body: "hello".into(),
+            parent_id: None,
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(&conn, &c).unwrap();
+        conn
+    }
+
+    #[test]
+    fn project_comment_create_posts_to_the_project_path_once_synced() {
+        let conn = project_comment_fixture(Some(80));
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Ready(p) => {
+                assert_eq!(p.team_remote_id, 700);
+                assert_eq!(p.target, CommentTarget::Project(80));
+                assert_eq!(p.params.body, "hello");
+                assert_eq!(p.params.parent_id, None);
+            }
+            Prep::Done(_) => panic!("expected Ready"),
+        }
+    }
+
+    /// Adds a reply "pr" to the fixture's project comment "pc", whose remote id is
+    /// `parent_remote`.
+    fn add_project_reply(conn: &Connection, parent_remote: Option<i64>) {
+        if let Some(r) = parent_remote {
+            queries::set_comment_remote_id(conn, "pc", r).unwrap();
+        }
+        let reply = crate::db::models::Comment {
+            id: "pr".into(),
+            remote_id: None,
+            issue_id: None,
+            project_id: Some("p1".into()),
+            author_id: None,
+            body: "reply".into(),
+            parent_id: Some("pc".into()),
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(conn, &reply).unwrap();
+    }
+
+    #[test]
+    fn project_reply_waits_for_an_unsynced_parent() {
+        let conn = project_comment_fixture(Some(80));
+        add_project_reply(&conn, None);
+        match prep_comment_create_in(&conn, "pr", i64::MAX) {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("expected the reply to wait"),
+        }
+    }
+
+    #[test]
+    fn project_reply_sends_the_parent_remote_id_to_the_project_path() {
+        let conn = project_comment_fixture(Some(80));
+        add_project_reply(&conn, Some(31));
+        match prep_comment_create_in(&conn, "pr", i64::MAX) {
+            Prep::Ready(p) => {
+                assert_eq!(p.target, CommentTarget::Project(80));
+                assert_eq!(p.params.parent_id, Some(31));
+            }
+            Prep::Done(_) => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn project_comment_create_waits_for_the_project() {
+        let conn = project_comment_fixture(None);
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("expected the create to wait"),
+        }
+    }
+
+    #[test]
+    fn project_comment_create_waits_for_the_team() {
+        let conn = project_comment_fixture(Some(80));
+        exec(&conn, "UPDATE teams SET remote_id = NULL WHERE id = 't1'");
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("expected the create to wait"),
+        }
+    }
+
+    #[test]
+    fn issue_comment_create_still_posts_to_the_issue_path() {
+        let conn = setup_labels_db();
+        exec(&conn, "UPDATE issues SET remote_id = 55 WHERE id = 'i1'");
+        let c = crate::db::models::Comment {
+            id: "ic".into(),
+            remote_id: None,
+            issue_id: Some("i1".into()),
+            project_id: None,
+            author_id: None,
+            body: "hi".into(),
+            parent_id: None,
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(&conn, &c).unwrap();
+        match prep_comment_create_in(&conn, "ic", i64::MAX) {
+            Prep::Ready(p) => assert_eq!(p.target, CommentTarget::Issue(55)),
+            Prep::Done(_) => panic!("expected Ready"),
+        }
     }
 
     #[test]
@@ -2846,6 +3450,54 @@ mod tests {
         let (conn, reply) = reply_fixture(None);
         assert!(is_retry(
             &resolve_comment_parent(&conn, &reply).unwrap_err()
+        ));
+    }
+
+    #[test]
+    fn comment_delete_prep_proceeds_only_on_complete_payload() {
+        let full = r#"{"team_remote_id":7,"issue_remote_id":50,"remote_id":9}"#;
+        match prep_comment_delete(Some(full)) {
+            Prep::Ready(p) => assert_eq!((p.team_remote_id, p.issue_remote_id, p.remote_id), (7, 50, 9)),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+        for bad in [None, Some("not json"), Some(r#"{"team_remote_id":7,"remote_id":9}"#)] {
+            assert!(matches!(
+                prep_comment_delete(bad),
+                Prep::Done(Outcome::DropAndLog(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn comment_delete_204_and_resource_404_are_success() {
+        assert!(matches!(comment_delete_outcome(Ok(()), 7), Outcome::Success));
+        let gone = Err(ApiError::NotFound("Comment not found".into()));
+        assert!(matches!(comment_delete_outcome(gone, 7), Outcome::Success));
+    }
+
+    #[test]
+    fn comment_delete_403_drops_with_server_message() {
+        let msg = "Only the author or a team admin can delete this";
+        match comment_delete_outcome(Err(ApiError::Forbidden(msg.into())), 7) {
+            Outcome::DropAndLog(r) => {
+                assert_eq!(r, format!("forbidden: {msg}"));
+                assert_eq!(SyncErrorKind::from_push_reason(&r), Some(SyncErrorKind::Forbidden));
+            }
+            other => panic!("expected drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_delete_scope_403_and_team_404_keep_existing_handling() {
+        let scope = Err(ApiError::Forbidden("Token lacks required scope".into()));
+        assert!(matches!(
+            comment_delete_outcome(scope, 7),
+            Outcome::PausePushes(PushPause::Forbidden, _)
+        ));
+        let team = Err(ApiError::NotFound("Team not found or access denied".into()));
+        assert!(matches!(
+            comment_delete_outcome(team, 7),
+            Outcome::TeamAccessLost(7, _)
         ));
     }
 
@@ -3194,6 +3846,44 @@ mod tests {
     }
 
     #[test]
+    fn label_update_prep_rereads_row_and_waits_for_remote_id() {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", None);
+        assert!(matches!(
+            label_update_prep(&conn, "lab1"),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        queries::set_label_remote_id(&conn, "lab1", 11).unwrap();
+        queries::edit_label(&conn, "lab1", "renamed", "#3b82f6").unwrap();
+        match label_update_prep(&conn, "lab1") {
+            Prep::Ready(p) => {
+                assert_eq!((p.team_remote_id, p.remote_id), (700, 11));
+                assert_eq!(p.params.name, "renamed");
+                assert_eq!(p.params.color.as_deref(), Some("#3b82f6"));
+            }
+            _ => panic!("expected Ready"),
+        }
+        assert!(matches!(
+            label_update_prep(&conn, "nope"),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
+    }
+
+    #[test]
+    fn label_delete_prep_reads_only_the_payload() {
+        match prep_label_delete(Some(r#"{"team_remote_id":700,"remote_id":11}"#)) {
+            Prep::Ready(ids) => assert_eq!(ids, (700, 11)),
+            _ => panic!("expected Ready"),
+        }
+        for bad in [None, Some("not json"), Some(r#"{"remote_id":11}"#)] {
+            assert!(matches!(
+                prep_label_delete(bad),
+                Prep::Done(Outcome::DropAndLog(_))
+            ));
+        }
+    }
+
+    #[test]
     fn build_label_ids_resolves_remote_ids() {
         let conn = setup_labels_db();
         insert_test_label(&conn, "lab1", Some(11));
@@ -3402,6 +4092,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             replies: None,
             issue_id: Some(500),
+            project_id: None,
         }
     }
 
@@ -3859,6 +4550,7 @@ mod tests {
             updated_at: "2026-02-01T00:00:00.000Z".into(),
             replies: None,
             issue_id: issue,
+            project_id: None,
         }
     }
 
@@ -3893,11 +4585,11 @@ mod tests {
     }
 
     #[test]
-    fn feed_comments_skip_project_and_unknown_issue_without_failing() {
+    fn feed_comments_skip_ownerless_and_unknown_issue_without_failing() {
         let conn = setup_labels_db();
         conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
         let dtos = vec![
-            feed_comment(1, None, None, "project comment"),
+            feed_comment(1, None, None, "ownerless"),
             feed_comment(2, None, Some(999), "unknown issue"),
             // Parent never seen: stored top-level, not a failure.
             feed_comment(3, Some(77), Some(50), "orphan reply"),
@@ -3906,6 +4598,60 @@ mod tests {
         let all = queries::comments_for_issue(&conn, "i1").unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].parent_id, None);
+    }
+
+    fn feed_project_comment(id: i64, parent: Option<i64>, project: i64, body: &str) -> CommentDto {
+        CommentDto {
+            issue_id: None,
+            project_id: Some(project),
+            ..feed_comment(id, parent, None, body)
+        }
+    }
+
+    fn insert_test_project(conn: &Connection, id: &str, remote: i64) {
+        exec(
+            conn,
+            &format!(
+                "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+                 VALUES ('{id}', {remote}, 't1', 'P', '2026-01-01', '2026-01-01')"
+            ),
+        );
+    }
+
+    #[test]
+    fn feed_applies_project_comments_parents_first_and_skips_unknown_project() {
+        let conn = setup_labels_db();
+        insert_test_project(&conn, "p1", 80);
+        // Reply delivered before its parent; one row for a project we lack.
+        let dtos = vec![
+            feed_project_comment(2, Some(1), 80, "reply"),
+            feed_project_comment(1, None, 80, "top"),
+            feed_project_comment(3, None, 999, "unknown project"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 1 + 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM comments WHERE project_id='p1' AND issue_id IS NULL"),
+            2
+        );
+        let top = queries::find_comment_by_remote_id(&conn, 1).unwrap().unwrap();
+        let reply = queries::find_comment_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(top.parent_id, None);
+        assert_eq!(reply.parent_id.as_deref(), Some(top.id.as_str()));
+        assert_eq!(top.owner(), crate::db::models::CommentOwner::Project("p1".into()));
+    }
+
+    #[test]
+    fn comment_tombstone_deletes_project_comment_and_replies() {
+        let conn = setup_labels_db();
+        insert_test_project(&conn, "p1", 80);
+        let dtos = vec![
+            feed_project_comment(1, None, 80, "top"),
+            feed_project_comment(2, Some(1), 80, "reply"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Comment", 1)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 0);
     }
 
     #[test]
@@ -4064,6 +4810,93 @@ mod tests {
         assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='kept'"), 1);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='stale'"), 0);
+    }
+
+    // ── Issues moved to another team on the web (JRST-69) ──
+
+    /// i1..i3 (remote 1..3) live in t1; t2 is a second team with lane l2.
+    fn setup_move_db() -> Connection {
+        let conn = setup_dependency_db();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t2', 'U', 'U', 701, ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, remote_id, created_at, updated_at)
+             VALUES ('l2', 'B', 0, 't2', 20, ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Remote issue 2 as the target team lists it after the move.
+    fn moved_dto() -> IssueDto {
+        let mut dto = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
+        dto.identifier = "U-9".into();
+        dto.lane = Some(serde_json::from_value(serde_json::json!({"id": 20, "name": "B"})).unwrap());
+        dto
+    }
+
+    fn team_pull(team: &str, full_listing: bool, seen: &[i64]) -> IssueTeamPull {
+        IssueTeamPull {
+            local_team_id: team.into(),
+            full_listing,
+            seen: seen.to_vec(),
+        }
+    }
+
+    fn assert_moved_not_archived_or_duplicated(conn: &Connection) {
+        let i = queries::find_issue_by_remote_id(conn, 2).unwrap().unwrap();
+        assert_eq!((i.id.as_str(), i.team_id.as_str(), i.lane_id.as_str()), ("i2", "t2", "l2"));
+        assert_eq!(i.team_number, Some(9));
+        assert_eq!(i.archived_at, None);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM issues WHERE remote_id = 2"), 1);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM issues WHERE team_id='t1' AND id='i2'"), 0);
+    }
+
+    #[test]
+    fn moved_issue_follows_when_source_is_pulled_before_target() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t1", true, &[1, 3]), team_pull("t2", true, &[2])];
+        assert_eq!(apply_pulled_issues(&conn, "t2", vec![moved_dto()]), 0);
+        archive_unlisted_issues(&conn, &pulls, true);
+        assert_moved_not_archived_or_duplicated(&conn);
+    }
+
+    #[test]
+    fn moved_issue_follows_when_target_is_pulled_before_source() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t2", true, &[2]), team_pull("t1", true, &[1, 3])];
+        assert_eq!(apply_pulled_issues(&conn, "t2", vec![moved_dto()]), 0);
+        archive_unlisted_issues(&conn, &pulls, true);
+        assert_moved_not_archived_or_duplicated(&conn);
+    }
+
+    #[test]
+    fn issue_missing_from_only_the_source_listing_is_not_archived() {
+        let conn = setup_move_db();
+        // Only the source team was pulled (target skipped or failed).
+        let pulls = [team_pull("t1", true, &[1, 3])];
+        archive_unlisted_issues(&conn, &pulls, false);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!((i.team_id.as_str(), i.archived_at), ("t1", None));
+    }
+
+    #[test]
+    fn issue_gone_from_every_listing_is_still_archived() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t1", true, &[1, 3]), team_pull("t2", true, &[])];
+        archive_unlisted_issues(&conn, &pulls, true);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert!(i.archived_at.is_some());
+        // Incremental pulls never archive.
+        let j = queries::find_issue_by_remote_id(&conn, 3).unwrap().unwrap();
+        assert_eq!(j.archived_at, None);
     }
 
     #[test]
@@ -4288,5 +5121,174 @@ mod tests {
         assert!(!pulled);
         assert!(report.auth_failed());
         assert_eq!(report.pull.processed, 0);
+    }
+
+    // ── Pushing an issue move (JRST-71) ──
+
+    #[test]
+    fn move_rejection_is_reported_apart_from_issue_edit_rejections() {
+        // A plain issue 422 reopens the edit form; a move 422 must not.
+        let entry = SyncQueueEntry {
+            id: Some(1),
+            entity_type: "issue".into(),
+            entity_id: "i2".into(),
+            action: "move".into(),
+            payload: None,
+            created_at: String::new(),
+            synced_at: None,
+        };
+        let mut report = SyncReport::default();
+        record_push_failure(&mut report, &entry, "validation: Issue is already in that team");
+        assert_eq!(report.failures[0].entity_type, "issue_move");
+        assert_eq!(report.failures[0].entity_id, "i2");
+    }
+
+    /// i2 (remote 2) moved locally t1 -> t2 and queued; returns the queued payload.
+    fn moved_locally() -> (Connection, String) {
+        let conn = setup_move_db();
+        queries::move_issue_to_team(&conn, "i2", "t2").unwrap();
+        assert!(queries::queue_issue_move(&conn, "i2", "t1").unwrap());
+        let payload = sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.action == "move")
+            .and_then(|e| e.payload)
+            .unwrap();
+        (conn, payload)
+    }
+
+    #[test]
+    fn move_prep_ready_with_the_ids_captured_at_enqueue() {
+        let (conn, payload) = moved_locally();
+        match prep_issue_move_in(&conn, "i2", Some(&payload)) {
+            Prep::Ready(p) => {
+                assert_eq!(
+                    (p.source_team_remote_id, p.issue_remote_id, p.target_team_remote_id),
+                    (700, 2, 701)
+                );
+            }
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn move_prep_waits_until_the_target_team_has_a_remote_id() {
+        let conn = setup_move_db();
+        conn.execute("UPDATE teams SET remote_id = NULL WHERE id = 't2'", []).unwrap();
+        queries::move_issue_to_team(&conn, "i2", "t2").unwrap();
+        queries::queue_issue_move(&conn, "i2", "t1").unwrap();
+        let payload = sync_queue::pending_entries(&conn).unwrap().remove(0).payload.unwrap();
+        match prep_issue_move_in(&conn, "i2", Some(&payload)) {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("target team has no remote id yet"),
+        }
+        // The team create drains; the same payload now resolves it.
+        conn.execute("UPDATE teams SET remote_id = 701 WHERE id = 't2'", []).unwrap();
+        match prep_issue_move_in(&conn, "i2", Some(&payload)) {
+            Prep::Ready(p) => assert_eq!(p.target_team_remote_id, 701),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn move_prep_drops_a_missing_payload_or_issue() {
+        let (conn, payload) = moved_locally();
+        assert!(matches!(prep_issue_move_in(&conn, "i2", None), Prep::Done(o) if is_drop(&o)));
+        assert!(
+            matches!(prep_issue_move_in(&conn, "gone", Some(&payload)), Prep::Done(o) if is_drop(&o))
+        );
+    }
+
+    #[test]
+    fn move_response_sets_the_server_identifier_and_lane() {
+        let (conn, _) = moved_locally();
+        let before = queries::get_issue(&conn, "i2").unwrap().unwrap();
+        assert_ne!(before.team_number, Some(9));
+        let out = issue_move_outcome(&conn, "i2", 700, Ok(moved_dto()));
+        assert!(matches!(out, Outcome::Success), "{out:?}");
+        let i = queries::get_issue(&conn, "i2").unwrap().unwrap();
+        assert_eq!((i.team_id.as_str(), i.lane_id.as_str(), i.team_number), ("t2", "l2", Some(9)));
+        // Only identifier/lane/assignee/parent come from the response.
+        assert_eq!(i.title, before.title);
+    }
+
+    #[test]
+    fn move_rejections_drop_the_entry_and_server_errors_retry() {
+        let (conn, _) = moved_locally();
+        let nf = ApiError::NotFound("Team not found or access denied".into());
+        assert!(is_drop(&issue_move_outcome(&conn, "i2", 700, Err(nf))));
+        let inv = ApiError::Validation { errors: vec!["Issue is already in that team".into()] };
+        match issue_move_outcome(&conn, "i2", 700, Err(inv)) {
+            Outcome::DropAndLog(m) => assert!(m.contains("already in that team"), "{m}"),
+            o => panic!("{o:?}"),
+        }
+        let down = ApiError::Server { status: 503, message: "x".into() };
+        assert!(is_retry(&issue_move_outcome(&conn, "i2", 700, Err(down))));
+    }
+
+    // ── Per-issue ordering around a queued move ──────────────────────────
+
+    fn queue_update(conn: &Connection) -> i64 {
+        sync_queue::enqueue(conn, "issue", "i2", "update", None).unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn move_entry_id(conn: &Connection) -> i64 {
+        sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.action == "move")
+            .and_then(|e| e.id)
+            .unwrap()
+    }
+
+    #[test]
+    fn update_queued_after_a_move_waits_until_the_move_drains() {
+        let (conn, _) = moved_locally();
+        let update = queue_update(&conn);
+        match prep_issue_update_in(&conn, "i2", update) {
+            Prep::Done(o) => assert!(is_retry(&o), "{o:?}"),
+            Prep::Ready(_) => panic!("update must wait for the pending move"),
+        }
+        // Once the move succeeded, the update goes to the new team's URL.
+        sync_queue::mark_synced(&conn, move_entry_id(&conn)).unwrap();
+        match prep_issue_update_in(&conn, "i2", update) {
+            Prep::Ready(p) => assert_eq!((p.team_remote_id, p.remote_id), (701, 2)),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn update_queued_before_a_move_goes_to_the_source_team() {
+        let conn = setup_move_db();
+        let update = queue_update(&conn);
+        queries::move_issue_to_team(&conn, "i2", "t2").unwrap();
+        assert!(queries::queue_issue_move(&conn, "i2", "t1").unwrap());
+        assert!(update < move_entry_id(&conn));
+        match prep_issue_update_in(&conn, "i2", update) {
+            Prep::Ready(p) => {
+                assert_eq!((p.team_remote_id, p.remote_id), (700, 2));
+                // Post-move lane/labels aren't sent to the old team.
+                assert_eq!(p.params.lane_id, None);
+                assert_eq!(p.params.label_ids, None);
+                assert!(p.params.title.is_some());
+            }
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dropped_move_does_not_block_later_updates() {
+        let (conn, _) = moved_locally();
+        let update = queue_update(&conn);
+        // A 422 drops the entry: it is marked synced and no longer pending.
+        sync_queue::mark_synced(&conn, move_entry_id(&conn)).unwrap();
+        assert!(matches!(prep_issue_update_in(&conn, "i2", update), Prep::Ready(_)));
+    }
+
+    #[test]
+    fn other_issues_ignore_the_move() {
+        let (conn, _) = moved_locally();
+        assert_eq!(move_order(&conn, "i1", i64::MAX).unwrap(), None);
     }
 }

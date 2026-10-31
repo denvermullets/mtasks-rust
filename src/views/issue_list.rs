@@ -24,6 +24,7 @@ use crate::scroll;
 use crate::theme as t;
 use crate::views::board::CardData;
 use crate::views::labels as labels_view;
+use crate::views::lane_icon;
 use crate::views::util;
 
 /// Fixed cell widths (px) so each property lines up across rows.
@@ -152,6 +153,7 @@ pub fn view<'a>(
                         .spacing(8)
                         .align_y(Alignment::Center)
                         .push(text(marker).size(12).color(t::text_muted()))
+                        .push_maybe(col.lane_icon.map(lane_icon::view))
                         .push(text(col.title.clone()).size(14).color(t::text_primary()))
                         .push(
                             text(format!("{}", col.issues.len()))
