@@ -292,12 +292,12 @@ fn discussion_section<'a>(
         can_reply: true,
         reply_to: detail.reply_to.as_deref(),
         reply_composer: &detail.reply_composer,
-        suggest: &detail.suggest,
+        suggest: detail.suggest.as_ref(),
     };
     push_thread(col, Comment::thread_order(comments), &ctx)
         .push(new_comment_composer(
             &detail.comment_composer,
-            &detail.suggest,
+            detail.suggest.as_ref(),
         ))
         .into()
 }

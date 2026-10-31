@@ -152,13 +152,13 @@ pub fn view<'a>(
                 .on_action(Message::IssueDetailDescriptionChanged)
                 .key_binding(editor_binding(
                     None,
-                    suggesting(&detail.suggest, EditorTarget::Description),
+                    suggesting(detail.suggest.as_ref(), EditorTarget::Description),
                 ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(220.0)),
         )
-        .push_maybe(suggestion_list(&detail.suggest, EditorTarget::Description))
+        .push_maybe(suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
         .push_maybe(description_preview(
             &detail.description_text(),
             team,
@@ -177,7 +177,20 @@ pub fn view<'a>(
                 .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
         )
         .push(comments_section(
-            comments, events, members, detail, team, teams, issues, my_member_ids,
+            comments,
+            events,
+            detail,
+            &ThreadCtx {
+                members,
+                team,
+                teams,
+                issues,
+                my_member_ids,
+                can_reply: true,
+                reply_to: detail.reply_to.as_deref(),
+                reply_composer: &detail.reply_composer,
+                suggest: detail.suggest.as_ref(),
+            },
         ));
 
     // ---- Right sidebar: properties ----
@@ -296,40 +309,11 @@ pub fn view<'a>(
             .width(Length::Fill),
         ))
         .push(section("Labels", placeholder_value()))
-        .push(section(
-            "Blocking",
-            dependency_section(
-                &deps.blocking,
-                Some(("+ Add blocking issue…", DepDirection::Blocking)),
-                t::dep_blocks(),
-            ),
-        ))
-        .push(section(
-            "Blocked by",
-            dependency_section(
-                &deps.blocked_by,
-                Some(("+ Add blocked by issue…", DepDirection::BlockedBy)),
-                t::dep_blocked_by(),
-            ),
-        ))
-        .push_maybe((!deps.related.is_empty()).then(|| {
-            section(
-                "Related",
-                dependency_section(&deps.related, None, t::dep_relates()),
-            )
-        }))
-        .push_maybe((!deps.duplicates.is_empty()).then(|| {
-            section(
-                "Duplicates",
-                dependency_section(&deps.duplicates, None, t::dep_duplicates()),
-            )
-        }))
-        .push_maybe((!deps.duplicated_by.is_empty()).then(|| {
-            section(
-                "Duplicated by",
-                dependency_section(&deps.duplicated_by, None, t::dep_duplicates()),
-            )
-        }))
+        .push(dependency_block(DepKind::Blocking, &deps.blocking))
+        .push(dependency_block(DepKind::BlockedBy, &deps.blocked_by))
+        .push_maybe(optional_dependency_block(DepKind::Related, &deps.related))
+        .push_maybe(optional_dependency_block(DepKind::Duplicates, &deps.duplicates))
+        .push_maybe(optional_dependency_block(DepKind::DuplicatedBy, &deps.duplicated_by))
         .push(
             button(text("Move to team…").size(12).color(t::accent()))
                 .on_press(Message::OpenMoveTeamPicker(issue.id.clone()))
@@ -497,18 +481,68 @@ fn placeholder_value<'a>() -> Element<'a, Message> {
     text("—").size(13).color(t::text_muted()).into()
 }
 
-/// A dependency sidebar section: the linked issues as clickable rows, followed
-/// (when `add` is given) by a text "+ Add …" button that opens the picker.
-fn dependency_section<'a>(
+/// The dependency sidebar sections. Blocking / blocked-by are editable (they
+/// get a "+ Add" button); the rest are read-only and hidden when empty.
+#[derive(Clone, Copy)]
+enum DepKind {
+    Blocking,
+    BlockedBy,
+    Related,
+    Duplicates,
+    DuplicatedBy,
+}
+
+impl DepKind {
+    fn title(self) -> &'static str {
+        match self {
+            DepKind::Blocking => "Blocking",
+            DepKind::BlockedBy => "Blocked by",
+            DepKind::Related => "Related",
+            DepKind::Duplicates => "Duplicates",
+            DepKind::DuplicatedBy => "Duplicated by",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            DepKind::Blocking => t::dep_blocks(),
+            DepKind::BlockedBy => t::dep_blocked_by(),
+            DepKind::Related => t::dep_relates(),
+            DepKind::Duplicates | DepKind::DuplicatedBy => t::dep_duplicates(),
+        }
+    }
+
+    fn add(self) -> Option<(&'static str, DepDirection)> {
+        match self {
+            DepKind::Blocking => Some(("+ Add blocking issue…", DepDirection::Blocking)),
+            DepKind::BlockedBy => Some(("+ Add blocked by issue…", DepDirection::BlockedBy)),
+            _ => None,
+        }
+    }
+}
+
+/// A titled sidebar section for `kind`.
+fn dependency_block<'a>(kind: DepKind, links: &'a [DependencyLink]) -> Element<'a, Message> {
+    section(kind.title(), dependency_section(links, kind))
+}
+
+/// Like [`dependency_block`], but absent when there are no links.
+fn optional_dependency_block<'a>(
+    kind: DepKind,
     links: &'a [DependencyLink],
-    add: Option<(&'a str, DepDirection)>,
-    color: Color,
-) -> Element<'a, Message> {
+) -> Option<Element<'a, Message>> {
+    (!links.is_empty()).then(|| dependency_block(kind, links))
+}
+
+/// The linked issues as clickable rows, followed (for editable kinds) by a
+/// text "+ Add …" button that opens the picker.
+fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element<'a, Message> {
+    let color = kind.color();
     let mut col = column![].spacing(6);
     for link in links {
         col = col.push(dependency_row(link, color));
     }
-    if let Some((add_label, direction)) = add {
+    if let Some((add_label, direction)) = kind.add() {
         col = col.push(
             button(text(add_label).size(12).color(t::accent()))
                 .on_press(Message::OpenDependencyPicker(direction))
@@ -596,17 +630,16 @@ pub fn editor_binding(
     }
 }
 
-fn suggesting(suggest: &Option<SuggestState>, target: EditorTarget) -> bool {
-    suggest.as_ref().is_some_and(|s| s.target == target)
+fn suggesting(suggest: Option<&SuggestState>, target: EditorTarget) -> bool {
+    suggest.is_some_and(|s| s.target == target)
 }
 
 /// Autocomplete rows under the editor `target`, if its list is open.
 fn suggestion_list<'a>(
-    suggest: &'a Option<SuggestState>,
+    suggest: Option<&'a SuggestState>,
     target: EditorTarget,
 ) -> Option<Element<'a, Message>> {
     suggest
-        .as_ref()
         .filter(|s| s.target == target)
         .map(suggestion_rows)
 }
@@ -782,44 +815,29 @@ fn referenced_in_section<'a>(
 fn comments_section<'a>(
     comments: &'a [Comment],
     events: &'a [IssueEvent],
-    members: &'a [Member],
     detail: &'a IssueDetailState,
-    team: Option<&'a Team>,
-    teams: &'a [Team],
-    issues: &'a [Issue],
-    my_member_ids: &[String],
+    ctx: &ThreadCtx<'a, '_>,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
         .push(text("Activity").size(13).color(t::text_secondary()));
 
-    let ctx = ThreadCtx {
-        members,
-        team,
-        teams,
-        issues,
-        my_member_ids,
-        can_reply: true,
-        reply_to: detail.reply_to.as_deref(),
-        reply_composer: &detail.reply_composer,
-        suggest: &detail.suggest,
-    };
     let items = events::timeline(events, comments);
     if items.is_empty() {
         col = col.push(text("No activity yet").size(12).color(t::text_muted()));
     }
     for item in items {
         match item {
-            TimelineItem::Event(event) => col = col.push(event_row(event, members)),
+            TimelineItem::Event(event) => col = col.push(event_row(event, ctx.members)),
             TimelineItem::Thread(thread) => {
-                col = push_thread(col, thread, &ctx);
+                col = push_thread(col, thread, ctx);
             }
         }
     }
 
     col.push(new_comment_composer(
         &detail.comment_composer,
-        &detail.suggest,
+        detail.suggest.as_ref(),
     ))
     .into()
 }
@@ -837,7 +855,7 @@ pub struct ThreadCtx<'a, 'b> {
     pub can_reply: bool,
     pub reply_to: Option<&'a str>,
     pub reply_composer: &'a text_editor::Content,
-    pub suggest: &'a Option<SuggestState>,
+    pub suggest: Option<&'a SuggestState>,
 }
 
 /// Append a threaded run of comments (indented replies, inline reply composer
@@ -848,16 +866,7 @@ pub fn push_thread<'a>(
     ctx: &ThreadCtx<'a, '_>,
 ) -> iced::widget::Column<'a, Message> {
     for (depth, comment) in thread {
-        col = col.push(comment_row(
-            depth,
-            comment,
-            ctx.members,
-            ctx.team,
-            ctx.teams,
-            ctx.issues,
-            ctx.my_member_ids,
-            ctx.can_reply,
-        ));
+        col = col.push(comment_row(depth, comment, ctx));
         if ctx.reply_to == Some(comment.id.as_str()) {
             col = col.push(reply_composer(depth + 1, ctx.reply_composer, ctx.suggest));
             col = col.push_maybe(
@@ -871,7 +880,7 @@ pub fn push_thread<'a>(
 /// Composer: multiline editor + "Comment" button.
 pub fn new_comment_composer<'a>(
     content: &'a text_editor::Content,
-    suggest: &'a Option<SuggestState>,
+    suggest: Option<&'a SuggestState>,
 ) -> Element<'a, Message> {
     column![]
         .spacing(8)
@@ -933,7 +942,7 @@ fn indent<'a>(depth: usize, e: Element<'a, Message>) -> Element<'a, Message> {
 fn reply_composer<'a>(
     depth: usize,
     content: &'a text_editor::Content,
-    suggest: &'a Option<SuggestState>,
+    suggest: Option<&'a SuggestState>,
 ) -> Element<'a, Message> {
     let body = column![]
         .spacing(6)
@@ -976,13 +985,17 @@ fn reply_composer<'a>(
 fn comment_row<'a>(
     depth: usize,
     comment: &'a Comment,
-    members: &'a [Member],
-    team: Option<&'a Team>,
-    teams: &'a [Team],
-    issues: &'a [Issue],
-    my_member_ids: &[String],
-    can_reply: bool,
+    ctx: &ThreadCtx<'a, '_>,
 ) -> Element<'a, Message> {
+    let ThreadCtx {
+        members,
+        team,
+        teams,
+        issues,
+        my_member_ids,
+        can_reply,
+        ..
+    } = *ctx;
     let author = comment
         .author_id
         .as_ref()
