@@ -28,9 +28,26 @@ pub struct StoredEntry {
     pub description: String,
 }
 
+/// Per-issue Activity fetch state (`issue_activity_state`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FetchState {
+    /// `X-Server-Time` of the last successful fetch; `None` if never fetched.
+    pub cursor: Option<String>,
+    /// True once the full history has been fetched.
+    pub fully_fetched: bool,
+}
+
 /// Store a fetched batch for `issue_id`, upserting by entry cursor so entries
 /// re-delivered at a cursor overlap replace themselves rather than duplicate.
-pub fn store_batch(conn: &Connection, issue_id: &str, entries: &[ActivityEntry]) -> Result<()> {
+/// The fetch state is written in the same transaction: a `Some` cursor replaces
+/// the stored one (`None` keeps it), and `fully_fetched` only ever flips to true.
+pub fn store_batch(
+    conn: &Connection,
+    issue_id: &str,
+    entries: &[ActivityEntry],
+    cursor: Option<&str>,
+    fully_fetched: bool,
+) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     {
         let mut stmt = tx.prepare(
@@ -59,7 +76,33 @@ pub fn store_batch(conn: &Connection, issue_id: &str, entries: &[ActivityEntry])
             ])?;
         }
     }
+    tx.execute(
+        "INSERT INTO issue_activity_state (issue_id, cursor, fully_fetched)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT (issue_id) DO UPDATE SET
+            cursor = COALESCE(excluded.cursor, cursor),
+            fully_fetched = MAX(fully_fetched, excluded.fully_fetched)",
+        params![issue_id, cursor, fully_fetched],
+    )?;
     tx.commit()
+}
+
+/// The issue's fetch state; the default (no cursor, not fully fetched) if none stored.
+pub fn fetch_state(conn: &Connection, issue_id: &str) -> Result<FetchState> {
+    let row = conn.query_row(
+        "SELECT cursor, fully_fetched FROM issue_activity_state WHERE issue_id = ?1",
+        params![issue_id],
+        |r| {
+            Ok(FetchState {
+                cursor: r.get(0)?,
+                fully_fetched: r.get::<_, i64>(1)? != 0,
+            })
+        },
+    );
+    match row {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(FetchState::default()),
+        other => other,
+    }
 }
 
 /// Every cached entry for the issue, oldest first (ties broken by insert order).
@@ -211,7 +254,7 @@ mod tests {
     #[test]
     fn stores_and_reads_back_with_all_fields() {
         let conn = mem();
-        store_batch(&conn, "i1", &feed(BATCH)).unwrap();
+        store_batch(&conn, "i1", &feed(BATCH), None, false).unwrap();
         let got = entries_for_issue(&conn, "i1").unwrap();
         assert_eq!(got.len(), 3);
 
@@ -239,16 +282,16 @@ mod tests {
     fn redelivery_is_idempotent() {
         let conn = mem();
         let all = feed(BATCH);
-        store_batch(&conn, "i1", &all).unwrap();
-        store_batch(&conn, "i1", &all[1..]).unwrap();
-        store_batch(&conn, "i1", &all).unwrap();
+        store_batch(&conn, "i1", &all, None, false).unwrap();
+        store_batch(&conn, "i1", &all[1..], None, false).unwrap();
+        store_batch(&conn, "i1", &all, None, false).unwrap();
         assert_eq!(entries_for_issue(&conn, "i1").unwrap().len(), 3);
     }
 
     #[test]
     fn same_numeric_id_different_types_kept_separately() {
         let conn = mem();
-        store_batch(&conn, "i1", &feed(BATCH)).unwrap();
+        store_batch(&conn, "i1", &feed(BATCH), None, false).unwrap();
         let cursors: Vec<_> = entries_for_issue(&conn, "i1")
             .unwrap()
             .into_iter()
@@ -260,8 +303,8 @@ mod tests {
     #[test]
     fn entries_are_scoped_per_issue() {
         let conn = mem();
-        store_batch(&conn, "i1", &feed(BATCH)).unwrap();
-        store_batch(&conn, "i2", &feed(BATCH)).unwrap();
+        store_batch(&conn, "i1", &feed(BATCH), None, false).unwrap();
+        store_batch(&conn, "i2", &feed(BATCH), None, false).unwrap();
         assert_eq!(entries_for_issue(&conn, "i1").unwrap().len(), 3);
         assert_eq!(entries_for_issue(&conn, "i2").unwrap().len(), 3);
     }
@@ -269,8 +312,50 @@ mod tests {
     #[test]
     fn deleting_the_issue_removes_its_entries() {
         let conn = mem();
-        store_batch(&conn, "i1", &feed(BATCH)).unwrap();
+        store_batch(&conn, "i1", &feed(BATCH), Some("t1"), true).unwrap();
         conn.execute("DELETE FROM issues WHERE id = 'i1'", []).unwrap();
         assert!(entries_for_issue(&conn, "i1").unwrap().is_empty());
+        assert_eq!(fetch_state(&conn, "i1").unwrap(), FetchState::default());
+    }
+
+    #[test]
+    fn fetch_state_defaults_when_never_fetched() {
+        let conn = mem();
+        assert_eq!(fetch_state(&conn, "i1").unwrap(), FetchState::default());
+    }
+
+    #[test]
+    fn batch_and_state_written_together() {
+        let conn = mem();
+        store_batch(&conn, "i1", &feed(BATCH), Some("t1"), false).unwrap();
+        let st = fetch_state(&conn, "i1").unwrap();
+        assert_eq!(st.cursor.as_deref(), Some("t1"));
+        assert!(!st.fully_fetched);
+        assert_eq!(fetch_state(&conn, "i2").unwrap(), FetchState::default());
+
+        store_batch(&conn, "i1", &[], Some("t2"), true).unwrap();
+        let st = fetch_state(&conn, "i1").unwrap();
+        assert_eq!(st.cursor.as_deref(), Some("t2"));
+        assert!(st.fully_fetched);
+    }
+
+    #[test]
+    fn none_cursor_keeps_cursor_and_full_flag_never_regresses() {
+        let conn = mem();
+        store_batch(&conn, "i1", &[], Some("t1"), true).unwrap();
+        store_batch(&conn, "i1", &[], None, false).unwrap();
+        let st = fetch_state(&conn, "i1").unwrap();
+        assert_eq!(st.cursor.as_deref(), Some("t1"));
+        assert!(st.fully_fetched);
+    }
+
+    #[test]
+    fn failed_batch_leaves_state_untouched() {
+        let conn = mem();
+        store_batch(&conn, "i1", &[], Some("t1"), false).unwrap();
+        // Unknown issue violates the FK: the whole transaction rolls back.
+        assert!(store_batch(&conn, "nope", &feed(BATCH), Some("t9"), true).is_err());
+        assert_eq!(fetch_state(&conn, "i1").unwrap().cursor.as_deref(), Some("t1"));
+        assert_eq!(fetch_state(&conn, "nope").unwrap(), FetchState::default());
     }
 }
