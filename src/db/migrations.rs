@@ -366,12 +366,41 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 20,
+        name: "comments_owner",
+        // A comment belongs to an issue or a project (exactly one), so issue_id
+        // becomes nullable: rebuild the table. Runs with foreign keys off (see
+        // FK_OFF_MIGRATIONS) so the DROP doesn't trip the parent_id self-reference.
+        up: "
+            CREATE TABLE comments_new (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                issue_id TEXT REFERENCES issues(id) ON DELETE CASCADE,
+                project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+                author_id TEXT REFERENCES members(id),
+                body TEXT NOT NULL,
+                parent_id TEXT REFERENCES comments(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK ((issue_id IS NULL) != (project_id IS NULL))
+            );
+            INSERT INTO comments_new
+                (id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at)
+                SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
+                FROM comments;
+            DROP TABLE comments;
+            ALTER TABLE comments_new RENAME TO comments;
+            CREATE INDEX IF NOT EXISTS idx_comments_issue_id ON comments(issue_id);
+            CREATE INDEX IF NOT EXISTS idx_comments_project_id ON comments(project_id);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
 /// `PRAGMA foreign_keys=OFF`, which is a no-op inside a transaction, so `run`
 /// toggles it around the transaction.
-const FK_OFF_MIGRATIONS: &[u32] = &[15];
+const FK_OFF_MIGRATIONS: &[u32] = &[15, 20];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -669,6 +698,69 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
             .unwrap();
         assert_eq!(fk, 1, "foreign_keys restored");
+    }
+
+    #[test]
+    fn comments_owner_rebuild_keeps_rows_and_allows_project_owner() {
+        let conn = open_mem();
+        // Seed under the old NOT NULL issue_id schema (before v20).
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 20) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations VALUES (?1, 'x')",
+                rusqlite::params![m.version],
+            )
+            .unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        for sql in [
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)",
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1', 'B', 0, 't1', ?1, ?1)",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1', 'I', 4, 'l1', 't1', ?1, ?1)",
+            "INSERT INTO projects (id, team_id, name, created_at, updated_at) VALUES ('p1', 't1', 'P', ?1, ?1)",
+            "INSERT INTO members (id, team_id, name, email, remote_id, created_at, updated_at) VALUES ('m1', 't1', 'M', 'm@x', 9, ?1, ?1)",
+            "INSERT INTO comments (id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at) VALUES ('c1', 100, 'i1', 'm1', 'top', NULL, ?1, ?1)",
+            "INSERT INTO comments (id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at) VALUES ('c2', NULL, 'i1', NULL, 'reply', 'c1', ?1, ?1)",
+        ] {
+            conn.execute(sql, rusqlite::params![now]).unwrap();
+        }
+
+        run(&conn).unwrap();
+
+        let rows: Vec<(String, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+            .prepare("SELECT id, remote_id, issue_id, project_id, parent_id, author_id FROM comments ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("c1".into(), Some(100), Some("i1".into()), None, None, Some("m1".into())),
+                ("c2".into(), None, Some("i1".into()), None, Some("c1".into()), None),
+            ]
+        );
+
+        // A project-owned comment stores; zero or two owners are rejected.
+        conn.execute(
+            "INSERT INTO comments (id, project_id, body, created_at, updated_at) VALUES ('c3', 'p1', 'b', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        for owners in ["NULL, NULL", "'i1', 'p1'"] {
+            let bad = conn.execute(
+                &format!("INSERT INTO comments (id, issue_id, project_id, body, created_at, updated_at) VALUES ('x', {owners}, 'b', ?1, ?1)"),
+                rusqlite::params![now],
+            );
+            assert!(bad.is_err(), "owner {owners} should violate the CHECK");
+        }
     }
 
     #[test]

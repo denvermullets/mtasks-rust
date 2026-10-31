@@ -381,6 +381,7 @@ async fn process(
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
+        ("label", "update") => label_update(client, &entry.entity_id).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
@@ -1319,6 +1320,62 @@ async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
     }
 }
 
+struct LabelUpdatePrep {
+    team_remote_id: i64,
+    remote_id: i64,
+    params: LabelParams,
+}
+
+fn prep_label_update(entity_id: &str) -> Prep<LabelUpdatePrep> {
+    match open() {
+        Ok(conn) => label_update_prep(&conn, entity_id),
+        Err(e) => Prep::Done(Outcome::LeavePending(e)),
+    }
+}
+
+/// Re-reads the label row so the newest name and color go out, however many
+/// edits were queued.
+fn label_update_prep(conn: &Connection, entity_id: &str) -> Prep<LabelUpdatePrep> {
+    let label = match queries::get_label(conn, entity_id) {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "label {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let Some(remote_id) = label.remote_id else {
+        return Prep::Done(Outcome::LeavePending("label create not yet drained".into()));
+    };
+    let team_remote_id = match queries::remote_id_for(conn, "teams", &label.team_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    Prep::Ready(LabelUpdatePrep {
+        team_remote_id,
+        remote_id,
+        params: LabelParams {
+            name: label.name,
+            color: label.color,
+        },
+    })
+}
+
+async fn label_update(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match prep_label_update(entity_id) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    // A 422 (duplicate name on the server) is dropped; the next label pull
+    // restores the server value.
+    match labels::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
+        Ok(_) => Outcome::Success,
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
 // ── Comments ──────────────────────────────────────────────────────────────
 
 struct CommentCreatePrep {
@@ -1347,7 +1404,16 @@ fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
     }
     // The comment is nested under its issue; both the issue and its team must be
     // synced before we can address the endpoint.
-    let issue = match queries::get_issue(&conn, &comment.issue_id) {
+    // Project comments are not pushed yet (the project path lands with a later ticket).
+    let comment_issue_id = match comment.owner() {
+        crate::db::models::CommentOwner::Issue(id) => id,
+        crate::db::models::CommentOwner::Project(_) => {
+            return Prep::Done(Outcome::DropAndLog(
+                "project comment push not supported yet".into(),
+            ))
+        }
+    };
+    let issue = match queries::get_issue(&conn, &comment_issue_id) {
         Ok(Some(i)) => i,
         Ok(None) => return Prep::Done(Outcome::DropAndLog("comment's issue missing".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
@@ -1616,7 +1682,12 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
         ("label", _) => team_remote(&queries::get_label(conn, id).ok()??.team_id),
         ("comment", _) => {
             let c = queries::get_comment(conn, id).ok()??;
-            team_remote(&queries::get_issue(conn, &c.issue_id).ok()??.team_id)
+            let team_id = match (&c.issue_id, &c.project_id) {
+                (Some(i), _) => queries::get_issue(conn, i).ok()??.team_id,
+                (None, Some(p)) => queries::get_project(conn, p).ok()??.team_id,
+                (None, None) => return None,
+            };
+            team_remote(&team_id)
         }
         ("dependency", _) => {
             let d = queries::get_issue_dependency(conn, id).ok()??;
@@ -1794,14 +1865,25 @@ impl SyncEngine {
 
         // Phase 4: per-team resources. Each helper logs and updates the report
         // independently so one team's failure doesn't block the others.
+        let mut issue_pulls: Vec<IssueTeamPull> = Vec::new();
+        let mut all_issue_pulls_ok = true;
         for target in &targets {
             let mut steps = vec![
                 pull_lanes_step(client, target.remote_id, &target.local_id).await,
                 pull_labels_step(client, target.remote_id, &target.local_id).await,
                 pull_members_step(client, target.remote_id, &target.local_id).await,
                 pull_projects_step(client, target.remote_id, &target.local_id).await,
-                pull_issues_step(client, target.remote_id, &target.local_id).await,
             ];
+            match pull_issues_step(client, target.remote_id, &target.local_id).await {
+                Ok(pull) => {
+                    issue_pulls.push(pull);
+                    steps.push(Ok(()));
+                }
+                Err(e) => {
+                    all_issue_pulls_ok = false;
+                    steps.push(Err(e));
+                }
+            }
             // Tombstones run before comments; the comment ids they removed
             // are handed on so a feed row for one cannot resurrect it.
             let mut deleted_comments = HashSet::new();
@@ -1831,6 +1913,15 @@ impl SyncEngine {
                     }
                 }
             }
+        }
+
+        // A targeted pull (some teams not covered) can't tell "moved to an
+        // unpulled team" from "gone", so archiving needs every team pulled.
+        let covers_all_teams = collect_pull_targets(None)
+            .map(|all| all.len() == targets.len())
+            .unwrap_or(false);
+        if let Ok(conn) = open() {
+            archive_unlisted_issues(&conn, &issue_pulls, all_issue_pulls_ok && covers_all_teams);
         }
 
         PullOutcome {
@@ -2213,7 +2304,7 @@ async fn pull_issues_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
-) -> Result<(), String> {
+) -> Result<IssueTeamPull, String> {
     let since = {
         let conn = open()?;
         queries::get_pull_cursor(&conn, local_team_id, ISSUES_CURSOR)
@@ -2249,19 +2340,39 @@ async fn pull_issues_step(
             "issues: {skipped}/{total} skipped (see [sync] log)"
         ));
     }
-    if since.is_none() {
-        // A full (unfiltered) listing includes archived issues, so the rows
-        // carry their own `archived_at`. A local issue the listing does not
-        // return at all is no longer visible server-side (deleted or moved
-        // out of reach); archive it rather than leave it looking live.
-        let active_ids: Vec<i64> = dtos.iter().map(|d| d.id).collect();
-        let _ = queries::archive_missing_issues(&conn, local_team_id, &active_ids);
-    }
     if let Some(t) = &collected.server_time {
         queries::set_pull_cursor(&conn, local_team_id, ISSUES_CURSOR, t)
             .map_err(|e| format!("db (pull cursor): {e}"))?;
     }
-    Ok(())
+    Ok(IssueTeamPull {
+        local_team_id: local_team_id.to_string(),
+        full_listing: since.is_none(),
+        seen: dtos.iter().map(|d| d.id).collect(),
+    })
+}
+
+/// What one team's issue pull saw in this cycle.
+struct IssueTeamPull {
+    local_team_id: String,
+    /// True when the whole team was listed (no cursor), so absence means gone.
+    full_listing: bool,
+    seen: Vec<i64>,
+}
+
+/// Archive local issues a full listing no longer returns (deleted or out of
+/// reach; full listings carry their own `archived_at` for archived rows). An
+/// issue moved to another team on the web vanishes from its source listing, so
+/// absence is judged against every issue seen this cycle, and only when every
+/// team's issue pull succeeded (`complete`): otherwise the target team may
+/// simply not have been pulled yet.
+fn archive_unlisted_issues(conn: &Connection, pulls: &[IssueTeamPull], complete: bool) {
+    if !complete {
+        return;
+    }
+    let seen: Vec<i64> = pulls.iter().flat_map(|p| p.seen.iter().copied()).collect();
+    for p in pulls.iter().filter(|p| p.full_listing) {
+        let _ = queries::archive_missing_issues(conn, &p.local_team_id, &seen);
+    }
 }
 
 /// Cursor resource name for the tombstone feed in `pull_cursors`.
@@ -2818,7 +2929,8 @@ mod tests {
         let mk = |id: &str, remote: Option<i64>, parent: Option<&str>| Comment {
             id: id.into(),
             remote_id: remote,
-            issue_id: "i1".into(),
+            issue_id: Some("i1".into()),
+            project_id: None,
             author_id: None,
             body: id.into(),
             parent_id: parent.map(String::from),
@@ -3193,6 +3305,30 @@ mod tests {
             rusqlite::params![id, remote_id, now],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn label_update_prep_rereads_row_and_waits_for_remote_id() {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", None);
+        assert!(matches!(
+            label_update_prep(&conn, "lab1"),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        queries::set_label_remote_id(&conn, "lab1", 11).unwrap();
+        queries::edit_label(&conn, "lab1", "renamed", "#3b82f6").unwrap();
+        match label_update_prep(&conn, "lab1") {
+            Prep::Ready(p) => {
+                assert_eq!((p.team_remote_id, p.remote_id), (700, 11));
+                assert_eq!(p.params.name, "renamed");
+                assert_eq!(p.params.color.as_deref(), Some("#3b82f6"));
+            }
+            _ => panic!("expected Ready"),
+        }
+        assert!(matches!(
+            label_update_prep(&conn, "nope"),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
     }
 
     #[test]
@@ -4066,6 +4202,93 @@ mod tests {
         assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='kept'"), 1);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM issue_dependencies WHERE id='stale'"), 0);
+    }
+
+    // ── Issues moved to another team on the web (JRST-69) ──
+
+    /// i1..i3 (remote 1..3) live in t1; t2 is a second team with lane l2.
+    fn setup_move_db() -> Connection {
+        let conn = setup_dependency_db();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t2', 'U', 'U', 701, ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, remote_id, created_at, updated_at)
+             VALUES ('l2', 'B', 0, 't2', 20, ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Remote issue 2 as the target team lists it after the move.
+    fn moved_dto() -> IssueDto {
+        let mut dto = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
+        dto.identifier = "U-9".into();
+        dto.lane = Some(serde_json::from_value(serde_json::json!({"id": 20, "name": "B"})).unwrap());
+        dto
+    }
+
+    fn team_pull(team: &str, full_listing: bool, seen: &[i64]) -> IssueTeamPull {
+        IssueTeamPull {
+            local_team_id: team.into(),
+            full_listing,
+            seen: seen.to_vec(),
+        }
+    }
+
+    fn assert_moved_not_archived_or_duplicated(conn: &Connection) {
+        let i = queries::find_issue_by_remote_id(conn, 2).unwrap().unwrap();
+        assert_eq!((i.id.as_str(), i.team_id.as_str(), i.lane_id.as_str()), ("i2", "t2", "l2"));
+        assert_eq!(i.team_number, Some(9));
+        assert_eq!(i.archived_at, None);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM issues WHERE remote_id = 2"), 1);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM issues WHERE team_id='t1' AND id='i2'"), 0);
+    }
+
+    #[test]
+    fn moved_issue_follows_when_source_is_pulled_before_target() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t1", true, &[1, 3]), team_pull("t2", true, &[2])];
+        assert_eq!(apply_pulled_issues(&conn, "t2", vec![moved_dto()]), 0);
+        archive_unlisted_issues(&conn, &pulls, true);
+        assert_moved_not_archived_or_duplicated(&conn);
+    }
+
+    #[test]
+    fn moved_issue_follows_when_target_is_pulled_before_source() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t2", true, &[2]), team_pull("t1", true, &[1, 3])];
+        assert_eq!(apply_pulled_issues(&conn, "t2", vec![moved_dto()]), 0);
+        archive_unlisted_issues(&conn, &pulls, true);
+        assert_moved_not_archived_or_duplicated(&conn);
+    }
+
+    #[test]
+    fn issue_missing_from_only_the_source_listing_is_not_archived() {
+        let conn = setup_move_db();
+        // Only the source team was pulled (target skipped or failed).
+        let pulls = [team_pull("t1", true, &[1, 3])];
+        archive_unlisted_issues(&conn, &pulls, false);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!((i.team_id.as_str(), i.archived_at), ("t1", None));
+    }
+
+    #[test]
+    fn issue_gone_from_every_listing_is_still_archived() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t1", true, &[1, 3]), team_pull("t2", true, &[])];
+        archive_unlisted_issues(&conn, &pulls, true);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert!(i.archived_at.is_some());
+        // Incremental pulls never archive.
+        let j = queries::find_issue_by_remote_id(&conn, 3).unwrap().unwrap();
+        assert_eq!(j.archived_at, None);
     }
 
     #[test]

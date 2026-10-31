@@ -90,6 +90,9 @@ pub enum Message {
     ReplyComposerChanged(iced::widget::text_editor::Action),
     /// Submit the inline reply composer as a child of `reply_to`.
     SubmitReply,
+    /// "Delete" pressed on one of the user's own unsynced comments (local id).
+    ConfirmDeleteComment(String),
+    DeleteCommentConfirmed,
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -131,6 +134,11 @@ pub enum Message {
     LabelNameChanged(String),
     LabelColorChanged(String),
     CreateLabel,
+    /// Open edit mode for a label (by local UUID).
+    SelectLabelForEdit(String),
+    EditLabelNameChanged(String),
+    EditLabelColorChanged(String),
+    SaveLabelEdit,
     /// Toggle a label on the issue targeted by the label modal (by local UUID).
     ToggleIssueLabel(String),
     SaveIssueLabels,
@@ -284,6 +292,8 @@ pub enum Modal {
     Settings,
     ProjectForm,
     DeleteProjectConfirm(String),
+    /// Confirm deleting an unsynced comment (local id) and its replies.
+    DeleteCommentConfirm(String),
     Labels,
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
@@ -1121,7 +1131,8 @@ impl App {
         let comment = Comment {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
-            issue_id,
+            issue_id: Some(issue_id),
+            project_id: None,
             author_id,
             body,
             parent_id,
@@ -2938,6 +2949,24 @@ impl App {
                 }
             }
 
+            Message::ConfirmDeleteComment(comment_id) => {
+                self.modal = Modal::DeleteCommentConfirm(comment_id);
+            }
+
+            Message::DeleteCommentConfirmed => {
+                if let Modal::DeleteCommentConfirm(ref comment_id) = self.modal {
+                    let conn = self.db();
+                    let _ = queries::delete_unsynced_comment(&conn, comment_id);
+                    if let Some(d) = &mut self.issue_detail {
+                        if d.reply_to.as_deref() == Some(comment_id.as_str()) {
+                            d.reply_to = None;
+                        }
+                    }
+                }
+                self.modal = Modal::None;
+                self.reload_data();
+            }
+
             Message::DeleteProjectConfirmed => {
                 if let Modal::DeleteProjectConfirm(ref project_id) = self.modal {
                     let conn = self.db();
@@ -3028,6 +3057,57 @@ impl App {
                             form.name.clear();
                         }
                         self.reload_data();
+                    }
+                }
+            }
+
+            Message::SelectLabelForEdit(label_id) => {
+                let label = self.labels.iter().find(|l| l.id == label_id).cloned();
+                if let (Some(form), Some(label)) = (self.label_form.as_mut(), label) {
+                    form.editing_id = Some(label.id);
+                    form.edit_name = label.name;
+                    form.edit_color = label
+                        .color
+                        .unwrap_or_else(|| labels_view::PALETTE[0].to_string());
+                    form.edit_error = None;
+                }
+            }
+
+            Message::EditLabelNameChanged(v) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.edit_name = v;
+                }
+            }
+
+            Message::EditLabelColorChanged(hex) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.edit_color = hex;
+                }
+            }
+
+            Message::SaveLabelEdit => {
+                let Some((id, name, color)) = self
+                    .label_form
+                    .as_ref()
+                    .and_then(|f| Some((f.editing_id.clone()?, f.edit_name.clone(), f.edit_color.clone())))
+                else {
+                    return Task::none();
+                };
+                match queries::edit_label(&self.db(), &id, &name, &color) {
+                    Ok(needs_update) => {
+                        if needs_update {
+                            self.enqueue_sync("label", &id, "update", None);
+                        }
+                        if let Some(ref mut form) = self.label_form {
+                            form.editing_id = None;
+                            form.edit_error = None;
+                        }
+                        self.reload_data();
+                    }
+                    Err(e) => {
+                        if let Some(ref mut form) = self.label_form {
+                            form.edit_error = Some(e.message().into());
+                        }
                     }
                 }
             }
@@ -3207,6 +3287,10 @@ impl App {
                             .iter()
                             .filter(|i| i.parent_issue_id.as_deref() == Some(issue.id.as_str()))
                             .collect();
+                        let my_member_ids = display::my_member_ids(
+                            &self.members,
+                            self.config.current_user_remote_id,
+                        );
                         issue_detail::view(
                             issue,
                             detail,
@@ -3223,6 +3307,7 @@ impl App {
                             &self.issues,
                             parent,
                             sub_issues,
+                            &my_member_ids,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
@@ -3362,6 +3447,10 @@ impl App {
                     .unwrap_or("this project");
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
+            }
+            Modal::DeleteCommentConfirm(comment_id) => {
+                let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
+                iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
             }
             Modal::IssuePicker => match (&self.issue_picker, &self.issue_detail) {
                 (Some(picker), Some(detail)) => {
@@ -3580,26 +3669,36 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
 }
 
 fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
+    delete_modal(
+        "Delete Project?",
+        format!("Are you sure you want to delete \"{}\"?", project_name),
+        Message::DeleteProjectConfirmed,
+    )
+}
+
+fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
+    let body = match replies {
+        0 => "Delete this comment?".to_string(),
+        1 => "Delete this comment and its 1 reply?".to_string(),
+        n => format!("Delete this comment and its {n} replies?"),
+    };
+    delete_modal("Delete Comment?", body, Message::DeleteCommentConfirmed)
+}
+
+fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'a, Message> {
     use iced::widget::{button, column, container, row, text};
     use iced::Border;
 
     let content = column![]
         .spacing(16)
-        .push(text("Delete Project?").size(18).color(t::text_primary()))
-        .push(
-            text(format!(
-                "Are you sure you want to delete \"{}\"?",
-                project_name
-            ))
-            .size(14)
-            .color(t::text_secondary()),
-        )
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(text(body).size(14).color(t::text_secondary()))
         .push(
             row![]
                 .spacing(8)
                 .push(
                     button(text("Delete").size(14).color(iced::Color::WHITE))
-                        .on_press(Message::DeleteProjectConfirmed)
+                        .on_press(confirm)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
                             background: Some(iced::Background::Color(t::danger())),
