@@ -13,6 +13,7 @@
 //! Everything here is pure so it can be unit tested without iced or SQLite.
 
 use crate::db::models::{Comment, Issue, Member, Team};
+use crate::issue_match::IssueQuery;
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -324,40 +325,37 @@ pub fn member_suggestions(members: &[Member], query: &str) -> Vec<Suggestion> {
         .collect()
 }
 
-/// Issues of the team matching `query` by identifier or title. Identifier
-/// matches sort first. `exclude_id` is the open issue (no self-reference).
+/// Issues of the team matching `query` via the shared matcher
+/// (`issue_match`), newest number first. `exclude_id` is the open issue (no
+/// self-reference); archived issues are left out.
 pub fn issue_suggestions(
     issues: &[Issue],
     team_identifier: &str,
     exclude_id: &str,
     query: &str,
 ) -> Vec<Suggestion> {
-    let q = query.to_lowercase();
-    let mut hits: Vec<(bool, i32, Suggestion)> = issues
+    let q = IssueQuery::parse(query);
+    let mut hits: Vec<(i32, Suggestion)> = issues
         .iter()
         .filter(|i| i.id != exclude_id && i.archived_at.is_none())
+        .filter(|i| q.matches(i, team_identifier))
         .filter_map(|i| {
             let n = i.team_number?;
             let ident = format!("{team_identifier}-{n}");
-            let by_ident = ident.to_lowercase().contains(&q);
-            let by_title = i.title.to_lowercase().contains(&q);
-            (by_ident || by_title).then(|| {
-                (
-                    !by_ident,
-                    -n,
-                    Suggestion {
-                        insert: format!("{ident} "),
-                        label: ident,
-                        detail: i.title.clone(),
-                    },
-                )
-            })
+            Some((
+                -n,
+                Suggestion {
+                    insert: format!("{ident} "),
+                    label: ident,
+                    detail: i.title.clone(),
+                },
+            ))
         })
         .collect();
-    hits.sort_by_key(|a| (a.0, a.1));
+    hits.sort_by_key(|h| h.0);
     hits.into_iter()
         .take(MAX_SUGGESTIONS)
-        .map(|h| h.2)
+        .map(|h| h.1)
         .collect()
 }
 
@@ -662,12 +660,23 @@ mod tests {
             issue("c", 2, None),
         ];
         let s = issue_suggestions(&is, "JAIT", "c", "1");
-        // identifier matches (JAIT-1, JAIT-12), newest first; excluded id absent.
+        // Exact number only (Rails semantics): #1, not #12; excluded id absent.
         let labels: Vec<_> = s.iter().map(|s| s.label.as_str()).collect();
-        assert_eq!(labels, vec!["JAIT-12", "JAIT-1"]);
-        assert_eq!(s[0].insert, "JAIT-12 ");
+        assert_eq!(labels, vec!["JAIT-1"]);
+        assert_eq!(s[0].insert, "JAIT-1 ");
+        let s = issue_suggestions(&is, "JAIT", "", "jait-12");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].label, "JAIT-12");
+        // Wrong prefix matches nothing.
+        assert!(issue_suggestions(&is, "JAIT", "", "ENG-12").is_empty());
         // Title search.
         assert_eq!(issue_suggestions(&is, "JAIT", "", "title 2").len(), 1);
+        // Archived issues are left out.
+        let mut arch = issue("z", 9, None);
+        arch.archived_at = Some("2026-01-01".into());
+        assert!(issue_suggestions(&[arch], "JAIT", "", "9").is_empty());
+        // Blank query matches nothing.
+        assert!(issue_suggestions(&is, "JAIT", "", "  ").is_empty());
     }
 
     #[test]
