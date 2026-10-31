@@ -311,6 +311,7 @@ pub enum Message {
     InboxSelect(usize),
     /// Mark the selected Inbox Notification read (`r`).
     InboxMarkRead,
+    InboxMarkAllRead,
     /// Switch the Inbox to the other filter (f).
     InboxToggleFilter,
     /// Set the Inbox filter (filter tabs).
@@ -1950,6 +1951,15 @@ impl App {
                             crate::db::notifications::unread_count(&conn).unwrap_or(0);
                         self.reload_inbox();
                     }
+                }
+            }
+            Message::InboxMarkAllRead => {
+                let conn = self.db();
+                let now = crate::db::now_iso();
+                if crate::db::notifications::mark_all_read(&conn, &now).unwrap_or(0) > 0 {
+                    self.notif_unread_count =
+                        crate::db::notifications::unread_count(&conn).unwrap_or(0);
+                    self.reload_inbox();
                 }
             }
             Message::InboxSelect(i) => {

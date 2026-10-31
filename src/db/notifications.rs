@@ -314,6 +314,28 @@ pub fn mark_read(conn: &Connection, remote_id: i64, now: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Mark every unread Notification read locally and queue one
+/// `notification`/`read_all` entry with payload `{"before": newest created_at}`.
+/// The badge drops to 0. Returns the number of rows changed (0 = no-op).
+pub fn mark_all_read(conn: &Connection, now: &str) -> Result<usize> {
+    let newest: Option<String> = conn.query_row(
+        "SELECT MAX(created_at) FROM notifications WHERE read_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let Some(newest) = newest else {
+        return Ok(0);
+    };
+    let changed = conn.execute(
+        "UPDATE notifications SET read_at = ?1 WHERE read_at IS NULL",
+        params![now],
+    )?;
+    set_unread_count(conn, 0)?;
+    let payload = serde_json::json!({ "before": newest }).to_string();
+    sync_queue::enqueue(conn, ENTITY_TYPE, "all", "read_all", Some(&payload))?;
+    Ok(changed)
+}
+
 /// Overwrite the badge number (clamped at 0), e.g. from a `read_all` response.
 pub fn set_unread_count(conn: &Connection, count: i64) -> Result<()> {
     set_pull_cursor(conn, SCOPE, UNREAD_RESOURCE, &count.max(0).to_string())
@@ -542,6 +564,27 @@ mod tests {
         let q = sync_queue::pending_entries(&conn).unwrap();
         assert_eq!(q.len(), 1);
         assert_eq!((q[0].entity_type.as_str(), q[0].entity_id.as_str(), q[0].action.as_str()), ("notification", "1", "read"));
+    }
+
+    #[test]
+    fn mark_all_read_marks_everything_zeroes_count_and_enqueues_before_payload() {
+        let conn = mem();
+        apply_poll(
+            &conn,
+            &env(vec![n(1, "2026-10-31T09:00:00.000Z", None), n(2, "2026-10-31T09:10:00.000Z", None)], 2, NOW),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(mark_all_read(&conn, NOW).unwrap(), 2);
+        assert!(inbox_list(&conn, Filter::Unread).unwrap().is_empty());
+        assert_eq!(unread_count(&conn).unwrap(), 0);
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].entity_type.as_str(), q[0].action.as_str()), ("notification", "read_all"));
+        assert_eq!(q[0].payload.as_deref(), Some(r#"{"before":"2026-10-31T09:10:00.000Z"}"#));
+        // nothing unread left: no second entry
+        assert_eq!(mark_all_read(&conn, NOW).unwrap(), 0);
+        assert_eq!(sync_queue::pending_entries(&conn).unwrap().len(), 1);
     }
 
     #[test]
