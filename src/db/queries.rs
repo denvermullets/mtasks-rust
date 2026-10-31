@@ -1,6 +1,6 @@
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
-use super::events::{self, Source};
+use super::activity::{self, Source};
 use super::models::{Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
@@ -144,8 +144,8 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
-    // No stored "created" event: the activity derives that line at read time.
-    events::record_initial_parent(conn, issue, Source::Local)?;
+    // No stored events: Activity derives the "created the issue" line at read
+    // time, and a parent set at creation travels in the create payload.
     Ok(())
 }
 
@@ -157,7 +157,7 @@ fn now_ts() -> String {
 /// current row. No-op when the issue didn't exist beforehand.
 fn record_local_diff(conn: &Connection, old: Option<Issue>, issue_id: &str) -> Result<()> {
     if let (Some(old), Some(new)) = (old, get_issue(conn, issue_id)?) {
-        events::record_changes(conn, &old, &new, Source::Local, &now_ts())?;
+        activity::record_changes(conn, &old, &new, Source::Local, &now_ts())?;
     }
     Ok(())
 }
@@ -1186,7 +1186,7 @@ pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Resu
             dep.updated_at,
         ],
     )?;
-    events::record_dependency(
+    activity::record_dependency(
         conn,
         &dep.blocking_issue_id,
         &dep.blocked_issue_id,
@@ -1199,7 +1199,7 @@ pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Resu
 
 pub fn delete_issue_dependency(conn: &Connection, dep_id: &str) -> Result<()> {
     if let Some(dep) = get_issue_dependency(conn, dep_id)? {
-        events::record_dependency(
+        activity::record_dependency(
             conn,
             &dep.blocking_issue_id,
             &dep.blocked_issue_id,
@@ -2765,23 +2765,37 @@ mod tests {
         assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
     }
 
+    /// Wording of the issue's Pending changes, as Activity shows them. Activity
+    /// only shows events linked to a queue entry, so this links every local
+    /// one first (linking itself is covered by the `*_queued` tests).
     fn event_lines(conn: &Connection, issue_id: &str) -> Vec<String> {
-        events::events_for_issue(conn, issue_id)
+        conn.execute(
+            "UPDATE issue_events SET sync_queue_id = 1
+             WHERE source = 'local' AND sync_queue_id IS NULL",
+            [],
+        )
+        .unwrap();
+        activity::activity_for_issue(conn, issue_id)
             .unwrap()
-            .iter()
-            .map(|e| e.description())
+            .into_iter()
+            .filter(|i| i.origin == activity::ItemOrigin::Pending)
+            .map(|i| i.text)
             .collect()
     }
 
     #[test]
-    fn local_insert_stores_no_created_event() {
+    fn local_insert_shows_only_the_derived_created_line() {
         let conn = setup();
         insert_issue(&conn, &make_issue("n0", None, None)).unwrap();
-        assert!(events::events_for_issue(&conn, "n0").unwrap().is_empty());
+        assert!(event_lines(&conn, "n0").is_empty());
+        let stored: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_events WHERE issue_id = 'n0'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 0);
     }
 
     #[test]
-    fn local_writes_record_events_and_not_sync_queue() {
+    fn local_writes_record_pending_changes() {
         let conn = setup();
         conn.execute(
             "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
@@ -2807,10 +2821,6 @@ mod tests {
                 "changed estimate from none to 2",
             ]
         );
-        let queued: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(queued, 0);
     }
 
     #[test]
@@ -2824,7 +2834,7 @@ mod tests {
         issue.updated_at = "2026-03-02T00:00:00.000Z".into();
         upsert_issue(&conn, &issue).unwrap();
 
-        assert!(events::events_for_issue(&conn, "p1").unwrap().is_empty());
+        assert!(event_lines(&conn, "p1").is_empty());
         assert_eq!(get_issue(&conn, "p1").unwrap().unwrap().priority, 0);
     }
 
@@ -2841,13 +2851,13 @@ mod tests {
         assert!(i2[0].starts_with("now blocked by "));
         assert!(i2[1].starts_with("no longer blocked by "));
 
-        // Born with a parent -> parent event, and the column is persisted.
+        // Born with a parent: the column is persisted, no event is stored.
         let mut child = make_issue("c1", None, None);
         child.parent_issue_id = Some("i1".into());
         insert_issue(&conn, &child).unwrap();
         let stored = get_issue(&conn, "c1").unwrap().unwrap();
         assert_eq!(stored.parent_issue_id.as_deref(), Some("i1"));
-        assert!(event_lines(&conn, "c1")[0].starts_with("set parent to "));
+        assert!(event_lines(&conn, "c1").is_empty());
 
         // Renamed lanes show their current name when resolved.
         conn.execute(
@@ -2859,9 +2869,7 @@ mod tests {
         move_issue_to_lane(&conn, "c1", "l2").unwrap();
         conn.execute("UPDATE lanes SET name = 'Active' WHERE id = 'l2'", [])
             .unwrap();
-        let evs = events::events_for_issue_resolved(&conn, "c1", None).unwrap();
-        assert!(evs[1].description().ends_with("to Active"));
-        assert_eq!(evs[1].actor_name, None);
+        assert_eq!(event_lines(&conn, "c1"), vec!["changed status from Backlog to Doing"]);
     }
 
     // ── move_issue_to_team ──

@@ -9,7 +9,10 @@
 use rusqlite::{params, Connection, Result};
 use serde_json::{json, Value};
 
-use super::events::{self, EventKind};
+mod pending;
+
+use pending::{describe, priority_label, EventKind};
+pub use pending::{record_changes, record_dependency, Source};
 use super::models::Priority;
 use crate::api::activity::{
     ActivityActor, ActivityEntry, ActivityRef, ChangeValue, DependencyDirection, DependencyEvent,
@@ -388,7 +391,7 @@ fn merge_pending(conn: &Connection, issue_id: &str, items: &mut Vec<ActivityItem
         }
         let item = ActivityItem {
             key: format!("pending:{id}#0"),
-            text: events::describe(kind, old.as_deref(), new.as_deref()),
+            text: describe(kind, old.as_deref(), new.as_deref()),
             at,
             actor: ActorSlot { remote_id: None, name: Some("You".to_string()) },
             origin: ItemOrigin::Pending,
@@ -503,7 +506,7 @@ fn strip_html(html: &str) -> String {
 /// current name by remote id, falling back to the name the server sent.
 fn reference_change_line(conn: &Connection, change: &Value) -> Option<String> {
     let field = change["field"].as_str()?;
-    // `None` kind = team, which `events::describe` has no wording for.
+    // `None` kind = team, which `describe` has no wording for.
     let (kind, table) = match field {
         "lane_id" => (Some(EventKind::Status), "lanes"),
         "assignee_id" => (Some(EventKind::Assignee), "members"),
@@ -536,7 +539,7 @@ fn reference_change_line(conn: &Connection, change: &Value) -> Option<String> {
             Some(o) => format!("removed from project {o}"),
             None => "removed from project".to_string(),
         }),
-        Some(k) => Some(events::describe(k, old.as_deref(), new.as_deref())),
+        Some(k) => Some(describe(k, old.as_deref(), new.as_deref())),
     }
 }
 
@@ -590,10 +593,10 @@ fn dependency_line(entry: &StoredEntry) -> Option<String> {
         "destroy" => (other, None),
         _ => return None,
     };
-    Some(events::describe(kind, old.as_deref(), new.as_deref()))
+    Some(describe(kind, old.as_deref(), new.as_deref()))
 }
 
-/// Wording for a plain (non-reference) field, reusing `events::describe`.
+/// Wording for a plain (non-reference) field, reusing `describe`.
 fn plain_change_line(change: &Value) -> Option<String> {
     let field = change["field"].as_str()?;
     let kind = match field {
@@ -612,7 +615,7 @@ fn plain_change_line(change: &Value) -> Option<String> {
             other => Some(other.to_string()),
         }
     };
-    Some(events::describe(
+    Some(describe(
         kind,
         value(&change["from"]).as_deref(),
         value(&change["to"]).as_deref(),
@@ -622,7 +625,7 @@ fn plain_change_line(change: &Value) -> Option<String> {
 /// Server priority name (`"no_priority"`, `"high"`, ...) as the desktop label.
 fn priority_name_label(name: &str) -> String {
     match Priority::from_rails_str(name) {
-        Ok(p) => events::priority_label(p.to_i32()),
+        Ok(p) => priority_label(p.to_i32()),
         Err(_) => name.to_string(),
     }
 }

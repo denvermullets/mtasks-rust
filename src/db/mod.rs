@@ -1,6 +1,5 @@
 pub mod activity;
 pub mod connection;
-pub mod events;
 pub mod home_page;
 pub mod migrations;
 pub mod models;
