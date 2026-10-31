@@ -7,18 +7,6 @@ use crate::theme as t;
 use crate::views::header;
 use crate::views::projects::format_target_date;
 
-/// u8 → Color helper (mirrors `theme::c`), for the roadmap-specific dot/status
-/// colors carried over verbatim from the Rails `roadmaps/_card` partial.
-const fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
-}
-
-const BEHIND: Color = rgb(0xF0, 0x95, 0x95);
-const GOOD: Color = rgb(0x5D, 0xCA, 0xA5);
-const AMBER: Color = rgb(0xEF, 0x9F, 0x27);
-const NEUTRAL: Color = rgb(0x88, 0x87, 0x80);
-const BAR_BEHIND: Color = rgb(0xE2, 0x4B, 0x4A);
-
 /// The three swimlanes, in display order, with their header copy + dot color.
 fn lane_defs() -> [(RoadmapCommitment, &'static str, &'static str, Color); 3] {
     [
@@ -38,7 +26,7 @@ fn lane_defs() -> [(RoadmapCommitment, &'static str, &'static str, Color); 3] {
             RoadmapCommitment::Later,
             "Later",
             "On the radar, not committed",
-            NEUTRAL,
+            t::text_muted(),
         ),
     ]
 }
@@ -87,12 +75,12 @@ pub fn view<'a>(
 
     let mut chips = row![].spacing(6).align_y(Alignment::Center);
     if behind > 0 {
-        chips = chips.push(count_chip(behind, "behind", BEHIND));
+        chips = chips.push(count_chip(behind, "behind", t::danger()));
     }
     if in_progress > 0 {
-        chips = chips.push(count_chip(in_progress, "in progress", AMBER));
+        chips = chips.push(count_chip(in_progress, "in progress", t::warning()));
     }
-    chips = chips.push(count_chip(planned, "planned", NEUTRAL));
+    chips = chips.push(count_chip(planned, "planned", t::text_muted()));
 
     let header = row![]
         .spacing(12)
@@ -264,20 +252,20 @@ fn card<'a>(project: &'a Project, identifier: &'a str) -> Element<'a, Message> {
 /// Status pill label + color, mirroring the Rails `roadmaps/_card` logic.
 fn card_status(project: &Project) -> (&'static str, Color) {
     if project.behind_schedule {
-        return ("Behind", BEHIND);
+        return ("Behind", t::danger());
     }
     match project.status {
-        Some(ProjectStatus::Completed) => ("Completed", GOOD),
-        Some(ProjectStatus::Cancelled) => ("Cancelled", NEUTRAL),
-        Some(ProjectStatus::Paused) => ("Paused", AMBER),
+        Some(ProjectStatus::Completed) => ("Completed", t::priority_low()),
+        Some(ProjectStatus::Cancelled) => ("Cancelled", t::text_muted()),
+        Some(ProjectStatus::Paused) => ("Paused", t::warning()),
         Some(ProjectStatus::Started) => {
             if project.progress_percentage > 0 {
-                ("In progress", GOOD)
+                ("In progress", t::priority_low())
             } else {
-                ("Started", AMBER)
+                ("Started", t::warning())
             }
         }
-        Some(ProjectStatus::Backlog) | None => ("Planned", NEUTRAL),
+        Some(ProjectStatus::Backlog) | None => ("Planned", t::text_muted()),
     }
 }
 
@@ -285,11 +273,11 @@ fn card_status(project: &Project) -> (&'static str, Color) {
 fn progress_bar<'a>(project: &Project) -> Element<'a, Message> {
     let pct = project.progress_percentage.clamp(0, 100);
     let bar_color = if project.behind_schedule {
-        BAR_BEHIND
+        t::danger()
     } else if project.status == Some(ProjectStatus::Started) && pct < 50 {
-        AMBER
+        t::warning()
     } else {
-        GOOD
+        t::priority_low()
     };
     let filled = pct.max(2) as u16;
     let empty = (100 - pct).clamp(0, 100) as u16;
