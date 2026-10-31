@@ -39,6 +39,34 @@ pub fn issues_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Issue>> {
     rows.collect()
 }
 
+/// An issue plus its team's identifier, for cross-team search.
+#[derive(Debug, Clone)]
+pub struct SearchableIssue {
+    pub issue: Issue,
+    pub team_identifier: String,
+}
+
+/// Every non-archived issue in every non-archived team, with its team's
+/// identifier. Soft-deleted issues are left out too.
+pub fn searchable_issues(conn: &Connection) -> Result<Vec<SearchableIssue>> {
+    let mut stmt = conn.prepare(
+        "SELECT i.id, i.title, i.description, i.priority, i.team_number, i.due_date, i.estimate,
+                i.started_at, i.completed_at, i.canceled_at, i.lane_id, i.team_id,
+                i.project_id, i.parent_issue_id, i.assignee_id, i.creator_id, i.archived_at,
+                i.remote_id, i.created_at, i.updated_at, t.identifier
+         FROM issues i JOIN teams t ON t.id = i.team_id
+         WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND t.archived_at IS NULL
+         ORDER BY i.created_at",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SearchableIssue {
+            issue: Issue::from_row(row)?,
+            team_identifier: row.get(20)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn issues_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Issue>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, description, priority, team_number, due_date, estimate,
@@ -1846,6 +1874,35 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn searchable_issues_spans_teams_and_skips_archived() {
+        let conn = setup();
+        conn.execute_batch(&format!(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+               VALUES ('t2', 'Two', 'TWO', '{NOW}', '{NOW}');
+             INSERT INTO teams (id, name, identifier, archived_at, created_at, updated_at)
+               VALUES ('t3', 'Dead', 'DEAD', '{NOW}', '{NOW}', '{NOW}');
+             INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+               VALUES ('l2', 'B', 0, 't2', '{NOW}', '{NOW}'), ('l3', 'B', 0, 't3', '{NOW}', '{NOW}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+               VALUES ('i2', 'Other team', 0, 'l2', 't2', '{NOW}', '{NOW}'),
+                      ('i3', 'In dead team', 0, 'l3', 't3', '{NOW}', '{NOW}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, archived_at, created_at, updated_at)
+               VALUES ('i4', 'Archived', 0, 'l1', 't1', '{NOW}', '{NOW}', '{NOW}');"
+        ))
+        .unwrap();
+        let mut found: Vec<_> = searchable_issues(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.issue.id, s.team_identifier))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [("i1".to_string(), "T".to_string()), ("i2".to_string(), "TWO".to_string())]
+        );
     }
 
     fn make_label(id: &str, name: &str) -> Label {

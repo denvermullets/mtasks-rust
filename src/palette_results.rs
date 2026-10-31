@@ -4,7 +4,8 @@
 //! `push_*` function called from `palette_results`.
 
 use crate::app::View;
-use crate::db::models::{Issue, Team};
+use crate::db::models::Team;
+use crate::db::queries::SearchableIssue;
 use crate::issue_match::IssueQuery;
 
 /// What a row is, shown as a label so rows can be scanned by kind.
@@ -62,10 +63,11 @@ pub struct PaletteProject {
 /// recompute rows on every keystroke. Later kinds add their fields here.
 #[derive(Debug, Clone, Default)]
 pub struct PaletteData {
-    /// The current team's issues (archived ones are filtered out here).
-    pub issues: Vec<Issue>,
-    /// The current team; `None` or archived yields no issue rows.
-    pub team: Option<Team>,
+    /// Every non-archived issue of every non-archived team (a snapshot taken
+    /// when the palette opens).
+    pub issues: Vec<SearchableIssue>,
+    /// The selected team; its issues rank first. `None` ranks none first.
+    pub current_team_id: Option<String>,
     pub teams: Vec<Team>,
     /// Projects of every team, loaded when the palette opens.
     pub projects: Vec<PaletteProject>,
@@ -116,24 +118,25 @@ fn name_matches(needle: &str, name: &str) -> bool {
     name.to_lowercase().contains(needle)
 }
 
-/// Current-team issues matching `query` via the shared matcher: highest team
-/// number first, unsynced (no number) issues after the numbered ones.
+/// Issues from every team matching `query` via the shared matcher. The
+/// current team's come first; within a team the highest number first, with
+/// unsynced (no number) issues after the numbered ones.
 fn push_issues(query: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
-    let Some(team) = data.team.as_ref().filter(|t| t.archived_at.is_none()) else {
-        return;
-    };
     let query = IssueQuery::parse(query);
-    let mut found: Vec<&Issue> = data
+    let mut found: Vec<&SearchableIssue> = data
         .issues
         .iter()
-        .filter(|i| i.archived_at.is_none() && query.matches(i, &team.identifier))
+        .filter(|s| s.issue.archived_at.is_none() && query.matches(&s.issue, &s.team_identifier))
         .collect();
     // Stable: ties (e.g. several unnumbered issues) keep their input order.
-    found.sort_by_key(|i| std::cmp::Reverse(i.team_number));
-    for issue in found {
+    found.sort_by_key(|s| {
+        let other_team = data.current_team_id.as_deref() != Some(s.issue.team_id.as_str());
+        (other_team, std::cmp::Reverse(s.issue.team_number))
+    });
+    for SearchableIssue { issue, team_identifier } in found {
         let identifier = match issue.team_number {
-            Some(n) => format!("{}-{}", team.identifier, n),
-            None => "Unsynced".to_string(),
+            Some(n) => format!("{team_identifier}-{n}"),
+            None => format!("{team_identifier} unsynced"),
         };
         rows.push(PaletteRow {
             kind: PaletteKind::Issue,
@@ -195,6 +198,7 @@ fn push_projects(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::Issue;
 
     fn team(id: &str, name: &str, ident: &str, archived: bool) -> Team {
         Team {
@@ -211,7 +215,7 @@ mod tests {
     fn data() -> PaletteData {
         PaletteData {
             issues: Vec::new(),
-            team: None,
+            current_team_id: None,
             projects: Vec::new(),
             teams: vec![
                 team("t1", "JAIT App", "JRST", false),
@@ -221,11 +225,7 @@ mod tests {
         }
     }
 
-    fn eng(archived: bool) -> Team {
-        team("t", "Eng", "ENG", archived)
-    }
-
-    fn issue(id: &str, num: Option<i32>, title: &str, archived: bool) -> Issue {
+    fn issue(id: &str, team: &str, num: Option<i32>, title: &str, archived: bool) -> Issue {
         Issue {
             id: id.into(),
             title: title.into(),
@@ -238,7 +238,7 @@ mod tests {
             completed_at: None,
             canceled_at: None,
             lane_id: "l".into(),
-            team_id: "t".into(),
+            team_id: team.into(),
             project_id: None,
             parent_issue_id: None,
             assignee_id: None,
@@ -250,9 +250,25 @@ mod tests {
         }
     }
 
-    fn issue_ids(query: &str, team: &Team, issues: &[Issue]) -> Vec<String> {
-        let data = PaletteData { issues: issues.to_vec(), team: Some(team.clone()), teams: Vec::new(), projects: Vec::new() };
-        palette_results(query, &data)
+    /// Issue "ENG" team is "t-eng", "OPS" is "t-ops"; identifier derives from id.
+    fn si(id: &str, team_ident: &str, num: Option<i32>, title: &str) -> SearchableIssue {
+        SearchableIssue {
+            issue: issue(id, &format!("t-{}", team_ident.to_lowercase()), num, title, false),
+            team_identifier: team_ident.into(),
+        }
+    }
+
+    fn issue_data(current: Option<&str>, issues: Vec<SearchableIssue>) -> PaletteData {
+        PaletteData {
+            issues,
+            current_team_id: current.map(String::from),
+            teams: Vec::new(),
+            projects: Vec::new(),
+        }
+    }
+
+    fn issue_ids(query: &str, current: Option<&str>, issues: Vec<SearchableIssue>) -> Vec<String> {
+        palette_results(query, &issue_data(current, issues))
             .into_iter()
             .filter_map(|r| match r.nav {
                 PaletteNav::Issue(id) => Some(id),
@@ -263,38 +279,72 @@ mod tests {
 
     #[test]
     fn identifier_and_number_find_current_team_issue() {
-        let t = eng(false);
-        let issues = [issue("a", Some(42), "Fix", false), issue("b", Some(7), "Other", false)];
+        let issues = || vec![si("a", "ENG", Some(42), "Fix"), si("b", "ENG", Some(7), "Other")];
         for q in ["ENG-42", "eng-42", "42"] {
-            assert_eq!(issue_ids(q, &t, &issues), ["a"], "query {q}");
+            assert_eq!(issue_ids(q, Some("t-eng"), issues()), ["a"], "query {q}");
         }
-        assert!(issue_ids("OPS-42", &t, &issues).is_empty());
+        assert!(issue_ids("OPS-42", Some("t-eng"), issues()).is_empty());
     }
 
     #[test]
-    fn title_matches_highest_number_first_unsynced_last() {
-        let t = eng(false);
-        let issues = [
-            issue("u", None, "login local", false),
-            issue("a", Some(3), "Login bug", false),
-            issue("b", Some(9), "login page", false),
-            issue("c", Some(5), "unrelated", false),
+    fn bare_number_matches_every_team_current_first() {
+        let issues = vec![
+            si("o", "OPS", Some(42), "ops"),
+            si("e", "ENG", Some(42), "eng"),
+            si("x", "ENG", Some(420), "no"),
         ];
-        assert_eq!(issue_ids("login", &t, &issues), ["b", "a", "u"]);
+        assert_eq!(issue_ids("42", Some("t-eng"), issues.clone()), ["e", "o"]);
+        assert_eq!(issue_ids("42", Some("t-ops"), issues), ["o", "e"]);
     }
 
     #[test]
-    fn archived_issues_and_archived_team_are_left_out() {
-        let issues = [issue("a", Some(1), "thing", true), issue("b", Some(2), "thing", false)];
-        assert_eq!(issue_ids("thing", &eng(false), &issues), ["b"]);
-        assert!(issue_ids("thing", &eng(true), &issues).is_empty());
+    fn prefixed_number_matches_only_that_team() {
+        let issues = vec![si("o", "OPS", Some(42), "ops"), si("e", "ENG", Some(42), "eng")];
+        assert_eq!(issue_ids("ops-42", Some("t-eng"), issues), ["o"]);
+    }
+
+    #[test]
+    fn other_teams_title_matches_rank_after_current_team() {
+        let issues = vec![
+            si("o9", "OPS", Some(9), "login ops"),
+            si("e1", "ENG", Some(1), "login eng"),
+            si("e3", "ENG", Some(3), "Login bug"),
+            si("o2", "OPS", Some(2), "login again"),
+            si("u", "ENG", None, "login local"),
+            si("n", "ENG", Some(5), "unrelated"),
+        ];
+        assert_eq!(
+            issue_ids("login", Some("t-eng"), issues),
+            ["e3", "e1", "u", "o9", "o2"]
+        );
+    }
+
+    #[test]
+    fn without_a_current_team_issues_still_match_by_number_desc_per_team() {
+        let issues = vec![si("a", "AAA", Some(1), "x"), si("b", "BBB", Some(1), "x")];
+        assert_eq!(issue_ids("x", None, issues).len(), 2);
+    }
+
+    #[test]
+    fn archived_issues_are_left_out() {
+        let mut archived = si("a", "ENG", Some(1), "thing");
+        archived.issue.archived_at = Some("2026-01-01".into());
+        let issues = vec![archived, si("b", "ENG", Some(2), "thing")];
+        assert_eq!(issue_ids("thing", Some("t-eng"), issues), ["b"]);
+    }
+
+    #[test]
+    fn issue_row_shows_its_team_and_title() {
+        let data = issue_data(Some("t-eng"), vec![si("a", "OPS", Some(42), "Fix it"), si("u", "OPS", None, "Fix new")]);
+        let rows = palette_results("fix", &data);
+        let by_title = |t: &str| rows.iter().find(|r| r.secondary == t).unwrap();
+        assert_eq!(by_title("Fix it").primary, "OPS-42");
+        assert!(by_title("Fix new").primary.starts_with("OPS"));
     }
 
     #[test]
     fn issues_come_before_views_and_empty_query_has_none() {
-        let t = eng(false);
-        let issues = [issue("a", Some(1), "board fix", false)];
-        let data = PaletteData { issues: issues.to_vec(), team: Some(t), teams: Vec::new(), projects: Vec::new() };
+        let data = issue_data(Some("t-eng"), vec![si("a", "ENG", Some(1), "board fix")]);
         let rows = palette_results("board", &data);
         assert_eq!(rows[0].kind, PaletteKind::Issue);
         assert_eq!(rows[0].primary, "ENG-1");
