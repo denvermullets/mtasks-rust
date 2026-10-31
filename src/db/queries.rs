@@ -1,7 +1,7 @@
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
 use super::events::{self, Source};
-use super::models::{Comment, Issue, IssueDependency, Label, Lane, Member, Project, Team};
+use super::models::{Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
 
@@ -313,6 +313,43 @@ pub fn delete_unsynced_comment(conn: &Connection, comment_id: &str) -> Result<us
     }
     tx.commit()?;
     Ok(ids.len())
+}
+
+/// Delete the user's own comment and its reply subtree. A comment the server
+/// has seen also yields the `comment/delete` queue payload, captured before the
+/// rows go: `{team_remote_id, issue_remote_id, remote_id}`. Unsynced comments
+/// are dropped as by [`delete_unsynced_comment`] and yield no payload. Returns
+/// `(removed count, payload)`.
+pub fn delete_comment(conn: &Connection, comment_id: &str) -> Result<(usize, Option<String>)> {
+    let Some(comment) = get_comment(conn, comment_id)? else {
+        return Ok((0, None));
+    };
+    let Some(remote_id) = comment.remote_id else {
+        return Ok((delete_unsynced_comment(conn, comment_id)?, None));
+    };
+    let owner_remote = match comment.owner() {
+        CommentOwner::Issue(issue_id) => get_issue(conn, &issue_id)?.and_then(|i| {
+            let team = remote_id_for(conn, "teams", &i.team_id).ok().flatten()?;
+            Some((team, i.remote_id?))
+        }),
+        CommentOwner::Project(_) => None,
+    };
+    let tx = conn.unchecked_transaction()?;
+    let ids = comment_subtree_ids(&tx, comment_id)?;
+    for id in ids.iter().rev() {
+        tx.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "comment", id)?;
+    }
+    tx.commit()?;
+    let payload = owner_remote.map(|(team_remote_id, issue_remote_id)| {
+        serde_json::json!({
+            "team_remote_id": team_remote_id,
+            "issue_remote_id": issue_remote_id,
+            "remote_id": remote_id,
+        })
+        .to_string()
+    });
+    Ok((ids.len(), payload))
 }
 
 /// Apply a server tombstone for an issue dependency (Rails destroys blocking
@@ -1919,6 +1956,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deletes, 0);
+    }
+
+    fn link_remote_owner(conn: &Connection) {
+        conn.execute_batch(
+            "UPDATE issues SET remote_id = 50 WHERE id = 'i1';
+             UPDATE teams SET remote_id = 7 WHERE id = (SELECT team_id FROM issues WHERE id = 'i1');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn delete_comment_synced_root_captures_payload_and_retires_subtree() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        link_remote_owner(&conn);
+        set_comment_remote_id(&conn, "c1", 9).unwrap();
+        set_comment_remote_id(&conn, "c2", 10).unwrap();
+        let (removed, payload) = delete_comment(&conn, "c1").unwrap();
+        assert_eq!(removed, 4);
+        let payload: serde_json::Value = serde_json::from_str(&payload.unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"team_remote_id": 7, "issue_remote_id": 50, "remote_id": 9})
+        );
+        assert_eq!(comments_for_issue(&conn, "i1").unwrap().len(), 1);
+        // Pending creates for the subtree are retired; only c5's remains.
+        assert_eq!(pending_count(&conn), 1);
+    }
+
+    #[test]
+    fn delete_comment_unsynced_root_has_no_payload() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        link_remote_owner(&conn);
+        let (removed, payload) = delete_comment(&conn, "c1").unwrap();
+        assert_eq!(removed, 4);
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn delete_comment_unknown_id_removes_nothing() {
+        let conn = setup();
+        assert_eq!(delete_comment(&conn, "nope").unwrap(), (0, None));
     }
 
     #[test]

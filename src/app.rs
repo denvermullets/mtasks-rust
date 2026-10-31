@@ -2956,7 +2956,9 @@ impl App {
             Message::DeleteCommentConfirmed => {
                 if let Modal::DeleteCommentConfirm(ref comment_id) = self.modal {
                     let conn = self.db();
-                    let _ = queries::delete_unsynced_comment(&conn, comment_id);
+                    if let Ok((_, Some(payload))) = queries::delete_comment(&conn, comment_id) {
+                        self.enqueue_sync("comment", comment_id, "delete", Some(payload.as_str()));
+                    }
                     if let Some(d) = &mut self.issue_detail {
                         if d.reply_to.as_deref() == Some(comment_id.as_str()) {
                             d.reply_to = None;

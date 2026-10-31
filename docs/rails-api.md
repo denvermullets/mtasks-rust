@@ -237,7 +237,7 @@ Show a single project. Adds:
 ```
 
 - `POST` body: `{ "comment": { "body": "...", "parent_id": null } }`. Send an `Idempotency-Key` header: a replay with the same key returns the existing comment with **200**; a new comment returns **201**. Creating a comment touches the parent issue/project (`updated_at` moves).
-- `DELETE .../issues/:issue_id/comments/:id` returns 204; 403 `Only the author or a team admin can delete this` otherwise. Comment attachments: `DELETE .../comments/:comment_id/attachments/:id`. Project comments have no delete route (attachment delete only).
+- `DELETE .../issues/:issue_id/comments/:id` returns 204; 403 `Only the author or a team admin can delete this` otherwise. **Used by the desktop** (`comment/delete` queue entry): 204 and 404 count as success; a 403 drops the entry with a toast, and the next per-issue comment fetch restores the comment. Comment attachments: `DELETE .../comments/:comment_id/attachments/:id`. Project comments have no delete route (attachment delete only).
 
 ## Write endpoints
 
