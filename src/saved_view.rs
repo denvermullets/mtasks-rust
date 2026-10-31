@@ -1087,4 +1087,19 @@ mod tests {
         assert_eq!(ov.state.display.order_by, OrderBy::Manual);
         assert!(!ov.is_modified(&fx.mirror()));
     }
+
+    #[test]
+    fn save_as_new_encodes_the_working_copy_over_the_original_raw_query() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("order_by", "priority"), ("web_only", "keep")]);
+        ov.state.display.order_by = OrderBy::Manual;
+        ov.state.search = "bug".into();
+        let query = ov.encoded(&fx.mirror());
+        assert_eq!(query.get("web_only").map(String::as_str), Some("keep"));
+        assert_eq!(query.get("order_by").map(String::as_str), Some("manual"));
+        assert_eq!(query.get("q").map(String::as_str), Some("bug"));
+        // The original's stored definition is untouched.
+        assert_eq!(ov.raw.get("order_by").map(String::as_str), Some("priority"));
+        assert!(ov.is_modified(&fx.mirror()));
+    }
 }
