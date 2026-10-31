@@ -259,7 +259,7 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
     for entry in entries_for_issue(conn, issue_id)? {
         let actor = resolve_actor(conn, entry.actor_remote_id, entry.actor_name.as_deref())?;
         let texts = match entry.entry_type.as_str() {
-            "version" => version_lines(&entry),
+            "version" => version_lines(conn, &entry),
             "reference" => vec![reference_line(&entry)],
             "dependency" => dependency_line(&entry).into_iter().collect(),
             _ => Vec::new(),
@@ -328,11 +328,71 @@ fn created_item(conn: &Connection, issue_id: &str) -> Result<Option<ActivityItem
 
 /// One line per change in a version entry. Changes this layer can't word yet
 /// produce no line.
-fn version_lines(entry: &StoredEntry) -> Vec<String> {
+fn version_lines(conn: &Connection, entry: &StoredEntry) -> Vec<String> {
     let Some(changes) = entry.payload["changes"].as_array() else {
         return Vec::new();
     };
-    changes.iter().filter_map(plain_change_line).collect()
+    changes
+        .iter()
+        .filter_map(|c| plain_change_line(c).or_else(|| reference_change_line(conn, c)))
+        .collect()
+}
+
+/// Reference fields (JRST-134): each side is resolved to the local entity's
+/// current name by remote id, falling back to the name the server sent.
+fn reference_change_line(conn: &Connection, change: &Value) -> Option<String> {
+    let field = change["field"].as_str()?;
+    // `None` kind = team, which `events::describe` has no wording for.
+    let (kind, table) = match field {
+        "lane_id" => (Some(EventKind::Status), "lanes"),
+        "assignee_id" => (Some(EventKind::Assignee), "members"),
+        "project_id" => (Some(EventKind::Project), "projects"),
+        "parent_issue_id" => (Some(EventKind::Parent), "issues"),
+        "team_id" => (None, "teams"),
+        _ => return None,
+    };
+    let name = |v: &Value| -> Option<String> {
+        if v.is_null() {
+            return None;
+        }
+        let remote = v["id"].as_i64();
+        let sent = |key: &str| v[key].as_str().filter(|s| !s.is_empty()).map(String::from);
+        remote
+            .and_then(|rid| local_ref_name(conn, table, rid))
+            .or_else(|| sent(if table == "issues" { "identifier" } else { "name" }))
+            .or_else(|| sent("name"))
+            .or_else(|| remote.map(|r| format!("#{r}")))
+    };
+    let (old, new) = (name(&change["from"]), name(&change["to"]));
+    match kind {
+        None => Some(match (old, new) {
+            (Some(o), Some(n)) => format!("moved from team {o} to team {n}"),
+            (None, Some(n)) => format!("moved to team {n}"),
+            (Some(o), None) => format!("removed from team {o}"),
+            (None, None) => "changed the team".to_string(),
+        }),
+        Some(EventKind::Project) if new.is_none() => Some(match old {
+            Some(o) => format!("removed from project {o}"),
+            None => "removed from project".to_string(),
+        }),
+        Some(k) => Some(events::describe(k, old.as_deref(), new.as_deref())),
+    }
+}
+
+fn local_ref_name(conn: &Connection, table: &str, remote_id: i64) -> Option<String> {
+    let sql = match table {
+        "lanes" => "SELECT name FROM lanes WHERE remote_id = ?1",
+        "members" => "SELECT name FROM members WHERE remote_id = ?1",
+        "projects" => "SELECT name FROM projects WHERE remote_id = ?1",
+        "teams" => "SELECT name FROM teams WHERE remote_id = ?1",
+        _ => {
+            "SELECT t.identifier || '-' || i.team_number FROM issues i
+             JOIN teams t ON t.id = i.team_id WHERE i.remote_id = ?1"
+        }
+    };
+    conn.query_row(sql, params![remote_id], |r| r.get::<_, Option<String>>(0))
+        .ok()
+        .flatten()
 }
 
 /// One line for a dependency entry, worded from this issue's side using
@@ -766,5 +826,73 @@ mod jrst137_tests {
     #[test]
     fn missing_other_issue_uses_generic_wording() {
         assert_eq!(lines("blocking", "create", r#""other_issue":null"#), ["changed blocking issues"]);
+    }
+}
+
+#[cfg(test)]
+mod jrst_134_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at) VALUES ('t1','Core','COR',4,?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, remote_id, created_at, updated_at) VALUES ('l1','Doing',0,'t1',10,?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, team_number, remote_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',7,70,?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO members (id, team_id, name, email, remote_id, created_at, updated_at) VALUES ('m1','t1','Ann','a@x',5,?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO projects (id, team_id, name, remote_id, created_at, updated_at) VALUES ('p1','t1','Renamed',20,?1,?1)", params![now]).unwrap();
+        conn
+    }
+
+    fn lines(conn: &Connection, changes: &str) -> Vec<String> {
+        let body = format!(
+            r#"[{{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"","changes":{changes}}}]"#
+        );
+        let entries: Vec<ActivityEntry> = serde_json::from_str(&body).unwrap();
+        store_batch(conn, "i1", &entries, None, false).unwrap();
+        activity_for_issue(conn, "i1").unwrap().into_iter().map(|i| i.text).collect()
+    }
+
+    #[test]
+    fn lane_resolves_current_local_name_and_falls_back() {
+        let conn = mem();
+        let t = lines(&conn, r#"[{"field":"lane_id","from":{"id":10,"name":"Old Name"},"to":{"id":99,"name":"Sent"}}]"#);
+        assert_eq!(t, ["changed status from Doing to Sent"]);
+    }
+
+    #[test]
+    fn assignee_and_null_sides() {
+        let conn = mem();
+        let t = lines(&conn, r#"[{"field":"assignee_id","from":null,"to":{"id":5,"name":"Anne"}},
+            {"field":"assignee_id","from":{"id":5,"name":"x"},"to":null},
+            {"field":"assignee_id","from":{"id":5,"name":"x"},"to":{"id":6,"name":"Bob"}}]"#);
+        assert_eq!(t, ["assigned to Ann", "unassigned Ann", "reassigned from Ann to Bob"]);
+    }
+
+    #[test]
+    fn project_renamed_added_and_removed() {
+        let conn = mem();
+        let t = lines(&conn, r#"[{"field":"project_id","from":null,"to":{"id":20,"name":"Old"}},
+            {"field":"project_id","from":{"id":20,"name":"Old"},"to":null},
+            {"field":"project_id","from":{"id":88,"name":"Gone"},"to":null}]"#);
+        assert_eq!(t, ["moved to project Renamed", "removed from project Renamed", "removed from project Gone"]);
+    }
+
+    #[test]
+    fn parent_uses_identifier() {
+        let conn = mem();
+        let t = lines(&conn, r#"[{"field":"parent_issue_id","from":null,"to":{"id":70,"identifier":"OLD-1"}},
+            {"field":"parent_issue_id","from":{"id":70,"identifier":"OLD-1"},"to":{"id":71,"identifier":"ZZZ-3"}},
+            {"field":"parent_issue_id","from":{"id":71,"identifier":"ZZZ-3"},"to":null}]"#);
+        assert_eq!(t, ["set parent to COR-7", "changed parent from COR-7 to ZZZ-3", "removed parent ZZZ-3"]);
+    }
+
+    #[test]
+    fn team_resolves_and_falls_back() {
+        let conn = mem();
+        let t = lines(&conn, r#"[{"field":"team_id","from":{"id":4,"name":"Old"},"to":{"id":9,"name":"Other"}}]"#);
+        assert_eq!(t, ["moved from team Core to team Other"]);
     }
 }
