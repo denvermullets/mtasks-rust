@@ -27,6 +27,7 @@ use crate::api::activity::{self as api, ActivityEntry, ActivityPage, ActivityPar
 use crate::api::{ApiClient, ApiError};
 use crate::db::activity::{self as store, FetchState};
 use crate::db::connection;
+use crate::sync::cursor::since_with_overlap;
 
 /// Everything needed to fetch one issue, resolved from the local DB.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +45,10 @@ pub struct Target {
 pub enum Plan {
     /// No full-history flag: page back from the newest entry to the start.
     FullHistory,
-    // JRST-148: `Incremental { since }` (stored cursor minus the overlap).
+    /// History is complete: ask only for entries created after the stored
+    /// cursor minus the overlap (`since` is that ISO8601 string). Re-delivered
+    /// entries upsert by entry cursor, so the overlap is harmless.
+    Incremental { since: String },
 }
 
 /// A fetched batch, ready for [`commit`]. Nothing is stored until it exists.
@@ -71,8 +75,15 @@ pub enum FetchOutcome {
 // ---- pure decisions -------------------------------------------------------
 
 /// Pick the plan for a target's stored state.
+/// Incremental needs the full-history flag *and* a usable cursor; anything
+/// else (never fetched, interrupted first fetch, unparseable cursor) pages the
+/// whole history again.
 pub fn plan(state: &FetchState) -> Plan {
-    let _ = state;
+    if state.fully_fetched {
+        if let Some(since) = state.cursor.as_deref().and_then(since_with_overlap) {
+            return Plan::Incremental { since };
+        }
+    }
     Plan::FullHistory
 }
 
@@ -120,7 +131,27 @@ pub fn join_pages(pages_newest_first: Vec<Vec<ActivityEntry>>) -> Vec<ActivityEn
 /// Page backwards from the newest entry until `X-Next-Before-Id` is absent.
 /// `fetch_page` gets the `before_id` (None for the first page). All-or-nothing:
 /// any page error is returned and the pages so far are dropped.
-pub async fn collect_history<F, Fut>(mut fetch_page: F) -> Result<Fetched, ApiError>
+pub async fn collect_history<F, Fut>(fetch_page: F) -> Result<Fetched, ApiError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<ActivityPage, ApiError>>,
+{
+    collect_paged(fetch_page, true).await
+}
+
+/// Page backwards like [`collect_history`] for an incremental fetch (the
+/// request carries `since`, so "no older entries" means "caught up", not
+/// "start of history"). The batch does not claim to complete the history.
+pub async fn collect_since<F, Fut>(fetch_page: F) -> Result<Fetched, ApiError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<ActivityPage, ApiError>>,
+{
+    collect_paged(fetch_page, false).await
+}
+
+/// The shared paging loop behind [`collect_history`] and [`collect_since`].
+async fn collect_paged<F, Fut>(mut fetch_page: F, fully_fetched: bool) -> Result<Fetched, ApiError>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = Result<ActivityPage, ApiError>>,
@@ -143,7 +174,7 @@ where
     Ok(Fetched {
         entries: join_pages(pages),
         cursor: cursor.expect("set on the first page"),
-        fully_fetched: true,
+        fully_fetched,
     })
 }
 
@@ -181,6 +212,17 @@ pub async fn execute(
                 let params = ActivityParams {
                     before_id: before.as_deref(),
                     since: None,
+                    limit: Some(limit),
+                };
+                api::list(client, target.team_remote_id, target.issue_remote_id, &params).await
+            })
+            .await
+        }
+        Plan::Incremental { since } => {
+            collect_since(|before| async move {
+                let params = ActivityParams {
+                    before_id: before.as_deref(),
+                    since: Some(since.as_str()),
                     limit: Some(limit),
                 };
                 api::list(client, target.team_remote_id, target.issue_remote_id, &params).await
@@ -290,6 +332,53 @@ mod tests {
     #[test]
     fn plan_without_flag_is_full_history() {
         assert_eq!(plan(&FetchState::default()), Plan::FullHistory);
+    }
+
+    fn state(cursor: Option<&str>, fully: bool) -> FetchState {
+        FetchState { cursor: cursor.map(String::from), fully_fetched: fully }
+    }
+
+    #[test]
+    fn plan_with_flag_and_cursor_is_incremental_with_overlap() {
+        assert_eq!(
+            plan(&state(Some("2026-07-06T00:00:10.000000Z"), true)),
+            Plan::Incremental { since: "2026-07-06T00:00:05.000000Z".into() }
+        );
+    }
+
+    #[test]
+    fn plan_without_flag_or_usable_cursor_is_full_history() {
+        assert_eq!(plan(&state(Some("2026-07-06T00:00:10Z"), false)), Plan::FullHistory);
+        assert_eq!(plan(&state(None, true)), Plan::FullHistory);
+        assert_eq!(plan(&state(Some("garbage"), true)), Plan::FullHistory);
+    }
+
+    #[tokio::test]
+    async fn collect_since_pages_but_does_not_claim_full_history() {
+        let f = collect_since(|before| {
+            let p = match before.as_deref() {
+                None => page(&[5, 6], Some("version:5"), Some("T-first")),
+                _ => page(&[3, 4], None, Some("T-second")),
+            };
+            async move { Ok(p) }
+        })
+        .await
+        .unwrap();
+        assert_eq!((f.entries.len(), f.cursor.as_str(), f.fully_fetched), (4, "T-first", false));
+    }
+
+    #[test]
+    fn incremental_commit_keeps_the_flag_advances_the_cursor_and_dedupes_overlap() {
+        let conn = mem();
+        let full = Fetched { entries: vec![entry(1), entry(2)], cursor: "2026-07-06T00:00:10.000000Z".into(), fully_fetched: true };
+        commit(&conn, "synced", &full).unwrap();
+        // Overlap re-delivers entry 2; entry 3 is new.
+        let inc = Fetched { entries: vec![entry(2), entry(3)], cursor: "2026-07-06T00:00:20.000000Z".into(), fully_fetched: false };
+        commit(&conn, "synced", &inc).unwrap();
+        assert_eq!(store::entries_for_issue(&conn, "synced").unwrap().len(), 3);
+        let st = store::fetch_state(&conn, "synced").unwrap();
+        assert_eq!(st.cursor.as_deref(), Some("2026-07-06T00:00:20.000000Z"));
+        assert!(st.fully_fetched);
     }
 
     #[test]
@@ -513,5 +602,33 @@ mod tests {
         assert_eq!(ids, cursors(&all.entries));
         commit(&conn, "synced", &f).unwrap();
         assert_eq!(store::entries_for_issue(&conn, "synced").unwrap().len(), ids.len());
+    }
+
+    /// Live incremental check (run with `--ignored`; same env as the paging test).
+    /// After a full fetch, the cursor is "now", so an incremental fetch must
+    /// return only the overlap window (a subset of the full history).
+    #[tokio::test]
+    #[ignore]
+    async fn live_incremental_against_local_rails() {
+        let env = |k: &str| std::env::var(k).unwrap().parse::<i64>().unwrap();
+        let (cfg, _) = crate::config::load();
+        let client = ApiClient::new(cfg.api_base_url.trim(), cfg.api_token.unwrap_or_default()).unwrap();
+        let conn = mem();
+        conn.execute("UPDATE teams SET remote_id = ?1 WHERE id = 't1'", params![env("ACT_TEAM")]).unwrap();
+        conn.execute("UPDATE issues SET remote_id = ?1 WHERE id = 'synced'", params![env("ACT_ISSUE")]).unwrap();
+        let limit = env("ACT_LIMIT") as u32;
+        let target = resolve(&conn, "synced").unwrap().unwrap();
+        let full = execute(&client, &target, &plan(&target.state), limit).await.unwrap();
+        commit(&conn, "synced", &full).unwrap();
+        let target = resolve(&conn, "synced").unwrap().unwrap();
+        let p = plan(&target.state);
+        assert!(matches!(p, Plan::Incremental { .. }), "{p:?}");
+        let inc = execute(&client, &target, &p, limit).await.unwrap();
+        println!("full={} incremental={} plan={p:?}", full.entries.len(), inc.entries.len());
+        let all = cursors(&full.entries);
+        assert!(cursors(&inc.entries).iter().all(|c| all.contains(c)));
+        assert!(inc.entries.len() < full.entries.len() || full.entries.len() <= 1);
+        commit(&conn, "synced", &inc).unwrap();
+        assert_eq!(store::entries_for_issue(&conn, "synced").unwrap().len(), all.len());
     }
 }
