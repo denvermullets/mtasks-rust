@@ -147,6 +147,27 @@ where
     })
 }
 
+/// [`collect_history`], restarted from scratch once if a `before_id` request
+/// 404s (the cursor entry vanished mid-walk). A 404 on the first page (no
+/// `before_id`) is the issue itself missing and is not retried; a second
+/// failure of any kind is returned as-is.
+pub async fn collect_history_restarting<F, Fut>(mut fetch_page: F) -> Result<Fetched, ApiError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<ActivityPage, ApiError>>,
+{
+    let paged = std::cell::Cell::new(false);
+    let first = collect_history(|before| {
+        paged.set(before.is_some());
+        fetch_page(before)
+    })
+    .await;
+    match first {
+        Err(ApiError::NotFound(_)) if paged.get() => collect_history(fetch_page).await,
+        other => other,
+    }
+}
+
 /// Run a plan against the server. No DB access.
 pub async fn execute(
     client: &ApiClient,
@@ -156,7 +177,7 @@ pub async fn execute(
 ) -> Result<Fetched, ApiError> {
     match plan {
         Plan::FullHistory => {
-            collect_history(|before| async move {
+            collect_history_restarting(|before| async move {
                 let params = ActivityParams {
                     before_id: before.as_deref(),
                     since: None,
@@ -332,6 +353,78 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((*n.borrow(), f.entries.len()), (1, 1));
+    }
+
+    fn nf() -> ApiError {
+        ApiError::NotFound("gone".into())
+    }
+
+    #[tokio::test]
+    async fn before_id_404_restarts_the_full_fetch_once() {
+        let seen = RefCell::new(Vec::new());
+        let dead = RefCell::new(true);
+        let f = collect_history_restarting(|before| {
+            seen.borrow_mut().push(before.clone());
+            let r = match before.as_deref() {
+                None => Ok(page(&[5, 6], Some("version:5"), Some("T"))),
+                Some(_) if *dead.borrow() => {
+                    *dead.borrow_mut() = false;
+                    Err(nf())
+                }
+                Some(_) => Ok(page(&[3, 4], None, Some("T2"))),
+            };
+            async move { r }
+        })
+        .await
+        .unwrap();
+        assert_eq!(f.entries.len(), 4);
+        assert_eq!(seen.borrow().iter().filter(|b| b.is_none()).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn second_404_fails_without_a_third_attempt() {
+        let firsts = RefCell::new(0);
+        let r = collect_history_restarting(|before| {
+            if before.is_none() {
+                *firsts.borrow_mut() += 1;
+            }
+            let r = match before {
+                None => Ok(page(&[2], Some("version:2"), Some("T"))),
+                Some(_) => Err(nf()),
+            };
+            async move { r }
+        })
+        .await;
+        assert!(matches!(r, Err(ApiError::NotFound(_))));
+        assert_eq!(*firsts.borrow(), 2);
+    }
+
+    #[tokio::test]
+    async fn first_page_404_is_not_retried() {
+        let n = RefCell::new(0);
+        let r = collect_history_restarting(|_| {
+            *n.borrow_mut() += 1;
+            async { Err(nf()) }
+        })
+        .await;
+        assert!(matches!(r, Err(ApiError::NotFound(_))));
+        assert_eq!(*n.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_404_errors_are_not_retried() {
+        let n = RefCell::new(0);
+        let r = collect_history_restarting(|before| {
+            *n.borrow_mut() += 1;
+            let r = match before {
+                None => Ok(page(&[2], Some("version:2"), Some("T"))),
+                Some(_) => Err(ApiError::Server { status: 500, message: "x".into() }),
+            };
+            async move { r }
+        })
+        .await;
+        assert!(matches!(r, Err(ApiError::Server { .. })));
+        assert_eq!(*n.borrow(), 2);
     }
 
     #[tokio::test]
