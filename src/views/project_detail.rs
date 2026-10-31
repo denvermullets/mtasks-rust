@@ -289,7 +289,7 @@ fn discussion_section<'a>(
         teams,
         issues,
         my_member_ids: &[],
-        can_reply: false,
+        can_reply: true,
         reply_to: detail.reply_to.as_deref(),
         reply_composer: &detail.reply_composer,
         suggest: &detail.suggest,

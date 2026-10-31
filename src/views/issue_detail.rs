@@ -69,14 +69,6 @@ impl IssueDetailState {
     pub fn description_text(&self) -> String {
         self.description.text()
     }
-
-    pub fn comment_text(&self) -> String {
-        self.comment_composer.text()
-    }
-
-    pub fn reply_text(&self) -> String {
-        self.reply_composer.text()
-    }
 }
 
 /// Project pick_list option; the leading `{ id: None }` entry is "No project".

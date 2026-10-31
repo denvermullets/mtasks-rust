@@ -3008,6 +3008,49 @@ mod tests {
         }
     }
 
+    /// Adds a reply "pr" to the fixture's project comment "pc", whose remote id is
+    /// `parent_remote`.
+    fn add_project_reply(conn: &Connection, parent_remote: Option<i64>) {
+        if let Some(r) = parent_remote {
+            queries::set_comment_remote_id(conn, "pc", r).unwrap();
+        }
+        let reply = crate::db::models::Comment {
+            id: "pr".into(),
+            remote_id: None,
+            issue_id: None,
+            project_id: Some("p1".into()),
+            author_id: None,
+            body: "reply".into(),
+            parent_id: Some("pc".into()),
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(conn, &reply).unwrap();
+    }
+
+    #[test]
+    fn project_reply_waits_for_an_unsynced_parent() {
+        let conn = project_comment_fixture(Some(80));
+        add_project_reply(&conn, None);
+        match prep_comment_create_in(&conn, "pr") {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("expected the reply to wait"),
+        }
+    }
+
+    #[test]
+    fn project_reply_sends_the_parent_remote_id_to_the_project_path() {
+        let conn = project_comment_fixture(Some(80));
+        add_project_reply(&conn, Some(31));
+        match prep_comment_create_in(&conn, "pr") {
+            Prep::Ready(p) => {
+                assert_eq!(p.target, CommentTarget::Project(80));
+                assert_eq!(p.params.parent_id, Some(31));
+            }
+            Prep::Done(_) => panic!("expected Ready"),
+        }
+    }
+
     #[test]
     fn project_comment_create_waits_for_the_project() {
         let conn = project_comment_fixture(None);

@@ -79,7 +79,7 @@ pub enum Message {
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
 
-    // Issue detail — comments (flat thread, v1)
+    // Issue and project detail — comments (threaded)
     /// Composer text-editor action.
     CommentComposerChanged(iced::widget::text_editor::Action),
     /// "Comment" button pressed: persist the composer body locally + enqueue push.
@@ -288,6 +288,7 @@ pub enum Message {
 /// The comment composers of the open detail view (issue or project).
 struct CommentDrafts<'a> {
     comment: &'a mut iced::widget::text_editor::Content,
+    reply_to: &'a mut Option<String>,
     reply: &'a mut iced::widget::text_editor::Content,
     suggest: &'a mut Option<crate::mentions::SuggestState>,
 }
@@ -800,12 +801,14 @@ impl App {
         if matches!(self.view, View::ProjectDetail(_)) {
             return self.project_detail.as_mut().map(|d| CommentDrafts {
                 comment: &mut d.comment_composer,
+                reply_to: &mut d.reply_to,
                 reply: &mut d.reply_composer,
                 suggest: &mut d.suggest,
             });
         }
         self.issue_detail.as_mut().map(|d| CommentDrafts {
             comment: &mut d.comment_composer,
+            reply_to: &mut d.reply_to,
             reply: &mut d.reply_composer,
             suggest: &mut d.suggest,
         })
@@ -2009,38 +2012,38 @@ impl App {
                 }
             }
             Message::StartReply(parent_id) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_to = Some(parent_id);
-                    d.suggest = None;
-                    d.reply_composer = iced::widget::text_editor::Content::new();
+                if let Some(d) = self.comment_drafts_mut() {
+                    *d.reply_to = Some(parent_id);
+                    *d.suggest = None;
+                    *d.reply = iced::widget::text_editor::Content::new();
                 }
             }
             Message::CancelReply => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_to = None;
-                    d.reply_composer = iced::widget::text_editor::Content::new();
-                    d.suggest = None;
+                if let Some(d) = self.comment_drafts_mut() {
+                    *d.reply_to = None;
+                    *d.reply = iced::widget::text_editor::Content::new();
+                    *d.suggest = None;
                 }
             }
             Message::ReplyComposerChanged(action) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_composer.perform(action);
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.reply.perform(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Reply);
             }
             Message::SubmitReply => {
-                let (body, parent) = match &self.issue_detail {
-                    Some(d) => match &d.reply_to {
-                        Some(p) => (d.reply_text().trim().to_string(), p.clone()),
+                let (body, parent) = match self.comment_drafts_mut() {
+                    Some(d) => match d.reply_to {
+                        Some(p) => (d.reply.text().trim().to_string(), p.clone()),
                         None => return Task::none(),
                     },
                     None => return Task::none(),
                 };
                 if self.create_comment(body, Some(parent)) {
-                    if let Some(d) = &mut self.issue_detail {
-                        d.reply_to = None;
-                        d.reply_composer = iced::widget::text_editor::Content::new();
-                        d.suggest = None;
+                    if let Some(d) = self.comment_drafts_mut() {
+                        *d.reply_to = None;
+                        *d.reply = iced::widget::text_editor::Content::new();
+                        *d.suggest = None;
                     }
                 }
             }
