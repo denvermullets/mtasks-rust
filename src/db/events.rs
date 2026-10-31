@@ -663,7 +663,8 @@ mod tests {
         Comment {
             id: id.into(),
             remote_id: None,
-            issue_id: "i1".into(),
+            issue_id: Some("i1".into()),
+            project_id: None,
             author_id: None,
             body: String::new(),
             parent_id: parent.map(str::to_string),

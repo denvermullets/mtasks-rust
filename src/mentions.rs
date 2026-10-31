@@ -242,7 +242,9 @@ pub fn referenced_in(
     }
     for c in comments {
         if hits(&c.body) {
-            mark(&c.issue_id, false);
+            if let Some(issue_id) = &c.issue_id {
+                mark(issue_id, false);
+            }
         }
     }
     out
@@ -477,7 +479,8 @@ mod tests {
         Comment {
             id: format!("c-{issue_id}"),
             remote_id: None,
-            issue_id: issue_id.into(),
+            issue_id: Some(issue_id.into()),
+            project_id: None,
             author_id: None,
             body: body.into(),
             parent_id: None,

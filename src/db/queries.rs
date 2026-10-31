@@ -588,7 +588,7 @@ pub fn members_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Member>>
 /// surfaced in v1 — replies are ignored on pull.
 pub fn comments_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>> {
     let mut stmt = conn.prepare(
-        "SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
+        "SELECT id, remote_id, issue_id, project_id, author_id, body, parent_id, created_at, updated_at
          FROM comments WHERE issue_id = ?1 ORDER BY created_at",
     )?;
     let rows = stmt.query_map(params![issue_id], Comment::from_row)?;
@@ -598,7 +598,7 @@ pub fn comments_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Comme
 /// Every comment on any issue of a team (for local "Referenced In" scanning).
 pub fn comments_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Comment>> {
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.remote_id, c.issue_id, c.author_id, c.body, c.parent_id, c.created_at, c.updated_at
+        "SELECT c.id, c.remote_id, c.issue_id, c.project_id, c.author_id, c.body, c.parent_id, c.created_at, c.updated_at
          FROM comments c JOIN issues i ON i.id = c.issue_id
          WHERE i.team_id = ?1 AND i.deleted_at IS NULL ORDER BY c.created_at",
     )?;
@@ -608,7 +608,7 @@ pub fn comments_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Comment
 
 pub fn get_comment(conn: &Connection, comment_id: &str) -> Result<Option<Comment>> {
     conn.query_row(
-        "SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
+        "SELECT id, remote_id, issue_id, project_id, author_id, body, parent_id, created_at, updated_at
          FROM comments WHERE id = ?1",
         params![comment_id],
         Comment::from_row,
@@ -619,12 +619,13 @@ pub fn get_comment(conn: &Connection, comment_id: &str) -> Result<Option<Comment
 pub fn insert_comment(conn: &Connection, comment: &Comment) -> Result<()> {
     conn.execute(
         "INSERT INTO comments
-            (id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (id, remote_id, issue_id, project_id, author_id, body, parent_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             comment.id,
             comment.remote_id,
             comment.issue_id,
+            comment.project_id,
             comment.author_id,
             comment.body,
             comment.parent_id,
@@ -637,7 +638,7 @@ pub fn insert_comment(conn: &Connection, comment: &Comment) -> Result<()> {
 
 pub fn find_comment_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Comment>> {
     conn.query_row(
-        "SELECT id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at
+        "SELECT id, remote_id, issue_id, project_id, author_id, body, parent_id, created_at, updated_at
          FROM comments WHERE remote_id = ?1",
         params![remote_id],
         Comment::from_row,
@@ -648,11 +649,12 @@ pub fn find_comment_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Op
 pub fn upsert_comment(conn: &Connection, comment: &Comment) -> Result<()> {
     conn.execute(
         "INSERT INTO comments
-            (id, remote_id, issue_id, author_id, body, parent_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            (id, remote_id, issue_id, project_id, author_id, body, parent_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
             remote_id = excluded.remote_id,
             issue_id = excluded.issue_id,
+            project_id = excluded.project_id,
             author_id = excluded.author_id,
             body = excluded.body,
             parent_id = excluded.parent_id,
@@ -661,6 +663,7 @@ pub fn upsert_comment(conn: &Connection, comment: &Comment) -> Result<()> {
             comment.id,
             comment.remote_id,
             comment.issue_id,
+            comment.project_id,
             comment.author_id,
             comment.body,
             comment.parent_id,
@@ -1743,7 +1746,8 @@ mod tests {
         Comment {
             id: id.to_string(),
             remote_id,
-            issue_id: "i1".to_string(),
+            issue_id: Some("i1".to_string()),
+            project_id: None,
             author_id: None,
             body: body.to_string(),
             parent_id: None,
@@ -1814,6 +1818,30 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].body, "edited");
         assert_eq!(all[0].remote_id, Some(42));
+    }
+
+    #[test]
+    fn project_comment_round_trips_with_its_owner() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO projects (id, team_id, name, created_at, updated_at)
+             VALUES ('p1', 't1', 'P', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        let mut c = make_comment("pc1", None, "hello", NOW);
+        c.issue_id = None;
+        c.project_id = Some("p1".into());
+        insert_comment(&conn, &c).unwrap();
+
+        let got = get_comment(&conn, "pc1").unwrap().unwrap();
+        assert_eq!(got.owner(), crate::db::models::CommentOwner::Project("p1".into()));
+        assert_eq!(got.issue_id, None);
+        // Issue comment queries don't pick it up.
+        assert!(comments_for_issue(&conn, "i1").unwrap().is_empty());
+
+        let issue_comment = make_comment("ic1", None, "x", NOW);
+        assert_eq!(issue_comment.owner(), crate::db::models::CommentOwner::Issue("i1".into()));
     }
 
     #[test]
