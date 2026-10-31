@@ -570,6 +570,8 @@ pub struct NewRecurringIssue {
     pub assignee_id: Option<String>,
     pub project_id: Option<String>,
     pub lane_id: Option<String>,
+    /// Local label ids to attach.
+    pub label_ids: Vec<String>,
 }
 
 /// Payload of a `recurring_issue` / `create` queue entry: `{"starts_on":...}`.
@@ -613,6 +615,13 @@ pub fn create(conn: &Connection, local_team_id: &str, new: &NewRecurringIssue) -
                 new.lane_id
             ],
         )?;
+        for label_id in &new.label_ids {
+            c.execute(
+                "INSERT OR IGNORE INTO recurring_issue_labels (recurring_issue_id, label_id)
+                 VALUES (?1, ?2)",
+                params![id, label_id],
+            )?;
+        }
         Ok(())
     })?;
     Ok(id)
@@ -943,6 +952,7 @@ mod tests {
             assignee_id: None,
             project_id: None,
             lane_id: None,
+            label_ids: vec![],
         }
     }
 
@@ -965,6 +975,17 @@ mod tests {
         let id2 = create(&conn, "t1", &new_weekly()).unwrap();
         let r2 = get(&conn, &id2).unwrap().unwrap();
         assert_eq!((r2.lane_id, r2.project_id, r2.assignee_id), (None, None, None));
+    }
+
+    #[test]
+    fn create_writes_the_chosen_labels() {
+        let conn = setup();
+        let mut new = new_weekly();
+        new.label_ids = vec!["lab2".into(), "lab1".into()];
+        let id = create(&conn, "t1", &new).unwrap();
+        assert_eq!(label_ids(&conn, &id).unwrap(), vec!["lab1", "lab2"]);
+        let id2 = create(&conn, "t1", &new_weekly()).unwrap();
+        assert!(label_ids(&conn, &id2).unwrap().is_empty());
     }
 
     #[test]

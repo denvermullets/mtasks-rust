@@ -60,6 +60,7 @@ pub enum Message {
     RecurringFormAssigneeChanged(crate::views::recurring_issue_form::Choice),
     RecurringFormProjectChanged(crate::views::recurring_issue_form::Choice),
     RecurringFormLaneChanged(crate::views::recurring_issue_form::Choice),
+    RecurringFormLabelToggled(String),
     /// Validate and save the form: local row plus queued create.
     SaveRecurringIssue,
     /// Ask to delete a recurring issue (local id); opens the confirm modal.
@@ -4453,6 +4454,11 @@ impl App {
                     f.lane = v;
                 }
             }
+            Message::RecurringFormLabelToggled(label_id) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.toggle_label(&label_id);
+                }
+            }
             Message::SaveRecurringIssue => {
                 let (Some(form), Some(team_id)) =
                     (self.recurring_form.as_mut(), self.selected_team_id.clone())
@@ -4849,7 +4855,7 @@ impl App {
             }
             Modal::RecurringForm => match self.recurring_form {
                 Some(ref form) => {
-                    iced::widget::stack![base, crate::views::recurring_issue_form::view(form)]
+                    iced::widget::stack![base, crate::views::recurring_issue_form::view(form, &self.labels)]
                         .into()
                 }
                 None => base,
