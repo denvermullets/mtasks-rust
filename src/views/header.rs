@@ -53,6 +53,15 @@ pub fn save_as_new_view_button<'a>(read_only: bool) -> Element<'a, Message> {
         .into()
 }
 
+/// The header's Revert action for a Modified view.
+pub fn revert_button<'a>() -> Element<'a, Message> {
+    button(text("Revert").size(13))
+        .on_press(Message::RevertSavedView)
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`

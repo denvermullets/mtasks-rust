@@ -42,6 +42,8 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
+    /// Drop the open Saved view's unsaved changes (local only).
+    RevertSavedView,
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
     DeleteSavedViewConfirmed,
@@ -1407,7 +1409,8 @@ impl App {
             + usize::from(!header::needle(self.active_search()).is_empty())
     }
 
-    /// The header's "Update view" button: only on a Modified open view.
+    /// The header's view actions (Update view, Save as new view, Revert): only on
+    /// a Modified open view on the Board.
     fn update_view_action(&self) -> Option<Element<'_, Message>> {
         let v = self.open_view.as_ref()?;
         if self.view != View::Board {
@@ -1424,6 +1427,7 @@ impl App {
                 iced::widget::row![
                     header::update_view_button(self.sync_read_only),
                     header::save_as_new_view_button(self.sync_read_only),
+                    header::revert_button(),
                 ]
                 .spacing(8)
                 .into()
@@ -2391,6 +2395,16 @@ impl App {
                     Ok(false) => {}
                     Err(e) => eprintln!("[saved_views] update failed: {e}"),
                 }
+            }
+
+            Message::RevertSavedView => {
+                // Local only: nothing is written or queued.
+                if let Some(v) = &mut self.open_view {
+                    v.revert();
+                }
+                self.scroll_state.clear();
+                self.focused_lane = 0;
+                self.focused_issue = 0;
             }
 
             Message::ConfirmDeleteSavedView(view_id) => {

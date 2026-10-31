@@ -124,7 +124,12 @@ impl OpenView {
         self.baseline = self.state.clone();
     }
 
-    /// Whether the view is still the thing on screen:the selected team is its
+    /// Drop the working copy's changes and show the saved version again.
+    pub fn revert(&mut self) {
+        self.state = self.baseline.clone();
+    }
+
+    /// Whether the view is still the thing on screen: the selected team is its
     /// team and the pane is that team's board (or an issue opened from it).
     pub fn stays_open(&self, selected_team: Option<&str>, on_board_or_detail: bool) -> bool {
         on_board_or_detail && selected_team == Some(self.team_id.as_str())
@@ -1102,4 +1107,23 @@ mod tests {
         assert_eq!(ov.raw.get("order_by").map(String::as_str), Some("priority"));
         assert!(ov.is_modified(&fx.mirror()));
     }
+
+    #[test]
+    fn revert_restores_the_saved_version_and_clears_modified() {
+        let fx = Fx::new();
+        let mut ov = open_with(
+            &fx,
+            &[("order_by", "priority"), ("lane_ids", "10"), ("q", "bug")],
+        );
+        let saved = ov.state.clone();
+        let m = fx.mirror();
+        ov.state.display.order_by = OrderBy::Manual;
+        ov.state.filters.statuses = vec!["l-b".into()];
+        ov.state.search = "other".into();
+        assert!(ov.is_modified(&m));
+        ov.revert();
+        assert_eq!(ov.state, saved);
+        assert!(!ov.is_modified(&m));
+    }
 }
+
