@@ -2233,6 +2233,17 @@ impl SyncEngine {
             }
         }
 
+        // Phase 2b: the user's Saved views (cross-team, own cursor). Needs the
+        // teams just refreshed; a failure doesn't block the per-team pulls.
+        match pull_saved_views_step(client).await {
+            Ok(()) => report.processed += 1,
+            Err(msg) => {
+                report.failed += 1;
+                note_pull_failure(&mut report, &msg);
+                report.last_error = Some(msg);
+            }
+        }
+
         // Phase 3: figure out which teams to deeply sync.
         let targets = match collect_pull_targets(me.token.scoped_team_ids().as_deref()) {
             Ok(t) => t,
@@ -2604,6 +2615,37 @@ fn store_list_etag(conn: &Connection, team_id: &str, list: &str, etag: Option<&s
             &e.to_string(),
         );
     }
+}
+
+/// Pull the user's Saved views (cross-team). Incremental from the Saved-views
+/// cursor minus the overlap; the cursor advances to `X-Server-Time` only when
+/// every row was applied.
+async fn pull_saved_views_step(client: &ApiClient) -> Result<(), String> {
+    let since = {
+        let conn = open()?;
+        crate::db::saved_views::cursor(&conn)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
+    };
+    let page = crate::api::saved_views::list_page(client, since.as_deref())
+        .await
+        .map_err(|e| format!("saved_views: {e}"))?;
+    let conn = open()?;
+    let applied = crate::db::saved_views::apply_pulled(&conn, &page.rows, page.server_time.as_deref())
+        .map_err(|e| format!("db (saved views): {e}"))?;
+    sync_log(
+        "phase=pull_saved_views",
+        "ok",
+        &format!(
+            "mode={} rows={} upserted={} skipped_unmirrored_team={} skipped_pending={}",
+            pull_mode(&since),
+            page.rows.len(),
+            applied.upserted,
+            applied.skipped_unmirrored,
+            applied.skipped_pending
+        ),
+    );
+    Ok(())
 }
 
 /// Cursor resource name for the project index in `pull_cursors`.

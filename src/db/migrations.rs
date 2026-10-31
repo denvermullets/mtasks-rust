@@ -420,6 +420,25 @@ const MIGRATIONS: &[Migration] = &[
                 ON notifications (read_at, created_at);
         ",
     },
+    Migration {
+        version: 22,
+        name: "saved_views",
+        up: "
+            -- Local mirror of the user's Saved views. `query` is the raw Rails
+            -- string->string map as JSON, with remote ids, unknown keys kept.
+            CREATE TABLE IF NOT EXISTS saved_views (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                query TEXT NOT NULL DEFAULT '{}',
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_views_team_position
+                ON saved_views (team_id, position);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
