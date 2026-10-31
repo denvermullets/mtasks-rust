@@ -577,16 +577,12 @@ pub struct App {
 impl App {
     /// Snapshot of what the command palette searches, taken when it opens.
     fn palette_data(&self) -> PaletteData {
-        let team = self
-            .selected_team_id
-            .as_ref()
-            .and_then(|id| self.teams.iter().find(|t| t.id == *id))
-            .cloned();
+        let conn = self.db();
         PaletteData {
-            issues: self.issues.clone(),
-            team,
+            issues: queries::searchable_issues(&conn).unwrap_or_default(),
+            current_team_id: self.selected_team_id.clone(),
             teams: self.teams.clone(),
-            projects: PaletteData::load_projects(&self.db()),
+            projects: PaletteData::load_projects(&conn),
         }
     }
 
@@ -2568,8 +2564,25 @@ impl App {
                     PaletteNav::Team(id) => {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
-                    // open_issue_detail commits any open detail edits first.
-                    PaletteNav::Issue(id) => return self.update(Message::OpenIssueDetail(id)),
+                    PaletteNav::Issue(id) => {
+                        let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
+                            return Task::none();
+                        };
+                        // Another team (or My Issues' mixed data): select the
+                        // issue's team first, like a sidebar click, so the
+                        // sidebar follows and the detail view has its data.
+                        if self.selected_team_id.as_deref() != Some(issue.team_id.as_str())
+                            || self.view == View::MyIssues
+                        {
+                            self.expanded_teams.insert(issue.team_id.clone());
+                            let _ = self.update(Message::SelectTeamView(
+                                issue.team_id.clone(),
+                                View::Board,
+                            ));
+                        }
+                        // open_issue_detail commits any open detail edits first.
+                        return self.open_issue_detail(&issue);
+                    }
                     PaletteNav::Project { project_id, team_id } => {
                         // Other team: switch (reloads its data) so the project is
                         // in memory; current team opens without a reload.
