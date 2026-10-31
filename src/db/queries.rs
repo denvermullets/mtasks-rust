@@ -405,6 +405,123 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
     Ok(())
 }
 
+/// What a local team move changed, for the toast.
+#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueMoveSummary {
+    pub team_number: i32,
+    pub lane_id: String,
+    /// True when the target had no lane with the old lane's name.
+    pub lane_fell_back: bool,
+    pub assignee_cleared: bool,
+    pub project_cleared: bool,
+    pub parent_cleared: bool,
+    pub labels_removed: usize,
+    pub sub_issues_detached: usize,
+}
+
+/// Move an issue to another local team in one transaction, mirroring the Rails
+/// `IssueTeamMover`. Not queued here; the normal `update_issue` path still
+/// never writes `team_id` / `team_number`.
+#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
+pub fn move_issue_to_team(
+    conn: &Connection,
+    issue_id: &str,
+    target_team_id: &str,
+) -> Result<IssueMoveSummary> {
+    let tx = conn.unchecked_transaction()?;
+    let old = get_issue(&tx, issue_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    if old.team_id == target_team_id {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "issue is already in that team".into(),
+        ));
+    }
+
+    // Lane: case-insensitive name match, else the target's first lane.
+    let old_lane_name: Option<String> = tx
+        .query_row(
+            "SELECT name FROM lanes WHERE id = ?1",
+            params![old.lane_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let target_lanes = lanes_for_team(&tx, target_team_id)?;
+    let matched = old_lane_name.as_ref().and_then(|n| {
+        target_lanes
+            .iter()
+            .find(|l| l.name.to_lowercase() == n.to_lowercase())
+    });
+    let lane = matched
+        .or_else(|| target_lanes.first())
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+    // Assignee: members are per-team rows, so keep the person by finding their
+    // row in the target team (same row, remote id, or email).
+    let new_assignee: Option<String> = match &old.assignee_id {
+        Some(a) => tx
+            .query_row(
+                "SELECT t.id FROM members m JOIN members t ON t.team_id = ?2
+                   AND (t.id = m.id OR (m.remote_id IS NOT NULL AND t.remote_id = m.remote_id)
+                        OR LOWER(t.email) = LOWER(m.email))
+                 WHERE m.id = ?1 LIMIT 1",
+                params![a, target_team_id],
+                |r| r.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+
+    // Parent survives only if it's already in the target team.
+    let parent_kept = match &old.parent_issue_id {
+        Some(p) => tx
+            .query_row(
+                "SELECT 1 FROM issues WHERE id = ?1 AND team_id = ?2",
+                params![p, target_team_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some(),
+        None => false,
+    };
+
+    let team_number = next_team_number(&tx, target_team_id)?;
+    let now = now_ts();
+    tx.execute(
+        "UPDATE issues SET team_id=?1, team_number=?2, lane_id=?3, assignee_id=?4,
+                project_id=NULL, parent_issue_id=?5, updated_at=?6 WHERE id=?7",
+        params![
+            target_team_id,
+            team_number,
+            lane.id,
+            new_assignee,
+            if parent_kept { old.parent_issue_id.clone() } else { None },
+            now,
+            issue_id
+        ],
+    )?;
+    let labels_removed = tx.execute(
+        "DELETE FROM issue_labels WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    let sub_issues_detached = tx.execute(
+        "UPDATE issues SET parent_issue_id = NULL, updated_at = ?2 WHERE parent_issue_id = ?1",
+        params![issue_id, now],
+    )?;
+    record_local_diff(&tx, Some(old.clone()), issue_id)?;
+    tx.commit()?;
+
+    Ok(IssueMoveSummary {
+        team_number,
+        lane_id: lane.id.clone(),
+        lane_fell_back: matched.is_none(),
+        assignee_cleared: old.assignee_id.is_some() && new_assignee.is_none(),
+        project_cleared: old.project_id.is_some(),
+        parent_cleared: old.parent_issue_id.is_some() && !parent_kept,
+        labels_removed,
+        sub_issues_detached,
+    })
+}
+
 pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> Result<()> {
     let old = get_issue(conn, issue_id)?;
     let now = crate::db::now_iso();
@@ -2016,5 +2133,171 @@ mod tests {
         let evs = events::events_for_issue_resolved(&conn, "c1", None).unwrap();
         assert!(evs[2].description().ends_with("to Active"));
         assert_eq!(evs[2].actor_name, None);
+    }
+
+    // ── move_issue_to_team ──
+
+    /// `setup()` plus a target team t2 with lanes "Todo"(0), "in progress"(1),
+    /// members shared by email, and a source-team lane/member set.
+    fn move_setup() -> Connection {
+        let conn = setup();
+        let ex = |sql: &str| conn.execute_batch(sql).unwrap();
+        ex("INSERT INTO teams (id, name, identifier, created_at, updated_at)
+            VALUES ('t2', 'T2', 'TWO', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+            INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES
+              ('l1b', 'In Progress', 1, 't1', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+              ('l2a', 'Todo', 0, 't2', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+              ('l2b', 'in progress', 1, 't2', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+            INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at) VALUES
+              ('m1', 1, 't1', 'Ann', 'ann@x.io', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+              ('m2', 2, 't1', 'Bob', 'bob@x.io', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+              ('m1t2', NULL, 't2', 'Ann', 'ANN@x.io', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+            INSERT INTO projects (id, team_id, name, created_at, updated_at)
+              VALUES ('p1', 't1', 'P', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+            INSERT INTO issues (id, title, priority, lane_id, team_id, team_number, created_at, updated_at)
+              VALUES ('x2', 'Existing', 4, 'l2a', 't2', 7, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');");
+        conn
+    }
+
+    fn issue_row(conn: &Connection, id: &str) -> Issue {
+        get_issue(conn, id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn move_sets_team_and_unique_provisional_number() {
+        let conn = move_setup();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        let i = issue_row(&conn, "i1");
+        assert_eq!(i.team_id, "t2");
+        assert_eq!(i.team_number, Some(8));
+        assert_eq!(s.team_number, 8);
+    }
+
+    #[test]
+    fn move_remaps_lane_by_name_case_insensitively() {
+        let conn = move_setup();
+        conn.execute("UPDATE issues SET lane_id='l1b' WHERE id='i1'", []).unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").lane_id, "l2b");
+        assert!(!s.lane_fell_back);
+    }
+
+    #[test]
+    fn move_falls_back_to_first_lane_by_position() {
+        let conn = move_setup();
+        // "Backlog" has no match in t2.
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").lane_id, "l2a");
+        assert!(s.lane_fell_back);
+    }
+
+    #[test]
+    fn move_keeps_assignee_who_is_a_target_member() {
+        let conn = move_setup();
+        conn.execute("UPDATE issues SET assignee_id='m1' WHERE id='i1'", []).unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").assignee_id.as_deref(), Some("m1t2"));
+        assert!(!s.assignee_cleared);
+    }
+
+    #[test]
+    fn move_clears_assignee_who_is_not_a_target_member() {
+        let conn = move_setup();
+        conn.execute("UPDATE issues SET assignee_id='m2' WHERE id='i1'", []).unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").assignee_id, None);
+        assert!(s.assignee_cleared);
+    }
+
+    #[test]
+    fn move_clears_project_and_removes_all_labels() {
+        let conn = move_setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        insert_label(&conn, &make_label("lab2", "ui")).unwrap();
+        set_issue_labels(&conn, "i1", &["lab1".into(), "lab2".into()]).unwrap();
+        conn.execute("UPDATE issues SET project_id='p1' WHERE id='i1'", []).unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").project_id, None);
+        assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+        assert!(s.project_cleared);
+        assert_eq!(s.labels_removed, 2);
+        // The labels themselves survive.
+        assert_eq!(labels_for_team(&conn, "t1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn move_clears_cross_team_parent() {
+        let conn = move_setup();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES ('par', 'Parent', 4, 'l1', 't1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        conn.execute("UPDATE issues SET parent_issue_id='par' WHERE id='i1'", []).unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").parent_issue_id, None);
+        assert!(s.parent_cleared);
+    }
+
+    #[test]
+    fn move_keeps_a_parent_already_in_the_target_team() {
+        let conn = move_setup();
+        conn.execute("UPDATE issues SET parent_issue_id='x2' WHERE id='i1'", []).unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").parent_issue_id.as_deref(), Some("x2"));
+        assert!(!s.parent_cleared);
+    }
+
+    #[test]
+    fn move_detaches_sub_issues() {
+        let conn = move_setup();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, parent_issue_id, created_at, updated_at)
+             VALUES ('kid', 'Kid', 4, 'l1', 't1', 'i1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        let kid = issue_row(&conn, "kid");
+        assert_eq!(kid.parent_issue_id, None);
+        assert_eq!(kid.team_id, "t1");
+        assert_eq!(s.sub_issues_detached, 1);
+    }
+
+    #[test]
+    fn move_leaves_comments_and_dependencies_alone() {
+        let conn = move_setup();
+        conn.execute(
+            "INSERT INTO comments (id, issue_id, body, created_at, updated_at)
+             VALUES ('c1', 'i1', 'hi', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+             VALUES ('d1', 'i1', 'x2', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        move_issue_to_team(&conn, "i1", "t2").unwrap();
+        let n = |t: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!((n("comments"), n("issue_dependencies")), (1, 1));
+    }
+
+    #[test]
+    fn move_to_same_team_or_laneless_team_is_refused_without_changes() {
+        let conn = move_setup();
+        assert!(move_issue_to_team(&conn, "i1", "t1").is_err());
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t3', 'T3', 'TRE', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        assert!(move_issue_to_team(&conn, "i1", "t3").is_err());
+        assert_eq!(issue_row(&conn, "i1").team_id, "t1");
     }
 }
