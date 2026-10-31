@@ -2,6 +2,7 @@ pub mod connection;
 pub mod events;
 pub mod migrations;
 pub mod models;
+pub mod notifications;
 pub mod queries;
 pub mod sync_queue;
 
