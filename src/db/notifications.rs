@@ -297,6 +297,49 @@ pub fn set_etag(conn: &Connection, etag: &str) -> Result<()> {
     set_list_etag(conn, SCOPE, RESOURCE, etag)
 }
 
+/// Most per-item banners one poll may post; more collapses into a single one.
+pub const MAX_ITEM_BANNERS: usize = 3;
+
+/// A native banner to post.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Banner {
+    pub title: String,
+    pub body: String,
+}
+
+/// Which banners a poll should post. `new_unread` is `PollReport::new_unread`.
+/// Nothing when the window is focused, the poll was the backfill, banners are
+/// disabled, or there is nothing new; up to 3 items get one banner each; more
+/// collapse into one "N new notifications" banner.
+pub fn banners_to_fire(
+    new_unread: &[Notification],
+    window_focused: bool,
+    backfill: bool,
+    enabled: bool,
+) -> Vec<Banner> {
+    if window_focused || backfill || !enabled || new_unread.is_empty() {
+        return Vec::new();
+    }
+    if new_unread.len() > MAX_ITEM_BANNERS {
+        return vec![Banner {
+            title: "JAIT".into(),
+            body: format!("{} new notifications", new_unread.len()),
+        }];
+    }
+    new_unread
+        .iter()
+        .map(|n| Banner {
+            title: match (&n.actor_name, &n.issue_identifier) {
+                (Some(a), Some(i)) => format!("{a} \u{b7} {i}"),
+                (Some(a), None) => a.clone(),
+                (None, Some(i)) => i.clone(),
+                (None, None) => "JAIT".into(),
+            },
+            body: n.message.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +373,56 @@ mod tests {
     }
 
     const NOW: &str = "2026-10-31T12:00:00.000Z";
+
+    fn mirrored(count: i64) -> Vec<Notification> {
+        let items = (1..=count).map(|i| n(i, "2026-10-31T10:00:00.000Z", None)).collect();
+        apply_poll(&mem(), &env(items, count, NOW), NOW).unwrap()
+    }
+
+    #[test]
+    fn banners_nothing_when_window_focused() {
+        assert!(banners_to_fire(&mirrored(2), true, false, true).is_empty());
+    }
+
+    #[test]
+    fn banners_nothing_on_backfill() {
+        assert!(banners_to_fire(&mirrored(2), false, true, true).is_empty());
+    }
+
+    #[test]
+    fn banners_nothing_when_disabled() {
+        assert!(banners_to_fire(&mirrored(2), false, false, false).is_empty());
+    }
+
+    #[test]
+    fn banners_nothing_for_empty_poll() {
+        assert!(banners_to_fire(&[], false, false, true).is_empty());
+    }
+
+    #[test]
+    fn banners_one_each_up_to_three() {
+        for count in 1..=3 {
+            let b = banners_to_fire(&mirrored(count), false, false, true);
+            assert_eq!(b.len(), count as usize);
+        }
+        let b = banners_to_fire(&mirrored(1), false, false, true);
+        assert_eq!(b[0].title, "Ann \u{b7} JRST-1");
+        assert_eq!(b[0].body, "msg 1");
+    }
+
+    #[test]
+    fn banners_collapse_above_three() {
+        let b = banners_to_fire(&mirrored(4), false, false, true);
+        assert_eq!(b, vec![Banner { title: "JAIT".into(), body: "4 new notifications".into() }]);
+    }
+
+    #[test]
+    fn banner_title_falls_back_without_actor_or_issue() {
+        let mut one = mirrored(1);
+        one[0].actor_name = None;
+        one[0].issue_identifier = None;
+        assert_eq!(banners_to_fire(&one, false, false, true)[0].title, "JAIT");
+    }
 
     #[test]
     fn reapplying_same_envelope_is_idempotent() {
