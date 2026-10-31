@@ -43,6 +43,9 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
+    /// Pause (false) or resume (true) a recurring issue (local id); local
+    /// write plus queued push.
+    ToggleRecurringActive(String, bool),
     /// Drop the open Saved view's unsaved changes (local only).
     RevertSavedView,
     /// Ask to delete a Saved view (local id).
@@ -4335,6 +4338,12 @@ impl App {
                 if let Some(id) = self.label_form.as_ref().and_then(|f| f.editing_id.clone()) {
                     self.modal = Modal::DeleteLabelConfirm(id);
                 }
+            }
+
+            Message::ToggleRecurringActive(id, active) => {
+                let conn = self.db();
+                let _ = crate::db::recurring_issues::set_active(&conn, &id, active);
+                self.reload_recurring(&conn);
             }
 
             Message::DeleteLabelConfirmed => {

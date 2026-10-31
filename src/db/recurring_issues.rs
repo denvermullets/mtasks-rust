@@ -291,7 +291,6 @@ pub fn origin_of_issue(conn: &Connection, issue_id: &str) -> Result<Option<Recur
     }
 }
 
-#[allow(dead_code)] // used by the view/write tickets that build on this module
 pub fn get(conn: &Connection, id: &str) -> Result<Option<RecurringIssue>> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM recurring_issues WHERE id = ?1"),
@@ -457,6 +456,85 @@ pub fn list_rows(conn: &Connection, local_team_id: &str) -> Result<Vec<Recurring
         .iter()
         .map(|r| row_from(conn, r))
         .collect()
+}
+
+/// Run a local recurring issue write and enqueue its push in ONE transaction,
+/// so the row and its `recurring_issue` queue entry commit together or not at
+/// all. Returns the new sync-queue entry id. Every local write (set active,
+/// edit, delete, create) goes through this; `action` is the queue action and
+/// `payload` its JSON (see [`update_payload`] for `update`).
+pub fn write_queued(
+    conn: &Connection,
+    id: &str,
+    action: &str,
+    payload: Option<&str>,
+    edit: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    edit(&tx)?;
+    let entry = sync_queue::enqueue_returning_id(&tx, ENTITY_TYPE, id, action, payload)?;
+    tx.commit()?;
+    Ok(entry)
+}
+
+/// Payload of a `recurring_issue` / `update` queue entry:
+/// `{"changed":["active",...]}` names the fields the push sends (values are
+/// re-read from the row at push time), plus `"starts_on"` (`YYYY-MM-DD`) only
+/// when the change moves the schedule. Without `starts_on` the server keeps
+/// the stored `next_run_on` (a pause/resume must not reset the schedule).
+pub fn update_payload(changed: &[&str], starts_on: Option<&str>) -> String {
+    let mut v = serde_json::json!({ "changed": changed });
+    if let Some(d) = starts_on {
+        v["starts_on"] = serde_json::Value::String(d.to_string());
+    }
+    v.to_string()
+}
+
+/// Decode an update payload into (changed field names, starts_on). A missing
+/// or unparseable payload is "no known fields", no `starts_on`.
+pub fn parse_update_payload(payload: Option<&str>) -> (Vec<String>, Option<String>) {
+    let Some(v) = payload.and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok()) else {
+        return (Vec::new(), None);
+    };
+    let changed = v
+        .get("changed")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let starts_on = v.get("starts_on").and_then(|s| s.as_str()).map(String::from);
+    (changed, starts_on)
+}
+
+/// Pause (`false`) or resume (`true`) a recurring issue locally and queue the
+/// `update` push, atomically. Returns the queue entry id, or `None` when the
+/// row doesn't exist (nothing written). The schedule is untouched, so the
+/// payload carries no `starts_on`.
+pub fn set_active(conn: &Connection, id: &str, active: bool) -> Result<Option<i64>> {
+    if get(conn, id)?.is_none() {
+        return Ok(None);
+    }
+    let payload = update_payload(&["active"], None);
+    write_queued(conn, id, "update", Some(&payload), |c| {
+        c.execute(
+            "UPDATE recurring_issues SET active = ?1, updated_at = ?2 WHERE id = ?3",
+            params![active, crate::db::now_iso(), id],
+        )?;
+        Ok(())
+    })
+    .map(Some)
+}
+
+/// Overwrite the local row `id` with a push response (the server's version
+/// wins, including `next_run_on` and the label join). Unlike [`apply_pulled`]
+/// it ignores queued entries: it runs while the pushed entry is still queued.
+pub fn apply_response(conn: &Connection, id: &str, dto: &RecurringIssueDto) -> Result<()> {
+    let Some(local) = get(conn, id)? else {
+        return Ok(());
+    };
+    let tx = conn.unchecked_transaction()?;
+    upsert_row(&tx, id, &local.team_id, dto)?;
+    replace_labels(&tx, id, &dto.label_ids)?;
+    tx.commit()
 }
 
 /// Local label ids joined to a recurring issue, sorted.
@@ -644,6 +722,103 @@ mod tests {
         assert!(find_by_remote_id(&conn, 6).unwrap().is_some());
         assert!(label_ids(&conn, &id5).unwrap().is_empty());
         assert!(!sync_queue::has_pending_entry(&conn, ENTITY_TYPE, &id5).unwrap());
+    }
+
+    fn pending_entries(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+        let mut stmt = conn
+            .prepare("SELECT entity_type, action, payload FROM sync_queue WHERE synced_at IS NULL")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn set_active_enqueues_one_update_without_starts_on() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(5, "R", NOW)], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+
+        assert!(set_active(&conn, &id, false).unwrap().is_some());
+
+        assert!(!get(&conn, &id).unwrap().unwrap().active);
+        let entries = pending_entries(&conn);
+        assert_eq!(entries.len(), 1);
+        assert_eq!((entries[0].0.as_str(), entries[0].1.as_str()), (ENTITY_TYPE, "update"));
+        let payload: serde_json::Value =
+            serde_json::from_str(entries[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(payload, serde_json::json!({ "changed": ["active"] }));
+        assert!(payload.get("starts_on").is_none());
+    }
+
+    #[test]
+    fn set_active_on_a_missing_row_writes_nothing() {
+        let conn = setup();
+        assert_eq!(set_active(&conn, "nope", true).unwrap(), None);
+        assert!(pending_entries(&conn).is_empty());
+    }
+
+    #[test]
+    fn write_queued_rolls_back_the_edit_when_the_edit_fails() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(5, "R", NOW)], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        let r = write_queued(&conn, &id, "update", None, |c| {
+            c.execute("UPDATE recurring_issues SET active = 0 WHERE id = ?1", params![id])?;
+            c.execute("UPDATE no_such_table SET x = 1", [])?;
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert!(get(&conn, &id).unwrap().unwrap().active);
+        assert!(pending_entries(&conn).is_empty());
+    }
+
+    #[test]
+    fn update_payload_round_trips_and_only_schedule_changes_carry_starts_on() {
+        let p = update_payload(&["frequency", "interval"], Some("2026-11-05"));
+        assert_eq!(
+            parse_update_payload(Some(&p)),
+            (
+                vec!["frequency".to_string(), "interval".to_string()],
+                Some("2026-11-05".to_string())
+            )
+        );
+        assert_eq!(parse_update_payload(None), (vec![], None));
+        assert_eq!(parse_update_payload(Some("junk")), (vec![], None));
+    }
+
+    #[test]
+    fn a_pull_during_a_pending_toggle_does_not_revert_the_row() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(5, "R", NOW)], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        set_active(&conn, &id, false).unwrap();
+
+        let applied =
+            apply_pulled(&conn, "t1", &[rec(5, "R", "2026-02-01T00:00:00.000Z")], None).unwrap();
+
+        assert_eq!(applied.skipped_pending, 1);
+        assert!(!get(&conn, &id).unwrap().unwrap().active);
+    }
+
+    #[test]
+    fn apply_response_overwrites_the_row_even_while_its_entry_is_queued() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(5, "R", NOW)], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        set_active(&conn, &id, false).unwrap();
+
+        let mut resp = rec(5, "R server", "2026-02-01T00:00:00.000Z");
+        resp.active = false;
+        resp.next_run_on = Some("2026-11-09".into());
+        resp.label_ids = vec![1];
+        apply_response(&conn, &id, &resp).unwrap();
+
+        let row = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.title, "R server");
+        assert_eq!(row.next_run_on.as_deref(), Some("2026-11-09"));
+        assert_eq!(label_ids(&conn, &id).unwrap(), vec!["lab1".to_string()]);
     }
 
     #[test]
