@@ -238,8 +238,8 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     .width(Length::Fixed(COL_LANE));
 
     let mut chips = row![].spacing(4).align_y(Alignment::Center);
-    for (name, color) in &r.labels {
-        chips = chips.push(label_chip(name, color.as_deref()));
+    for chip in &r.labels {
+        chips = chips.push(label_chip(&chip.name, chip.color.as_deref()));
     }
     let labels = container(chips).width(Length::Fixed(COL_LABELS));
 

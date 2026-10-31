@@ -370,8 +370,16 @@ pub struct RecurringIssueRow {
     /// Local name of the lane spawned issues start in, or [`FIRST_LANE`] when
     /// none is set (the server then uses the team's first lane).
     pub lane: String,
-    /// Attached labels as `(name, hex color)`, sorted by name.
-    pub labels: Vec<(String, Option<String>)>,
+    /// Attached labels, sorted by name.
+    pub labels: Vec<LabelChip>,
+}
+
+/// A label as a row shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelChip {
+    pub name: String,
+    /// Hex color, if the label has one.
+    pub color: Option<String>,
 }
 
 /// Lane cell text for a recurring issue with no lane set.
@@ -464,14 +472,19 @@ fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> 
     })
 }
 
-/// `(name, color)` of a recurring issue's labels, sorted by name.
-fn label_chips(conn: &Connection, id: &str) -> Result<Vec<(String, Option<String>)>> {
+/// The labels of a recurring issue, sorted by name.
+fn label_chips(conn: &Connection, id: &str) -> Result<Vec<LabelChip>> {
     let mut stmt = conn.prepare(
         "SELECT l.name, l.color FROM recurring_issue_labels ril
          JOIN labels l ON l.id = ril.label_id
          WHERE ril.recurring_issue_id = ?1 ORDER BY l.name, l.id",
     )?;
-    let rows = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(params![id], |r| {
+        Ok(LabelChip {
+            name: r.get(0)?,
+            color: r.get(1)?,
+        })
+    })?;
     rows.collect()
 }
 
@@ -1285,8 +1298,8 @@ mod tests {
         assert_eq!(
             by("With"),
             vec![
-                ("Alpha".to_string(), None),
-                ("Zed".to_string(), Some("#ff0000".to_string()))
+                LabelChip { name: "Alpha".into(), color: None },
+                LabelChip { name: "Zed".into(), color: Some("#ff0000".into()) }
             ]
         );
         assert!(by("Without").is_empty());
