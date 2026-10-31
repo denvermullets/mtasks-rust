@@ -77,6 +77,9 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
         );
     }
     content = content.push(list);
+    if state.rows.is_empty() {
+        content = content.push(text("No results").size(13).color(t::text_muted()));
+    }
 
     let panel = container(content)
         .padding(20)

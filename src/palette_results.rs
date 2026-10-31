@@ -49,6 +49,15 @@ pub struct PaletteData<'a> {
     pub team: Option<&'a Team>,
 }
 
+/// Most rows the palette ever shows.
+pub const MAX_ROWS: usize = 20;
+
+/// Keep the first `max` rows; call after ordering so the best matches survive.
+fn cap_rows(mut rows: Vec<PaletteRow>, max: usize) -> Vec<PaletteRow> {
+    rows.truncate(max);
+    rows
+}
+
 /// Ordered palette rows for `query`. An empty (or blank) query lists every
 /// navigation target.
 pub fn palette_results(query: &str, data: &PaletteData<'_>) -> Vec<PaletteRow> {
@@ -56,7 +65,7 @@ pub fn palette_results(query: &str, data: &PaletteData<'_>) -> Vec<PaletteRow> {
     let mut rows = Vec::new();
     push_issues(query, data, &mut rows);
     push_views(&needle, data, &mut rows);
-    rows
+    cap_rows(rows, MAX_ROWS)
 }
 
 /// Case-insensitive substring match; `needle` is already trimmed and lowercased.
@@ -241,6 +250,33 @@ mod tests {
     #[test]
     fn non_matching_query_returns_nothing() {
         assert!(names("zzz").is_empty());
+    }
+
+    fn view_row(name: &str) -> PaletteRow {
+        PaletteRow {
+            kind: PaletteKind::View,
+            primary: name.to_string(),
+            secondary: String::new(),
+            nav: PaletteNav::View(View::Board),
+        }
+    }
+
+    #[test]
+    fn cap_keeps_the_first_rows_in_order() {
+        let rows: Vec<_> = ["a", "b", "c", "d"].into_iter().map(view_row).collect();
+        let capped: Vec<_> = cap_rows(rows, 2).into_iter().map(|r| r.primary).collect();
+        assert_eq!(capped, ["a", "b"]);
+    }
+
+    #[test]
+    fn cap_leaves_short_lists_alone() {
+        let rows = vec![view_row("a")];
+        assert_eq!(cap_rows(rows, 20).len(), 1);
+    }
+
+    #[test]
+    fn results_never_exceed_the_cap() {
+        assert!(palette_results("", &PaletteData::default()).len() <= MAX_ROWS);
     }
 
     #[test]
