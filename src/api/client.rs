@@ -107,6 +107,25 @@ impl ApiClient {
         })
     }
 
+    /// GET a list endpoint and also return the raw response headers, for
+    /// endpoints whose paging header isn't `X-Next-After-Id` (Activity). Same
+    /// row-skipping decode.
+    pub async fn get_list_with_headers<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<(Vec<T>, header::HeaderMap), ApiError> {
+        let resp = self.dispatch(self.http.get(self.url(path))).await?;
+        if !resp.status().is_success() {
+            return Err(map_error(resp).await);
+        }
+        let headers = resp.headers().clone();
+        let value = resp
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+        Ok((decode_list_lenient(value, path)?, headers))
+    }
+
     /// Conditional variant of [`Self::get_list`]: same row-skipping decode.
     pub async fn get_list_conditional<T: DeserializeOwned>(
         &self,

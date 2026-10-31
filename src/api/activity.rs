@@ -1,9 +1,86 @@
 //! DTOs for the issue Activity feed (`GET .../issues/:id/activity`).
 
-// Unused until the client call and store land (JRST-130 / JRST-131); drop then.
+// Unused until the store and fetch routine land (JRST-131+); drop then.
 #![allow(dead_code)]
 
+use reqwest::header::HeaderMap;
 use serde::Deserialize;
+
+use super::{encode_query_value, ApiClient, ApiError};
+
+/// Entry types the desktop shows. `comments` is left out (comments have their
+/// own endpoint).
+const TYPES: &str = "versions,dependencies,references";
+
+/// Server cap on `limit`.
+pub const MAX_LIMIT: u32 = 500;
+
+/// One page of the feed (oldest first within the page).
+#[derive(Debug, PartialEq)]
+pub struct ActivityPage {
+    pub entries: Vec<ActivityEntry>,
+    /// `X-Next-Before-Id`: pass as `before_id` to get the next older page.
+    /// `None` when nothing older exists.
+    pub next_before_id: Option<String>,
+    /// `X-Server-Time`. Absent on the unknown-issue 404 (that is an `Err`).
+    pub server_time: Option<String>,
+}
+
+/// Query options for [`list`].
+#[derive(Debug, Default, Clone)]
+pub struct ActivityParams<'a> {
+    /// Entry cursor (`"version:440"`) to page back from.
+    pub before_id: Option<&'a str>,
+    /// Strict `created_at > since` (ISO8601).
+    pub since: Option<&'a str>,
+    /// Newest `limit` matches; clamped to [`MAX_LIMIT`].
+    pub limit: Option<u32>,
+}
+
+/// `GET /api/v1/teams/:team_id/issues/:issue_id/activity`. An unknown issue
+/// (or one that left the team) is `ApiError::NotFound`; so is an unknown
+/// `before_id`. Entry types we don't model are skipped, not an error.
+pub async fn list(
+    client: &ApiClient,
+    team_id: i64,
+    issue_id: i64,
+    params: &ActivityParams<'_>,
+) -> Result<ActivityPage, ApiError> {
+    let path = list_path(team_id, issue_id, params);
+    let (entries, headers) = client.get_list_with_headers(&path).await?;
+    let (next_before_id, server_time) = page_meta(&headers);
+    Ok(ActivityPage {
+        entries,
+        next_before_id,
+        server_time,
+    })
+}
+
+fn list_path(team_id: i64, issue_id: i64, p: &ActivityParams<'_>) -> String {
+    let mut path = format!("api/v1/teams/{team_id}/issues/{issue_id}/activity?types={TYPES}");
+    if let Some(b) = p.before_id {
+        path.push_str(&format!("&before_id={}", encode_query_value(b)));
+    }
+    if let Some(s) = p.since {
+        path.push_str(&format!("&since={}", encode_query_value(s)));
+    }
+    if let Some(l) = p.limit {
+        path.push_str(&format!("&limit={}", l.min(MAX_LIMIT)));
+    }
+    path
+}
+
+/// `(X-Next-Before-Id, X-Server-Time)`; blank values are `None`.
+fn page_meta(headers: &HeaderMap) -> (Option<String>, Option<String>) {
+    let get = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    (get("x-next-before-id"), get("x-server-time"))
+}
 
 /// One feed entry, tagged by the JSON `type`: `Version` (field changes),
 /// `Reference` (incoming mention) or `Dependency` (relation added/removed).
@@ -154,6 +231,56 @@ pub struct ActivityRef {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn path_defaults_and_encoding() {
+        let p = ActivityParams::default();
+        assert_eq!(
+            list_path(1, 2, &p),
+            "api/v1/teams/1/issues/2/activity?types=versions,dependencies,references"
+        );
+        let p = ActivityParams {
+            before_id: Some("version:440"),
+            since: Some("2026-10-31T17:59:21+00:00"),
+            limit: Some(9999),
+        };
+        assert_eq!(
+            list_path(1, 2, &p),
+            "api/v1/teams/1/issues/2/activity?types=versions,dependencies,references\
+             &before_id=version%3A440&since=2026-10-31T17%3A59%3A21%2B00%3A00&limit=500"
+        );
+    }
+
+    #[test]
+    fn page_meta_reads_string_cursor_and_server_time() {
+        let mut h = HeaderMap::new();
+        h.insert("X-Next-Before-Id", "version:440".parse().unwrap());
+        h.insert(
+            "X-Server-Time",
+            "2026-10-31T17:59:21.515570Z".parse().unwrap(),
+        );
+        assert_eq!(
+            page_meta(&h),
+            (
+                Some("version:440".to_string()),
+                Some("2026-10-31T17:59:21.515570Z".to_string())
+            )
+        );
+        assert_eq!(page_meta(&HeaderMap::new()), (None, None));
+    }
+
+    #[test]
+    fn unknown_entry_type_is_skipped_not_fatal() {
+        let value = json!([
+            {"type":"comment","id":1,"cursor":"comment:1","created_at":"2026-07-06T00:00:00Z"},
+            {"type":"reference","id":1,"cursor":"reference:1","created_at":"2026-07-08T13:35:39Z",
+             "source_issue":null,"source_type":"comment","user":null}
+        ]);
+        let rows: Vec<ActivityEntry> =
+            crate::api::client::decode_list_lenient(value, "activity").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], ActivityEntry::Reference(_)));
+    }
 
     fn version(body: &str) -> VersionEntry {
         match serde_json::from_str(body).unwrap() {
