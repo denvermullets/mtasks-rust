@@ -467,7 +467,7 @@ fn dependency_section<'a>(
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(6);
     for link in links {
-        col = col.push(dependency_row(link));
+        col = col.push(dependency_row(link, direction));
     }
     col.push(
         button(text(add_label).size(12).color(t::accent()))
@@ -479,8 +479,13 @@ fn dependency_section<'a>(
 }
 
 /// One dependency edge: a clickable `IDENT — title` that navigates to that
-/// issue, plus a trailing `×` that removes the relationship.
-fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
+/// issue, plus a trailing `×` that removes the relationship. The identifier is
+/// tinted with the relation's dependency color.
+fn dependency_row<'a>(link: &'a DependencyLink, direction: DepDirection) -> Element<'a, Message> {
+    let relation_color = match direction {
+        DepDirection::Blocking => t::dep_blocks(),
+        DepDirection::BlockedBy => t::dep_blocked_by(),
+    };
     row![]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -488,7 +493,7 @@ fn dependency_row<'a>(link: &'a DependencyLink) -> Element<'a, Message> {
             button(
                 row![]
                     .spacing(6)
-                    .push(text(&link.identifier).size(12).color(t::text_muted()))
+                    .push(text(&link.identifier).size(12).color(relation_color))
                     .push(text(&link.title).size(12).color(t::text_secondary())),
             )
             .on_press(Message::OpenIssueDetail(link.issue_id.clone()))
