@@ -21,6 +21,7 @@ pub fn view<'a>(
     home_team_remote_id: Option<i64>,
     read_only: bool,
     saved_views: &'a HashMap<String, Vec<SavedView>>,
+    open_view_id: Option<&'a str>,
     home: Option<&HomePage>,
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(0).width(Length::Fill);
@@ -165,7 +166,7 @@ pub fn view<'a>(
                 ("Roadmap", View::Roadmap),
             ];
             for (label, view) in sub_rows {
-                let active = is_selected && *current_view == view;
+                let active = is_selected && *current_view == view && open_view_id.is_none();
                 col = col.push(nav_row(
                     label,
                     active,
@@ -173,17 +174,23 @@ pub fn view<'a>(
                     28,
                 ));
             }
-            // Saved views: display only; opening comes in a later ticket.
             for sv in saved_views.get(&team.id).into_iter().flatten() {
+                let active = open_view_id == Some(sv.id.as_str());
                 col = col.push(
-                    container(
-                        row![text(&sv.name).size(13).color(t::text_secondary())]
-                            .spacing(6)
-                            .align_y(iced::Alignment::Center)
-                            .push_maybe(is_home_view(home, sv).then(home_marker)),
+                    button(
+                        row![text(&sv.name).size(13).color(if active {
+                            t::text_primary()
+                        } else {
+                            t::text_secondary()
+                        })]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center)
+                        .push_maybe(is_home_view(home, sv).then(home_marker)),
                     )
+                    .on_press(Message::OpenSavedView(sv.id.clone()))
                     .padding([6, 28])
-                    .width(Length::Fill),
+                    .width(Length::Fill)
+                    .style(move |_theme: &Theme, _status| selected_row_style(active)),
                 );
             }
         }

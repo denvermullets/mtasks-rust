@@ -40,6 +40,8 @@ pub enum Message {
     ToggleTeamExpanded(String),
     /// Select a team and switch the right pane to `view` (team sub-row click).
     SelectTeamView(String, View),
+    /// Open a Saved view (local id) on its team's board.
+    OpenSavedView(String),
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
 
@@ -527,6 +529,9 @@ pub struct App {
     teams: Vec<Team>,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
+    /// The open Saved view's working copy; while set it stands in for the
+    /// config's display options and filters and the header search.
+    open_view: Option<crate::saved_view::OpenView>,
     /// The user's Home page as last reported by the server (see `db::home_page`).
     home_page: Option<crate::db::home_page::HomePage>,
     selected_team_id: Option<String>,
@@ -744,6 +749,7 @@ impl App {
     fn switch_view(&mut self, view: View) {
         let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
         self.view = view;
+        self.retain_open_view();
         if self.view == View::Inbox {
             self.reload_inbox();
         }
@@ -953,23 +959,54 @@ impl App {
     // resolves to the local state (the config plus the header search).
 
     fn board_display(&self) -> &DisplayOptions {
-        &self.config.display
+        match &self.open_view {
+            Some(v) => &v.state.display,
+            None => &self.config.display,
+        }
     }
 
     fn board_display_mut(&mut self) -> &mut DisplayOptions {
-        &mut self.config.display
+        match &mut self.open_view {
+            Some(v) => &mut v.state.display,
+            None => &mut self.config.display,
+        }
     }
 
     fn board_filters(&self) -> &Filters {
-        &self.config.filters
+        match &self.open_view {
+            Some(v) => &v.state.filters,
+            None => &self.config.filters,
+        }
     }
 
     fn board_filters_mut(&mut self) -> &mut Filters {
-        &mut self.config.filters
+        match &mut self.open_view {
+            Some(v) => &mut v.state.filters,
+            None => &mut self.config.filters,
+        }
+    }
+
+    /// Drop the open view's working copy unless it is still on screen: its
+    /// team's board (or an issue opened from it). Leaving drops unsaved edits.
+    fn retain_open_view(&mut self) {
+        let on_board = matches!(self.view, View::Board | View::IssueDetail(_));
+        if let Some(v) = &self.open_view {
+            if !v.stays_open(self.selected_team_id.as_deref(), on_board) {
+                self.open_view = None;
+            }
+        }
     }
 
     /// Drop filter ids the loaded data doesn't contain; true if any changed.
+    /// On an open view this prunes the working copy, which no config save
+    /// follows (the stored query is untouched).
     fn prune_board_filters(&mut self) -> bool {
+        if let Some(v) = &mut self.open_view {
+            v.state
+                .filters
+                .prune(&self.members, &self.labels, &self.lanes, &self.projects);
+            return false;
+        }
         self.config.filters.prune(
             &self.members,
             &self.labels,
@@ -980,6 +1017,9 @@ impl App {
 
     /// The header search text if it applies to the current view, else "".
     fn active_search(&self) -> &str {
+        if let Some(v) = &self.open_view {
+            return &v.state.search;
+        }
         if self.search_view == self.view {
             &self.search_query
         } else {
@@ -988,11 +1028,19 @@ impl App {
     }
 
     fn set_view_search(&mut self, query: String) {
+        if let Some(v) = &mut self.open_view {
+            v.state.search = query;
+            return;
+        }
         self.search_query = query;
         self.search_view = self.view.clone();
     }
 
     fn clear_view_search(&mut self) {
+        if let Some(v) = &mut self.open_view {
+            v.state.search.clear();
+            return;
+        }
         self.search_query.clear();
     }
     // --- end active board state ----------------------------------------
@@ -1009,6 +1057,12 @@ impl App {
         }
         if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "Inbox".into());
+        }
+        if let (Some(v), View::Board) = (&self.open_view, &self.view) {
+            // The view's name replaces the "Issues" crumb.
+            if let Some(last) = crumbs.last_mut() {
+                *last = v.name.clone();
+            }
         }
         crumbs
     }
@@ -1231,8 +1285,11 @@ impl App {
 
     /// Persist the display/filter settings and re-validate board focus.
     fn persist_display(&mut self) {
-        if let Err(e) = config::save(&self.config) {
-            self.config_error = Some(e);
+        // An open view's edits live in the working copy only.
+        if self.open_view.is_none() {
+            if let Err(e) = config::save(&self.config) {
+                self.config_error = Some(e);
+            }
         }
         self.clamp_focus();
     }
@@ -1823,6 +1880,7 @@ impl App {
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views: crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default(),
+            open_view: None,
             home_page: crate::db::home_page::get(&conn).unwrap_or_default(),
             last_notif_poll: None,
             inbox: Default::default(),
@@ -1982,6 +2040,7 @@ impl App {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
         let task = self.update_inner(message);
+        self.retain_open_view();
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
@@ -2039,7 +2098,46 @@ impl App {
                 }
             }
 
+            Message::OpenSavedView(view_id) => {
+                let found = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == view_id)
+                    .cloned();
+                let Some(sv) = found else {
+                    return Task::none();
+                };
+                // Switch team first when needed (this drops any open view).
+                let task = if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
+                    || self.view != View::Board
+                {
+                    self.expanded_teams.insert(sv.team_id.clone());
+                    self.update_inner(Message::SelectTeamView(sv.team_id.clone(), View::Board))
+                } else {
+                    Task::none()
+                };
+                let local = crate::saved_view::BoardState {
+                    display: self.config.display.clone(),
+                    filters: self.config.filters.clone(),
+                    search: String::new(),
+                };
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                self.open_view = Some(crate::saved_view::OpenView::open(&sv, &mirror, &local));
+                self.scroll_state.clear();
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+                return task;
+            }
+
             Message::SelectTeamView(team_id, view) => {
+                // Going to a team's own pages leaves any open Saved view.
+                self.open_view = None;
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
@@ -3833,6 +3931,7 @@ impl App {
                 .map(|h| h.remote_id),
             self.sync_read_only,
             &self.saved_views,
+            self.open_view.as_ref().map(|v| v.view_id.as_str()),
             self.home_page.as_ref(),
         );
         let sidebar_column = column![
@@ -4077,6 +4176,8 @@ impl App {
                         projects: &self.projects,
                         cross_team: self.view == View::MyIssues,
                         scoped_to_project: matches!(self.view, View::ProjectDetail(_)),
+                        // Rails can't store "unassigned" in a Saved view.
+                        offer_unassigned: self.open_view.is_none(),
                     },
                 );
                 iced::widget::stack![base, display_panel::popover(panel)].into()

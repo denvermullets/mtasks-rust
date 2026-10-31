@@ -17,6 +17,21 @@ use crate::display::{
 /// A Saved view's raw Rails query.
 pub type RawQuery = BTreeMap<String, String>;
 
+/// Parse a stored query (JSON object text) into the string map. Non-string
+/// scalars are stringified, nulls dropped; anything not an object is empty.
+pub fn parse_stored_query(json: &str) -> RawQuery {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str(json) else {
+        return RawQuery::new();
+    };
+    map.into_iter()
+        .filter_map(|(k, v)| match v {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some((k, s)),
+            other => Some((k, other.to_string())),
+        })
+        .collect()
+}
+
 /// The desktop state a Saved view drives: display options, filters and the
 /// view search text.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -40,6 +55,41 @@ pub struct Mirror<'a> {
 pub struct Decoded {
     pub state: BoardState,
     pub raw: RawQuery,
+}
+
+/// An open Saved view: the working copy that stands in for the user's own
+/// board state while the view is shown. Edits change `state` only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenView {
+    /// Local id of the Saved view.
+    pub view_id: String,
+    /// Local team id the view belongs to.
+    pub team_id: String,
+    pub name: String,
+    /// Working copy: display, filters and view search.
+    pub state: BoardState,
+    /// The stored query as decoded, kept for encode/revert later.
+    pub raw: RawQuery,
+}
+
+impl OpenView {
+    /// Open `sv`, falling back to `local` for keys the view doesn't set.
+    pub fn open(sv: &crate::db::saved_views::SavedView, mirror: &Mirror, local: &BoardState) -> Self {
+        let d = decode(&parse_stored_query(&sv.query), mirror, local);
+        OpenView {
+            view_id: sv.id.clone(),
+            team_id: sv.team_id.clone(),
+            name: sv.name.clone(),
+            state: d.state,
+            raw: d.raw,
+        }
+    }
+
+    /// Whether the view is still the thing on screen: the selected team is its
+    /// team and the pane is that team's board (or an issue opened from it).
+    pub fn stays_open(&self, selected_team: Option<&str>, on_board_or_detail: bool) -> bool {
+        on_board_or_detail && selected_team == Some(self.team_id.as_str())
+    }
 }
 
 /// Decode `query` against the mirror. Keys that are missing, or whose value is
@@ -476,5 +526,53 @@ mod tests {
             &local,
         );
         assert_eq!(d.state, local);
+    }
+
+    #[test]
+    fn parses_stored_query_json_into_a_string_map() {
+        let raw = parse_stored_query(r#"{"view_mode":"list","show_sub_issues":true,"n":3,"x":null}"#);
+        assert_eq!(raw["view_mode"], "list");
+        assert_eq!(raw["show_sub_issues"], "true");
+        assert_eq!(raw["n"], "3");
+        assert!(!raw.contains_key("x"));
+        assert!(parse_stored_query("not json").is_empty());
+        assert!(parse_stored_query("[1]").is_empty());
+    }
+
+    #[test]
+    fn open_view_decodes_stored_row_into_a_working_copy() {
+        let sv = crate::db::saved_views::SavedView {
+            id: "v1".into(),
+            remote_id: Some(9),
+            team_id: "t1".into(),
+            name: "Urgent".into(),
+            query: r#"{"view_mode":"list","q":"bug","creator_ids":"4"}"#.into(),
+            position: 0,
+            updated_at: String::new(),
+        };
+        let fx = Fx::new();
+        let ov = OpenView::open(&sv, &fx.mirror(), &BoardState::default());
+        assert_eq!((ov.view_id.as_str(), ov.name.as_str()), ("v1", "Urgent"));
+        assert_eq!(ov.state.display.view_mode, ViewMode::List);
+        assert_eq!(ov.state.search, "bug");
+        assert_eq!(ov.raw["creator_ids"], "4");
+    }
+
+    #[test]
+    fn open_view_applies_only_on_its_teams_board_or_issue_detail() {
+        let sv = crate::db::saved_views::SavedView {
+            id: "v1".into(),
+            remote_id: None,
+            team_id: "t1".into(),
+            name: "V".into(),
+            query: "{}".into(),
+            position: 0,
+            updated_at: String::new(),
+        };
+        let ov = OpenView::open(&sv, &Fx::new().mirror(), &BoardState::default());
+        assert!(ov.stays_open(Some("t1"), true));
+        assert!(!ov.stays_open(Some("t2"), true));
+        assert!(!ov.stays_open(Some("t1"), false));
+        assert!(!ov.stays_open(None, true));
     }
 }
