@@ -262,6 +262,7 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
         };
         let texts = match entry.entry_type.as_str() {
             "version" => version_lines(&entry),
+            "dependency" => dependency_line(&entry).into_iter().collect(),
             _ => Vec::new(),
         };
         for (i, text) in texts.into_iter().enumerate() {
@@ -284,6 +285,26 @@ fn version_lines(entry: &StoredEntry) -> Vec<String> {
         return Vec::new();
     };
     changes.iter().filter_map(plain_change_line).collect()
+}
+
+/// One line for a dependency entry, worded from this issue's side using
+/// `direction` and `event` (the server description is worded from the blocking
+/// side). JRST-138 adds the relates / duplicates / duplicated_by arms.
+fn dependency_line(entry: &StoredEntry) -> Option<String> {
+    let kind = match entry.payload["direction"].as_str()? {
+        "blocking" => EventKind::Blocking,
+        "blocked_by" => EventKind::BlockedBy,
+        _ => return None,
+    };
+    let other = entry.payload["other_issue"]["identifier"]
+        .as_str()
+        .map(str::to_string);
+    let (old, new) = match entry.payload["event"].as_str()? {
+        "create" => (None, other),
+        "destroy" => (other, None),
+        _ => return None,
+    };
+    Some(events::describe(kind, old.as_deref(), new.as_deref()))
 }
 
 /// Wording for a plain (non-reference) field, reusing `events::describe`.
@@ -530,5 +551,49 @@ mod display_tests {
         let conn = mem();
         store(&conn, r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"","changes":[]}]"#);
         assert!(activity_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod jrst137_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn lines(direction: &str, event: &str, other: &str) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let body = format!(
+            r#"[{{"type":"dependency","id":1,"cursor":"dependency:1","created_at":"2026-07-06T00:00:00Z",
+            "event":"{event}","kind":"blocks","direction":"{direction}",{other},
+            "actor":{{"id":2,"name":"ryan"}},"description":"added dependency: <strong>MTK-9</strong> blocking <strong>MTK-3</strong>"}}]"#
+        );
+        let entries: Vec<ActivityEntry> = serde_json::from_str(&body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        activity_for_issue(&conn, "i1").unwrap().into_iter().map(|i| i.text).collect()
+    }
+
+    const OTHER: &str = r#""other_issue":{"id":2,"identifier":"MTK-2","title":"X"}"#;
+
+    #[test]
+    fn blocking_and_blocked_by_word_from_this_issues_side() {
+        assert_eq!(lines("blocking", "create", OTHER), ["now blocks MTK-2"]);
+        assert_eq!(lines("blocking", "destroy", OTHER), ["no longer blocks MTK-2"]);
+        assert_eq!(lines("blocked_by", "create", OTHER), ["now blocked by MTK-2"]);
+        assert_eq!(lines("blocked_by", "destroy", OTHER), ["no longer blocked by MTK-2"]);
+    }
+
+    #[test]
+    fn unsupported_direction_or_event_yields_no_line() {
+        assert!(lines("relates", "create", OTHER).is_empty());
+        assert!(lines("blocking", "weird", OTHER).is_empty());
+    }
+
+    #[test]
+    fn missing_other_issue_uses_generic_wording() {
+        assert_eq!(lines("blocking", "create", r#""other_issue":null"#), ["changed blocking issues"]);
     }
 }
