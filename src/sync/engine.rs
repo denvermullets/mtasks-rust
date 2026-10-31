@@ -2250,6 +2250,16 @@ impl SyncEngine {
             }
         }
 
+        // Phase 2c: Saved views deleted on the server (user-level feed).
+        match pull_saved_view_tombstones_step(client).await {
+            Ok(()) => report.processed += 1,
+            Err(msg) => {
+                report.failed += 1;
+                note_pull_failure(&mut report, &msg);
+                report.last_error = Some(msg);
+            }
+        }
+
         // Phase 3: figure out which teams to deeply sync.
         let targets = match collect_pull_targets(me.token.scoped_team_ids().as_deref()) {
             Ok(t) => t,
@@ -2655,6 +2665,29 @@ async fn pull_saved_views_step(client: &ApiClient) -> Result<(), String> {
             applied.skipped_unmirrored,
             applied.skipped_pending
         ),
+    );
+    Ok(())
+}
+
+/// Pull the user-level tombstone feed and remove Saved views deleted on the
+/// server. Own cursor; advances to `X-Server-Time` once the page is applied.
+async fn pull_saved_view_tombstones_step(client: &ApiClient) -> Result<(), String> {
+    let since = {
+        let conn = open()?;
+        crate::db::saved_views::deleted_cursor(&conn)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
+    };
+    let page = deleted::list_user(client, since.as_deref())
+        .await
+        .map_err(|e| format!("deleted (user): {e}"))?;
+    let conn = open()?;
+    let removed = crate::db::saved_views::apply_tombstones(&conn, &page.rows, page.server_time.as_deref())
+        .map_err(|e| format!("db (saved view tombstones): {e}"))?;
+    sync_log(
+        "phase=pull_deleted_user",
+        "ok",
+        &format!("mode={} rows={} removed={removed}", pull_mode(&since), page.rows.len()),
     );
     Ok(())
 }

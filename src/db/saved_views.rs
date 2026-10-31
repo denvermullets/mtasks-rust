@@ -14,6 +14,10 @@ use super::sync_queue;
 pub const SCOPE: &str = "user";
 /// Cursor resource for the Saved-views index.
 pub const RESOURCE: &str = "saved_views";
+/// Cursor resource for the user-level tombstone feed (`GET /deleted`).
+pub const DELETED_RESOURCE: &str = "deleted";
+/// `record_type` of a Saved view in the tombstone feed.
+const TOMBSTONE_TYPE: &str = "SavedView";
 /// `sync_queue.entity_type` for Saved-view writes.
 pub const ENTITY_TYPE: &str = "saved_view";
 
@@ -98,6 +102,33 @@ pub fn apply_pulled(
         set_pull_cursor(conn, SCOPE, RESOURCE, t)?;
     }
     Ok(applied)
+}
+
+/// Delete mirrored views the user-level tombstone feed reports (idempotent, so
+/// cursor overlap is safe). Other record types and unmirrored ids are ignored.
+/// Advances the tombstone cursor to `server_time` if given; returns how many
+/// views were removed.
+pub fn apply_tombstones(
+    conn: &Connection,
+    rows: &[crate::api::deleted::TombstoneDto],
+    server_time: Option<&str>,
+) -> Result<usize> {
+    let mut removed = 0;
+    for row in rows.iter().filter(|r| r.record_type == TOMBSTONE_TYPE) {
+        removed += conn.execute(
+            "DELETE FROM saved_views WHERE remote_id = ?1",
+            params![row.record_id],
+        )?;
+    }
+    if let Some(t) = server_time {
+        set_pull_cursor(conn, SCOPE, DELETED_RESOURCE, t)?;
+    }
+    Ok(removed)
+}
+
+/// Stored user-level tombstone cursor, if any.
+pub fn deleted_cursor(conn: &Connection) -> Result<Option<String>> {
+    get_pull_cursor(conn, SCOPE, DELETED_RESOURCE)
 }
 
 pub fn find_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<SavedView>> {
@@ -260,5 +291,50 @@ mod tests {
             .map(|v| v.name)
             .collect();
         assert_eq!(names, ["B", "A", "A2"]);
+    }
+
+    fn tomb(kind: &str, id: i64) -> crate::api::deleted::TombstoneDto {
+        crate::api::deleted::TombstoneDto {
+            record_type: kind.into(),
+            record_id: id,
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn tombstone_removes_the_matching_view_only() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(1, 700, "A", json!({})), view(2, 700, "B", json!({}))], None).unwrap();
+        let n = apply_tombstones(&conn, &[tomb("SavedView", 1)], Some("T1")).unwrap();
+        assert_eq!(n, 1);
+        assert!(find_by_remote_id(&conn, 1).unwrap().is_none());
+        assert!(find_by_remote_id(&conn, 2).unwrap().is_some());
+    }
+
+    #[test]
+    fn tombstone_for_an_unmirrored_view_is_a_noop() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(2, 700, "B", json!({}))], None).unwrap();
+        assert_eq!(apply_tombstones(&conn, &[tomb("SavedView", 99)], None).unwrap(), 0);
+        assert_eq!(list_for_team(&conn, "t1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn other_record_types_are_ignored() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(1, 700, "A", json!({}))], None).unwrap();
+        let rows = [tomb("Dashboard", 1), tomb("DashboardGroup", 1)];
+        assert_eq!(apply_tombstones(&conn, &rows, None).unwrap(), 0);
+        assert!(find_by_remote_id(&conn, 1).unwrap().is_some());
+    }
+
+    #[test]
+    fn tombstone_cursor_is_its_own_and_advances_only_when_given() {
+        let conn = setup();
+        assert_eq!(deleted_cursor(&conn).unwrap(), None);
+        apply_tombstones(&conn, &[], Some("D1")).unwrap();
+        apply_tombstones(&conn, &[], None).unwrap();
+        assert_eq!(deleted_cursor(&conn).unwrap().as_deref(), Some("D1"));
+        assert_eq!(cursor(&conn).unwrap(), None);
     }
 }
