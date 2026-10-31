@@ -395,6 +395,31 @@ const MIGRATIONS: &[Migration] = &[
             CREATE INDEX IF NOT EXISTS idx_comments_project_id ON comments(project_id);
         ",
     },
+    Migration {
+        version: 21,
+        name: "notifications",
+        up: "
+            -- Local mirror of the user's Notifications (not team-scoped). Rows
+            -- are keyed locally by a uuid and matched to the server by remote_id.
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER NOT NULL UNIQUE,
+                action TEXT NOT NULL,
+                message TEXT NOT NULL,
+                actor_name TEXT,
+                issue_remote_id INTEGER,
+                issue_identifier TEXT,
+                issue_title TEXT,
+                team_remote_id INTEGER,
+                comment_remote_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                read_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_notifications_read_created
+                ON notifications (read_at, created_at);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -530,6 +555,7 @@ mod tests {
             "issue_dependencies",
             "comments",
             "issue_events",
+            "notifications",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }
