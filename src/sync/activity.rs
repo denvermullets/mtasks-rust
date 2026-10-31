@@ -632,3 +632,101 @@ mod tests {
         assert_eq!(store::entries_for_issue(&conn, "synced").unwrap().len(), all.len());
     }
 }
+
+/// JRST-147: a failed fetch keeps the cache, cursor and full-history flag.
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn entry(id: i64) -> ActivityEntry {
+        serde_json::from_str(&format!(
+            r#"{{"type":"version","id":{id},"cursor":"version:{id}","created_at":"2026-07-06T00:00:{id:02}Z",
+                "actor":null,"event":"update","changes":[],"description":"d"}}"#
+        ))
+        .unwrap()
+    }
+
+    /// File-backed DB (so `fetch_with` can reopen it per step) with a synced
+    /// issue that already has two cached entries, a cursor and the flag.
+    fn seeded(path: &std::path::Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at) VALUES ('t1','T','T',7,?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, remote_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',42,?1,?1)", params![now]).unwrap();
+        commit(
+            &conn,
+            "i1",
+            &Fetched {
+                entries: vec![entry(1), entry(2)],
+                cursor: "CURSOR-0".into(),
+                fully_fetched: true,
+            },
+        )
+        .unwrap();
+        conn
+    }
+
+    fn snapshot(conn: &Connection) -> (usize, FetchState) {
+        (
+            store::entries_for_issue(conn, "i1").unwrap().len(),
+            store::fetch_state(conn, "i1").unwrap(),
+        )
+    }
+
+    fn temp_db() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("jrst147-{}.db", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn offline_fetch_leaves_cache_cursor_and_flag_untouched() {
+        let path = temp_db();
+        let conn = seeded(&path);
+        let before = snapshot(&conn);
+        // Nothing listens on port 1: a connection error, like being offline.
+        let client = ApiClient::new("http://127.0.0.1:1", "token").unwrap();
+        let out = fetch_with(&client, "i1", 2, || Connection::open(&path)).await;
+        assert!(matches!(out, FetchOutcome::Failed(_)), "got {out:?}");
+        assert_eq!(snapshot(&conn), before);
+        assert_eq!(before.1.cursor.as_deref(), Some("CURSOR-0"));
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Server errors and mid-paging failures take the same path: `execute`
+    /// returns `Err`, so `commit` never runs and nothing is stored.
+    #[tokio::test]
+    async fn server_error_partway_through_paging_stores_nothing() {
+        let path = temp_db();
+        let conn = seeded(&path);
+        let before = snapshot(&conn);
+        let res = collect_history(|before| {
+            let p = ActivityPage {
+                entries: vec![entry(8), entry(9)],
+                next_before_id: Some("version:8".into()),
+                server_time: Some("CURSOR-NEW".into()),
+            };
+            async move {
+                match before {
+                    None => Ok(p),
+                    Some(_) => Err(ApiError::Server { status: 500, message: "boom".into() }),
+                }
+            }
+        })
+        .await;
+        // The same Err -> Failed mapping `fetch_with` applies; no commit.
+        let outcome = match res {
+            Ok(f) => {
+                commit(&conn, "i1", &f).unwrap();
+                FetchOutcome::Fetched { stored: f.entries.len() }
+            }
+            Err(e) => FetchOutcome::Failed(e.to_string()),
+        };
+        assert!(matches!(&outcome, FetchOutcome::Failed(m) if m.contains("500")), "got {outcome:?}");
+        assert_eq!(snapshot(&conn), before);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+}
