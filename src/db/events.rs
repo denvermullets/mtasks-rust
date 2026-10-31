@@ -376,7 +376,13 @@ pub fn record_created(conn: &Connection, issue: &Issue, source: Source) -> Resul
         &Change::plain(EventKind::Created, None, None),
         &issue.created_at,
     )?;
-    // Born with a parent (sub-issue created from the form).
+    record_initial_parent(conn, issue, source)
+}
+
+/// Record the "set parent" event for an issue born with a parent (sub-issue
+/// created from the form). Local create uses this alone: its "created the
+/// issue" line is derived at read time.
+pub fn record_initial_parent(conn: &Connection, issue: &Issue, source: Source) -> Result<()> {
     if let Some(parent) = &issue.parent_issue_id {
         let change = ref_change(
             EventKind::Parent,

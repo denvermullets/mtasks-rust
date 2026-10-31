@@ -144,7 +144,8 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
-    events::record_created(conn, issue, Source::Local)?;
+    // No stored "created" event: the activity derives that line at read time.
+    events::record_initial_parent(conn, issue, Source::Local)?;
     Ok(())
 }
 
@@ -2773,6 +2774,13 @@ mod tests {
     }
 
     #[test]
+    fn local_insert_stores_no_created_event() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("n0", None, None)).unwrap();
+        assert!(events::events_for_issue(&conn, "n0").unwrap().is_empty());
+    }
+
+    #[test]
     fn local_writes_record_events_and_not_sync_queue() {
         let conn = setup();
         conn.execute(
@@ -2793,7 +2801,6 @@ mod tests {
         assert_eq!(
             event_lines(&conn, "n1"),
             vec![
-                "created the issue",
                 "changed status from Backlog to In Progress",
                 "changed priority from None to High",
                 "changed the title",
@@ -2831,8 +2838,8 @@ mod tests {
         let i2 = event_lines(&conn, "i2");
         assert!(i1[i1.len() - 2].starts_with("now blocks "));
         assert!(i1[i1.len() - 1].starts_with("no longer blocks "));
-        assert!(i2[1].starts_with("now blocked by "));
-        assert!(i2[2].starts_with("no longer blocked by "));
+        assert!(i2[0].starts_with("now blocked by "));
+        assert!(i2[1].starts_with("no longer blocked by "));
 
         // Born with a parent -> parent event, and the column is persisted.
         let mut child = make_issue("c1", None, None);
@@ -2840,7 +2847,7 @@ mod tests {
         insert_issue(&conn, &child).unwrap();
         let stored = get_issue(&conn, "c1").unwrap().unwrap();
         assert_eq!(stored.parent_issue_id.as_deref(), Some("i1"));
-        assert!(event_lines(&conn, "c1")[1].starts_with("set parent to "));
+        assert!(event_lines(&conn, "c1")[0].starts_with("set parent to "));
 
         // Renamed lanes show their current name when resolved.
         conn.execute(
@@ -2853,8 +2860,8 @@ mod tests {
         conn.execute("UPDATE lanes SET name = 'Active' WHERE id = 'l2'", [])
             .unwrap();
         let evs = events::events_for_issue_resolved(&conn, "c1", None).unwrap();
-        assert!(evs[2].description().ends_with("to Active"));
-        assert_eq!(evs[2].actor_name, None);
+        assert!(evs[1].description().ends_with("to Active"));
+        assert_eq!(evs[1].actor_name, None);
     }
 
     // ── move_issue_to_team ──
