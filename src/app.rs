@@ -427,8 +427,7 @@ pub struct App {
     issue_labels: HashMap<String, Vec<Label>>,
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
-    detail_blocking: Vec<queries::DependencyLink>,
-    detail_blocked_by: Vec<queries::DependencyLink>,
+    detail_deps: queries::DependencyGroups,
     /// The open issue detail was reached from My Issues, so Back returns there.
     detail_from_my_issues: bool,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
@@ -597,17 +596,14 @@ impl App {
     /// render them; other views don't need this, so keep it cheap.
     fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
         if let View::IssueDetail(ref issue_id) = self.view {
-            self.detail_blocking =
-                queries::blocking_links_for_issue(conn, issue_id).unwrap_or_default();
-            self.detail_blocked_by =
-                queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
+            self.detail_deps =
+                queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
         } else {
             self.detail_references.clear();
-            self.detail_blocking.clear();
-            self.detail_blocked_by.clear();
+            self.detail_deps = Default::default();
             self.detail_comments.clear();
             self.detail_events.clear();
         }
@@ -1407,8 +1403,7 @@ impl App {
             members,
             labels,
             issue_labels,
-            detail_blocking: Vec::new(),
-            detail_blocked_by: Vec::new(),
+            detail_deps: Default::default(),
             detail_from_my_issues: false,
             detail_comments: Vec::new(),
             detail_events: Vec::new(),
@@ -3174,8 +3169,7 @@ impl App {
                             &self.projects,
                             &self.members,
                             project_name,
-                            &self.detail_blocking,
-                            &self.detail_blocked_by,
+                            &self.detail_deps,
                             &self.detail_comments,
                             &self.detail_events,
                             &self.detail_references,
@@ -3332,8 +3326,8 @@ impl App {
                     // Exclude the open issue itself and any issue already linked
                     // in this direction (a duplicate would hit the UNIQUE edge).
                     let existing = match picker.direction {
-                        DepDirection::Blocking => &self.detail_blocking,
-                        DepDirection::BlockedBy => &self.detail_blocked_by,
+                        DepDirection::Blocking => &self.detail_deps.blocking,
+                        DepDirection::BlockedBy => &self.detail_deps.blocked_by,
                     };
                     let mut excluded: HashSet<&str> =
                         existing.iter().map(|l| l.issue_id.as_str()).collect();

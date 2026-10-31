@@ -2,12 +2,12 @@ use iced::widget::{
     button, column, container, pick_list, rich_text, row, scrollable, span, text, text_editor,
     text_input,
 };
-use iced::{Alignment, Border, Element, Length, Theme};
+use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
 use crate::db::events::{self, IssueEvent, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
-use crate::db::queries::DependencyLink;
+use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
 use crate::theme as t;
 use crate::views::issue_form::LaneOption;
@@ -108,8 +108,7 @@ pub fn view<'a>(
     projects: &'a [Project],
     members: &'a [Member],
     project_name: Option<&'a str>,
-    blocking: &'a [DependencyLink],
-    blocked_by: &'a [DependencyLink],
+    deps: &'a DependencyGroups,
     comments: &'a [Comment],
     events: &'a [IssueEvent],
     references: &'a [Reference],
@@ -296,16 +295,38 @@ pub fn view<'a>(
         .push(section("Labels", placeholder_value()))
         .push(section(
             "Blocking",
-            dependency_section(blocking, "+ Add blocking issue…", DepDirection::Blocking),
+            dependency_section(
+                &deps.blocking,
+                Some(("+ Add blocking issue…", DepDirection::Blocking)),
+                t::dep_blocks(),
+            ),
         ))
         .push(section(
             "Blocked by",
             dependency_section(
-                blocked_by,
-                "+ Add blocked by issue…",
-                DepDirection::BlockedBy,
+                &deps.blocked_by,
+                Some(("+ Add blocked by issue…", DepDirection::BlockedBy)),
+                t::dep_blocked_by(),
             ),
         ))
+        .push_maybe((!deps.related.is_empty()).then(|| {
+            section(
+                "Related",
+                dependency_section(&deps.related, None, t::dep_relates()),
+            )
+        }))
+        .push_maybe((!deps.duplicates.is_empty()).then(|| {
+            section(
+                "Duplicates",
+                dependency_section(&deps.duplicates, None, t::dep_duplicates()),
+            )
+        }))
+        .push_maybe((!deps.duplicated_by.is_empty()).then(|| {
+            section(
+                "Duplicated by",
+                dependency_section(&deps.duplicated_by, None, t::dep_duplicates()),
+            )
+        }))
         .push(
             column![]
                 .spacing(2)
@@ -462,33 +483,31 @@ fn placeholder_value<'a>() -> Element<'a, Message> {
 }
 
 /// A dependency sidebar section: the linked issues as clickable rows, followed
-/// by a text "+ Add …" button that opens the picker for `direction`.
+/// (when `add` is given) by a text "+ Add …" button that opens the picker.
 fn dependency_section<'a>(
     links: &'a [DependencyLink],
-    add_label: &'a str,
-    direction: DepDirection,
+    add: Option<(&'a str, DepDirection)>,
+    color: Color,
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(6);
     for link in links {
-        col = col.push(dependency_row(link, direction));
+        col = col.push(dependency_row(link, color));
     }
-    col.push(
-        button(text(add_label).size(12).color(t::accent()))
-            .on_press(Message::OpenDependencyPicker(direction))
-            .padding(0)
-            .style(button::text),
-    )
-    .into()
+    if let Some((add_label, direction)) = add {
+        col = col.push(
+            button(text(add_label).size(12).color(t::accent()))
+                .on_press(Message::OpenDependencyPicker(direction))
+                .padding(0)
+                .style(button::text),
+        );
+    }
+    col.into()
 }
 
 /// One dependency edge: a clickable `IDENT — title` that navigates to that
 /// issue, plus a trailing `×` that removes the relationship. The identifier is
-/// tinted with the relation's dependency color.
-fn dependency_row<'a>(link: &'a DependencyLink, direction: DepDirection) -> Element<'a, Message> {
-    let relation_color = match direction {
-        DepDirection::Blocking => t::dep_blocks(),
-        DepDirection::BlockedBy => t::dep_blocked_by(),
-    };
+/// tinted with the section's dependency color.
+fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Element<'a, Message> {
     row![]
         .spacing(6)
         .align_y(Alignment::Center)
