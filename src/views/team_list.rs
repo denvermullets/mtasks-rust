@@ -9,21 +9,35 @@ use crate::db::models::Team;
 use crate::db::saved_views::SavedView;
 use crate::theme as t;
 
-#[allow(clippy::too_many_arguments)]
-pub fn view<'a>(
-    teams: &'a [Team],
-    selected_team_id: Option<&'a str>,
-    expanded_teams: &'a HashSet<String>,
-    current_view: &'a View,
-    team_menu_open: Option<&'a str>,
-    show_archived: bool,
-    unread_count: i64,
-    home_team_remote_id: Option<i64>,
-    read_only: bool,
-    saved_views: &'a HashMap<String, Vec<SavedView>>,
-    open_view_id: Option<&'a str>,
-    home: Option<&HomePage>,
-) -> Element<'a, Message> {
+/// Everything the sidebar reads, bundled so `view` takes one argument.
+pub struct SidebarState<'a> {
+    pub teams: &'a [Team],
+    pub selected_team_id: Option<&'a str>,
+    pub expanded_teams: &'a HashSet<String>,
+    pub current_view: &'a View,
+    pub team_menu_open: Option<&'a str>,
+    pub show_archived: bool,
+    pub unread_count: i64,
+    pub read_only: bool,
+    pub saved_views: &'a HashMap<String, Vec<SavedView>>,
+    pub open_view_id: Option<&'a str>,
+    pub home: Option<&'a HomePage>,
+}
+
+pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
+    let SidebarState {
+        teams,
+        selected_team_id,
+        expanded_teams,
+        current_view,
+        team_menu_open,
+        show_archived,
+        unread_count,
+        read_only,
+        saved_views,
+        open_view_id,
+        home,
+    } = state;
     let mut col = column![].spacing(0).width(Length::Fill);
 
     // Workspace section
@@ -142,7 +156,7 @@ pub fn view<'a>(
                     synced.then(|| Message::OpenTeamWebSettings(team.id.clone(), section)),
                 )
             };
-            let is_home = team.remote_id.is_some() && team.remote_id == home_team_remote_id;
+            let is_home = is_home_team(home, team);
             let home_label = if is_home { "Home page \u{2713}" } else { "Set as home" };
             let can_set_home = synced && !read_only && !is_home;
             col = col
@@ -193,30 +207,25 @@ pub fn view<'a>(
                 // Set-as-home needs a writable token and is a no-op on the
                 // current home; disabled (muted) otherwise.
                 let is_home = is_home_view(home, sv);
-                let home_btn = button(text("\u{2302}").size(12).color(t::text_muted()))
-                    .on_press_maybe(
-                        (!read_only && !is_home).then(|| Message::SetSavedViewAsHome(sv.id.clone())),
-                    )
-                    .padding([6, 8])
-                    .style(|_theme: &Theme, _status| button::Style {
-                        background: None,
-                        ..Default::default()
-                    });
+                let home_btn = icon_btn(
+                    "\u{2302}",
+                    12,
+                    [6, 8],
+                    (!read_only && !is_home).then(|| Message::SetSavedViewAsHome(sv.id.clone())),
+                );
                 // Delete needs a writable token; disabled (muted) otherwise.
-                let delete_btn = button(text("\u{2715}").size(11).color(t::text_muted()))
-                    .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteSavedView(sv.id.clone())))
-                    .padding([6, 8])
-                    .style(|_theme: &Theme, _status| button::Style {
-                        background: None,
-                        ..Default::default()
-                    });
-                let rename_btn = button(text("\u{270E}").size(11).color(t::text_muted()))
-                    .on_press_maybe((!read_only).then(|| Message::OpenRenameSavedView(sv.id.clone())))
-                    .padding([6, 4])
-                    .style(|_theme: &Theme, _status| button::Style {
-                        background: None,
-                        ..Default::default()
-                    });
+                let delete_btn = icon_btn(
+                    "\u{2715}",
+                    11,
+                    [6, 8],
+                    (!read_only).then(|| Message::ConfirmDeleteSavedView(sv.id.clone())),
+                );
+                let rename_btn = icon_btn(
+                    "\u{270E}",
+                    11,
+                    [6, 4],
+                    (!read_only).then(|| Message::OpenRenameSavedView(sv.id.clone())),
+                );
                 col = col.push(
                     row![open_btn, home_btn, rename_btn, delete_btn]
                         .align_y(iced::Alignment::Center),
@@ -237,17 +246,25 @@ pub fn view<'a>(
 
 /// True when `home` is this team. A team without a remote id never matches.
 pub fn is_home_team(home: Option<&HomePage>, team: &Team) -> bool {
-    matches!((home, team.remote_id), (Some(h), Some(id)) if h.kind == "team" && h.remote_id == id)
+    home.is_some_and(|h| h.matches_team(team))
 }
 
 /// True when `home` is this Saved view, by remote id or (chosen before its
 /// create pushed) by local id.
 pub fn is_home_view(home: Option<&HomePage>, view: &SavedView) -> bool {
-    let Some(h) = home.filter(|h| h.kind == "view") else { return false };
-    match &h.local_id {
-        Some(l) => *l == view.id,
-        None => view.remote_id == Some(h.remote_id),
-    }
+    home.is_some_and(|h| h.matches_view(view))
+}
+
+/// A muted glyph-only sidebar button; disabled when `msg` is `None`.
+fn icon_btn<'a>(glyph: &'static str, size: u16, padding: [u16; 2], msg: Option<Message>) -> Element<'a, Message> {
+    button(text(glyph).size(size).color(t::text_muted()))
+        .on_press_maybe(msg)
+        .padding(padding)
+        .style(|_theme: &Theme, _status| button::Style {
+            background: None,
+            ..Default::default()
+        })
+        .into()
 }
 
 /// The small home glyph shown next to the Home page's row.
@@ -411,7 +428,8 @@ mod tests {
     use crate::db::saved_views::SavedView;
 
     fn home(kind: &str, id: i64) -> HomePage {
-        HomePage { kind: kind.into(), remote_id: id, local_id: None }
+        use crate::db::home_page::HomeTarget;
+        HomePage { target: HomeTarget::from_wire(kind, id).unwrap() }
     }
 
     fn team(remote_id: Option<i64>) -> Team {
