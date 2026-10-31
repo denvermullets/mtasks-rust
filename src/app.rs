@@ -2503,7 +2503,9 @@ impl App {
             Message::OpenCommandPalette => {
                 // Never opens over another modal.
                 if self.modal == Modal::None {
-                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new());
+                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new(
+                        crate::palette_results::PaletteData::load(&self.db()),
+                    ));
                     return text_input::focus(command_palette::input_id());
                 }
             }
@@ -2518,6 +2520,18 @@ impl App {
                     // Same path as any other view navigation: commits open
                     // issue/project detail edits first.
                     PaletteNav::View(view) => return self.update(Message::NavigateToView(view)),
+                    PaletteNav::Project { project_id, team_id } => {
+                        // Other team: switch (reloads its data) so the project is
+                        // in memory; current team opens without a reload.
+                        if self.selected_team_id.as_deref() != Some(team_id.as_str()) {
+                            let _ = self.update(Message::SelectTeamView(
+                                team_id.clone(),
+                                View::ProjectList,
+                            ));
+                        }
+                        self.expanded_teams.insert(team_id);
+                        return self.update(Message::OpenProjectDetail(project_id));
+                    }
                 }
             }
 

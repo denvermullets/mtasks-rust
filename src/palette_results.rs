@@ -9,12 +9,14 @@ use crate::app::View;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteKind {
     View,
+    Project,
 }
 
 impl PaletteKind {
     pub fn label(self) -> &'static str {
         match self {
             PaletteKind::View => "View",
+            PaletteKind::Project => "Project",
         }
     }
 }
@@ -24,6 +26,8 @@ impl PaletteKind {
 pub enum PaletteNav {
     /// Switch view for the current team (`Message::NavigateToView`).
     View(View),
+    /// Open a project's detail, switching to `team_id` first when needed.
+    Project { project_id: String, team_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,9 +38,41 @@ pub struct PaletteRow {
     pub nav: PaletteNav,
 }
 
+/// A project from any team, with the team facts the palette needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaletteProject {
+    pub id: String,
+    pub name: String,
+    pub team_id: String,
+    pub team_name: String,
+    pub team_archived: bool,
+}
+
 /// Local data the palette searches. Later kinds add their fields here.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PaletteData {}
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PaletteData {
+    /// Projects of every team, loaded when the palette opens.
+    pub projects: Vec<PaletteProject>,
+}
+
+impl PaletteData {
+    /// Load the palette's data from the local database.
+    pub fn load(conn: &rusqlite::Connection) -> Self {
+        let mut projects = Vec::new();
+        for team in crate::db::queries::all_teams(conn).unwrap_or_default() {
+            for p in crate::db::queries::projects_for_team(conn, &team.id).unwrap_or_default() {
+                projects.push(PaletteProject {
+                    id: p.id,
+                    name: p.name,
+                    team_id: team.id.clone(),
+                    team_name: team.name.clone(),
+                    team_archived: team.archived_at.is_some(),
+                });
+            }
+        }
+        PaletteData { projects }
+    }
+}
 
 /// Ordered palette rows for `query`. An empty (or blank) query lists every
 /// navigation target.
@@ -44,6 +80,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let needle = query.trim().to_lowercase();
     let mut rows = Vec::new();
     push_views(&needle, data, &mut rows);
+    push_projects(&needle, data, &mut rows);
     rows
 }
 
@@ -66,6 +103,22 @@ fn push_views(needle: &str, _data: &PaletteData, rows: &mut Vec<PaletteRow>) {
                 primary: name.to_string(),
                 secondary: scope.to_string(),
                 nav: PaletteNav::View(view),
+            });
+        }
+    }
+}
+
+fn push_projects(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    for p in data.projects.iter().filter(|p| !p.team_archived) {
+        if name_matches(needle, &p.name) {
+            rows.push(PaletteRow {
+                kind: PaletteKind::Project,
+                primary: p.name.clone(),
+                secondary: p.team_name.clone(),
+                nav: PaletteNav::Project {
+                    project_id: p.id.clone(),
+                    team_id: p.team_id.clone(),
+                },
             });
         }
     }
@@ -111,6 +164,71 @@ mod tests {
     #[test]
     fn non_matching_query_returns_nothing() {
         assert!(names("zzz").is_empty());
+    }
+
+    fn project(id: &str, name: &str, team: &str, archived: bool) -> PaletteProject {
+        PaletteProject {
+            id: id.into(),
+            name: name.into(),
+            team_id: format!("t-{team}"),
+            team_name: team.into(),
+            team_archived: archived,
+        }
+    }
+
+    fn project_data() -> PaletteData {
+        PaletteData {
+            projects: vec![
+                project("p1", "Billing revamp", "Alpha", false),
+                project("p2", "Onboarding", "Beta", false),
+                project("p3", "Billing legacy", "Old", true),
+            ],
+        }
+    }
+
+    fn project_rows(query: &str) -> Vec<PaletteRow> {
+        palette_results(query, &project_data())
+            .into_iter()
+            .filter(|r| r.kind == PaletteKind::Project)
+            .collect()
+    }
+
+    #[test]
+    fn project_matches_substring_ignoring_case_across_teams() {
+        let rows = project_rows("ONBO");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Onboarding");
+        assert_eq!(rows[0].secondary, "Beta");
+        assert_eq!(rows[0].kind.label(), "Project");
+        assert_eq!(
+            rows[0].nav,
+            PaletteNav::Project { project_id: "p2".into(), team_id: "t-Beta".into() }
+        );
+    }
+
+    #[test]
+    fn projects_in_archived_teams_are_left_out() {
+        let rows = project_rows("billing");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Billing revamp");
+        assert!(project_rows("legacy").is_empty());
+    }
+
+    #[test]
+    fn empty_query_lists_projects_after_views() {
+        let rows = palette_results("", &project_data());
+        let kinds: Vec<_> = rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                PaletteKind::View,
+                PaletteKind::View,
+                PaletteKind::View,
+                PaletteKind::View,
+                PaletteKind::Project,
+                PaletteKind::Project,
+            ]
+        );
     }
 
     #[test]

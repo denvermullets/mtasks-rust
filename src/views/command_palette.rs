@@ -12,13 +12,15 @@ use crate::theme as t;
 pub struct PaletteState {
     pub query: String,
     pub rows: Vec<PaletteRow>,
+    data: PaletteData,
 }
 
 impl PaletteState {
-    pub fn new() -> Self {
+    pub fn new(data: PaletteData) -> Self {
         let mut state = PaletteState {
             query: String::new(),
             rows: Vec::new(),
+            data,
         };
         state.set_query(String::new());
         state
@@ -26,7 +28,7 @@ impl PaletteState {
 
     /// Store the query and recompute the rows.
     pub fn set_query(&mut self, query: String) {
-        self.rows = palette_results(&query, &PaletteData::default());
+        self.rows = palette_results(&query, &self.data);
         self.query = query;
     }
 }
@@ -112,12 +114,12 @@ mod tests {
 
     #[test]
     fn palette_starts_with_empty_query() {
-        assert_eq!(PaletteState::new().query, "");
+        assert_eq!(PaletteState::new(PaletteData::default()).query, "");
     }
 
     #[test]
     fn typing_recomputes_rows() {
-        let mut state = PaletteState::new();
+        let mut state = PaletteState::new(PaletteData::default());
         assert_eq!(state.rows.len(), 4);
         state.set_query("road".into());
         assert_eq!(state.rows.len(), 1);
