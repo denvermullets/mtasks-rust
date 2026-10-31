@@ -388,6 +388,7 @@ async fn process(
         ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
+        ("notification", "read") => notification_read(client, &entry.entity_id).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -1797,6 +1798,22 @@ fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> 
     }
 }
 
+/// `PATCH /notifications/:id/read`. Idempotent, so a retry is safe.
+async fn notification_read(client: &ApiClient, entity_id: &str) -> Outcome {
+    let Ok(remote_id) = entity_id.parse::<i64>() else {
+        return Outcome::DropAndLog(format!("bad notification id {entity_id}"));
+    };
+    notification_read_outcome(crate::api::notifications::mark_read(client, remote_id).await)
+}
+
+/// A 404 (not yours, or gone) means there is nothing left to mark: done.
+fn notification_read_outcome(result: Result<(), ApiError>) -> Outcome {
+    match result {
+        Ok(()) | Err(ApiError::NotFound(_)) => Outcome::Success,
+        Err(e) => classify(&e),
+    }
+}
+
 fn resolve_comment_parent(
     conn: &rusqlite::Connection,
     comment: &crate::db::models::Comment,
@@ -3160,6 +3177,19 @@ fn relax_issue_fks(conn: &Connection, mut dto: IssueDto) -> IssueDto {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notification_read_404_counts_as_done() {
+        assert!(matches!(notification_read_outcome(Ok(())), Outcome::Success));
+        assert!(matches!(
+            notification_read_outcome(Err(ApiError::NotFound("Not found".into()))),
+            Outcome::Success
+        ));
+        assert!(matches!(
+            notification_read_outcome(Err(ApiError::Unauthorized("x".into()))),
+            Outcome::LeavePending(_)
+        ));
+    }
+
     use super::*;
 
     fn failure(kind: SyncErrorKind) -> SyncFailure {

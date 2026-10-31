@@ -29,7 +29,6 @@ impl InboxState {
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
     }
 
-    #[allow(dead_code)] // used by JRST-94 (mark read) / Enter
     pub fn selected_item(&self) -> Option<&Notification> {
         self.items.get(self.selected)
     }

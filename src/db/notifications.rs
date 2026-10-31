@@ -297,6 +297,23 @@ pub fn delete_for_issue(conn: &Connection, issue_remote_id: i64) -> Result<usize
     )
 }
 
+/// Mark one Notification read locally and queue `notification`/`read` for the
+/// server (entity_id = remote id). Lowers the stored badge count by one.
+/// Returns false (and does nothing) when the row is unknown or already read.
+pub fn mark_read(conn: &Connection, remote_id: i64, now: &str) -> Result<bool> {
+    let before = unread_count(conn)?;
+    let changed = conn.execute(
+        "UPDATE notifications SET read_at = ?1 WHERE remote_id = ?2 AND read_at IS NULL",
+        params![now, remote_id],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    set_unread_count(conn, before - 1)?;
+    sync_queue::enqueue(conn, ENTITY_TYPE, &remote_id.to_string(), "read", None)?;
+    Ok(true)
+}
+
 /// Overwrite the badge number (clamped at 0), e.g. from a `read_all` response.
 pub fn set_unread_count(conn: &Connection, count: i64) -> Result<()> {
     set_pull_cursor(conn, SCOPE, UNREAD_RESOURCE, &count.max(0).to_string())
@@ -511,6 +528,41 @@ mod tests {
     fn mark_locally_read(conn: &Connection, remote_id: i64, at: &str) {
         conn.execute("UPDATE notifications SET read_at = ?1 WHERE remote_id = ?2", params![at, remote_id]).unwrap();
         sync_queue::enqueue(conn, ENTITY_TYPE, &remote_id.to_string(), "read", None).unwrap();
+    }
+
+    #[test]
+    fn mark_read_sets_read_at_lowers_count_and_enqueues_one_entry() {
+        let conn = mem();
+        let c = "2026-10-31T09:00:00.000Z";
+        apply_poll(&conn, &env(vec![n(1, c, None), n(2, c, None)], 2, NOW), NOW).unwrap();
+        assert!(mark_read(&conn, 1, NOW).unwrap());
+        let all = inbox_list(&conn, Filter::All).unwrap();
+        assert_eq!(all.iter().find(|x| x.remote_id == 1).unwrap().read_at.as_deref(), Some(NOW));
+        assert_eq!(unread_count(&conn).unwrap(), 1);
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].entity_type.as_str(), q[0].entity_id.as_str(), q[0].action.as_str()), ("notification", "1", "read"));
+    }
+
+    #[test]
+    fn mark_read_twice_or_unknown_is_a_noop() {
+        let conn = mem();
+        apply_poll(&conn, &env(vec![n(1, "2026-10-31T09:00:00.000Z", None)], 1, NOW), NOW).unwrap();
+        assert!(mark_read(&conn, 1, NOW).unwrap());
+        assert!(!mark_read(&conn, 1, NOW).unwrap());
+        assert!(!mark_read(&conn, 99, NOW).unwrap());
+        assert_eq!(unread_count(&conn).unwrap(), 0);
+        assert_eq!(sync_queue::pending_entries(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn poll_after_mark_read_keeps_row_read() {
+        let conn = mem();
+        let c = "2026-10-31T09:00:00.000Z";
+        apply_poll(&conn, &env(vec![n(1, c, None)], 1, NOW), NOW).unwrap();
+        mark_read(&conn, 1, "2026-10-31T09:45:00.000Z").unwrap();
+        apply_poll(&conn, &env(vec![n(1, c, None)], 1, NOW), NOW).unwrap();
+        assert!(!inbox_list(&conn, Filter::All).unwrap()[0].is_unread());
     }
 
     #[test]

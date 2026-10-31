@@ -26,6 +26,19 @@ pub async fn list(
         .await
 }
 
+/// `PATCH /api/v1/notifications/:id/read`. Idempotent; the returned
+/// Notification is not needed (the next poll delivers it).
+pub async fn mark_read(client: &ApiClient, remote_id: i64) -> Result<(), ApiError> {
+    let _: serde_json::Value = client
+        .patch(&read_path(remote_id), &serde_json::json!({}))
+        .await?;
+    Ok(())
+}
+
+fn read_path(remote_id: i64) -> String {
+    format!("api/v1/notifications/{remote_id}/read")
+}
+
 fn list_path(updated_since: Option<&str>) -> String {
     match updated_since {
         Some(t) => format!(
@@ -39,6 +52,11 @@ fn list_path(updated_since: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_path_targets_the_member_route() {
+        assert_eq!(read_path(12), "api/v1/notifications/12/read");
+    }
 
     const SAMPLE: &str = r#"{
       "notifications": [

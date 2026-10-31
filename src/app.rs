@@ -309,6 +309,8 @@ pub enum Message {
     InboxMove(isize),
     /// Select the Inbox row at this index (click).
     InboxSelect(usize),
+    /// Mark the selected Inbox Notification read (`r`).
+    InboxMarkRead,
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
@@ -1935,6 +1937,17 @@ impl App {
             }
 
             Message::InboxMove(delta) => self.inbox.step(delta),
+            Message::InboxMarkRead => {
+                if let Some(remote_id) = self.inbox.selected_item().map(|n| n.remote_id) {
+                    let conn = self.db();
+                    let now = crate::db::now_iso();
+                    if crate::db::notifications::mark_read(&conn, remote_id, &now).unwrap_or(false) {
+                        self.notif_unread_count =
+                            crate::db::notifications::unread_count(&conn).unwrap_or(0);
+                        self.reload_inbox();
+                    }
+                }
+            }
             Message::InboxSelect(i) => {
                 if i < self.inbox.items.len() {
                     self.inbox.selected = i;
