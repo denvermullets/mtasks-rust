@@ -523,6 +523,8 @@ impl SortDir {
 
 pub struct App {
     teams: Vec<Team>,
+    /// Saved views per local team id, in sidebar order (see `db::saved_views`).
+    saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     selected_team_id: Option<String>,
     /// Current right-pane screen.
     view: View,
@@ -669,6 +671,7 @@ impl App {
     fn reload_data(&mut self) {
         let conn = self.db();
         self.teams = queries::all_teams(&conn).unwrap_or_default();
+        self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
 
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
@@ -1814,6 +1817,7 @@ impl App {
             sync_read_only: false,
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
+            saved_views: crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default(),
             last_notif_poll: None,
             inbox: Default::default(),
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
@@ -3794,6 +3798,7 @@ impl App {
             self.team_menu_open.as_deref(),
             self.show_archived_teams,
             self.notif_unread_count,
+            &self.saved_views,
         );
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),

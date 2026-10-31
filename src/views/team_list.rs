@@ -1,12 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{Message, TeamWebSection, View};
 use crate::db::models::Team;
+use crate::db::saved_views::SavedView;
 use crate::theme as t;
 
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     teams: &'a [Team],
     selected_team_id: Option<&'a str>,
@@ -15,6 +17,7 @@ pub fn view<'a>(
     team_menu_open: Option<&'a str>,
     show_archived: bool,
     unread_count: i64,
+    saved_views: &'a HashMap<String, Vec<SavedView>>,
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(0).width(Length::Fill);
 
@@ -157,6 +160,14 @@ pub fn view<'a>(
                     Message::SelectTeamView(team.id.clone(), view),
                     28,
                 ));
+            }
+            // Saved views: display only; opening comes in a later ticket.
+            for sv in saved_views.get(&team.id).into_iter().flatten() {
+                col = col.push(
+                    container(text(&sv.name).size(13).color(t::text_secondary()))
+                        .padding([6, 28])
+                        .width(Length::Fill),
+                );
             }
         }
     }
