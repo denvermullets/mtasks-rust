@@ -12,6 +12,7 @@ mod lane_icon;
 mod mentions;
 mod palette_results;
 mod saved_view;
+mod schedule_summary;
 mod scroll;
 mod sync;
 mod theme;
