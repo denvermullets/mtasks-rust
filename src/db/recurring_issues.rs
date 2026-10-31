@@ -509,7 +509,10 @@ mod tests {
         let conn = setup();
         let mut row = rec(5, "R", NOW);
         row.project = rref(9, "P");
-        apply_pulled(&conn, "t1", &[row, rec(6, "None", "2026-02-01T00:00:00.000Z")], None).unwrap();
+        row.created_at = "2026-01-01T00:00:00.000Z".into();
+        let mut other = rec(6, "None", "2026-02-01T00:00:00.000Z");
+        other.created_at = "2026-01-02T00:00:00.000Z".into();
+        apply_pulled(&conn, "t1", &[row, other], None).unwrap();
         let names = |c: &Connection| -> Vec<Option<String>> {
             list_rows(c, "t1").unwrap().into_iter().map(|r| r.project_name).collect()
         };
