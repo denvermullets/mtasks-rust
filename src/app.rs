@@ -303,6 +303,12 @@ pub enum Message {
     ProjectDetailPriorityChanged(Priority),
     ProjectDetailLeadChanged(Option<String>),
 
+    // Inbox
+    /// Move the Inbox selection by a signed step (j/k).
+    InboxMove(isize),
+    /// Select the Inbox row at this index (click).
+    InboxSelect(usize),
+
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
 }
@@ -571,6 +577,9 @@ pub struct App {
     /// Unread Notification count (JRST-90 badge). Loaded at startup from the
     /// mirror, refreshed by every completed poll.
     notif_unread_count: i64,
+    /// Inbox rows, selection and filter (JRST-91). Reloaded on entering the
+    /// Inbox and after every poll.
+    inbox: crate::inbox::InboxState,
     /// Report of the most recent successful poll (JRST-95 prune, JRST-96
     /// banners read `new_unread` + `backfill`).
     #[allow(dead_code)] // consumed by JRST-96
@@ -712,11 +721,21 @@ impl App {
     fn switch_view(&mut self, view: View) {
         let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
         self.view = view;
+        if self.view == View::Inbox {
+            self.reload_inbox();
+        }
         if crossing {
             self.focused_lane = 0;
             self.focused_issue = 0;
             self.reload_data();
         }
+    }
+
+    /// Re-read the Inbox rows from the mirror, keeping the selection.
+    fn reload_inbox(&mut self) {
+        let conn = self.db();
+        let items = crate::db::notifications::inbox_list(&conn, self.inbox.filter).unwrap_or_default();
+        self.inbox.set_items(items);
     }
 
     /// Resolve dependency edges for the open detail issue so the sidebar can
@@ -1687,6 +1706,7 @@ impl App {
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             last_notif_poll: None,
+            inbox: Default::default(),
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
@@ -1877,6 +1897,11 @@ impl App {
                 let modal_open = self.modal != Modal::None;
                 let palette_open = matches!(self.modal, Modal::CommandPalette(_));
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
+                if self.view == View::Inbox && !modal_open {
+                    if let Some(msg) = keys::handle_inbox_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
                 }
@@ -1906,6 +1931,13 @@ impl App {
                     self.reload_data();
                 }
                 self.view = view;
+            }
+
+            Message::InboxMove(delta) => self.inbox.step(delta),
+            Message::InboxSelect(i) => {
+                if i < self.inbox.items.len() {
+                    self.inbox.selected = i;
+                }
             }
 
             Message::NavigateToView(view) => {
@@ -3040,6 +3072,9 @@ impl App {
                 let ok = outcome.succeeded();
                 if let PollOutcome::Polled(report) = outcome {
                     self.notif_unread_count = report.unread_count;
+                    if self.view == View::Inbox {
+                        self.reload_inbox();
+                    }
                     // JRST-99 wires the Settings toggle in place of `true`.
                     crate::sync::banner::post(crate::db::notifications::banners_to_fire(
                         &report.new_unread,
@@ -3689,8 +3724,7 @@ impl App {
                 }
             }
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
-            // Placeholder until "Inbox list" (JRST-91) fills it.
-            View::Inbox => placeholder::view("Inbox"),
+            View::Inbox => crate::views::inbox::view(&self.inbox),
         };
 
         let token_configured = self

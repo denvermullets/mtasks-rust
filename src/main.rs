@@ -5,6 +5,7 @@ mod csv_io;
 mod db;
 mod display;
 mod fonts;
+mod inbox;
 mod issue_match;
 mod keys;
 mod lane_icon;
