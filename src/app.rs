@@ -47,6 +47,8 @@ pub enum Message {
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
     DeleteSavedViewConfirmed,
+    /// Make a Saved view (local id) the user's Home page.
+    SetSavedViewAsHome(String),
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
 
@@ -2623,6 +2625,31 @@ impl App {
                     }
                 } else {
                     self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
+                }
+            }
+
+            Message::SetSavedViewAsHome(view_id) => {
+                let found = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == view_id)
+                    .map(|v| v.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(remote_id) = found {
+                    // An unpushed view is queued by local id; the push waits
+                    // for its create.
+                    if let Err(e) =
+                        crate::db::home_page::set_view_local(&self.db(), &view_id, remote_id)
+                    {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
                 }
             }
 

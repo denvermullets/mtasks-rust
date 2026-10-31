@@ -1842,8 +1842,18 @@ fn notification_read_outcome(result: Result<(), ApiError>) -> Outcome {
 /// `PUT /me/home_page`. A 422 drops the entry (logged by the drain); the next
 /// `/me` read restores the server value.
 async fn home_page_set(client: &ApiClient, payload: Option<&str>) -> Outcome {
-    let Some((kind, id)) = crate::db::home_page::parse_payload(payload) else {
-        return Outcome::DropAndLog("home_page set: bad payload".into());
+    let resolved = match open() {
+        Ok(conn) => crate::db::home_page::resolve_payload(&conn, payload),
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let (kind, id) = match resolved {
+        crate::db::home_page::Resolved::Ready(k, i) => (k, i),
+        crate::db::home_page::Resolved::Waiting => {
+            return Outcome::LeavePending("home view not synced yet".into())
+        }
+        crate::db::home_page::Resolved::Bad => {
+            return Outcome::DropAndLog("home_page set: bad payload".into())
+        }
     };
     match crate::api::users::set_home_page(client, &kind, id).await {
         Ok(()) => Outcome::Success,
@@ -4086,6 +4096,24 @@ mod tests {
         sync_queue::mark_synced(&conn, entry.id.unwrap()).unwrap();
         home_page::apply_me(&conn, Some(&crate::api::HomePageDto { kind: "team".into(), id: 1 })).unwrap();
         assert_eq!(home_page::get(&conn).unwrap().unwrap().remote_id, 1);
+    }
+
+    #[test]
+    fn a_view_created_offline_then_set_as_home_waits_then_resolves_after_its_create() {
+        use crate::db::home_page::{self, Resolved};
+        let (mut conn, id) = saved_view_conn();
+        home_page::set_view_local(&conn, &id, None).unwrap();
+        let pending = sync_queue::pending_entries(&conn).unwrap();
+        // FIFO: the create drains before the home write.
+        assert_eq!((pending[0].entity_type.as_str(), pending[1].entity_type.as_str()), ("saved_view", "home_page"));
+        assert_eq!(home_page::resolve_payload(&conn, pending[1].payload.as_deref()), Resolved::Waiting);
+        // The create pushes; the queued PUT now carries the view's remote id.
+        commit_saved_view_create(&mut conn, pending[0].id.unwrap(), &id, &saved_view_dto(88)).unwrap();
+        assert_eq!(
+            home_page::resolve_payload(&conn, pending[1].payload.as_deref()),
+            Resolved::Ready("view".into(), 88)
+        );
+        assert_eq!(home_page::get(&conn).unwrap().unwrap().remote_id, 88);
     }
 
     #[test]
