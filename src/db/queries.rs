@@ -631,8 +631,8 @@ pub fn members_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Member>>
 
 // ── Comments ──
 
-/// Flat list of comments on an issue, oldest first. Nesting (parent_id) is not
-/// surfaced in v1 — replies are ignored on pull.
+/// Flat list of comments on an issue, oldest first; nesting is in `parent_id`
+/// (see `Comment::thread_order`).
 pub fn comments_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Comment>> {
     let mut stmt = conn.prepare(
         "SELECT id, remote_id, issue_id, project_id, author_id, body, parent_id, created_at, updated_at
@@ -643,6 +643,16 @@ pub fn comments_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Comme
 }
 
 /// Every comment on any issue of a team (for local "Referenced In" scanning).
+/// Flat list of comments on a project, oldest first.
+pub fn comments_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Comment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, issue_id, project_id, author_id, body, parent_id, created_at, updated_at
+         FROM comments WHERE project_id = ?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![project_id], Comment::from_row)?;
+    rows.collect()
+}
+
 pub fn comments_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Comment>> {
     let mut stmt = conn.prepare(
         "SELECT c.id, c.remote_id, c.issue_id, c.project_id, c.author_id, c.body, c.parent_id, c.created_at, c.updated_at

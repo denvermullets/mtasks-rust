@@ -4,8 +4,9 @@ use iced::widget::{
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::{Message, View};
-use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
+use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme as t;
+use crate::views::issue_detail::{push_thread, ThreadCtx};
 use crate::display::{CardProperty, DisplayOptions};
 use crate::views::util;
 use crate::views::progress_chart;
@@ -25,6 +26,11 @@ pub struct ProjectDetailState {
     pub due_date: String,
     /// Inline validation (blank name). `None` = valid.
     pub error: Option<String>,
+    /// Open reply composer and mention list (comment composers land with the
+    /// composer tickets; the thread renders read-only until then).
+    pub reply_to: Option<String>,
+    pub reply_composer: text_editor::Content,
+    pub suggest: Option<crate::mentions::SuggestState>,
 }
 
 impl ProjectDetailState {
@@ -37,6 +43,9 @@ impl ProjectDetailState {
             start_date: p.start_date.clone().unwrap_or_default(),
             due_date: p.due_date.clone().unwrap_or_default(),
             error: None,
+            reply_to: None,
+            reply_composer: text_editor::Content::new(),
+            suggest: None,
         }
     }
 
@@ -71,6 +80,8 @@ pub fn view<'a>(
     visible: Vec<&'a Issue>,
     display: &'a DisplayOptions,
     lanes: &'a [Lane],
+    teams: &'a [Team],
+    comments: &'a [Comment],
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -139,7 +150,10 @@ pub fn view<'a>(
                 .height(Length::Fixed(160.0)),
         )
         .push(burndown(project, issues))
-        .push(issues_section(visible, display, team, lanes, members));
+        .push(issues_section(visible, display, team, lanes, members))
+        .push(discussion_section(
+            comments, detail, members, team, teams, issues,
+        ));
 
     // ---- Right sidebar: properties ----
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
@@ -247,6 +261,38 @@ pub fn view<'a>(
         .push(divider)
         .push(sidebar_panel)
         .into()
+}
+
+/// The project's discussion: threaded comments with indented replies, rendered
+/// by the same rows as issue detail. Read-only for now; no delete on project
+/// comments (the web has none).
+#[allow(clippy::too_many_arguments)]
+fn discussion_section<'a>(
+    comments: &'a [Comment],
+    detail: &'a ProjectDetailState,
+    members: &'a [Member],
+    team: Option<&'a Team>,
+    teams: &'a [Team],
+    issues: &'a [Issue],
+) -> Element<'a, Message> {
+    let mut col = column![]
+        .spacing(12)
+        .push(text("Discussion").size(13).color(t::text_secondary()));
+    if comments.is_empty() {
+        col = col.push(text("No comments yet").size(12).color(t::text_muted()));
+    }
+    let ctx = ThreadCtx {
+        members,
+        team,
+        teams,
+        issues,
+        my_member_ids: &[],
+        can_reply: false,
+        reply_to: detail.reply_to.as_deref(),
+        reply_composer: &detail.reply_composer,
+        suggest: &detail.suggest,
+    };
+    push_thread(col, Comment::thread_order(comments), &ctx).into()
 }
 
 /// Burndown / progress chart: scope, started, completed over time against the

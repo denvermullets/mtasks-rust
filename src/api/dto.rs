@@ -448,7 +448,7 @@ impl CommentDto {
 /// Returns the number of comments upserted.
 pub fn merge_comment_tree(
     conn: &Connection,
-    issue_local_uuid: &str,
+    owner: &CommentOwner,
     dtos: Vec<CommentDto>,
     parent_local_uuid: Option<&str>,
 ) -> usize {
@@ -465,13 +465,13 @@ pub fn merge_comment_tree(
         });
         let comment = dto.into_model(
             conn,
-            CommentOwner::Issue(issue_local_uuid.to_string()),
+            owner.clone(),
             existing,
             parent,
         );
         if crate::db::queries::upsert_comment(conn, &comment).is_ok() {
             count += 1;
-            count += merge_comment_tree(conn, issue_local_uuid, replies, Some(&comment.id));
+            count += merge_comment_tree(conn, owner, replies, Some(&comment.id));
         }
     }
     count
@@ -992,7 +992,7 @@ mod tests {
             None,
             Some(vec![mk(11, Some(10), Some(vec![mk(12, Some(11), None)]))]),
         )];
-        assert_eq!(merge_comment_tree(&conn, "i1", tree.clone(), None), 3);
+        assert_eq!(merge_comment_tree(&conn, &CommentOwner::Issue("i1".into()), tree.clone(), None), 3);
         let all = crate::db::queries::comments_for_issue(&conn, "i1").unwrap();
         let by_remote = |r: i64| all.iter().find(|c| c.remote_id == Some(r)).unwrap();
         assert_eq!(by_remote(10).parent_id, None);
@@ -1005,13 +1005,43 @@ mod tests {
             Some(by_remote(11).id.as_str())
         );
         // Idempotent re-merge.
-        assert_eq!(merge_comment_tree(&conn, "i1", tree, None), 3);
+        assert_eq!(merge_comment_tree(&conn, &CommentOwner::Issue("i1".into()), tree, None), 3);
         assert_eq!(
             crate::db::queries::comments_for_issue(&conn, "i1")
                 .unwrap()
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn merge_comment_tree_stores_a_project_thread_under_the_project() {
+        let conn = fresh_conn();
+        conn.execute_batch(
+            "INSERT INTO teams (id,name,identifier,remote_id,created_at,updated_at) VALUES ('t1','T','TT',1,'x','x');
+             INSERT INTO projects (id,team_id,name,created_at,updated_at) VALUES ('p1','t1','P','x','x');",
+        )
+        .unwrap();
+        let mk = |id: i64, parent: Option<i64>, replies: Option<Vec<CommentDto>>| CommentDto {
+            id,
+            body: format!("c{id}"),
+            parent_id: parent,
+            user: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            replies,
+            issue_id: None,
+            project_id: Some(80),
+        };
+        let tree = vec![mk(10, None, Some(vec![mk(11, Some(10), None)]))];
+        let owner = CommentOwner::Project("p1".into());
+        assert_eq!(merge_comment_tree(&conn, &owner, tree, None), 2);
+        let all = crate::db::queries::comments_for_project(&conn, "p1").unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|c| c.owner() == owner));
+        let top = all.iter().find(|c| c.remote_id == Some(10)).unwrap();
+        let reply = all.iter().find(|c| c.remote_id == Some(11)).unwrap();
+        assert_eq!(reply.parent_id.as_deref(), Some(top.id.as_str()));
     }
 
     fn now() -> String {

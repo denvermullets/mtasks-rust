@@ -101,6 +101,7 @@ pub enum Message {
     MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
+    ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
 
@@ -664,6 +665,13 @@ impl App {
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
+        } else if let View::ProjectDetail(ref project_id) = self.view {
+            self.detail_references.clear();
+            self.detail_deps = Default::default();
+            self.detail_comments =
+                queries::comments_for_project(conn, project_id).unwrap_or_default();
+            self.detail_events.clear();
+            return;
         } else {
             self.detail_references.clear();
             self.detail_deps = Default::default();
@@ -1346,7 +1354,42 @@ impl App {
         self.commit_project_detail();
         self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
         self.view = View::ProjectDetail(project.id.clone());
-        Task::none()
+        let conn = self.db();
+        self.load_detail_dependencies(&conn);
+        self.fetch_project_comments_task(&conn, project)
+    }
+
+    /// Build the async task that fetches a project's comments (nested replies)
+    /// once when it is opened. No-op unless the project + team are synced and a
+    /// client can be built.
+    fn fetch_project_comments_task(
+        &self,
+        conn: &rusqlite::Connection,
+        project: &Project,
+    ) -> Task<Message> {
+        let Some(project_remote_id) = project.remote_id else {
+            return Task::none();
+        };
+        let Ok(Some(team_remote_id)) = queries::remote_id_for(conn, "teams", &project.team_id)
+        else {
+            return Task::none();
+        };
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            return Task::none();
+        };
+        let project_local_id = project.id.clone();
+        Task::perform(
+            async move {
+                let result =
+                    crate::api::comments::list_project(&client, team_remote_id, project_remote_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                (project_local_id, result)
+            },
+            |(id, result)| Message::ProjectCommentsFetched(id, result),
+        )
     }
 
     /// Apply a live sidebar change (Status/Priority/Lead) to the project behind
@@ -1963,9 +2006,27 @@ impl App {
             Message::CommentsFetched(issue_id, result) => {
                 if let Ok(dtos) = result {
                     let conn = self.db();
-                    crate::api::dto::merge_comment_tree(&conn, &issue_id, dtos, None);
+                    crate::api::dto::merge_comment_tree(
+                        &conn,
+                        &crate::db::models::CommentOwner::Issue(issue_id),
+                        dtos,
+                        None,
+                    );
                     drop(conn);
                     // Refresh so the open detail's comment list reflects the merge.
+                    self.reload_data();
+                }
+            }
+            Message::ProjectCommentsFetched(project_id, result) => {
+                if let Ok(dtos) = result {
+                    let conn = self.db();
+                    crate::api::dto::merge_comment_tree(
+                        &conn,
+                        &crate::db::models::CommentOwner::Project(project_id),
+                        dtos,
+                        None,
+                    );
+                    drop(conn);
                     self.reload_data();
                 }
             }
@@ -3261,6 +3322,8 @@ impl App {
                             self.project_detail_issues(project_id, &needle),
                             &self.config.display,
                             &self.lanes,
+                            &self.teams,
+                            &self.detail_comments,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.

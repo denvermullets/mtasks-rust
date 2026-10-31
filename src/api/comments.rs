@@ -14,8 +14,7 @@ struct CommentWrap<'a> {
     comment: &'a CommentParams,
 }
 
-/// Top-level comments on an issue. The server nests `replies` under each; v1
-/// ignores them (flat thread).
+/// Top-level comments on an issue. The server nests `replies` under each.
 pub async fn list(
     client: &ApiClient,
     team_id: i64,
@@ -23,6 +22,21 @@ pub async fn list(
 ) -> Result<Vec<CommentDto>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/comments");
     client.get_list(&path).await
+}
+
+fn project_comments_path(team_id: i64, project_id: i64) -> String {
+    format!("api/v1/teams/{team_id}/projects/{project_id}/comments")
+}
+
+/// Top-level comments on a project, with `replies` nested under each.
+pub async fn list_project(
+    client: &ApiClient,
+    team_id: i64,
+    project_id: i64,
+) -> Result<Vec<CommentDto>, ApiError> {
+    client
+        .get_list(&project_comments_path(team_id, project_id))
+        .await
 }
 
 /// Every comment in the team (issue and project comments, replies as flat rows)
@@ -69,6 +83,14 @@ pub async fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_comments_path_nests_under_the_project() {
+        assert_eq!(
+            project_comments_path(3, 9),
+            "api/v1/teams/3/projects/9/comments"
+        );
+    }
 
     #[test]
     fn team_comments_path_includes_cursor_only_when_given() {
