@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::db::models::{
-    Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
+    Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
 
@@ -401,21 +401,29 @@ pub struct CommentDto {
     /// project comments); the per-issue endpoint omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_id: Option<i64>,
+    /// Remote project id. Only the team comments feed sends it (set for
+    /// project comments, null for issue comments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
 }
 
 impl CommentDto {
-    /// Merge a fetched comment into a local `Comment`. `issue_local_uuid` is the
-    /// local UUID of the parent issue (already resolved by the caller). The
+    /// Merge a fetched comment into a local `Comment`. `owner` is the local
+    /// UUID of the owning issue or project (already resolved by the caller). The
     /// author is resolved to a local member by `user.id`; if that member isn't
     /// known locally the author is left `None` (falls back to "Unknown" in the
     /// UI). `parent_local_uuid` is the local UUID of the parent comment, if any.
     pub fn into_model(
         self,
         conn: &Connection,
-        issue_local_uuid: String,
+        owner: CommentOwner,
         existing_uuid: Option<String>,
         parent_local_uuid: Option<String>,
     ) -> Comment {
+        let (issue_id, project_id) = match owner {
+            CommentOwner::Issue(i) => (Some(i), None),
+            CommentOwner::Project(p) => (None, Some(p)),
+        };
         let author_id = self
             .user
             .as_ref()
@@ -423,8 +431,8 @@ impl CommentDto {
         Comment {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
             remote_id: Some(self.id),
-            issue_id: Some(issue_local_uuid),
-            project_id: None,
+            issue_id,
+            project_id,
             author_id,
             body: self.body,
             parent_id: parent_local_uuid,
@@ -455,7 +463,12 @@ pub fn merge_comment_tree(
             dto.parent_id
                 .and_then(|pid| local_uuid_for(conn, "comments", pid).ok())
         });
-        let comment = dto.into_model(conn, issue_local_uuid.to_string(), existing, parent);
+        let comment = dto.into_model(
+            conn,
+            CommentOwner::Issue(issue_local_uuid.to_string()),
+            existing,
+            parent,
+        );
         if crate::db::queries::upsert_comment(conn, &comment).is_ok() {
             count += 1;
             count += merge_comment_tree(conn, issue_local_uuid, replies, Some(&comment.id));
@@ -943,6 +956,18 @@ mod tests {
     }
 
     #[test]
+    fn comment_dto_with_project_id_maps_to_project_owner() {
+        let conn = fresh_conn();
+        let json = r#"{"id":5,"body":"b","parent_id":null,"user":null,
+            "created_at":"x","updated_at":"x","issue_id":null,"project_id":80}"#;
+        let dto: CommentDto = serde_json::from_str(json).unwrap();
+        assert_eq!(dto.project_id, Some(80));
+        let c = dto.into_model(&conn, CommentOwner::Project("p1".into()), None, None);
+        assert_eq!(c.owner(), CommentOwner::Project("p1".into()));
+        assert_eq!(c.issue_id, None);
+    }
+
+    #[test]
     fn merge_comment_tree_flattens_replies_with_parent_links() {
         let conn = fresh_conn();
         conn.execute_batch(
@@ -960,6 +985,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00.000Z".into(),
             replies,
             issue_id: None,
+            project_id: None,
         };
         let tree = vec![mk(
             10,

@@ -26,7 +26,7 @@ use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
     ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
 };
-use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
+use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
 use crate::sync::cursor;
 
@@ -2513,14 +2513,14 @@ fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto
     failed
 }
 
-/// Write feed comments locally (idempotent). Project comments and comments on
-/// issues we do not have (or have tombstoned) are ignored. Replies are applied
+/// Write feed comments locally (idempotent). Comments on issues or projects we
+/// do not have (or issues we have tombstoned) are ignored. Replies are applied
 /// after their parents, however the feed ordered them; a parent that cannot be
 /// found locally leaves the reply top-level rather than blocking the cursor.
 /// Returns how many rows hit a DB error.
 fn apply_pulled_comments(conn: &Connection, dtos: Vec<CommentDto>) -> usize {
     let mut failed = 0;
-    let mut remaining: Vec<CommentDto> = dtos.into_iter().filter(|d| d.issue_id.is_some()).collect();
+    let mut remaining: Vec<CommentDto> = dtos.into_iter().filter(|d| d.issue_id.is_some() || d.project_id.is_some()).collect();
     loop {
         let before = remaining.len();
         let mut deferred = Vec::new();
@@ -2565,23 +2565,31 @@ fn apply_one_comment(
     dto: CommentDto,
     parent_local: Option<String>,
 ) -> Result<(), String> {
-    let Some(issue_remote) = dto.issue_id else {
+    let owner = if let Some(issue_remote) = dto.issue_id {
+        let issue = match queries::find_issue_by_remote_id(conn, issue_remote) {
+            Ok(Some(i)) => i,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("db (find issue): {e}")),
+        };
+        if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote)
+            .map_err(|e| format!("db (tombstone): {e}"))?
+        {
+            return Ok(());
+        }
+        CommentOwner::Issue(issue.id)
+    } else if let Some(project_remote) = dto.project_id {
+        match queries::find_project_by_remote_id(conn, project_remote) {
+            Ok(Some(p)) => CommentOwner::Project(p.id),
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("db (find project): {e}")),
+        }
+    } else {
         return Ok(());
     };
-    let issue = match queries::find_issue_by_remote_id(conn, issue_remote) {
-        Ok(Some(i)) => i,
-        Ok(None) => return Ok(()),
-        Err(e) => return Err(format!("db (find issue): {e}")),
-    };
-    if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote)
-        .map_err(|e| format!("db (tombstone): {e}"))?
-    {
-        return Ok(());
-    }
     let existing = queries::find_comment_by_remote_id(conn, dto.id)
         .map_err(|e| format!("db (find comment): {e}"))?
         .map(|c| c.id);
-    let comment = dto.into_model(conn, issue.id, existing, parent_local);
+    let comment = dto.into_model(conn, owner, existing, parent_local);
     queries::upsert_comment(conn, &comment).map_err(|e| format!("db (upsert comment): {e}"))
 }
 
@@ -3540,6 +3548,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             replies: None,
             issue_id: Some(500),
+            project_id: None,
         }
     }
 
@@ -3997,6 +4006,7 @@ mod tests {
             updated_at: "2026-02-01T00:00:00.000Z".into(),
             replies: None,
             issue_id: issue,
+            project_id: None,
         }
     }
 
@@ -4031,11 +4041,11 @@ mod tests {
     }
 
     #[test]
-    fn feed_comments_skip_project_and_unknown_issue_without_failing() {
+    fn feed_comments_skip_ownerless_and_unknown_issue_without_failing() {
         let conn = setup_labels_db();
         conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
         let dtos = vec![
-            feed_comment(1, None, None, "project comment"),
+            feed_comment(1, None, None, "ownerless"),
             feed_comment(2, None, Some(999), "unknown issue"),
             // Parent never seen: stored top-level, not a failure.
             feed_comment(3, Some(77), Some(50), "orphan reply"),
@@ -4044,6 +4054,60 @@ mod tests {
         let all = queries::comments_for_issue(&conn, "i1").unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].parent_id, None);
+    }
+
+    fn feed_project_comment(id: i64, parent: Option<i64>, project: i64, body: &str) -> CommentDto {
+        CommentDto {
+            issue_id: None,
+            project_id: Some(project),
+            ..feed_comment(id, parent, None, body)
+        }
+    }
+
+    fn insert_test_project(conn: &Connection, id: &str, remote: i64) {
+        exec(
+            conn,
+            &format!(
+                "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+                 VALUES ('{id}', {remote}, 't1', 'P', '2026-01-01', '2026-01-01')"
+            ),
+        );
+    }
+
+    #[test]
+    fn feed_applies_project_comments_parents_first_and_skips_unknown_project() {
+        let conn = setup_labels_db();
+        insert_test_project(&conn, "p1", 80);
+        // Reply delivered before its parent; one row for a project we lack.
+        let dtos = vec![
+            feed_project_comment(2, Some(1), 80, "reply"),
+            feed_project_comment(1, None, 80, "top"),
+            feed_project_comment(3, None, 999, "unknown project"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 1 + 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM comments WHERE project_id='p1' AND issue_id IS NULL"),
+            2
+        );
+        let top = queries::find_comment_by_remote_id(&conn, 1).unwrap().unwrap();
+        let reply = queries::find_comment_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(top.parent_id, None);
+        assert_eq!(reply.parent_id.as_deref(), Some(top.id.as_str()));
+        assert_eq!(top.owner(), crate::db::models::CommentOwner::Project("p1".into()));
+    }
+
+    #[test]
+    fn comment_tombstone_deletes_project_comment_and_replies() {
+        let conn = setup_labels_db();
+        insert_test_project(&conn, "p1", 80);
+        let dtos = vec![
+            feed_project_comment(1, None, 80, "top"),
+            feed_project_comment(2, Some(1), 80, "reply"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Comment", 1)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 0);
     }
 
     #[test]
