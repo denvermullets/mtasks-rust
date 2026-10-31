@@ -77,6 +77,7 @@ pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
             "j" => Some(Message::InboxMove(1)),
             "k" => Some(Message::InboxMove(-1)),
             "r" => Some(Message::InboxMarkRead),
+            "f" => Some(Message::InboxToggleFilter),
             _ => None,
         },
         Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::InboxMove(1)),
@@ -112,6 +113,15 @@ mod tests {
             Some(Message::InboxMarkRead)
         ));
         assert!(!matches!(press("r", false, false), Some(Message::InboxMarkRead)));
+    }
+
+    #[test]
+    fn inbox_f_toggles_filter() {
+        let f = Key::Character("f".into());
+        assert!(matches!(
+            handle_inbox_key(&f, Modifiers::empty()),
+            Some(Message::InboxToggleFilter)
+        ));
     }
 
     #[test]

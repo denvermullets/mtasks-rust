@@ -29,8 +29,23 @@ impl InboxState {
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
     }
 
+    /// Switch the filter and reset the selection to the top. The caller
+    /// reloads the rows afterwards.
+    pub fn set_filter(&mut self, filter: Filter) {
+        self.filter = filter;
+        self.selected = 0;
+    }
+
     pub fn selected_item(&self) -> Option<&Notification> {
         self.items.get(self.selected)
+    }
+}
+
+/// The other filter (what `f` switches to).
+pub fn other_filter(filter: Filter) -> Filter {
+    match filter {
+        Filter::Unread => Filter::All,
+        Filter::All => Filter::Unread,
     }
 }
 
@@ -105,6 +120,20 @@ mod tests {
         assert_eq!(s.selected, 1);
         s.set_items(vec![]);
         assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn set_filter_resets_selection() {
+        let mut s = state(&[3, 2, 1], 2);
+        s.set_filter(Filter::All);
+        assert_eq!(s.filter, Filter::All);
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn other_filter_toggles() {
+        assert_eq!(other_filter(Filter::Unread), Filter::All);
+        assert_eq!(other_filter(Filter::All), Filter::Unread);
     }
 
     #[test]

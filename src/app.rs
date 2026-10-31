@@ -311,6 +311,10 @@ pub enum Message {
     InboxSelect(usize),
     /// Mark the selected Inbox Notification read (`r`).
     InboxMarkRead,
+    /// Switch the Inbox to the other filter (f).
+    InboxToggleFilter,
+    /// Set the Inbox filter (filter tabs).
+    InboxSetFilter(crate::db::notifications::Filter),
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
@@ -1952,6 +1956,16 @@ impl App {
                 if i < self.inbox.items.len() {
                     self.inbox.selected = i;
                 }
+            }
+
+            Message::InboxToggleFilter => {
+                let next = crate::inbox::other_filter(self.inbox.filter);
+                self.inbox.set_filter(next);
+                self.reload_inbox();
+            }
+            Message::InboxSetFilter(filter) => {
+                self.inbox.set_filter(filter);
+                self.reload_inbox();
             }
 
             Message::NavigateToView(view) => {
