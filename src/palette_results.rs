@@ -4,7 +4,7 @@
 //! `push_*` function called from `palette_results`.
 
 use crate::app::View;
-use crate::db::models::{Issue, Team};
+use crate::db::models::Team;
 use crate::db::queries::SearchableIssue;
 use crate::issue_match::IssueQuery;
 
@@ -198,6 +198,7 @@ fn push_projects(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::Issue;
 
     fn team(id: &str, name: &str, ident: &str, archived: bool) -> Team {
         Team {
