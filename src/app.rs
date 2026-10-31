@@ -599,7 +599,6 @@ pub struct App {
     inbox: crate::inbox::InboxState,
     /// Report of the most recent successful poll (JRST-95 prune, JRST-96
     /// banners read `new_unread` + `backfill`).
-    #[allow(dead_code)] // consumed by JRST-96
     last_notif_poll: Option<PollReport>,
     scheduler: Scheduler,
     /// Delay until the scheduler's next timed check; `None` = no timer armed.
@@ -1131,6 +1130,28 @@ impl App {
         }
         self.scroll_state.insert(key, (new, viewport));
         scrollable::scroll_to(id, scrollable::AbsoluteOffset { x: 0.0, y: new })
+    }
+
+    /// Keep the selected Inbox row in view. Rows are fixed-height and sit in
+    /// their own scrollable below the filter tabs, so row `i` starts at
+    /// `i * ROW_HEIGHT`.
+    fn scroll_inbox_to_selection(&mut self) -> Task<Message> {
+        use crate::views::inbox as inbox_view;
+        let top = self.inbox.selected as f32 * inbox_view::ROW_HEIGHT;
+        let (offset, viewport) = self
+            .scroll_state
+            .get(&inbox_view::SCROLL_KEY)
+            .copied()
+            .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+        let new = scroll::offset_to_reveal(top, inbox_view::ROW_HEIGHT, offset, viewport);
+        if (new - offset).abs() < 0.5 {
+            return Task::none();
+        }
+        self.scroll_state.insert(inbox_view::SCROLL_KEY, (new, viewport));
+        scrollable::scroll_to(
+            inbox_view::scroll_id(),
+            scrollable::AbsoluteOffset { x: 0.0, y: new },
+        )
     }
 
     fn focused_issue(&self) -> Option<&Issue> {
@@ -1982,7 +2003,10 @@ impl App {
                 self.view = view;
             }
 
-            Message::InboxMove(delta) => self.inbox.step(delta),
+            Message::InboxMove(delta) => {
+                self.inbox.step(delta);
+                return self.scroll_inbox_to_selection();
+            }
             Message::InboxMarkRead => {
                 self.mark_selected_inbox_read();
             }
@@ -2056,10 +2080,12 @@ impl App {
                 let next = crate::inbox::other_filter(self.inbox.filter);
                 self.inbox.set_filter(next);
                 self.reload_inbox();
+                return self.scroll_inbox_to_selection();
             }
             Message::InboxSetFilter(filter) => {
                 self.inbox.set_filter(filter);
                 self.reload_inbox();
+                return self.scroll_inbox_to_selection();
             }
 
             Message::NavigateToView(view) => {
@@ -3878,6 +3904,7 @@ impl App {
             token_configured,
             &self.inaccessible_teams,
             self.sync_read_only,
+            self.view == View::Inbox,
         );
 
         let main_content = column![]

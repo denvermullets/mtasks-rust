@@ -12,7 +12,15 @@ use crate::inbox::{empty_message, InboxState};
 use crate::theme as t;
 use crate::views::util::relative_time;
 
-const ROW_HEIGHT: f32 = 52.0;
+pub const ROW_HEIGHT: f32 = 52.0;
+
+/// Key for the Inbox list in `App::scroll_state` (distinct from the board
+/// lane indices and `issue_list::SCROLL_KEY`).
+pub const SCROLL_KEY: usize = usize::MAX - 1;
+
+pub fn scroll_id() -> scrollable::Id {
+    scrollable::Id::new("inbox-list")
+}
 
 fn filter_tab<'a>(label: &'a str, filter: Filter, active: Filter) -> Element<'a, Message> {
     let on = filter == active;
@@ -62,6 +70,8 @@ fn list<'a>(state: &'a InboxState) -> Element<'a, Message> {
         .map(|(i, n)| notification_row(i, n, i == state.selected))
         .collect();
     scrollable(Column::with_children(rows).width(Length::Fill))
+        .id(scroll_id())
+        .on_scroll(|vp| Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height))
         .height(Length::Fill)
         .into()
 }

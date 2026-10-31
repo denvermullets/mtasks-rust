@@ -38,8 +38,6 @@ pub async fn mark_read(client: &ApiClient, remote_id: i64) -> Result<(), ApiErro
 /// Response of `PATCH /notifications/read_all`.
 #[derive(Debug, serde::Deserialize)]
 pub struct ReadAllResponse {
-    #[allow(dead_code)]
-    pub marked: i64,
     pub unread_count: i64,
 }
 
@@ -80,7 +78,7 @@ mod tests {
     fn read_all_path_and_response_decode() {
         assert_eq!(READ_ALL_PATH, "api/v1/notifications/read_all");
         let r: ReadAllResponse = serde_json::from_str(r#"{"marked": 3, "unread_count": 1}"#).unwrap();
-        assert_eq!((r.marked, r.unread_count), (3, 1));
+        assert_eq!(r.unread_count, 1);
     }
 
     const SAMPLE: &str = r#"{

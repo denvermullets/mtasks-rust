@@ -17,6 +17,7 @@ pub fn view<'a>(
     token_configured: bool,
     inaccessible_teams: &[String],
     read_only: bool,
+    in_inbox: bool,
 ) -> Element<'a, Message> {
     let (sync_text, sync_color) = if let Some(err) = last_sync_error {
         // Transient network failures are non-fatal (sync retries) — surface them
@@ -52,6 +53,8 @@ pub fn view<'a>(
 
     let shortcuts = if show_help {
         "[n]ew  [e]dit  [m]ove  [M]ove back  [t]eam move  [d]elete  [L]abels  [I]nbox  [j/k]\u{2195}  [h/l]\u{2194}  [v]iew board/list  [c]ollapse section  [1-4]priority  [s]ync  [\u{2318}K]command palette  Inbox: [j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]close help"
+    } else if in_inbox {
+        "[j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]help"
     } else {
         "[n]ew [e]dit [m]ove [d]elete [L]abels [v]iew [s]ync [?]help"
     };

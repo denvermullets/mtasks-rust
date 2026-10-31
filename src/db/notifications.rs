@@ -5,10 +5,6 @@
 //! Bookkeeping lives in the existing tables: the cursor in `pull_cursors` and
 //! the ETag in `list_etags` (both under [`SCOPE`]), and the server-reported
 //! unread count in `pull_cursors` under [`UNREAD_RESOURCE`].
-// The poll, Inbox and banner tickets build on this API; until they land the
-// public surface is unused.
-#![allow(dead_code)]
-
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -288,15 +284,6 @@ pub fn prune(conn: &Connection, now: &str) -> Result<usize> {
     )
 }
 
-/// Drop every Notification for a server issue id. Used when the issue is
-/// purged locally: the server cascades the delete and never re-sends them.
-pub fn delete_for_issue(conn: &Connection, issue_remote_id: i64) -> Result<usize> {
-    conn.execute(
-        "DELETE FROM notifications WHERE issue_remote_id = ?1",
-        params![issue_remote_id],
-    )
-}
-
 /// Mark one Notification read locally and queue `notification`/`read` for the
 /// server (entity_id = remote id). Lowers the stored badge count by one.
 /// Returns false (and does nothing) when the row is unknown or already read.
@@ -315,21 +302,25 @@ pub fn mark_read(conn: &Connection, remote_id: i64, now: &str) -> Result<bool> {
 }
 
 /// Mark every unread Notification read locally and queue one
-/// `notification`/`read_all` entry with payload `{"before": newest created_at}`.
-/// The badge drops to 0. Returns the number of rows changed (0 = no-op).
+/// `notification`/`read_all` entry with payload `{"before": newest created_at}`
+/// (the newest row the mirror holds, read or not). Also queues when no local
+/// row is unread but the stored count is above 0, so the server can clear rows
+/// the mirror has not seen. An empty mirror is a no-op. The badge drops to 0.
+/// Returns the number of rows changed.
 pub fn mark_all_read(conn: &Connection, now: &str) -> Result<usize> {
-    let newest: Option<String> = conn.query_row(
-        "SELECT MAX(created_at) FROM notifications WHERE read_at IS NULL",
-        [],
-        |r| r.get(0),
-    )?;
+    let newest: Option<String> =
+        conn.query_row("SELECT MAX(created_at) FROM notifications", [], |r| r.get(0))?;
     let Some(newest) = newest else {
         return Ok(0);
     };
+    let stored = unread_count(conn)?;
     let changed = conn.execute(
         "UPDATE notifications SET read_at = ?1 WHERE read_at IS NULL",
         params![now],
     )?;
+    if changed == 0 && stored <= 0 {
+        return Ok(0);
+    }
     set_unread_count(conn, 0)?;
     let payload = serde_json::json!({ "before": newest }).to_string();
     sync_queue::enqueue(conn, ENTITY_TYPE, "all", "read_all", Some(&payload))?;
@@ -588,6 +579,39 @@ mod tests {
     }
 
     #[test]
+    fn mark_all_read_before_is_newest_row_even_if_already_read() {
+        let conn = mem();
+        let items = vec![
+            n(1, "2026-10-31T09:00:00.000Z", None),
+            n(2, "2026-10-31T09:30:00.000Z", Some("2026-10-31T09:40:00.000Z")),
+        ];
+        apply_poll(&conn, &env(items, 1, NOW), NOW).unwrap();
+        assert_eq!(mark_all_read(&conn, NOW).unwrap(), 1);
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q[0].payload.as_deref(), Some(r#"{"before":"2026-10-31T09:30:00.000Z"}"#));
+    }
+
+    #[test]
+    fn mark_all_read_enqueues_when_only_the_server_count_is_unread() {
+        let conn = mem();
+        let items = vec![n(1, "2026-10-31T09:00:00.000Z", Some("2026-10-31T09:05:00.000Z"))];
+        apply_poll(&conn, &env(items, 3, NOW), NOW).unwrap();
+        assert_eq!(mark_all_read(&conn, NOW).unwrap(), 0);
+        assert_eq!(unread_count(&conn).unwrap(), 0);
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].payload.as_deref(), Some(r#"{"before":"2026-10-31T09:00:00.000Z"}"#));
+    }
+
+    #[test]
+    fn mark_all_read_on_empty_mirror_does_nothing() {
+        let conn = mem();
+        set_unread_count(&conn, 5).unwrap();
+        assert_eq!(mark_all_read(&conn, NOW).unwrap(), 0);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
     fn mark_read_twice_or_unknown_is_a_noop() {
         let conn = mem();
         apply_poll(&conn, &env(vec![n(1, "2026-10-31T09:00:00.000Z", None)], 1, NOW), NOW).unwrap();
@@ -755,15 +779,6 @@ mod tests {
         .unwrap();
         assert_eq!(prune(&conn, NOW).unwrap(), 1);
         assert_eq!(remote_ids(&conn), vec![2]);
-    }
-
-    #[test]
-    fn delete_for_issue_removes_only_that_issues_rows() {
-        let conn = mem();
-        let items = vec![n(1, "2026-10-30T00:00:00.000Z", None), n(2, "2026-10-30T00:00:00.000Z", None)];
-        apply_poll(&conn, &env(items, 2, NOW), NOW).unwrap();
-        assert_eq!(delete_for_issue(&conn, 12).unwrap(), 1);
-        assert_eq!(remote_ids(&conn), vec![1]);
     }
 
     #[test]
