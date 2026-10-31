@@ -62,6 +62,25 @@ pub fn revert_button<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Rename for the open Saved view. Disabled (no press) with a read-only token.
+pub fn rename_view_button<'a>(view_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Rename").size(13))
+        .on_press_maybe((!read_only).then(|| Message::OpenRenameSavedView(view_id.to_string())))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
+/// Delete for the open Saved view (asks to confirm). Disabled (no press) with
+/// a read-only token.
+pub fn delete_view_button<'a>(view_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Delete").size(13))
+        .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteSavedView(view_id.to_string())))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
