@@ -2503,7 +2503,11 @@ impl App {
             Message::OpenCommandPalette => {
                 // Never opens over another modal.
                 if self.modal == Modal::None {
-                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new());
+                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new(
+                        crate::palette_results::PaletteData {
+                            teams: self.teams.clone(),
+                        },
+                    ));
                     return text_input::focus(command_palette::input_id());
                 }
             }
@@ -2518,6 +2522,10 @@ impl App {
                     // Same path as any other view navigation: commits open
                     // issue/project detail edits first.
                     PaletteNav::View(view) => return self.update(Message::NavigateToView(view)),
+                    // Same path as a sidebar team click, so selection follows.
+                    PaletteNav::Team(id) => {
+                        return self.update(Message::SelectTeamView(id, View::Board))
+                    }
                 }
             }
 
