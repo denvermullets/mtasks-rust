@@ -568,6 +568,8 @@ pub struct NewRecurringIssue {
     pub starts_on: String,
     /// ActiveSupport zone name; `None` lets the server use the creator's.
     pub time_zone: Option<String>,
+    /// Local label ids to attach.
+    pub label_ids: Vec<String>,
 }
 
 /// Payload of a `recurring_issue` / `create` queue entry: `{"starts_on":...}`.
@@ -608,6 +610,13 @@ pub fn create(conn: &Connection, local_team_id: &str, new: &NewRecurringIssue) -
                 new.time_zone
             ],
         )?;
+        for label_id in &new.label_ids {
+            c.execute(
+                "INSERT OR IGNORE INTO recurring_issue_labels (recurring_issue_id, label_id)
+                 VALUES (?1, ?2)",
+                params![id, label_id],
+            )?;
+        }
         Ok(())
     })?;
     Ok(id)
@@ -936,7 +945,19 @@ mod tests {
             day_of_month: None,
             starts_on: "2026-11-04".into(),
             time_zone: None,
+            label_ids: vec![],
         }
+    }
+
+    #[test]
+    fn create_writes_the_chosen_labels() {
+        let conn = setup();
+        let mut new = new_weekly();
+        new.label_ids = vec!["lab2".into(), "lab1".into()];
+        let id = create(&conn, "t1", &new).unwrap();
+        assert_eq!(label_ids(&conn, &id).unwrap(), vec!["lab1", "lab2"]);
+        let id2 = create(&conn, "t1", &new_weekly()).unwrap();
+        assert!(label_ids(&conn, &id2).unwrap().is_empty());
     }
 
     #[test]
