@@ -4,7 +4,6 @@
 //! Entries are keyed by `(issue_id, entry_cursor)` where the cursor is the full
 //! `<type>:<id>` string: numeric ids collide across entry types.
 // Unused until the fetch routine and display layer land; drop then.
-#![allow(dead_code)]
 
 use rusqlite::{params, Connection, Result};
 use serde_json::{json, Value};
@@ -49,7 +48,8 @@ pub struct FetchState {
 ///
 /// Also prunes settled Pending changes (see [`prune_settled`]), treating the
 /// fetch as having started now. Callers that know when the request actually
-/// began should use [`store_batch_at`].
+/// began should use [`store_batch_at`]. Test helper only.
+#[cfg(test)]
 pub fn store_batch(
     conn: &Connection,
     issue_id: &str,

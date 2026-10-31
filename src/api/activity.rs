@@ -1,7 +1,6 @@
 //! DTOs for the issue Activity feed (`GET .../issues/:id/activity`).
 
 // Unused until the store and fetch routine land (JRST-131+); drop then.
-#![allow(dead_code)]
 
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
