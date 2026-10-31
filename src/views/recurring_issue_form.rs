@@ -152,7 +152,7 @@ pub struct TimeZoneChoice(pub Option<String>);
 
 impl std::fmt::Display for TimeZoneChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0.as_deref().unwrap_or("Default (my time zone)"))
+        f.write_str(self.0.as_deref().unwrap_or("My time zone preference"))
     }
 }
 
@@ -837,6 +837,11 @@ mod tests {
             assert!(US_TIME_ZONES.contains(&z), "{z}");
             assert!(crate::db::recurring_issues::time_zone_abbreviation(z).is_some(), "{z}");
         }
+    }
+
+    #[test]
+    fn the_default_zone_option_reads_my_time_zone_preference() {
+        assert_eq!(TimeZoneChoice(None).to_string(), "My time zone preference");
     }
 
     #[test]
