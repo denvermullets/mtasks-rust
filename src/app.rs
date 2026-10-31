@@ -135,6 +135,8 @@ pub enum Message {
     EditLabelNameChanged(String),
     EditLabelColorChanged(String),
     SaveLabelEdit,
+    ConfirmDeleteLabel,
+    DeleteLabelConfirmed,
     /// Toggle a label on the issue targeted by the label modal (by local UUID).
     ToggleIssueLabel(String),
     SaveIssueLabels,
@@ -291,6 +293,8 @@ pub enum Modal {
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
     Labels,
+    /// Confirm deleting the label being edited (local id) from the labels panel.
+    DeleteLabelConfirm(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
     /// "Add project to roadmap" picker; carries the lane a chosen project lands in.
@@ -3038,6 +3042,28 @@ impl App {
                 }
             }
 
+            Message::ConfirmDeleteLabel => {
+                if let Some(id) = self.label_form.as_ref().and_then(|f| f.editing_id.clone()) {
+                    self.modal = Modal::DeleteLabelConfirm(id);
+                }
+            }
+
+            Message::DeleteLabelConfirmed => {
+                if let Modal::DeleteLabelConfirm(ref label_id) = self.modal {
+                    let label_id = label_id.clone();
+                    if let Ok(Some(payload)) = queries::delete_label(&self.db(), &label_id) {
+                        self.enqueue_sync("label", &label_id, "delete", Some(payload.as_str()));
+                    }
+                    if let Some(ref mut form) = self.label_form {
+                        form.selected_label_ids.retain(|id| *id != label_id);
+                        form.editing_id = None;
+                        form.edit_error = None;
+                    }
+                }
+                self.modal = Modal::Labels;
+                self.reload_data();
+            }
+
             Message::ToggleIssueLabel(label_id) => {
                 if let Some(ref mut form) = self.label_form {
                     if let Some(pos) = form
@@ -3374,6 +3400,16 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::DeleteLabelConfirm(label_id) => {
+                let conn = self.db();
+                let name = queries::get_label(&conn, label_id)
+                    .ok()
+                    .flatten()
+                    .map(|l| l.name)
+                    .unwrap_or_default();
+                let count = queries::label_issue_count(&conn, label_id).unwrap_or(0);
+                iced::widget::stack![base, delete_label_confirm_modal(name, count)].into()
+            }
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
@@ -3596,6 +3632,15 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
         format!("Are you sure you want to delete \"{}\"?", project_name),
         Message::DeleteProjectConfirmed,
     )
+}
+
+fn delete_label_confirm_modal<'a>(name: String, issues: usize) -> Element<'a, Message> {
+    let body = match issues {
+        0 => format!("Delete the label \"{name}\"? No issues carry it."),
+        1 => format!("Delete the label \"{name}\"? It will be removed from 1 issue."),
+        n => format!("Delete the label \"{name}\"? It will be removed from {n} issues."),
+    };
+    delete_modal("Delete Label?", body, Message::DeleteLabelConfirmed)
 }
 
 fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {

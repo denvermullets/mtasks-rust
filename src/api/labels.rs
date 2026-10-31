@@ -43,9 +43,22 @@ pub async fn update(
     client.patch(&path, &LabelWrap { label: params }).await
 }
 
+fn delete_path(team_id: i64, id: i64) -> String {
+    format!("api/v1/teams/{team_id}/labels/{id}")
+}
+
+pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), ApiError> {
+    client.delete(&delete_path(team_id, id)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_path_names_team_and_label() {
+        assert_eq!(delete_path(700, 11), "api/v1/teams/700/labels/11");
+    }
 
     #[test]
     fn update_body_carries_name_and_color() {
