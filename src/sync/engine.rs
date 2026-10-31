@@ -27,7 +27,7 @@ use crate::api::{
     ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
 };
 use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
-use crate::db::{connection, queries, sync_queue};
+use crate::db::{connection, queries, recurring_issues, sync_queue};
 use crate::sync::cursor;
 
 #[derive(Debug, Default, Clone)]
@@ -3480,12 +3480,17 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
                 || dto.duplicates.is_some();
             let dto = relax_issue_fks(conn, dto);
             let existing_uuid = existing.map(|i| i.id);
+            let recurring_remote_id = dto.recurring_issue_id;
             // Capture the remote label ids before `into_model` consumes dto.
             let label_remote_ids: Vec<i64> = dto.labels.iter().map(|l| l.id).collect();
             let issue: Issue = dto
                 .into_model(conn, local_team_id.to_string(), existing_uuid)
                 .map_err(|e| format!("convert: {e}"))?;
             queries::upsert_issue(conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
+            // Recurring issues are pulled before issues, so the origin
+            // resolves locally; an unresolved id keeps the stored value.
+            recurring_issues::set_issue_origin(conn, &issue.id, recurring_remote_id)
+                .map_err(|e| format!("db (recurring origin): {e}"))?;
             // Reflect the remote label set into the issue_labels join. Labels
             // are pulled before issues, so their local rows already exist; any
             // remote id we can't resolve locally is skipped defensively.
@@ -5683,6 +5688,38 @@ mod tests {
         // Incremental pulls never archive.
         let j = queries::find_issue_by_remote_id(&conn, 3).unwrap().unwrap();
         assert_eq!(j.archived_at, None);
+    }
+
+    #[test]
+    fn pulled_issue_records_the_recurring_issue_that_spawned_it() {
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        recurring_issues::apply_pulled(
+            &conn,
+            "t1",
+            &[serde_json::from_value(serde_json::json!({
+                "id": 5, "title": "Weekly", "description": null, "priority": "no_priority",
+                "frequency": "weekly", "interval": 1, "weekday": 1, "day_of_month": null,
+                "time_zone": null, "active": true, "next_run_on": null, "last_run_at": null,
+                "assignee": null, "project": null, "lane": null, "label_ids": [],
+                "creator": null, "created_at": "2026-01-01T00:00:00.000Z",
+                "updated_at": "2026-01-01T00:00:00.000Z",
+            }))
+            .unwrap()],
+            Some("s"),
+        )
+        .unwrap();
+        let mut dto = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
+        dto.recurring_issue_id = Some(5);
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
+        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        let origin = recurring_issues::origin_of_issue(&conn, &i.id).unwrap().unwrap();
+        assert_eq!(origin.title, "Weekly");
+
+        // Server detached it: cleared.
+        let back = detail_dto(2, "two", "2026-06-01T00:00:00.000Z");
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![back]), 0);
+        assert_eq!(recurring_issues::origin_id(&conn, &i.id).unwrap(), None);
     }
 
     #[test]

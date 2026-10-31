@@ -249,6 +249,48 @@ pub fn apply_tombstone(conn: &Connection, local_team_id: &str, remote_id: i64) -
     Ok(true)
 }
 
+/// Record which recurring issue spawned `issue_id`, from the server's
+/// `recurring_issue_id` on the pulled issue. `None` clears it (hand-made
+/// issue). A remote id with no local row yet leaves the stored value alone.
+pub fn set_issue_origin(
+    conn: &Connection,
+    issue_id: &str,
+    recurring_remote_id: Option<i64>,
+) -> Result<()> {
+    let local: Option<String> = match recurring_remote_id {
+        None => None,
+        Some(remote) => match find_by_remote_id(conn, remote)? {
+            Some(r) => Some(r.id),
+            None => return Ok(()),
+        },
+    };
+    conn.execute(
+        "UPDATE issues SET recurring_issue_id = ?1 WHERE id = ?2",
+        params![local, issue_id],
+    )?;
+    Ok(())
+}
+
+/// Local id of the recurring issue that spawned `issue_id`, if any.
+pub fn origin_id(conn: &Connection, issue_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT recurring_issue_id FROM issues WHERE id = ?1",
+            params![issue_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// The recurring issue that spawned `issue_id`, if any (raw row).
+pub fn origin_of_issue(conn: &Connection, issue_id: &str) -> Result<Option<RecurringIssue>> {
+    match origin_id(conn, issue_id)? {
+        Some(id) => get(conn, &id),
+        None => Ok(None),
+    }
+}
+
 #[allow(dead_code)] // used by the view/write tickets that build on this module
 pub fn get(conn: &Connection, id: &str) -> Result<Option<RecurringIssue>> {
     conn.query_row(
@@ -386,6 +428,44 @@ mod tests {
             created_at: NOW.into(),
             updated_at: updated.into(),
         }
+    }
+
+    fn add_issue(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES (?1, 'x', 4, 'l1', 't1', ?2, ?2)",
+            params![id, NOW],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_origin_is_stored_cleared_and_kept_when_unresolved() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(1, "Weekly", NOW)], Some("s")).unwrap();
+        add_issue(&conn, "i1");
+        assert_eq!(origin_id(&conn, "i1").unwrap(), None);
+
+        set_issue_origin(&conn, "i1", Some(1)).unwrap();
+        let r = origin_of_issue(&conn, "i1").unwrap().unwrap();
+        assert_eq!(r.title, "Weekly");
+
+        // Unknown remote id: keep what we have.
+        set_issue_origin(&conn, "i1", Some(99)).unwrap();
+        assert!(origin_id(&conn, "i1").unwrap().is_some());
+
+        set_issue_origin(&conn, "i1", None).unwrap();
+        assert_eq!(origin_id(&conn, "i1").unwrap(), None);
+    }
+
+    #[test]
+    fn tombstoning_a_recurring_issue_nulls_the_origin() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(1, "Weekly", NOW)], Some("s")).unwrap();
+        add_issue(&conn, "i1");
+        set_issue_origin(&conn, "i1", Some(1)).unwrap();
+        assert!(apply_tombstone(&conn, "t1", 1).unwrap());
+        assert_eq!(origin_id(&conn, "i1").unwrap(), None);
     }
 
     fn rref(id: i64, name: &str) -> Option<RecordRef> {

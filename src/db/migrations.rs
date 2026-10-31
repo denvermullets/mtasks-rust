@@ -608,6 +608,19 @@ const MIGRATIONS: &[Migration] = &[
                 ON recurring_issue_labels (label_id);
         ",
     },
+    Migration {
+        version: 29,
+        name: "issue_recurring_issue_id",
+        up: "
+            -- Which recurring issue spawned an issue (local ref; NULL for
+            -- hand-made issues, and when the recurring issue is deleted,
+            -- matching the server's on_delete: :nullify).
+            ALTER TABLE issues ADD COLUMN recurring_issue_id TEXT
+                REFERENCES recurring_issues(id) ON DELETE SET NULL;
+            CREATE INDEX IF NOT EXISTS idx_issues_recurring_issue_id
+                ON issues (recurring_issue_id);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -774,7 +787,23 @@ mod tests {
         run(&conn).unwrap();
         assert!(table_exists(&conn, "recurring_issues"));
         assert!(table_exists(&conn, "recurring_issue_labels"));
-        assert_eq!(applied_versions(&conn).last(), Some(&28));
+        assert!(applied_versions(&conn).contains(&28));
+    }
+
+    #[test]
+    fn upgrade_from_v28_adds_the_issue_recurring_issue_column() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 29) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        run(&conn).unwrap();
+        conn.prepare("SELECT recurring_issue_id FROM issues").unwrap();
+        assert_eq!(applied_versions(&conn).last(), Some(&29));
     }
 
     #[test]

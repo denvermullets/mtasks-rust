@@ -81,6 +81,10 @@ pub struct IssueDto {
     /// Set when the issue is archived upstream; absent/null when active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
+    /// Remote id of the recurring issue that spawned this issue; null for
+    /// hand-made issues. Server-set, never pushed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurring_issue_id: Option<i64>,
 
     // detail-only (None when the Rails serializer ran with detailed: false)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +161,7 @@ impl IssueDto {
             created_at: issue.created_at.clone(),
             updated_at: issue.updated_at.clone(),
             archived_at: None,
+            recurring_issue_id: None,
             description: issue.description.clone(),
             parent_issue,
             blocking_issues: Some(blocking),
