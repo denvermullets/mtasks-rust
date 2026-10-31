@@ -19,6 +19,7 @@ pub fn handle_key_press(
         Key::Character(ref c) => match c.as_str() {
             // Global shortcuts — active on any view.
             "f" if modifiers.command() => Some(Message::FocusSearch),
+            "k" if modifiers.command() => Some(Message::OpenCommandPalette),
             "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
             "s" if modifiers.is_empty() => Some(Message::SyncNow),
@@ -82,5 +83,46 @@ mod tests {
     #[test]
     fn t_ignored_while_modal_open() {
         assert!(press("t", true, true).is_none());
+    }
+
+    fn cmd(c: &str, modal_open: bool, on_board: bool) -> Option<Message> {
+        handle_key_press(
+            Key::Character(c.into()),
+            Modifiers::COMMAND,
+            modal_open,
+            on_board,
+        )
+    }
+
+    #[test]
+    fn cmd_k_opens_palette_on_any_view() {
+        assert!(matches!(
+            cmd("k", false, true),
+            Some(Message::OpenCommandPalette)
+        ));
+        assert!(matches!(
+            cmd("k", false, false),
+            Some(Message::OpenCommandPalette)
+        ));
+    }
+
+    #[test]
+    fn cmd_k_ignored_while_modal_open() {
+        assert!(cmd("k", true, true).is_none());
+        assert!(cmd("k", true, false).is_none());
+    }
+
+    #[test]
+    fn cmd_f_still_focuses_search() {
+        assert!(matches!(cmd("f", false, true), Some(Message::FocusSearch)));
+        assert!(matches!(cmd("f", false, false), Some(Message::FocusSearch)));
+    }
+
+    #[test]
+    fn plain_k_still_moves_focus_on_board() {
+        assert!(matches!(
+            press("k", false, true),
+            Some(Message::FocusPrevIssue)
+        ));
     }
 }

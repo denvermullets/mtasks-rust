@@ -51,7 +51,7 @@ pub fn view<'a>(
     };
 
     let shortcuts = if show_help {
-        "[n]ew  [e]dit  [m]ove  [M]ove back  [t]eam move  [d]elete  [L]abels  [j/k]\u{2195}  [h/l]\u{2194}  [v]iew board/list  [c]ollapse section  [1-4]priority  [s]ync  [?]close help"
+        "[n]ew  [e]dit  [m]ove  [M]ove back  [t]eam move  [d]elete  [L]abels  [j/k]\u{2195}  [h/l]\u{2194}  [v]iew board/list  [c]ollapse section  [1-4]priority  [s]ync  [\u{2318}K]command palette  [\u{2318}F]search  [?]close help"
     } else {
         "[n]ew [e]dit [m]ove [d]elete [L]abels [v]iew [s]ync [?]help"
     };

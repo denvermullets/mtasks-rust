@@ -23,7 +23,7 @@ use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
+    board, command_palette, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
     team_list, team_members, team_picker, toast,
@@ -171,6 +171,10 @@ pub enum Message {
     // UI
     CloseModal,
     ToggleHelp,
+    /// Cmd+K: open the command palette.
+    OpenCommandPalette,
+    /// The palette's text field changed.
+    PaletteQueryChanged(String),
 
     // Header bar
     /// Header search box changed; filters the current view's items.
@@ -328,6 +332,8 @@ pub enum Modal {
     DisplayOptions,
     /// Filter popover, anchored under the header.
     FilterPanel,
+    /// Command palette (Cmd+K); see `command_palette`.
+    CommandPalette(command_palette::PaletteState),
 }
 
 /// Sections of the Rails team settings page (`/teams/:id/edit?section=…`).
@@ -2491,6 +2497,19 @@ impl App {
                 self.csv_import = None;
             }
 
+            Message::OpenCommandPalette => {
+                // Never opens over another modal.
+                if self.modal == Modal::None {
+                    self.modal = Modal::CommandPalette(command_palette::PaletteState::default());
+                    return text_input::focus(command_palette::input_id());
+                }
+            }
+            Message::PaletteQueryChanged(query) => {
+                if let Modal::CommandPalette(ref mut palette) = self.modal {
+                    palette.query = query;
+                }
+            }
+
             Message::ToggleHelp => {
                 self.show_help = !self.show_help;
             }
@@ -3715,6 +3734,9 @@ impl App {
                 }
                 None => base,
             },
+            Modal::CommandPalette(palette) => {
+                iced::widget::stack![base, command_palette::view(palette)].into()
+            }
             Modal::None => base,
         };
 
