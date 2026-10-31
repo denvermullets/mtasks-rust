@@ -290,7 +290,13 @@ pub struct RecurringIssueRow {
     pub schedule: String,
     /// Current local name of the linked project; `None` with no project.
     pub project_name: Option<String>,
+    /// Local name of the lane spawned issues start in, or [`FIRST_LANE`] when
+    /// none is set (the server then uses the team's first lane).
+    pub lane: String,
 }
+
+/// Lane cell text for a recurring issue with no lane set.
+pub const FIRST_LANE: &str = "First lane";
 
 /// Build the display row for one mirrored recurring issue. Column tickets
 /// extend this (they may use `conn` to resolve names).
@@ -298,6 +304,14 @@ fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> 
     let project_name = match &r.project_id {
         Some(pid) => conn
             .query_row("SELECT name FROM projects WHERE id = ?1", params![pid], |x| x.get(0))
+            .optional()?,
+        None => None,
+    };
+    let lane = match &r.lane_id {
+        Some(id) => conn
+            .query_row("SELECT name FROM lanes WHERE id = ?1", params![id], |row| {
+                row.get::<_, String>(0)
+            })
             .optional()?,
         None => None,
     };
@@ -312,6 +326,7 @@ fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> 
             r.day_of_month,
         ),
         project_name,
+        lane: lane.unwrap_or_else(|| FIRST_LANE.to_string()),
     })
 }
 
@@ -550,6 +565,21 @@ mod tests {
 
         conn.execute("DELETE FROM projects WHERE id = 'p1'", []).unwrap();
         assert_eq!(names(&conn), [None, None]);
+    }
+
+    #[test]
+    fn list_rows_shows_the_lane_name_or_first_lane() {
+        let conn = setup();
+        let mut with = rec(5, "With", NOW);
+        with.lane = rref(4, "Todo");
+        with.created_at = "2026-01-01T00:00:00.000Z".into();
+        let mut without = rec(6, "Without", "2026-02-01T00:00:00.000Z");
+        without.created_at = "2026-01-02T00:00:00.000Z".into();
+        apply_pulled(&conn, "t1", &[with, without], None).unwrap();
+        conn.execute("UPDATE lanes SET name = 'Renamed' WHERE id = 'l1'", []).unwrap();
+        let rows = list_rows(&conn, "t1").unwrap();
+        let got: Vec<(&str, &str)> = rows.iter().map(|r| (r.title.as_str(), r.lane.as_str())).collect();
+        assert_eq!(got, [("With", "Renamed"), ("Without", "First lane")]);
     }
 
     #[test]
