@@ -1832,7 +1832,18 @@ impl App {
         }
 
         let teams = queries::all_teams(&conn).unwrap_or_default();
-        let selected_team_id = default_team_id(&teams);
+        let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
+        let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        // Open the stored Home page; anything unresolvable falls back to the
+        // first team's board.
+        let launch = crate::db::home_page::launch_target(home_page.as_ref(), &teams, &saved_views);
+        let (selected_team_id, launch_view) = match launch {
+            crate::db::home_page::LaunchTarget::Team(id) => (Some(id), None),
+            crate::db::home_page::LaunchTarget::View { view_id, team_id } => {
+                (Some(team_id), Some(view_id))
+            }
+            crate::db::home_page::LaunchTarget::Default => (default_team_id(&teams), None),
+        };
 
         let (lanes, issues, projects, members, labels, issue_labels) =
             if let Some(ref tid) = selected_team_id {
@@ -1853,7 +1864,7 @@ impl App {
         // Expand the boot-selected team so its sub-rows are visible on first paint.
         let expanded_teams = selected_team_id.iter().cloned().collect();
 
-        let app = Self {
+        let mut app = Self {
             teams,
             selected_team_id,
             view: View::Board,
@@ -1900,9 +1911,9 @@ impl App {
             sync_read_only: false,
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
-            saved_views: crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default(),
+            saved_views,
             open_view: None,
-            home_page: crate::db::home_page::get(&conn).unwrap_or_default(),
+            home_page,
             last_notif_poll: None,
             inbox: Default::default(),
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
@@ -1912,7 +1923,11 @@ impl App {
             sync_paused_auth: false,
         };
 
-        (app, Task::none())
+        let task = match launch_view {
+            Some(view_id) => app.update_inner(Message::OpenSavedView(view_id)),
+            None => Task::none(),
+        };
+        (app, task)
     }
 
     pub fn title(&self) -> String {
