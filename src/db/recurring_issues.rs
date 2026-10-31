@@ -286,15 +286,27 @@ pub struct RecurringIssueRow {
     pub id: String,
     pub title: String,
     pub active: bool,
+    /// Who spawned issues are assigned to: the local member's name, else the
+    /// server's assignee name, else `None`.
+    pub assignee: Option<String>,
 }
 
 /// Build the display row for one mirrored recurring issue. Column tickets
 /// extend this (they may use `conn` to resolve names).
-fn row_from(_conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+    let local_assignee = match &r.assignee_id {
+        Some(mid) => conn
+            .query_row("SELECT name FROM members WHERE id = ?1", params![mid], |x| {
+                x.get::<_, String>(0)
+            })
+            .optional()?,
+        None => None,
+    };
     Ok(RecurringIssueRow {
         id: r.id.clone(),
         title: r.title.clone(),
         active: r.active,
+        assignee: local_assignee.or_else(|| r.assignee_name.clone()),
     })
 }
 
@@ -395,6 +407,23 @@ mod tests {
     fn count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM recurring_issues", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn rows_show_local_member_then_server_name_then_nothing() {
+        let conn = setup();
+        let mut local = rec(1, "Local", "2026-01-01T00:00:01.000Z");
+        local.assignee = rref(3, "Server Ann");
+        let mut gone = rec(2, "Gone", "2026-01-01T00:00:02.000Z");
+        gone.assignee = rref(77, "Left Team");
+        let none = rec(3, "None", "2026-01-01T00:00:03.000Z");
+        apply_pulled(&conn, "t1", &[local, gone, none], None).unwrap();
+
+        let rows = list_rows(&conn, "t1").unwrap();
+        let by = |t: &str| rows.iter().find(|r| r.title == t).unwrap().assignee.clone();
+        assert_eq!(by("Local").as_deref(), Some("Ann"));
+        assert_eq!(by("Gone").as_deref(), Some("Left Team"));
+        assert_eq!(by("None"), None);
     }
 
     #[test]

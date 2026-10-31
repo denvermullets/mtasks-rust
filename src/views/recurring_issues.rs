@@ -13,6 +13,7 @@ use crate::db::recurring_issues::RecurringIssueRow;
 use crate::theme as t;
 
 const COL_STATE: f32 = 110.0;
+const COL_ASSIGNEE: f32 = 140.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
 /// empty state when the team has none.
@@ -22,7 +23,8 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .padding([8, 16])
         .align_y(Alignment::Center)
         .push(header_cell("Title", Length::Fill))
-        .push(header_cell("State", Length::Fixed(COL_STATE)));
+        .push(header_cell("State", Length::Fixed(COL_STATE)))
+        .push(header_cell("Assignee", Length::Fixed(COL_ASSIGNEE)));
 
     let mut body = column![].width(Length::Fill);
     if rows.is_empty() {
@@ -108,13 +110,22 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     )
     .width(Length::Fixed(COL_STATE));
 
+    let assignee = container(
+        text(r.assignee.as_deref().unwrap_or(""))
+            .size(12)
+            .color(t::text_secondary())
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fixed(COL_ASSIGNEE));
+
     container(
         row![]
             .spacing(12)
             .padding([10, 16])
             .align_y(Alignment::Center)
             .push(title)
-            .push(state),
+            .push(state)
+            .push(assignee),
     )
     .width(Length::Fill)
     .into()
