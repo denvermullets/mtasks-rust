@@ -117,6 +117,8 @@ pub enum Message {
     MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
+    /// Activity fetch for an issue's detail finished (JRST-149); `true` when entries were stored.
+    ActivityFetched(String, bool),
     ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
@@ -1503,8 +1505,34 @@ impl App {
         self.load_detail_dependencies(&conn);
         Task::batch([
             self.fetch_comments_task(&conn, issue),
+            self.fetch_activity_task(&conn, issue),
             self.fetch_issue_task(&conn, issue),
         ])
+    }
+
+    /// Build the async task that fetches an issue's Activity into the local
+    /// cache. `Task::none()` unless the issue + team are synced and a client
+    /// can be built (the fetch itself also skips local-only issues).
+    fn fetch_activity_task(&self, conn: &rusqlite::Connection, issue: &Issue) -> Task<Message> {
+        if issue.remote_id.is_none()
+            || !matches!(queries::remote_id_for(conn, "teams", &issue.team_id), Ok(Some(_)))
+        {
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            return Task::none();
+        };
+        let issue_id = issue.id.clone();
+        Task::perform(
+            async move {
+                let outcome = crate::sync::activity::fetch(&client, &issue_id).await;
+                let stored = matches!(outcome, crate::sync::activity::FetchOutcome::Fetched { .. });
+                (issue_id, stored)
+            },
+            |(id, stored)| Message::ActivityFetched(id, stored),
+        )
     }
 
     /// Build the async task that does the one fresh fetch of `issue` (with
@@ -2946,6 +2974,14 @@ impl App {
             }
             Message::IssueFetched(result) => {
                 if result.is_ok() {
+                    self.reload_data();
+                }
+            }
+            Message::ActivityFetched(issue_id, stored) => {
+                // Only refresh when entries landed and that issue is still open.
+                if stored
+                    && matches!(&self.view, View::IssueDetail(id) if *id == issue_id)
+                {
                     self.reload_data();
                 }
             }

@@ -16,9 +16,6 @@
 //! The paging decisions ([`first_cursor`], [`advance`]) are pure; the network
 //! loop ([`collect_history`]) only feeds them pages.
 
-// Unused until the detail view triggers a fetch (JRST-149); drop then.
-#![allow(dead_code)]
-
 use std::future::Future;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -187,14 +184,15 @@ where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = Result<ActivityPage, ApiError>>,
 {
-    let paged = std::cell::Cell::new(false);
+    // Atomic (not Cell) so the future stays Send for `Task::perform`.
+    let paged = std::sync::atomic::AtomicBool::new(false);
     let first = collect_history(|before| {
-        paged.set(before.is_some());
+        paged.store(before.is_some(), std::sync::atomic::Ordering::Relaxed);
         fetch_page(before)
     })
     .await;
     match first {
-        Err(ApiError::NotFound(_)) if paged.get() => collect_history(fetch_page).await,
+        Err(ApiError::NotFound(_)) if paged.load(std::sync::atomic::Ordering::Relaxed) => collect_history(fetch_page).await,
         other => other,
     }
 }
