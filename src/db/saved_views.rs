@@ -18,7 +18,7 @@ pub const RESOURCE: &str = "saved_views";
 pub const ENTITY_TYPE: &str = "saved_view";
 
 /// A mirrored Saved view.
-#[allow(dead_code)] // read by the sidebar / open-view tickets
+#[allow(dead_code)] // some fields are read by the open-view ticket
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedView {
     /// Local uuid.
@@ -121,6 +121,24 @@ pub fn list_for_team(conn: &Connection, team_id: &str) -> Result<Vec<SavedView>>
     rows.collect()
 }
 
+/// Every team's views, grouped by local team id, each list in sidebar order.
+/// Teams without views have no entry.
+pub fn grouped_by_team(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, Vec<SavedView>>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, team_id, name, query, position, updated_at
+         FROM saved_views ORDER BY position, name",
+    )?;
+    let rows = stmt.query_map([], from_row)?;
+    let mut map: std::collections::HashMap<String, Vec<SavedView>> = Default::default();
+    for r in rows {
+        let v = r?;
+        map.entry(v.team_id.clone()).or_default().push(v);
+    }
+    Ok(map)
+}
+
 /// Stored Saved-views cursor (last applied `server_time`), if any.
 pub fn cursor(conn: &Connection) -> Result<Option<String>> {
     get_pull_cursor(conn, SCOPE, RESOURCE)
@@ -155,6 +173,30 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn grouped_by_team_orders_by_position_then_name_and_omits_empty_teams() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t2', 'U', 'U', 701, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let mut rows = vec![
+            view(1, 700, "Zeta", json!({})),
+            view(2, 700, "Alpha", json!({})),
+            view(3, 700, "First", json!({})),
+        ];
+        rows[2].position = 0;
+        rows[0].position = 5;
+        rows[1].position = 5;
+        apply_pulled(&conn, &rows, None).unwrap();
+        let g = grouped_by_team(&conn).unwrap();
+        let names: Vec<&str> = g["t1"].iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["First", "Alpha", "Zeta"]);
+        assert!(!g.contains_key("t2"));
     }
 
     fn view(id: i64, team: i64, name: &str, q: serde_json::Value) -> SavedViewIn {
