@@ -127,6 +127,11 @@ pub fn apply_pulled(
                 continue;
             }
         }
+        // A queued delete means the local row is already gone; don't bring it back.
+        if has_pending_delete(&tx, row.id)? {
+            applied.skipped_pending += 1;
+            continue;
+        }
         let id = existing
             .map(|r| r.id)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -139,6 +144,17 @@ pub fn apply_pulled(
     }
     tx.commit()?;
     Ok(applied)
+}
+
+/// True while a `recurring_issue` delete for `remote_id` is queued and unpushed.
+fn has_pending_delete(conn: &Connection, remote_id: i64) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_queue
+         WHERE entity_type = ?1 AND action = 'delete' AND synced_at IS NULL
+           AND json_extract(payload, '$.remote_id') = ?2)",
+        params![ENTITY_TYPE, remote_id],
+        |r| r.get(0),
+    )
 }
 
 fn upsert_row(conn: &Connection, id: &str, team_id: &str, row: &RecurringIssueDto) -> Result<()> {
@@ -532,6 +548,44 @@ pub fn set_active(conn: &Connection, id: &str, active: bool) -> Result<Option<i6
         Ok(())
     })
     .map(Some)
+}
+
+/// Delete a recurring issue locally and queue the server delete, atomically.
+/// Pending entries for the row (an earlier edit or pause) are retired first.
+/// A row the server never saw (no remote id, or its team unsynced) is just
+/// removed along with its queued create, so nothing is queued. Returns the
+/// queue entry id when a delete was queued; `None` otherwise (including a
+/// missing row). The payload carries `team_remote_id` and `remote_id` because
+/// the row is gone by push time.
+pub fn delete_local(conn: &Connection, id: &str) -> Result<Option<i64>> {
+    let Some(row) = get(conn, id)? else {
+        return Ok(None);
+    };
+    let team_remote = super::queries::remote_id_for(conn, "teams", &row.team_id)?;
+    let remove = |c: &Connection| -> Result<()> {
+        c.execute(
+            "DELETE FROM recurring_issue_labels WHERE recurring_issue_id = ?1",
+            params![id],
+        )?;
+        c.execute("DELETE FROM recurring_issues WHERE id = ?1", params![id])?;
+        super::queries::retire_pending_sync(c, ENTITY_TYPE, id)
+    };
+    match (row.remote_id, team_remote) {
+        (Some(remote_id), Some(team_remote_id)) => {
+            let payload = serde_json::json!({
+                "team_remote_id": team_remote_id,
+                "remote_id": remote_id,
+            })
+            .to_string();
+            write_queued(conn, id, "delete", Some(&payload), remove).map(Some)
+        }
+        _ => {
+            let tx = conn.unchecked_transaction()?;
+            remove(&tx)?;
+            tx.commit()?;
+            Ok(None)
+        }
+    }
 }
 
 /// Overwrite the local row `id` with a push response (the server's version
@@ -1030,5 +1084,71 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "A");
         assert_eq!(cursor(&conn, "t2").unwrap(), None);
+    }
+
+    #[test]
+    fn deleting_a_synced_row_removes_it_and_queues_a_delete_with_ids() {
+        let conn = setup();
+        let mut row = rec(5, "Weekly", NOW);
+        row.label_ids = vec![1];
+        apply_pulled(&conn, "t1", &[row], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        set_active(&conn, &id, false).unwrap();
+
+        assert!(delete_local(&conn, &id).unwrap().is_some());
+        assert!(get(&conn, &id).unwrap().is_none());
+        assert!(label_ids(&conn, &id).unwrap().is_empty());
+        let pending = sync_queue::pending_entries(&conn).unwrap();
+        // The earlier update is retired; only the delete is left.
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].action, "delete");
+        assert_eq!(pending[0].entity_type, ENTITY_TYPE);
+        let v: serde_json::Value =
+            serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(v["team_remote_id"], 700);
+        assert_eq!(v["remote_id"], 5);
+    }
+
+    #[test]
+    fn deleting_an_unsynced_row_queues_nothing() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO recurring_issues (id, team_id, title, priority, frequency, interval,
+               active, created_at, updated_at)
+             VALUES ('r1', 't1', 'New', 0, 'daily', 1, 1, ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        sync_queue::enqueue_returning_id(&conn, ENTITY_TYPE, "r1", "create", None).unwrap();
+        assert_eq!(delete_local(&conn, "r1").unwrap(), None);
+        assert!(get(&conn, "r1").unwrap().is_none());
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_missing_row_is_a_no_op() {
+        let conn = setup();
+        assert_eq!(delete_local(&conn, "nope").unwrap(), None);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pull_does_not_resurrect_a_row_with_a_queued_delete() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(5, "Weekly", NOW)], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        delete_local(&conn, &id).unwrap();
+
+        let applied = apply_pulled(
+            &conn,
+            "t1",
+            &[rec(5, "Weekly", "2026-02-01T00:00:00.000Z"), rec(6, "Other", NOW)],
+            Some("s"),
+        )
+        .unwrap();
+        assert_eq!(applied.skipped_pending, 1);
+        assert_eq!(applied.upserted, 1);
+        assert!(find_by_remote_id(&conn, 5).unwrap().is_none());
+        assert!(find_by_remote_id(&conn, 6).unwrap().is_some());
     }
 }

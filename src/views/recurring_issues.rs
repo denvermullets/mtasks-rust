@@ -19,7 +19,7 @@ const COL_ASSIGNEE: f32 = 140.0;
 const COL_PROJECT: f32 = 140.0;
 const COL_LANE: f32 = 130.0;
 const COL_LABELS: f32 = 200.0;
-const COL_ACTION: f32 = 70.0;
+const COL_ACTION: f32 = 150.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
 /// empty state when the team has none.
@@ -104,13 +104,23 @@ pub fn toggle_label(active: bool) -> &'static str {
     }
 }
 
-/// Row action: pause an active recurring issue or resume a paused one.
+/// Row actions: pause or resume, and delete (asks to confirm first).
 fn toggle_action<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     container(
-        button(text(toggle_label(r.active)).size(12))
-            .on_press(Message::ToggleRecurringActive(r.id.clone(), !r.active))
-            .padding([3, 8])
-            .style(button::secondary),
+        row![]
+            .spacing(6)
+            .push(
+                button(text(toggle_label(r.active)).size(12))
+                    .on_press(Message::ToggleRecurringActive(r.id.clone(), !r.active))
+                    .padding([3, 8])
+                    .style(button::secondary),
+            )
+            .push(
+                button(text("Delete").size(12))
+                    .on_press(Message::DeleteRecurring(r.id.clone()))
+                    .padding([3, 8])
+                    .style(button::danger),
+            ),
     )
     .width(Length::Fixed(COL_ACTION))
     .into()
