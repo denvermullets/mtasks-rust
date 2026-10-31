@@ -1223,8 +1223,20 @@ pub fn edit_issue_queued(
     edit: impl FnOnce(&Connection) -> Result<()>,
 ) -> Result<i64> {
     let tx = conn.unchecked_transaction()?;
+    let events_before: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM issue_events",
+        [],
+        |r| r.get(0),
+    )?;
     edit(&tx)?;
     let id = super::sync_queue::enqueue_returning_id(&tx, "issue", issue_id, action, payload)?;
+    // The edit's local Activity rows are its Pending changes: link them to the
+    // queue entry that will push them.
+    tx.execute(
+        "UPDATE issue_events SET sync_queue_id = ?1
+         WHERE id > ?2 AND issue_id = ?3 AND source = 'local' AND sync_queue_id IS NULL",
+        params![id, events_before, issue_id],
+    )?;
     tx.commit()?;
     Ok(id)
 }
