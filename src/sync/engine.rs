@@ -393,8 +393,10 @@ async fn process(
         ("home_page", "update") => home_page_set(client, entry.payload.as_deref()).await,
         ("saved_view", "create") => saved_view_create(client, &entry.entity_id, entry_id).await,
         ("saved_view", "update") => {
-            saved_view_update(client, &entry.entity_id, entry.payload.as_deref()).await
+            let legacy_rename = is_legacy_rename_payload(entry.payload.as_deref());
+            saved_view_update(client, &entry.entity_id, legacy_rename).await
         }
+        ("saved_view", "rename") => saved_view_update(client, &entry.entity_id, true).await,
         ("saved_view", "delete") => saved_view_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
@@ -1835,8 +1837,19 @@ fn notification_read_all_before(payload: Option<&str>) -> Option<String> {
 
 /// A 404 (not yours, or gone) means there is nothing left to mark: done.
 fn notification_read_outcome(result: Result<(), ApiError>) -> Outcome {
+    done_if_gone(result, |()| {})
+}
+
+/// Outcome for a write whose target may already be gone on the server: success
+/// (running `on_ok` with the response) and a 404 both mean done; anything else
+/// is classified as usual.
+fn done_if_gone<T>(result: Result<T, ApiError>, on_ok: impl FnOnce(T)) -> Outcome {
     match result {
-        Ok(()) | Err(ApiError::NotFound(_)) => Outcome::Success,
+        Ok(v) => {
+            on_ok(v);
+            Outcome::Success
+        }
+        Err(ApiError::NotFound(_)) => Outcome::Success,
         Err(e) => classify(&e),
     }
 }
@@ -2006,24 +2019,31 @@ async fn saved_view_create(client: &ApiClient, entity_id: &str, entry_id: i64) -
 struct SavedViewUpdatePrep {
     remote_id: i64,
     stored: String,
-    query: serde_json::Value,
-    /// Set for a rename entry: the stored name, sent alone (no query).
-    name_only: Option<String>,
+    change: SavedViewChange,
 }
 
-/// Payload of a rename entry; a plain update entry has none.
-pub const SAVED_VIEW_RENAME_PAYLOAD: &str = r#"{"only":"name"}"#;
+/// What an update pushes: the query as a JSON object, or (for a `rename`
+/// entry) the stored name alone.
+enum SavedViewChange {
+    Query(serde_json::Value),
+    Name(String),
+}
 
-fn is_rename_payload(payload: Option<&str>) -> bool {
-    payload.is_some_and(|p| p == SAVED_VIEW_RENAME_PAYLOAD)
+/// Older builds queued a rename as an `update` with this payload; such entries
+/// still in the queue are pushed as renames.
+const LEGACY_RENAME_PAYLOAD: &str = r#"{"only":"name"}"#;
+
+fn is_legacy_rename_payload(payload: Option<&str>) -> bool {
+    payload == Some(LEGACY_RENAME_PAYLOAD)
 }
 
 /// Re-reads the row so the newest definition goes out, however many updates
 /// were queued. Unknown keys and unresolvable ids ride along untouched.
+/// `rename` pushes the name alone instead of the query.
 fn saved_view_update_prep(
     conn: &Connection,
     entity_id: &str,
-    payload: Option<&str>,
+    rename: bool,
 ) -> Prep<SavedViewUpdatePrep> {
     let view = match crate::db::saved_views::get(conn, entity_id) {
         Ok(Some(v)) => v,
@@ -2045,53 +2065,49 @@ fn saved_view_update_prep(
     };
     // A name-only push never sends the query, so placeholders only matter on
     // the query path.
-    let name_only = is_rename_payload(payload).then_some(view.name);
-    let query = if name_only.is_some() {
-        query
+    let change = if rename {
+        SavedViewChange::Name(view.name)
     } else {
         let (query, dropped) = resolve_query_placeholders(conn, query);
         log_dropped_placeholders(entity_id, &dropped);
-        query
+        SavedViewChange::Query(query)
     };
     Prep::Ready(SavedViewUpdatePrep {
         remote_id,
         stored: view.query,
-        query,
-        name_only,
+        change,
     })
 }
 
 /// `PATCH /saved_views/:id`. On success the server's returned query replaces
 /// the local one, unless the row changed again meanwhile. A 404 means the view
 /// is gone on the server: done (the tombstone feed removes the row).
-async fn saved_view_update(client: &ApiClient, entity_id: &str, payload: Option<&str>) -> Outcome {
+async fn saved_view_update(client: &ApiClient, entity_id: &str, rename: bool) -> Outcome {
     let prep = match open() {
-        Ok(conn) => match saved_view_update_prep(&conn, entity_id, payload) {
+        Ok(conn) => match saved_view_update_prep(&conn, entity_id, rename) {
             Prep::Ready(p) => p,
             Prep::Done(o) => return o,
         },
         Err(e) => return Outcome::LeavePending(e),
     };
-    if let Some(name) = &prep.name_only {
-        return match crate::api::saved_views::update_name(client, prep.remote_id, name).await {
-            Ok(_) | Err(ApiError::NotFound(_)) => Outcome::Success,
-            Err(e) => classify(&e),
-        };
-    }
-    match crate::api::saved_views::update_query(client, prep.remote_id, &prep.query).await {
-        Ok(dto) => {
-            if let Ok(conn) = open() {
-                let _ = crate::db::saved_views::adopt_server_query(
-                    &conn,
-                    entity_id,
-                    &prep.stored,
-                    &dto.query,
-                );
-            }
-            Outcome::Success
+    match &prep.change {
+        SavedViewChange::Name(name) => {
+            let result = crate::api::saved_views::update_name(client, prep.remote_id, name).await;
+            done_if_gone(result, |_| {})
         }
-        Err(ApiError::NotFound(_)) => Outcome::Success,
-        Err(e) => classify(&e),
+        SavedViewChange::Query(query) => {
+            let result = crate::api::saved_views::update_query(client, prep.remote_id, query).await;
+            done_if_gone(result, |dto| {
+                if let Ok(conn) = open() {
+                    let _ = crate::db::saved_views::adopt_server_query(
+                        &conn,
+                        entity_id,
+                        &prep.stored,
+                        &dto.query,
+                    );
+                }
+            })
+        }
     }
 }
 
@@ -2109,10 +2125,7 @@ fn saved_view_delete_id(payload: Option<&str>) -> Option<i64> {
 }
 
 fn saved_view_delete_outcome(result: Result<(), ApiError>) -> Outcome {
-    match result {
-        Ok(()) | Err(ApiError::NotFound(_)) => Outcome::Success,
-        Err(e) => classify(&e),
-    }
+    done_if_gone(result, |()| {})
 }
 
 fn resolve_comment_parent(
@@ -4475,13 +4488,13 @@ mod tests {
     fn saved_view_update_pushes_the_stored_query_as_an_object() {
         let q = r#"{"lane_ids":"1,999","future_key":"x","view_mode":"list"}"#;
         let conn = saved_view_db(Some(5), q);
-        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", None) else {
+        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", false) else {
             panic!("expected ready");
         };
         assert_eq!(p.remote_id, 5);
         assert_eq!(
-            p.query,
-            serde_json::json!({"lane_ids":"1,999","future_key":"x","view_mode":"list"})
+            update_query(&p),
+            &serde_json::json!({"lane_ids":"1,999","future_key":"x","view_mode":"list"})
         );
         assert_eq!(p.stored, q);
     }
@@ -4489,16 +4502,43 @@ mod tests {
     #[test]
     fn saved_view_rename_entry_pushes_the_name_alone() {
         let conn = saved_view_db(Some(5), r#"{"view_mode":"list"}"#);
-        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", Some(SAVED_VIEW_RENAME_PAYLOAD))
-        else {
+        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", true) else {
             panic!("expected ready");
         };
-        assert_eq!(p.name_only.as_deref(), Some("V"));
-        let Prep::Ready(plain) = saved_view_update_prep(&conn, "sv1", None) else {
+        assert!(matches!(&p.change, SavedViewChange::Name(n) if n == "V"));
+        let Prep::Ready(plain) = saved_view_update_prep(&conn, "sv1", false) else {
             panic!("expected ready");
         };
-        assert_eq!(plain.name_only, None);
-        assert!(!is_rename_payload(Some("{}")));
+        assert!(matches!(plain.change, SavedViewChange::Query(_)));
+    }
+
+    #[test]
+    fn queued_legacy_rename_updates_are_still_recognised() {
+        assert!(is_legacy_rename_payload(Some(r#"{"only":"name"}"#)));
+        assert!(!is_legacy_rename_payload(Some("{}")));
+        assert!(!is_legacy_rename_payload(None));
+    }
+
+    #[test]
+    fn done_if_gone_treats_success_and_404_as_done_and_classifies_the_rest() {
+        let mut ran = false;
+        assert!(matches!(done_if_gone(Ok(1), |_| ran = true), Outcome::Success));
+        assert!(ran);
+        assert!(matches!(
+            done_if_gone(Err::<(), _>(ApiError::NotFound("gone".into())), |_| {}),
+            Outcome::Success
+        ));
+        assert!(matches!(
+            done_if_gone(Err::<(), _>(ApiError::MissingToken), |_| {}),
+            Outcome::LeavePending(_)
+        ));
+    }
+
+    fn update_query(p: &SavedViewUpdatePrep) -> &serde_json::Value {
+        match &p.change {
+            SavedViewChange::Query(q) => q,
+            SavedViewChange::Name(_) => panic!("expected a query change"),
+        }
     }
 
     #[test]
@@ -4522,12 +4562,12 @@ mod tests {
             )
             .unwrap();
         }
-        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", None) else {
+        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", false) else {
             panic!("expected ready");
         };
-        assert_eq!(p.query["label_ids"], "30,77");
-        assert_eq!(p.query["project_ids"], "none,88");
-        assert_eq!(p.query["x"], "1");
+        assert_eq!(update_query(&p)["label_ids"], "30,77");
+        assert_eq!(update_query(&p)["project_ids"], "none,88");
+        assert_eq!(update_query(&p)["x"], "1");
         // The stored query keeps the placeholders.
         assert_eq!(p.stored, q);
     }
@@ -4553,11 +4593,11 @@ mod tests {
     fn saved_view_update_waits_for_an_unpushed_create_and_drops_a_missing_row() {
         let conn = saved_view_db(None, "{}");
         assert!(matches!(
-            saved_view_update_prep(&conn, "sv1", None),
+            saved_view_update_prep(&conn, "sv1", false),
             Prep::Done(Outcome::LeavePending(_))
         ));
         assert!(matches!(
-            saved_view_update_prep(&conn, "nope", None),
+            saved_view_update_prep(&conn, "nope", false),
             Prep::Done(Outcome::DropAndLog(_))
         ));
     }

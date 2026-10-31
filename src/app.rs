@@ -2358,8 +2358,8 @@ impl App {
                             self.enqueue_sync(
                                 "saved_view",
                                 &view_id,
-                                "update",
-                                Some(crate::sync::engine::SAVED_VIEW_RENAME_PAYLOAD),
+                                "rename",
+                                None,
                             );
                             self.modal = Modal::None;
                             self.save_view_name.clear();
