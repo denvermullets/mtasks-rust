@@ -36,7 +36,6 @@ impl InboxState {
         self.selected = 0;
     }
 
-    #[allow(dead_code)] // used by JRST-94 (mark read) / Enter
     pub fn selected_item(&self) -> Option<&Notification> {
         self.items.get(self.selected)
     }

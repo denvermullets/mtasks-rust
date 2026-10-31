@@ -76,6 +76,7 @@ pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
         Key::Character(c) => match c.as_str() {
             "j" => Some(Message::InboxMove(1)),
             "k" => Some(Message::InboxMove(-1)),
+            "r" => Some(Message::InboxMarkRead),
             "f" => Some(Message::InboxToggleFilter),
             _ => None,
         },
@@ -102,6 +103,16 @@ mod tests {
             Some(Message::InboxMove(-1))
         ));
         assert!(handle_inbox_key(&k, Modifiers::COMMAND).is_none());
+    }
+
+    #[test]
+    fn inbox_r_marks_read_only_in_inbox_handler() {
+        let r = Key::Character("r".into());
+        assert!(matches!(
+            handle_inbox_key(&r, Modifiers::empty()),
+            Some(Message::InboxMarkRead)
+        ));
+        assert!(!matches!(press("r", false, false), Some(Message::InboxMarkRead)));
     }
 
     #[test]
