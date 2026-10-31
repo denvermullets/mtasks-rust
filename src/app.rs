@@ -611,6 +611,8 @@ pub struct App {
     detail_activity: Vec<ActivityItem>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
+    /// Title of the recurring issue that spawned the open issue detail, if any.
+    detail_origin: Option<String>,
     /// Search + direction state for the open issue-dependency picker modal.
     issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
@@ -771,6 +773,7 @@ impl App {
         }
 
         self.reload_recurring(&conn);
+        self.reload_detail_origin(&conn);
         self.refresh_open_view();
 
         // Filters are global but hold per-team ids; drop the ones this data
@@ -835,6 +838,14 @@ impl App {
     }
 
     /// Re-read the selected team's Recurring issue rows from the mirror.
+    /// Refresh the open issue detail's "From recurring issue" title.
+    fn reload_detail_origin(&mut self, conn: &rusqlite::Connection) {
+        self.detail_origin = match &self.view {
+            View::IssueDetail(id) => crate::db::recurring_issues::origin_title(conn, id),
+            _ => None,
+        };
+    }
+
     fn reload_recurring(&mut self, conn: &rusqlite::Connection) {
         self.recurring_rows = match &self.selected_team_id {
             Some(team_id) if self.view != View::MyIssues => {
@@ -1536,6 +1547,7 @@ impl App {
         self.view = View::IssueDetail(issue.id.clone());
         let conn = self.db();
         self.load_detail_dependencies(&conn);
+        self.reload_detail_origin(&conn);
         Task::batch([
             self.fetch_comments_task(&conn, issue),
             self.fetch_activity_task(issue),
@@ -2040,6 +2052,7 @@ impl App {
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_references: Vec::new(),
+            detail_origin: None,
             issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
@@ -4588,6 +4601,7 @@ impl App {
                             &self.issues,
                             parent,
                             sub_issues,
+                            self.detail_origin.as_deref(),
                             &my_member_ids,
                         )
                     }

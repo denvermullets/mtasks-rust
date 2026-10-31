@@ -307,6 +307,16 @@ pub fn origin_of_issue(conn: &Connection, issue_id: &str) -> Result<Option<Recur
     }
 }
 
+/// Current title of the recurring issue that spawned `issue_id`, for the
+/// issue detail's "From recurring issue" line. `None` when unlinked or the
+/// recurring issue is gone.
+pub fn origin_title(conn: &Connection, issue_id: &str) -> Option<String> {
+    origin_of_issue(conn, issue_id)
+        .ok()
+        .flatten()
+        .map(|r| r.title)
+}
+
 pub fn get(conn: &Connection, id: &str) -> Result<Option<RecurringIssue>> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM recurring_issues WHERE id = ?1"),
@@ -698,6 +708,20 @@ mod tests {
 
         set_issue_origin(&conn, "i1", None).unwrap();
         assert_eq!(origin_id(&conn, "i1").unwrap(), None);
+    }
+
+    #[test]
+    fn origin_title_follows_rename_and_disappears_on_delete() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(1, "Weekly", NOW)], Some("s")).unwrap();
+        add_issue(&conn, "i1");
+        assert_eq!(origin_title(&conn, "i1"), None);
+        set_issue_origin(&conn, "i1", Some(1)).unwrap();
+        assert_eq!(origin_title(&conn, "i1").as_deref(), Some("Weekly"));
+        apply_pulled(&conn, "t1", &[rec(1, "Fortnightly", NOW)], Some("s")).unwrap();
+        assert_eq!(origin_title(&conn, "i1").as_deref(), Some("Fortnightly"));
+        assert!(apply_tombstone(&conn, "t1", 1).unwrap());
+        assert_eq!(origin_title(&conn, "i1"), None);
     }
 
     #[test]
