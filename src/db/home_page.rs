@@ -48,6 +48,15 @@ pub fn set_local(conn: &Connection, kind: &str, remote_id: i64) -> Result<()> {
     super::sync_queue::enqueue(conn, QUEUE_ENTITY, "home", "update", Some(&payload))
 }
 
+/// Clear the stored home if it points at the Saved view `remote_id`. Nothing
+/// is queued: the server treats a missing view as the default home.
+pub fn clear_if_view(conn: &Connection, remote_id: i64) -> Result<()> {
+    if get(conn)?.is_some_and(|h| h.kind == "view" && h.remote_id == remote_id) {
+        clear_pull_cursor(conn, SCOPE, RESOURCE)?;
+    }
+    Ok(())
+}
+
 /// `(kind, id)` from a queued `home_page` payload.
 pub fn parse_payload(payload: Option<&str>) -> Option<(String, i64)> {
     let v: serde_json::Value = serde_json::from_str(payload?).ok()?;

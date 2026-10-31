@@ -90,6 +90,20 @@ impl OpenView {
         }
     }
 
+    /// Apply a newly pulled version of this view. The name always follows the
+    /// server. An unmodified view takes the new definition; a Modified one keeps its working copy and is measured
+    /// against the new saved version.
+    pub fn refresh(&mut self, latest: &crate::db::saved_views::SavedView, mirror: &Mirror, local: &BoardState) {
+        let modified = self.is_modified(mirror);
+        let fresh = OpenView::open(latest, mirror, local);
+        self.name = fresh.name;
+        self.raw = fresh.raw;
+        self.baseline = fresh.baseline.clone();
+        if !modified {
+            self.state = fresh.baseline;
+        }
+    }
+
     /// The working copy as a Rails query: encoded over the original raw query.
     pub fn encoded(&self, mirror: &Mirror) -> RawQuery {
         encode(&self.state, &self.raw, mirror)
@@ -1011,5 +1025,43 @@ mod tests {
         assert_eq!(query.get("q").map(String::as_str), Some("crash"));
         state.filters.assignees = vec!["m1".into()];
         assert!(!has_unassigned(&state));
+    }
+
+    fn sv_with(name: &str, pairs: &[(&str, &str)]) -> crate::db::saved_views::SavedView {
+        crate::db::saved_views::SavedView {
+            id: "v1".into(),
+            remote_id: Some(1),
+            team_id: "t".into(),
+            name: name.into(),
+            query: serde_json::to_string(&q(pairs)).unwrap(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn refresh_of_an_unmodified_view_takes_the_pulled_definition() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("order_by", "priority")]);
+        ov.refresh(&sv_with("Renamed", &[("order_by", "due_date"), ("q", "x")]), &fx.mirror(), &BoardState::default());
+        assert_eq!(ov.name, "Renamed");
+        assert_eq!(ov.state.display.order_by, OrderBy::DueDate);
+        assert_eq!(ov.state.search, "x");
+        assert!(!ov.is_modified(&fx.mirror()));
+    }
+
+    #[test]
+    fn refresh_of_a_modified_view_keeps_the_working_copy_and_remeasures() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("order_by", "priority")]);
+        ov.state.display.order_by = OrderBy::Manual;
+        ov.refresh(&sv_with("New", &[("order_by", "due_date")]), &fx.mirror(), &BoardState::default());
+        assert_eq!(ov.name, "New");
+        assert_eq!(ov.state.display.order_by, OrderBy::Manual);
+        assert!(ov.is_modified(&fx.mirror()));
+        // The server now matches the working copy: no longer modified.
+        ov.refresh(&sv_with("New", &[("order_by", "manual")]), &fx.mirror(), &BoardState::default());
+        assert_eq!(ov.state.display.order_by, OrderBy::Manual);
+        assert!(!ov.is_modified(&fx.mirror()));
     }
 }
