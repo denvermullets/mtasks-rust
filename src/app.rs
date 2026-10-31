@@ -127,6 +127,11 @@ pub enum Message {
     LabelNameChanged(String),
     LabelColorChanged(String),
     CreateLabel,
+    /// Open edit mode for a label (by local UUID).
+    SelectLabelForEdit(String),
+    EditLabelNameChanged(String),
+    EditLabelColorChanged(String),
+    SaveLabelEdit,
     /// Toggle a label on the issue targeted by the label modal (by local UUID).
     ToggleIssueLabel(String),
     SaveIssueLabels,
@@ -2959,6 +2964,57 @@ impl App {
                             form.name.clear();
                         }
                         self.reload_data();
+                    }
+                }
+            }
+
+            Message::SelectLabelForEdit(label_id) => {
+                let label = self.labels.iter().find(|l| l.id == label_id).cloned();
+                if let (Some(form), Some(label)) = (self.label_form.as_mut(), label) {
+                    form.editing_id = Some(label.id);
+                    form.edit_name = label.name;
+                    form.edit_color = label
+                        .color
+                        .unwrap_or_else(|| labels_view::PALETTE[0].to_string());
+                    form.edit_error = None;
+                }
+            }
+
+            Message::EditLabelNameChanged(v) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.edit_name = v;
+                }
+            }
+
+            Message::EditLabelColorChanged(hex) => {
+                if let Some(ref mut form) = self.label_form {
+                    form.edit_color = hex;
+                }
+            }
+
+            Message::SaveLabelEdit => {
+                let Some((id, name, color)) = self
+                    .label_form
+                    .as_ref()
+                    .and_then(|f| Some((f.editing_id.clone()?, f.edit_name.clone(), f.edit_color.clone())))
+                else {
+                    return Task::none();
+                };
+                match queries::edit_label(&self.db(), &id, &name, &color) {
+                    Ok(needs_update) => {
+                        if needs_update {
+                            self.enqueue_sync("label", &id, "update", None);
+                        }
+                        if let Some(ref mut form) = self.label_form {
+                            form.editing_id = None;
+                            form.edit_error = None;
+                        }
+                        self.reload_data();
+                    }
+                    Err(e) => {
+                        if let Some(ref mut form) = self.label_form {
+                            form.edit_error = Some(e.message().into());
+                        }
                     }
                 }
             }
