@@ -285,6 +285,13 @@ pub enum Message {
     KeyPressed(keyboard::Key, keyboard::Modifiers),
 }
 
+/// The comment composers of the open detail view (issue or project).
+struct CommentDrafts<'a> {
+    comment: &'a mut iced::widget::text_editor::Content,
+    reply: &'a mut iced::widget::text_editor::Content,
+    suggest: &'a mut Option<crate::mentions::SuggestState>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
     None,
@@ -701,11 +708,20 @@ impl App {
     /// Recompute the `@`/`#` suggestion list for `target` from its cursor.
     fn refresh_suggestions(&mut self, target: crate::mentions::EditorTarget) {
         use crate::mentions::{self as m, EditorTarget};
-        let Some(d) = &self.issue_detail else { return };
-        let content = match target {
-            EditorTarget::Description => &d.description,
-            EditorTarget::Comment => &d.comment_composer,
-            EditorTarget::Reply => &d.reply_composer,
+        // On project detail only the comment composers exist; the id excluded
+        // from `#` suggestions is the project's, which matches no issue.
+        let (content, exclude_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::ProjectDetail(_), _, Some(p)) => match target {
+                EditorTarget::Comment => (&p.comment_composer, p.project_id.as_str()),
+                EditorTarget::Reply => (&p.reply_composer, p.project_id.as_str()),
+                EditorTarget::Description => return,
+            },
+            (_, Some(d), _) => match target {
+                EditorTarget::Description => (&d.description, d.issue_id.as_str()),
+                EditorTarget::Comment => (&d.comment_composer, d.issue_id.as_str()),
+                EditorTarget::Reply => (&d.reply_composer, d.issue_id.as_str()),
+            },
+            _ => return,
         };
         // Column is a byte offset into the line (iced 0.13 / cosmic-text).
         let (line, col) = content.cursor_position();
@@ -717,12 +733,12 @@ impl App {
                 &self.members,
                 &self.issues,
                 &team.identifier,
-                &d.issue_id,
+                exclude_id,
             ),
             _ => None,
         };
-        if let Some(d) = &mut self.issue_detail {
-            d.suggest = state;
+        if let Some(slot) = self.open_suggest_mut() {
+            *slot = state;
         }
     }
 
@@ -773,7 +789,26 @@ impl App {
         if self.modal == Modal::IssueForm {
             return self.issue_form.as_mut().map(|f| &mut f.suggest);
         }
+        if matches!(self.view, View::ProjectDetail(_)) {
+            return self.project_detail.as_mut().map(|d| &mut d.suggest);
+        }
         self.issue_detail.as_mut().map(|d| &mut d.suggest)
+    }
+
+    /// The comment composers of whichever detail view is open (issue or project).
+    fn comment_drafts_mut(&mut self) -> Option<CommentDrafts<'_>> {
+        if matches!(self.view, View::ProjectDetail(_)) {
+            return self.project_detail.as_mut().map(|d| CommentDrafts {
+                comment: &mut d.comment_composer,
+                reply: &mut d.reply_composer,
+                suggest: &mut d.suggest,
+            });
+        }
+        self.issue_detail.as_mut().map(|d| CommentDrafts {
+            comment: &mut d.comment_composer,
+            reply: &mut d.reply_composer,
+            suggest: &mut d.suggest,
+        })
     }
 
     fn pick_suggestion(&mut self, idx: Option<usize>) {
@@ -782,6 +817,16 @@ impl App {
             if let Some(form) = &mut self.issue_form {
                 if let Some(s) = form.suggest.take() {
                     Self::insert_suggestion(&mut form.description, &s, idx);
+                }
+            }
+        } else if matches!(self.view, View::ProjectDetail(_)) {
+            if let Some(d) = self.comment_drafts_mut() {
+                if let Some(s) = d.suggest.take() {
+                    let content = match s.target {
+                        EditorTarget::Reply => d.reply,
+                        _ => d.comment,
+                    };
+                    Self::insert_suggestion(content, &s, idx);
                 }
             }
         } else if let Some(d) = &mut self.issue_detail {
@@ -1107,12 +1152,13 @@ impl App {
     }
 
     /// Persist a new comment (optionally a reply to local comment `parent_id`) on
-    /// the open detail issue and enqueue its push. Returns whether it was saved.
+    /// the open detail issue or project and enqueue its push. Returns whether it was saved.
     /// Replies beyond `MAX_NESTING_DEPTH` are refused (Rails rejects them too).
     fn create_comment(&mut self, body: String, parent_id: Option<String>) -> bool {
-        let issue_id = match &self.issue_detail {
-            Some(d) => d.issue_id.clone(),
-            None => return false,
+        let (issue_id, project_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::ProjectDetail(_), _, Some(p)) => (None, Some(p.project_id.clone())),
+            (_, Some(d), _) => (Some(d.issue_id.clone()), None),
+            _ => return false,
         };
         if body.is_empty() {
             return false;
@@ -1139,8 +1185,8 @@ impl App {
         let comment = Comment {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
-            issue_id: Some(issue_id),
-            project_id: None,
+            issue_id,
+            project_id,
             author_id,
             body,
             parent_id,
@@ -1938,8 +1984,8 @@ impl App {
 
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.comment_composer.perform(action);
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.comment.perform(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Comment);
             }
@@ -1951,14 +1997,14 @@ impl App {
                 }
             }
             Message::SubmitComment => {
-                let body = match &self.issue_detail {
-                    Some(d) => d.comment_text().trim().to_string(),
+                let body = match self.comment_drafts_mut() {
+                    Some(d) => d.comment.text().trim().to_string(),
                     None => return Task::none(),
                 };
                 if self.create_comment(body, None) {
-                    if let Some(d) = &mut self.issue_detail {
-                        d.comment_composer = iced::widget::text_editor::Content::new();
-                        d.suggest = None;
+                    if let Some(d) = self.comment_drafts_mut() {
+                        *d.comment = iced::widget::text_editor::Content::new();
+                        *d.suggest = None;
                     }
                 }
             }

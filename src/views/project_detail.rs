@@ -6,7 +6,7 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::{Message, View};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme as t;
-use crate::views::issue_detail::{push_thread, ThreadCtx};
+use crate::views::issue_detail::{new_comment_composer, push_thread, ThreadCtx};
 use crate::display::{CardProperty, DisplayOptions};
 use crate::views::util;
 use crate::views::progress_chart;
@@ -26,8 +26,9 @@ pub struct ProjectDetailState {
     pub due_date: String,
     /// Inline validation (blank name). `None` = valid.
     pub error: Option<String>,
-    /// Open reply composer and mention list (comment composers land with the
-    /// composer tickets; the thread renders read-only until then).
+    /// New-comment composer, cleared on submit.
+    pub comment_composer: text_editor::Content,
+    /// Reply composer state and the mention list (as on issue detail).
     pub reply_to: Option<String>,
     pub reply_composer: text_editor::Content,
     pub suggest: Option<crate::mentions::SuggestState>,
@@ -43,6 +44,7 @@ impl ProjectDetailState {
             start_date: p.start_date.clone().unwrap_or_default(),
             due_date: p.due_date.clone().unwrap_or_default(),
             error: None,
+            comment_composer: text_editor::Content::new(),
             reply_to: None,
             reply_composer: text_editor::Content::new(),
             suggest: None,
@@ -264,8 +266,8 @@ pub fn view<'a>(
 }
 
 /// The project's discussion: threaded comments with indented replies, rendered
-/// by the same rows as issue detail. Read-only for now; no delete on project
-/// comments (the web has none).
+/// by the same rows and composer as issue detail. No delete on project comments
+/// (the web has none).
 #[allow(clippy::too_many_arguments)]
 fn discussion_section<'a>(
     comments: &'a [Comment],
@@ -292,7 +294,12 @@ fn discussion_section<'a>(
         reply_composer: &detail.reply_composer,
         suggest: &detail.suggest,
     };
-    push_thread(col, Comment::thread_order(comments), &ctx).into()
+    push_thread(col, Comment::thread_order(comments), &ctx)
+        .push(new_comment_composer(
+            &detail.comment_composer,
+            &detail.suggest,
+        ))
+        .into()
 }
 
 /// Burndown / progress chart: scope, started, completed over time against the

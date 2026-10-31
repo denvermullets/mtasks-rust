@@ -224,6 +224,8 @@ Show a single project. Adds:
 
 ### Comments: `GET|POST /api/v1/teams/:team_id/issues/:issue_id/comments`, `GET|POST /api/v1/teams/:team_id/projects/:project_id/comments`
 
+The desktop uses both: issue and project `GET` on opening the detail view (merged by `remote_id`), and `POST` for issue and project comments and replies via the sync queue (`comment/create` routes to the owner's path).
+
 - `GET` returns top-level comments ordered by `created_at`, each with nested `replies` (one level, replies carry no `replies` key):
 
 ```json
