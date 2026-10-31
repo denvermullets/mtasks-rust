@@ -130,6 +130,8 @@ pub enum Message {
     RemoveDependency(String),
     /// Open the "Move to team" picker for an issue (local UUID).
     OpenMoveTeamPicker(String),
+    /// `t` on the board: open the move picker for the focused issue.
+    MoveFocusedIssueToTeam,
     /// A target team (local UUID) was chosen in the move picker.
     MoveTeamSelected(String),
 
@@ -2079,6 +2081,11 @@ impl App {
             }
             Message::OpenMoveTeamPicker(issue_id) => {
                 self.modal = Modal::MoveTeam(issue_id);
+            }
+            Message::MoveFocusedIssueToTeam => {
+                if let Some(issue) = self.focused_issue() {
+                    self.modal = Modal::MoveTeam(issue.id.clone());
+                }
             }
             Message::MoveTeamSelected(target_id) => {
                 if let Modal::MoveTeam(issue_id) = std::mem::replace(&mut self.modal, Modal::None) {
