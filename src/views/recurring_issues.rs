@@ -13,7 +13,9 @@ use crate::db::recurring_issues::RecurringIssueRow;
 use crate::theme as t;
 
 const COL_SCHEDULE: f32 = 200.0;
+const COL_NEXT_RUN: f32 = 150.0;
 const COL_STATE: f32 = 110.0;
+const COL_ASSIGNEE: f32 = 140.0;
 const COL_PROJECT: f32 = 140.0;
 const COL_LANE: f32 = 130.0;
 const COL_ACTION: f32 = 70.0;
@@ -27,7 +29,9 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .align_y(Alignment::Center)
         .push(header_cell("Title", Length::Fill))
         .push(header_cell("Schedule", Length::Fixed(COL_SCHEDULE)))
+        .push(header_cell("Next run", Length::Fixed(COL_NEXT_RUN)))
         .push(header_cell("State", Length::Fixed(COL_STATE)))
+        .push(header_cell("Assignee", Length::Fixed(COL_ASSIGNEE)))
         .push(header_cell("Project", Length::Fixed(COL_PROJECT)))
         .push(header_cell("Lane", Length::Fixed(COL_LANE)))
         .push(header_cell("", Length::Fixed(COL_ACTION)));
@@ -110,6 +114,15 @@ fn toggle_action<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     .into()
 }
 
+/// "2026-11-06 MT": the next run date and zone; "-" with no date.
+pub fn next_run_label(r: &RecurringIssueRow) -> String {
+    match (&r.next_run_on, &r.time_zone_label) {
+        (Some(d), Some(z)) => format!("{d} {z}"),
+        (Some(d), None) => d.clone(),
+        (None, _) => "-".to_string(),
+    }
+}
+
 fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     let title = container(
         text(&r.title)
@@ -131,6 +144,14 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     )
     .width(Length::Fixed(COL_SCHEDULE));
 
+    let next_run = container(
+        text(next_run_label(r))
+            .size(12)
+            .color(t::text_secondary())
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fixed(COL_NEXT_RUN));
+
     let dot = if r.active {
         t::priority_low()
     } else {
@@ -144,6 +165,14 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .push(text(state_label(r.active)).size(12).color(t::text_secondary())),
     )
     .width(Length::Fixed(COL_STATE));
+
+    let assignee = container(
+        text(r.assignee.as_deref().unwrap_or(""))
+            .size(12)
+            .color(t::text_secondary())
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fixed(COL_ASSIGNEE));
 
     let project = container(
         text(r.project_name.as_deref().unwrap_or(""))
@@ -168,7 +197,9 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .align_y(Alignment::Center)
             .push(title)
             .push(schedule)
+            .push(next_run)
             .push(state)
+            .push(assignee)
             .push(project)
             .push(lane)
             .push(toggle_action(r)),

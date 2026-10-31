@@ -287,6 +287,16 @@ pub struct RecurringIssueRow {
     pub active: bool,
     /// e.g. "Every 2 weeks on Wednesday".
     pub schedule: String,
+    /// Server-calculated next run date (`YYYY-MM-DD`), in the schedule's zone.
+    pub next_run_on: Option<String>,
+    /// Zone abbreviation (or the zone name if unknown); `None` = unresolved.
+    pub time_zone_label: Option<String>,
+    /// True when a local write is queued for this row, so `next_run_on` may be
+    /// stale until the server answers.
+    pub next_run_pending: bool,
+    /// Who spawned issues are assigned to: the local member's name, else the
+    /// server's assignee name, else `None`.
+    pub assignee: Option<String>,
     /// Current local name of the linked project; `None` with no project.
     pub project_name: Option<String>,
     /// Local name of the lane spawned issues start in, or [`FIRST_LANE`] when
@@ -297,9 +307,37 @@ pub struct RecurringIssueRow {
 /// Lane cell text for a recurring issue with no lane set.
 pub const FIRST_LANE: &str = "First lane";
 
+/// Abbreviation for an ActiveSupport zone name (US zones), else `None`.
+pub fn time_zone_abbreviation(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Eastern Time (US & Canada)" => "ET",
+        "Central Time (US & Canada)" => "CT",
+        "Mountain Time (US & Canada)" => "MT",
+        "Arizona" => "MST",
+        "Pacific Time (US & Canada)" => "PT",
+        "Alaska" => "AKT",
+        "Hawaii" => "HST",
+        "UTC" => "UTC",
+        _ => return None,
+    })
+}
+
+/// What a row shows for a stored zone name: the abbreviation, else the name.
+pub fn time_zone_label(name: &str) -> String {
+    time_zone_abbreviation(name).unwrap_or(name).to_string()
+}
+
 /// Build the display row for one mirrored recurring issue. Column tickets
 /// extend this (they may use `conn` to resolve names).
 fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+    let local_assignee = match &r.assignee_id {
+        Some(mid) => conn
+            .query_row("SELECT name FROM members WHERE id = ?1", params![mid], |x| {
+                x.get::<_, String>(0)
+            })
+            .optional()?,
+        None => None,
+    };
     let project_name = match &r.project_id {
         Some(pid) => conn
             .query_row("SELECT name FROM projects WHERE id = ?1", params![pid], |x| x.get(0))
@@ -324,9 +362,35 @@ fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> 
             r.weekday,
             r.day_of_month,
         ),
+        next_run_on: r.next_run_on.clone(),
+        time_zone_label: r.time_zone.as_deref().map(time_zone_label),
+        next_run_pending: sync_queue::has_pending_entry(conn, ENTITY_TYPE, &r.id)?,
+        assignee: local_assignee.or_else(|| r.assignee_name.clone()),
         project_name,
         lane: lane.unwrap_or_else(|| FIRST_LANE.to_string()),
     })
+}
+
+#[cfg(test)]
+mod time_zone_tests {
+    use super::*;
+
+    #[test]
+    fn us_zone_names_map_to_abbreviations_with_name_fallback() {
+        for (name, abbr) in [
+            ("Eastern Time (US & Canada)", "ET"),
+            ("Central Time (US & Canada)", "CT"),
+            ("Mountain Time (US & Canada)", "MT"),
+            ("Arizona", "MST"),
+            ("Pacific Time (US & Canada)", "PT"),
+            ("Alaska", "AKT"),
+            ("Hawaii", "HST"),
+        ] {
+            assert_eq!(time_zone_label(name), abbr);
+        }
+        assert_eq!(time_zone_label("Tokyo"), "Tokyo");
+        assert_eq!(time_zone_abbreviation("Tokyo"), None);
+    }
 }
 
 /// A team's display-ready rows for the Recurring issues view, in a stable
@@ -505,6 +569,23 @@ mod tests {
     fn count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM recurring_issues", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn rows_show_local_member_then_server_name_then_nothing() {
+        let conn = setup();
+        let mut local = rec(1, "Local", "2026-01-01T00:00:01.000Z");
+        local.assignee = rref(3, "Server Ann");
+        let mut gone = rec(2, "Gone", "2026-01-01T00:00:02.000Z");
+        gone.assignee = rref(77, "Left Team");
+        let none = rec(3, "None", "2026-01-01T00:00:03.000Z");
+        apply_pulled(&conn, "t1", &[local, gone, none], None).unwrap();
+
+        let rows = list_rows(&conn, "t1").unwrap();
+        let by = |t: &str| rows.iter().find(|r| r.title == t).unwrap().assignee.clone();
+        assert_eq!(by("Local").as_deref(), Some("Ann"));
+        assert_eq!(by("Gone").as_deref(), Some("Left Team"));
+        assert_eq!(by("None"), None);
     }
 
     #[test]
