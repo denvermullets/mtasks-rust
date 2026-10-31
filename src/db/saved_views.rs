@@ -245,6 +245,53 @@ pub fn adopt_created(conn: &Connection, view_id: &str, dto: &SavedViewIn) -> Res
     Ok(())
 }
 
+/// Store a new definition for a view locally, as JSON object text (remote
+/// ids, unknown keys intact). The queue entry carries no payload: the push
+/// re-reads the row so the newest query goes out however many updates were
+/// queued. Returns whether the view exists.
+pub fn update_query_local(
+    conn: &Connection,
+    view_id: &str,
+    query: &std::collections::BTreeMap<String, String>,
+) -> Result<bool> {
+    let json = serde_json::to_string(query).unwrap_or_else(|_| "{}".into());
+    let n = conn.execute(
+        "UPDATE saved_views SET query = ?2, updated_at = ?3 WHERE id = ?1",
+        params![view_id, json, crate::db::now_iso()],
+    )?;
+    Ok(n > 0)
+}
+
+/// A view by local id.
+pub fn get(conn: &Connection, view_id: &str) -> Result<Option<SavedView>> {
+    conn.query_row(
+        "SELECT id, remote_id, team_id, name, query, position, updated_at
+         FROM saved_views WHERE id = ?1",
+        params![view_id],
+        from_row,
+    )
+    .optional()
+}
+
+/// Adopt the server's returned query after a successful update push, but only
+/// if the row still holds `pushed` (a newer local edit wins and is pushed by
+/// its own entry). Returns whether the row changed.
+pub fn adopt_server_query(
+    conn: &Connection,
+    view_id: &str,
+    pushed: &str,
+    server: &serde_json::Value,
+) -> Result<bool> {
+    if !server.is_object() {
+        return Ok(false);
+    }
+    let n = conn.execute(
+        "UPDATE saved_views SET query = ?3 WHERE id = ?1 AND query = ?2",
+        params![view_id, pushed, server.to_string()],
+    )?;
+    Ok(n > 0)
+}
+
 /// Stored Saved-views cursor (last applied `server_time`), if any.
 pub fn cursor(conn: &Connection) -> Result<Option<String>> {
     get_pull_cursor(conn, SCOPE, RESOURCE)
@@ -390,6 +437,54 @@ mod tests {
         let a = apply_pulled(&conn, &[view(1, 700, "Remote edit", json!({}))], None).unwrap();
         assert_eq!(a.skipped_pending, 1);
         assert_eq!(find_by_remote_id(&conn, 1).unwrap().unwrap().name, "Server");
+    }
+
+    #[test]
+    fn update_query_local_stores_the_encoded_query_and_keeps_unknown_keys() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({"view_mode":"list"}))], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        let mut q = std::collections::BTreeMap::new();
+        q.insert("view_mode".to_string(), "board".to_string());
+        q.insert("future_key".to_string(), "x".to_string());
+        assert!(update_query_local(&conn, &id, &q).unwrap());
+        let v = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(stored_query(&v), json!({"view_mode":"board","future_key":"x"}));
+        assert!(!update_query_local(&conn, "nope", &q).unwrap());
+    }
+
+    #[test]
+    fn adopt_server_query_applies_only_when_the_row_is_unchanged() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({"a":"1"}))], None).unwrap();
+        let v = find_by_remote_id(&conn, 5).unwrap().unwrap();
+        let server = json!({"a":"1","b":"2"});
+        assert!(adopt_server_query(&conn, &v.id, &v.query, &server).unwrap());
+        assert_eq!(stored_query(&get(&conn, &v.id).unwrap().unwrap()), server);
+        // Row moved on since the push: leave it.
+        assert!(!adopt_server_query(&conn, &v.id, &v.query, &json!({"z":"9"})).unwrap());
+        assert_eq!(stored_query(&get(&conn, &v.id).unwrap().unwrap()), server);
+        // Non-object responses are ignored.
+        let cur = get(&conn, &v.id).unwrap().unwrap().query;
+        assert!(!adopt_server_query(&conn, &v.id, &cur, &json!(null)).unwrap());
+    }
+
+    #[test]
+    fn pending_update_blocks_a_pull_until_it_drains() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({"a":"1"}))], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        let mut q = std::collections::BTreeMap::new();
+        q.insert("a".to_string(), "2".to_string());
+        update_query_local(&conn, &id, &q).unwrap();
+        sync_queue::enqueue(&conn, ENTITY_TYPE, &id, "update", None).unwrap();
+        let e = sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        let a = apply_pulled(&conn, &[view(5, 700, "A", json!({"a":"server"}))], None).unwrap();
+        assert_eq!(a.skipped_pending, 1);
+        assert_eq!(stored_query(&get(&conn, &id).unwrap().unwrap()), json!({"a":"2"}));
+        sync_queue::mark_synced(&conn, e).unwrap();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({"a":"server"}))], None).unwrap();
+        assert_eq!(stored_query(&get(&conn, &id).unwrap().unwrap()), json!({"a":"server"}));
     }
 
     #[test]

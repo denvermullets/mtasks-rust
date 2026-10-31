@@ -200,6 +200,8 @@ pub enum Message {
     FocusSearch,
     /// "Display" button: open the display-options popover.
     OpenDisplayOptions,
+    /// Save the open Modified view's working copy as its new definition.
+    UpdateSavedView,
     /// "Filter" button: open the filter popover.
     OpenFilterPanel,
     /// "Save view…" in the display popover: ask for a name.
@@ -1402,6 +1404,22 @@ impl App {
             + usize::from(!header::needle(self.active_search()).is_empty())
     }
 
+    /// The header's "Update view" button: only on a Modified open view.
+    fn update_view_action(&self) -> Option<Element<'_, Message>> {
+        let v = self.open_view.as_ref()?;
+        if self.view != View::Board {
+            return None;
+        }
+        let mirror = crate::saved_view::Mirror {
+            lanes: &self.lanes,
+            members: &self.members,
+            labels: &self.labels,
+            projects: &self.projects,
+        };
+        v.is_modified(&mirror)
+            .then(|| header::update_view_button(self.sync_read_only))
+    }
+
     fn enqueue_sync(
         &self,
         entity_type: &str,
@@ -2313,6 +2331,40 @@ impl App {
                         eprintln!("[saved_views] create failed: {e}");
                         self.save_view_error = Some("Couldn't save the view");
                     }
+                }
+            }
+
+            Message::UpdateSavedView => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't update a view",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                let Some(v) = &mut self.open_view else {
+                    return Task::none();
+                };
+                if !v.is_modified(&mirror) {
+                    return Task::none();
+                }
+                v.mark_saved(&mirror);
+                let (view_id, query) = (v.view_id.clone(), v.raw.clone());
+                match crate::db::saved_views::update_query_local(&self.db(), &view_id, &query) {
+                    Ok(true) => {
+                        self.enqueue_sync("saved_view", &view_id, "update", None);
+                        self.saved_views =
+                            crate::db::saved_views::grouped_by_team(&self.db()).unwrap_or_default();
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[saved_views] update failed: {e}"),
                 }
             }
 
@@ -4180,6 +4232,7 @@ impl App {
                     (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
                         .then_some(Message::BackToInbox)
                 }),
+            self.update_view_action(),
         );
 
         let columns = if matches!(self.view, View::Board | View::MyIssues) {

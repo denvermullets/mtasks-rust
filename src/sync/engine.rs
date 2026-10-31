@@ -392,6 +392,7 @@ async fn process(
         ("notification", "read_all") => notification_read_all(client, entry.payload.as_deref()).await,
         ("home_page", "update") => home_page_set(client, entry.payload.as_deref()).await,
         ("saved_view", "create") => saved_view_create(client, &entry.entity_id, entry_id).await,
+        ("saved_view", "update") => saved_view_update(client, &entry.entity_id).await,
         ("saved_view", "delete") => saved_view_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
@@ -1940,6 +1941,70 @@ async fn saved_view_create(client: &ApiClient, entity_id: &str, entry_id: i64) -
             }
         }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
+/// What a `saved_view` update pushes: the server id, the stored query text (to
+/// guard adoption) and the query as a JSON object.
+struct SavedViewUpdatePrep {
+    remote_id: i64,
+    stored: String,
+    query: serde_json::Value,
+}
+
+/// Re-reads the row so the newest definition goes out, however many updates
+/// were queued. Unknown keys and unresolvable ids ride along untouched.
+fn saved_view_update_prep(conn: &Connection, entity_id: &str) -> Prep<SavedViewUpdatePrep> {
+    let view = match crate::db::saved_views::get(conn, entity_id) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "saved_view {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let Some(remote_id) = view.remote_id else {
+        return Prep::Done(Outcome::LeavePending(
+            "saved_view create not yet drained".into(),
+        ));
+    };
+    let query = match serde_json::from_str::<serde_json::Value>(&view.query) {
+        Ok(q) if q.is_object() => q,
+        _ => serde_json::json!({}),
+    };
+    Prep::Ready(SavedViewUpdatePrep {
+        remote_id,
+        stored: view.query,
+        query,
+    })
+}
+
+/// `PATCH /saved_views/:id`. On success the server's returned query replaces
+/// the local one, unless the row changed again meanwhile. A 404 means the view
+/// is gone on the server: done (the tombstone feed removes the row).
+async fn saved_view_update(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match saved_view_update_prep(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    match crate::api::saved_views::update_query(client, prep.remote_id, &prep.query).await {
+        Ok(dto) => {
+            if let Ok(conn) = open() {
+                let _ = crate::db::saved_views::adopt_server_query(
+                    &conn,
+                    entity_id,
+                    &prep.stored,
+                    &dto.query,
+                );
+            }
+            Outcome::Success
+        }
+        Err(ApiError::NotFound(_)) => Outcome::Success,
+        Err(e) => classify(&e),
     }
 }
 
@@ -4273,6 +4338,53 @@ mod tests {
         assert!(matches!(
             saved_view_delete_outcome(Err(ApiError::MissingToken)),
             Outcome::LeavePending(_)
+        ));
+    }
+
+    fn saved_view_db(remote_id: Option<i64>, query: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', 700, ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO saved_views (id, remote_id, team_id, name, query, position, updated_at)
+             VALUES ('sv1', ?1, 't1', 'V', ?2, 0, ?3)",
+            rusqlite::params![remote_id, query, now],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn saved_view_update_pushes_the_stored_query_as_an_object() {
+        let q = r#"{"lane_ids":"1,999","future_key":"x","view_mode":"list"}"#;
+        let conn = saved_view_db(Some(5), q);
+        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1") else {
+            panic!("expected ready");
+        };
+        assert_eq!(p.remote_id, 5);
+        assert_eq!(
+            p.query,
+            serde_json::json!({"lane_ids":"1,999","future_key":"x","view_mode":"list"})
+        );
+        assert_eq!(p.stored, q);
+    }
+
+    #[test]
+    fn saved_view_update_waits_for_an_unpushed_create_and_drops_a_missing_row() {
+        let conn = saved_view_db(None, "{}");
+        assert!(matches!(
+            saved_view_update_prep(&conn, "sv1"),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        assert!(matches!(
+            saved_view_update_prep(&conn, "nope"),
+            Prep::Done(Outcome::DropAndLog(_))
         ));
     }
 
