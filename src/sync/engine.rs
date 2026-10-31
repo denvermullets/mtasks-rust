@@ -4172,7 +4172,7 @@ mod tests {
         assert!(matches!(classify(&e), Outcome::DropAndLog(_)));
         sync_queue::mark_synced(&conn, entry.id.unwrap()).unwrap();
         home_page::apply_me(&conn, Some(&crate::api::HomePageDto { kind: "team".into(), id: 1 })).unwrap();
-        assert_eq!(home_page::get(&conn).unwrap().unwrap().remote_id, 1);
+        assert_eq!(home_page::get(&conn).unwrap().unwrap().target, home_page::HomeTarget::Team(1));
     }
 
     #[test]
@@ -4190,7 +4190,7 @@ mod tests {
             home_page::resolve_payload(&conn, pending[1].payload.as_deref()),
             Resolved::Ready("view".into(), 88)
         );
-        assert_eq!(home_page::get(&conn).unwrap().unwrap().remote_id, 88);
+        assert_eq!(home_page::get(&conn).unwrap().unwrap().target, home_page::HomeTarget::View(88));
     }
 
     #[test]
