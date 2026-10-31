@@ -492,6 +492,9 @@ pub enum View {
     ProjectList,
     ProjectDetail(String),
     Roadmap,
+    /// A team's Recurring issues table (JRST-159). Team-scoped; its rows live
+    /// in `App::recurring_rows`.
+    RecurringIssues,
     MyIssues,
     /// Notification Inbox. Not team-scoped, but unlike `MyIssues` it loads no
     /// cross-team issue data (the per-team data stays as is).
@@ -643,6 +646,9 @@ pub struct App {
     /// Inbox rows, selection and filter (JRST-91). Reloaded on entering the
     /// Inbox and after every poll.
     inbox: crate::inbox::InboxState,
+    /// Display rows of the selected team's Recurring issues (JRST-159),
+    /// reloaded by `reload_data` and on entering the view.
+    recurring_rows: Vec<crate::db::recurring_issues::RecurringIssueRow>,
     /// Report of the most recent successful poll (JRST-95 prune, JRST-96
     /// banners read `new_unread` + `backfill`).
     last_notif_poll: Option<PollReport>,
@@ -755,6 +761,7 @@ impl App {
             self.issue_labels.clear();
         }
 
+        self.reload_recurring(&conn);
         self.refresh_open_view();
 
         // Filters are global but hold per-team ids; drop the ones this data
@@ -807,11 +814,25 @@ impl App {
         if self.view == View::Inbox {
             self.reload_inbox();
         }
+        if self.view == View::RecurringIssues {
+            let conn = self.db();
+            self.reload_recurring(&conn);
+        }
         if crossing {
             self.focused_lane = 0;
             self.focused_issue = 0;
             self.reload_data();
         }
+    }
+
+    /// Re-read the selected team's Recurring issue rows from the mirror.
+    fn reload_recurring(&mut self, conn: &rusqlite::Connection) {
+        self.recurring_rows = match &self.selected_team_id {
+            Some(team_id) if self.view != View::MyIssues => {
+                crate::db::recurring_issues::list_rows(conn, team_id).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
     }
 
     /// Re-read the Inbox rows from the mirror, keeping the selection.
@@ -2045,6 +2066,7 @@ impl App {
             home_page,
             last_notif_poll: None,
             inbox: Default::default(),
+            recurring_rows: Vec::new(),
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
@@ -2540,6 +2562,10 @@ impl App {
                     self.reload_data();
                 }
                 self.view = view;
+                if self.view == View::RecurringIssues {
+                    let conn = self.db();
+                    self.reload_recurring(&conn);
+                }
             }
 
             Message::InboxMove(delta) => {
@@ -4542,6 +4568,7 @@ impl App {
                 }
             }
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
+            View::RecurringIssues => crate::views::recurring_issues::view(&self.recurring_rows),
             View::Inbox => crate::views::inbox::view(&self.inbox),
         };
 
@@ -4806,6 +4833,7 @@ fn breadcrumb(
         View::Board => crumbs.push("Issues".into()),
         View::ProjectList => crumbs.push("Projects".into()),
         View::Roadmap => crumbs.push("Roadmap".into()),
+        View::RecurringIssues => crumbs.push("Recurring issues".into()),
         View::ProjectDetail(id) => {
             crumbs.push("Projects".into());
             if let Some(p) = projects.iter().find(|p| p.id == *id) {

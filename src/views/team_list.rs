@@ -174,10 +174,11 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
 
         // Sub-rows for the expanded team.
         if is_expanded {
-            let sub_rows: [(&str, View); 3] = [
+            let sub_rows: [(&str, View); 4] = [
                 ("Issues", View::Board),
                 ("Projects", View::ProjectList),
                 ("Roadmap", View::Roadmap),
+                ("Recurring issues", View::RecurringIssues),
             ];
             for (label, view) in sub_rows {
                 let active = is_selected && *current_view == view && open_view_id.is_none();

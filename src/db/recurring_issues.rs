@@ -243,13 +243,42 @@ pub fn find_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Rec
 }
 
 /// A team's recurring issues, oldest first (raw rows; no name resolution).
-#[allow(dead_code)] // used by the Recurring issues view ticket
 pub fn list_for_team(conn: &Connection, local_team_id: &str) -> Result<Vec<RecurringIssue>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM recurring_issues WHERE team_id = ?1 ORDER BY created_at, id"
     ))?;
     let rows = stmt.query_map(params![local_team_id], RecurringIssue::from_row)?;
     rows.collect()
+}
+
+/// One display-ready row of the Recurring issues view. Column tickets add
+/// fields here (schedule summary, next run, assignee, project, lane, labels)
+/// and fill them in [`row_from`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurringIssueRow {
+    /// Local uuid.
+    pub id: String,
+    pub title: String,
+    pub active: bool,
+}
+
+/// Build the display row for one mirrored recurring issue. Column tickets
+/// extend this (they may use `conn` to resolve names).
+fn row_from(_conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+    Ok(RecurringIssueRow {
+        id: r.id.clone(),
+        title: r.title.clone(),
+        active: r.active,
+    })
+}
+
+/// A team's display-ready rows for the Recurring issues view, in a stable
+/// order (oldest first, id as tiebreak).
+pub fn list_rows(conn: &Connection, local_team_id: &str) -> Result<Vec<RecurringIssueRow>> {
+    list_for_team(conn, local_team_id)?
+        .iter()
+        .map(|r| row_from(conn, r))
+        .collect()
 }
 
 /// Local label ids joined to a recurring issue, sorted.
@@ -396,6 +425,27 @@ mod tests {
         assert_eq!(r.lane_id, None);
         assert_eq!(r.assignee_id, None);
         assert_eq!(r.assignee_name.as_deref(), Some("Gone"));
+    }
+
+    #[test]
+    fn list_rows_returns_the_teams_rows_with_title_and_active_in_stable_order() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t2', 'U', 'U', 701, ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        let mut paused = rec(6, "Second", "2026-02-01T00:00:00.000Z");
+        paused.active = false;
+        paused.created_at = "2026-01-02T00:00:00.000Z".into();
+        apply_pulled(&conn, "t1", &[paused, rec(5, "First", NOW)], None).unwrap();
+        apply_pulled(&conn, "t2", &[rec(7, "Other team", NOW)], None).unwrap();
+
+        let rows = list_rows(&conn, "t1").unwrap();
+        let got: Vec<(&str, bool)> = rows.iter().map(|r| (r.title.as_str(), r.active)).collect();
+        assert_eq!(got, [("First", true), ("Second", false)]);
+        assert!(list_rows(&conn, "nope").unwrap().is_empty());
     }
 
     #[test]
