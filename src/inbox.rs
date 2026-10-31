@@ -57,6 +57,39 @@ pub fn empty_message(filter: Filter) -> &'static str {
     }
 }
 
+/// Where Enter on a Notification should go.
+#[derive(Debug, PartialEq)]
+pub enum OpenTarget {
+    /// The issue is already in the local mirror.
+    Local(crate::db::models::Issue),
+    /// Not mirrored (e.g. outside the synced window): one-shot fetch it.
+    Fetch { team_remote_id: i64, local_team_id: String, issue_remote_id: i64 },
+    /// No issue on the Notification, or its team isn't known locally.
+    Unavailable,
+}
+
+/// Resolve a Notification's issue against the mirror.
+pub fn resolve_target(conn: &rusqlite::Connection, n: &Notification) -> OpenTarget {
+    use crate::db::queries;
+    let Some(issue_remote_id) = n.issue_remote_id else {
+        return OpenTarget::Unavailable;
+    };
+    if let Ok(Some(issue)) = queries::find_issue_by_remote_id(conn, issue_remote_id) {
+        return OpenTarget::Local(issue);
+    }
+    let Some(team_remote_id) = n.team_remote_id else {
+        return OpenTarget::Unavailable;
+    };
+    match queries::find_team_by_remote_id(conn, team_remote_id) {
+        Ok(Some(team)) => OpenTarget::Fetch {
+            team_remote_id,
+            local_team_id: team.id,
+            issue_remote_id,
+        },
+        _ => OpenTarget::Unavailable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +173,53 @@ mod tests {
     fn empty_messages_follow_filter() {
         assert_eq!(empty_message(Filter::Unread), "No unread notifications");
         assert_eq!(empty_message(Filter::All), "No notifications");
+    }
+
+    fn conn_with_issue(issue_remote: Option<i64>, team_remote: Option<i64>) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute_batch(&format!(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+               VALUES ('t1', 'T', 'T', {}, '{now}', '{now}');
+             INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+               VALUES ('l1', 'B', 0, 't1', '{now}', '{now}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, remote_id, created_at, updated_at)
+               VALUES ('i1', 'Issue', 0, 'l1', 't1', {}, '{now}', '{now}');",
+            team_remote.map_or("NULL".to_string(), |t| t.to_string()),
+            issue_remote.map_or("NULL".to_string(), |t| t.to_string()),
+        ))
+        .unwrap();
+        conn
+    }
+
+    fn for_issue(issue: Option<i64>, team: Option<i64>) -> Notification {
+        Notification { issue_remote_id: issue, team_remote_id: team, ..n(1) }
+    }
+
+    #[test]
+    fn target_is_the_local_issue_when_mirrored() {
+        let conn = conn_with_issue(Some(50), Some(47));
+        match resolve_target(&conn, &for_issue(Some(50), Some(47))) {
+            OpenTarget::Local(i) => assert_eq!(i.id, "i1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn target_fetches_when_issue_missing_but_team_known() {
+        let conn = conn_with_issue(Some(50), Some(47));
+        assert_eq!(
+            resolve_target(&conn, &for_issue(Some(99), Some(47))),
+            OpenTarget::Fetch { team_remote_id: 47, local_team_id: "t1".into(), issue_remote_id: 99 }
+        );
+    }
+
+    #[test]
+    fn target_unavailable_without_issue_or_known_team() {
+        let conn = conn_with_issue(Some(50), Some(47));
+        assert_eq!(resolve_target(&conn, &for_issue(None, Some(47))), OpenTarget::Unavailable);
+        assert_eq!(resolve_target(&conn, &for_issue(Some(99), None)), OpenTarget::Unavailable);
+        assert_eq!(resolve_target(&conn, &for_issue(Some(99), Some(1000))), OpenTarget::Unavailable);
     }
 }
