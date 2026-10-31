@@ -263,7 +263,7 @@ Size: **M**.
 ```json
 { "id":1, "title":"...", "description":"...", "priority":"medium",
   "frequency":"weekly", "interval":1, "weekday":3, "day_of_month":null,
-  "time_zone":"America/Denver", "active":true,
+  "time_zone":"Mountain Time (US & Canada)", "active":true,
   "next_run_on":"2026-11-05", "last_run_at":null,
   "assignee":{"id":1,"name":"..."}, "project":{...}, "lane":{...},
   "label_ids":[1,2], "schedule_summary":"Every week on Wednesday",
