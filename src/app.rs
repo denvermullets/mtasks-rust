@@ -318,6 +318,8 @@ pub enum Message {
     InboxIssueFetched(i64, Result<(), String>),
     /// Leave an issue detail opened from the Inbox and return there.
     BackToInbox,
+    /// A native banner was clicked: open its Notification's issue, or the Inbox.
+    BannerClicked(crate::db::notifications::BannerTarget),
     InboxMarkAllRead,
     /// Switch the Inbox to the other filter (f).
     InboxToggleFilter,
@@ -1835,7 +1837,9 @@ impl App {
             _ => None,
         });
 
-        let mut subs = vec![keys, activity];
+        let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
+
+        let mut subs = vec![keys, activity, banner_clicks];
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(
@@ -2060,6 +2064,42 @@ impl App {
                 self.detail_from_inbox = false;
                 self.issue_detail = None;
                 self.switch_view(View::Inbox);
+            }
+            Message::BannerClicked(target) => {
+                // macOS usually activates the app on a click; make sure.
+                let focus = iced::window::get_latest().and_then(iced::window::gain_focus);
+                // Don't navigate out from under an open modal (unsaved input).
+                if self.modal != Modal::None {
+                    return focus;
+                }
+                self.commit_issue_detail();
+                self.commit_project_detail();
+                self.detail_from_my_issues = false;
+                self.detail_from_inbox = false;
+                self.switch_view(View::Inbox);
+                let crate::db::notifications::BannerTarget::Notification(remote_id) = target else {
+                    return Task::batch([focus, self.scroll_inbox_to_selection()]);
+                };
+                // Already read (e.g. on another device) hides it from Unread.
+                if self.inbox.index_of(remote_id).is_none()
+                    && self.inbox.filter == crate::db::notifications::Filter::Unread
+                {
+                    let all = crate::db::notifications::inbox_list(
+                        &self.db(),
+                        crate::db::notifications::Filter::All,
+                    )
+                    .unwrap_or_default();
+                    if all.iter().any(|n| n.remote_id == remote_id) {
+                        self.inbox.set_filter(crate::db::notifications::Filter::All);
+                        self.inbox.set_items(all);
+                    }
+                }
+                // Pruned locally: stay on the Inbox.
+                let open = match self.inbox.index_of(remote_id) {
+                    Some(i) => self.update(Message::InboxOpenAt(i)),
+                    None => self.scroll_inbox_to_selection(),
+                };
+                return Task::batch([focus, open]);
             }
             Message::InboxMarkAllRead => {
                 let conn = self.db();

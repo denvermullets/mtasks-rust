@@ -362,11 +362,21 @@ pub fn set_etag(conn: &Connection, etag: &str) -> Result<()> {
 /// Most per-item banners one poll may post; more collapses into a single one.
 pub const MAX_ITEM_BANNERS: usize = 3;
 
+/// What clicking a banner opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerTarget {
+    /// The Notification with this remote id (its issue, via the Inbox).
+    Notification(i64),
+    /// The Inbox itself (collapsed "N new notifications" banner).
+    Inbox,
+}
+
 /// A native banner to post.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Banner {
     pub title: String,
     pub body: String,
+    pub target: BannerTarget,
 }
 
 /// Which banners a poll should post. `new_unread` is `PollReport::new_unread`.
@@ -386,6 +396,7 @@ pub fn banners_to_fire(
         return vec![Banner {
             title: "JAIT".into(),
             body: format!("{} new notifications", new_unread.len()),
+            target: BannerTarget::Inbox,
         }];
     }
     new_unread
@@ -398,6 +409,7 @@ pub fn banners_to_fire(
                 (None, None) => "JAIT".into(),
             },
             body: n.message.clone(),
+            target: BannerTarget::Notification(n.remote_id),
         })
         .collect()
 }
@@ -473,9 +485,30 @@ mod tests {
     }
 
     #[test]
+    fn item_banners_target_their_notification() {
+        let b = banners_to_fire(&mirrored(3), false, false, true);
+        let mut targets: Vec<_> = b.iter().map(|b| b.target).collect();
+        targets.sort_by_key(|t| match t {
+            BannerTarget::Notification(id) => *id,
+            BannerTarget::Inbox => 0,
+        });
+        assert_eq!(
+            targets,
+            [1, 2, 3].map(BannerTarget::Notification).to_vec()
+        );
+    }
+
+    #[test]
     fn banners_collapse_above_three() {
         let b = banners_to_fire(&mirrored(4), false, false, true);
-        assert_eq!(b, vec![Banner { title: "JAIT".into(), body: "4 new notifications".into() }]);
+        assert_eq!(
+            b,
+            vec![Banner {
+                title: "JAIT".into(),
+                body: "4 new notifications".into(),
+                target: BannerTarget::Inbox,
+            }]
+        );
     }
 
     #[test]

@@ -39,6 +39,11 @@ impl InboxState {
     pub fn selected_item(&self) -> Option<&Notification> {
         self.items.get(self.selected)
     }
+
+    /// Row index of the Notification with this remote id, if listed.
+    pub fn index_of(&self, remote_id: i64) -> Option<usize> {
+        self.items.iter().position(|n| n.remote_id == remote_id)
+    }
 }
 
 /// The other filter (what `f` switches to).
@@ -118,6 +123,13 @@ mod tests {
             selected,
             filter: Filter::Unread,
         }
+    }
+
+    #[test]
+    fn index_of_finds_listed_remote_id() {
+        let s = state(&[7, 8, 9], 0);
+        assert_eq!(s.index_of(8), Some(1));
+        assert_eq!(s.index_of(42), None);
     }
 
     #[test]
