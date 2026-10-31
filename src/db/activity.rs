@@ -4,7 +4,6 @@
 //! Entries are keyed by `(issue_id, entry_cursor)` where the cursor is the full
 //! `<type>:<id>` string: numeric ids collide across entry types.
 // Unused until the fetch routine and display layer land; drop then.
-#![allow(dead_code)]
 
 use rusqlite::{params, Connection, Result};
 use serde_json::{json, Value};
@@ -49,7 +48,8 @@ pub struct FetchState {
 ///
 /// Also prunes settled Pending changes (see [`prune_settled`]), treating the
 /// fetch as having started now. Callers that know when the request actually
-/// began should use [`store_batch_at`].
+/// began should use [`store_batch_at`]. Test helper only.
+#[cfg(test)]
 pub fn store_batch(
     conn: &Connection,
     issue_id: &str,
@@ -111,7 +111,7 @@ pub fn store_batch_at(
     tx.commit()
 }
 
-/// Remove the issue's settled Pending changes: local `issue_events` rows linked
+/// Remove the issue's settled Pending changes: Pending-change `issue_events` rows linked
 /// to a sync-queue entry that has synced AND whose `synced_at` is not later
 /// than `fetch_started_at`, i.e. the server had already applied the change
 /// when the fetch began, so the fetched Activity carries it.
@@ -229,6 +229,16 @@ fn to_row(entry: &ActivityEntry) -> StoredEntry {
     }
 }
 
+/// Re-format a server time (`...:47Z`, `...:47.5Z`, or with an offset) into the
+/// fixed-width local format of `db::now_iso()`, so string order matches time
+/// order against Pending changes in the same second. Unparseable input is
+/// stored as received.
+fn normalise_time(server: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(server)
+        .map(|t| t.with_timezone(&chrono::Utc).format(super::TS_FORMAT).to_string())
+        .unwrap_or_else(|_| server.to_string())
+}
+
 fn row(
     entry_type: &str,
     cursor: &str,
@@ -240,7 +250,7 @@ fn row(
     StoredEntry {
         cursor: cursor.to_string(),
         entry_type: entry_type.to_string(),
-        created_at: created_at.to_string(),
+        created_at: normalise_time(created_at),
         actor_remote_id: actor.map(|a| a.id),
         actor_name: actor.map(|a| a.name.clone()),
         payload,
@@ -692,7 +702,7 @@ mod tests {
 
         assert_eq!(got[0].cursor, "version:5");
         assert_eq!(got[0].entry_type, "version");
-        assert_eq!(got[0].created_at, "2026-07-06T00:40:47Z");
+        assert_eq!(got[0].created_at, "2026-07-06T00:40:47.000Z");
         assert_eq!(got[0].actor_remote_id, Some(2));
         assert_eq!(got[0].actor_name.as_deref(), Some("ryan"));
         assert_eq!(got[0].description, "changed priority");
@@ -833,7 +843,7 @@ mod display_tests {
             "changed due date from 2026-01-01 to none",
             "changed priority from High to None",
         ]);
-        assert_eq!(items[0].at, "2026-07-06T00:40:47Z");
+        assert_eq!(items[0].at, "2026-07-06T00:40:47.000Z");
         assert_eq!(items[0].actor.name.as_deref(), Some("ryan"));
         assert_eq!(items[0].key, "version:1#0");
         assert_eq!(items[0].origin, ItemOrigin::Server);
@@ -1181,7 +1191,7 @@ mod jrst141_tests {
     }
 
     #[test]
-    fn unqueued_local_events_are_not_pending() {
+    fn unqueued_edits_are_not_pending() {
         let conn = mem();
         let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
         issue.priority = 1;
@@ -1199,6 +1209,27 @@ mod jrst141_tests {
         edit_priority(&conn);
         let items = activity_for_issue(&conn, "i1").unwrap()[1..].to_vec();
         assert_eq!(items[0].origin, ItemOrigin::Server);
+        assert_eq!(items[1].origin, ItemOrigin::Pending);
+    }
+
+    #[test]
+    fn pending_change_in_the_same_second_sorts_after_the_server_entry() {
+        let conn = mem();
+        // The server stores whole seconds; local times carry milliseconds.
+        let body = r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-01-02T00:00:47Z","actor":null,"event":"update","description":"",
+          "changes":[{"field":"title","from":"a","to":"b"}]}]"#;
+        let entries: Vec<ActivityEntry> = serde_json::from_str(body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        conn.execute("INSERT INTO sync_queue (entity_type, entity_id, action, created_at) VALUES ('issue','i1','update','x')", []).unwrap();
+        conn.execute(
+            "INSERT INTO issue_events (issue_id, source, kind, old_value, new_value, created_at, sync_queue_id)
+             VALUES ('i1','local','priority','4','1','2026-01-02T00:00:47.123Z', last_insert_rowid())",
+            [],
+        )
+        .unwrap();
+        let items = activity_for_issue(&conn, "i1").unwrap()[1..].to_vec();
+        assert_eq!(items[0].origin, ItemOrigin::Server);
+        assert_eq!(items[0].at, "2026-01-02T00:00:47.000Z");
         assert_eq!(items[1].origin, ItemOrigin::Pending);
     }
 
@@ -1303,7 +1334,7 @@ mod jrst143_tests {
     }
 
     #[test]
-    fn unqueued_local_events_are_untouched() {
+    fn unqueued_edits_are_untouched() {
         let conn = mem();
         let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
         issue.priority = 1;

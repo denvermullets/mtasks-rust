@@ -10,7 +10,7 @@
 //! 3. [`execute`] runs the plan over the network and returns a [`Fetched`]
 //!    batch. It touches no DB, so an `Err` leaves the cache untouched
 //!    (JRST-147). JRST-146's restart-once wraps the `FullHistory` arm.
-//! 4. [`commit`] writes the batch via `db::activity::store_batch` in one
+//! 4. [`commit`] writes the batch via `db::activity::store_batch_at` in one
 //!    transaction.
 //!
 //! The paging decisions ([`first_cursor`], [`advance`]) are pure; the network
@@ -256,14 +256,10 @@ pub fn resolve(conn: &Connection, issue_id: &str) -> rusqlite::Result<Option<Tar
 }
 
 /// Store a fetched batch and its fetch state in one transaction.
-/// Settled Pending changes are pruned with it, treating the fetch as started now.
-pub fn commit(conn: &Connection, issue_id: &str, fetched: &Fetched) -> rusqlite::Result<()> {
-    commit_at(conn, issue_id, fetched, &crate::db::now_iso())
-}
-
-/// [`commit`] given the local time the fetch began (`db::now_iso()` format), so a
-/// push that landed while the request was in flight is not pruned.
-pub fn commit_at(
+/// `fetch_started_at` is the local time the fetch began (`db::now_iso()`
+/// format): settled Pending changes are pruned with it, and a push that landed
+/// while the request was in flight is not.
+pub fn commit(
     conn: &Connection,
     issue_id: &str,
     fetched: &Fetched,
@@ -300,7 +296,7 @@ where
         Ok(f) => f,
         Err(e) => return FetchOutcome::Failed(e.to_string()),
     };
-    match open().and_then(|c| commit_at(&c, issue_id, &fetched, &started_at)) {
+    match open().and_then(|c| commit(&c, issue_id, &fetched, &started_at)) {
         Ok(()) => FetchOutcome::Fetched {
             stored: fetched.entries.len(),
         },
@@ -313,6 +309,11 @@ mod tests {
     use super::*;
     use crate::db::migrations;
     use std::cell::RefCell;
+
+    /// `super::commit` for a fetch that began now.
+    fn commit(conn: &Connection, issue_id: &str, fetched: &Fetched) -> rusqlite::Result<()> {
+        super::commit(conn, issue_id, fetched, &crate::db::now_iso())
+    }
 
     fn entry(id: i64) -> ActivityEntry {
         serde_json::from_str(&format!(
@@ -650,6 +651,11 @@ mod tests {
 mod failure_tests {
     use super::*;
     use crate::db::migrations;
+
+    /// `super::commit` for a fetch that began now.
+    fn commit(conn: &Connection, issue_id: &str, fetched: &Fetched) -> rusqlite::Result<()> {
+        super::commit(conn, issue_id, fetched, &crate::db::now_iso())
+    }
 
     fn entry(id: i64) -> ActivityEntry {
         serde_json::from_str(&format!(

@@ -344,8 +344,8 @@ pub fn record_dependency(
     Ok(())
 }
 
-/// Diff `old` against `new` and record one event per changed tracked field.
-/// Returns the number of events written.
+/// Diff `old` against `new` and record one Pending change per changed tracked field.
+/// Returns the number of Pending changes written.
 pub fn record_changes(
     conn: &Connection,
     old: &Issue,
