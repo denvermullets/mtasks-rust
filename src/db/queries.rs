@@ -1793,7 +1793,6 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     if tombstoned > 0 {
         return Ok(());
     }
-    let old = get_issue(conn, &issue.id)?;
     conn.execute(
         "INSERT INTO issues
             (id, title, description, priority, team_number, due_date, estimate,
@@ -1844,14 +1843,6 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
-    // Local-only activity history: a new row gets a "created" event, an
-    // existing one gets an event per tracked field the pull changed.
-    match old {
-        Some(old) => {
-            events::record_changes(conn, &old, issue, Source::Sync, &issue.updated_at)?;
-        }
-        None => events::record_created(conn, issue, Source::Sync)?,
-    }
     Ok(())
 }
 
@@ -2816,25 +2807,18 @@ mod tests {
     }
 
     #[test]
-    fn pull_upsert_records_created_then_diffs() {
+    fn pull_upsert_records_no_events() {
         let conn = setup();
         let mut issue = make_issue("p1", None, None);
         issue.created_at = "2026-03-01T00:00:00.000Z".into();
         issue.updated_at = "2026-03-01T00:00:00.000Z".into();
         upsert_issue(&conn, &issue).unwrap();
-        // Re-pulling an unchanged row adds nothing.
-        upsert_issue(&conn, &issue).unwrap();
         issue.priority = 0;
         issue.updated_at = "2026-03-02T00:00:00.000Z".into();
         upsert_issue(&conn, &issue).unwrap();
 
-        let evs = events::events_for_issue(&conn, "p1").unwrap();
-        assert_eq!(evs.len(), 2);
-        assert_eq!(evs[0].created_at, "2026-03-01T00:00:00.000Z");
-        assert_eq!(evs[0].source, "sync");
-        assert_eq!(evs[1].description(), "changed priority from None to Urgent");
-        assert_eq!(evs[1].created_at, "2026-03-02T00:00:00.000Z");
-        assert_eq!(evs[1].default_actor(), "Someone");
+        assert!(events::events_for_issue(&conn, "p1").unwrap().is_empty());
+        assert_eq!(get_issue(&conn, "p1").unwrap().unwrap().priority, 0);
     }
 
     #[test]

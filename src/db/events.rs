@@ -66,15 +66,12 @@ impl EventKind {
 pub enum Source {
     /// Made on this desktop ("You" when no actor is recorded).
     Local,
-    /// Seen on sync pull ("Someone" when no actor is recorded).
-    Sync,
 }
 
 impl Source {
     fn as_str(self) -> &'static str {
         match self {
             Source::Local => "local",
-            Source::Sync => "sync",
         }
     }
 }
@@ -117,11 +114,7 @@ impl IssueEvent {
 
     /// Fallback actor label when no member name resolves.
     pub fn default_actor(&self) -> &'static str {
-        if self.source == "sync" {
-            "Someone"
-        } else {
-            "You"
-        }
+        "You"
     }
 
     pub fn description(&self) -> String {
