@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
+use crate::lane_icon::{icon_for, LaneIcon};
 use crate::views::header;
-use crate::views::lane_icon::{icon_for, LaneIcon};
 
 /// Key used for the "none" bucket of an axis (unassigned, no project, ...).
 const NONE_KEY: &str = "";

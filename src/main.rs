@@ -6,6 +6,7 @@ mod db;
 mod display;
 mod fonts;
 mod keys;
+mod lane_icon;
 mod mentions;
 mod scroll;
 mod sync;

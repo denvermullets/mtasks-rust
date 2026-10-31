@@ -205,7 +205,7 @@ pub fn view<'a>(
     let selected_icon = lanes
         .iter()
         .find(|l| l.id == issue.lane_id)
-        .map(|l| lane_icon::icon_for(l.category.as_deref()));
+        .map(|l| crate::lane_icon::icon_for(l.category.as_deref()));
 
     let project_options: Vec<ProjectOption> = std::iter::once(ProjectOption {
         id: None,
@@ -428,7 +428,7 @@ fn sub_issue_row<'a>(
             row![]
                 .spacing(4)
                 .align_y(Alignment::Center)
-                .push(lane_icon::view(lane_icon::icon_for(l.category.as_deref())))
+                .push(lane_icon::view(crate::lane_icon::icon_for(l.category.as_deref())))
                 .push(text(&l.name).size(11).color(color)),
         )
             .padding([2, 8])

@@ -13,8 +13,6 @@ pub enum Direction {
     Relates,
     /// Current issue duplicates the target issue.
     Duplicates,
-    /// Current issue is duplicated by the target issue.
-    DuplicatedBy,
 }
 
 impl Direction {
@@ -25,7 +23,6 @@ impl Direction {
             Direction::BlockedBy => "blocked_by",
             Direction::Relates => "relates",
             Direction::Duplicates => "duplicates",
-            Direction::DuplicatedBy => "duplicated_by",
         }
     }
 }
@@ -138,7 +135,6 @@ mod tests {
         for (d, wire) in [
             (Direction::Relates, "relates"),
             (Direction::Duplicates, "duplicates"),
-            (Direction::DuplicatedBy, "duplicated_by"),
         ] {
             let body = CreateBody { target_issue_id: 1, direction: d };
             assert_eq!(
@@ -164,7 +160,6 @@ mod tests {
             Direction::BlockedBy,
             Direction::Relates,
             Direction::Duplicates,
-            Direction::DuplicatedBy,
         ] {
             assert_eq!(serde_json::to_value(d).unwrap(), serde_json::json!(d.as_str()));
         }
