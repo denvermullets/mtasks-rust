@@ -43,6 +43,16 @@ pub fn update_view_button<'a>(read_only: bool) -> Element<'a, Message> {
         .into()
 }
 
+/// "Save as new view" for a Modified Saved view: asks for a name and saves the
+/// working copy as a new view. Disabled (no press) with a read-only token.
+pub fn save_as_new_view_button<'a>(read_only: bool) -> Element<'a, Message> {
+    button(text("Save as new view").size(13))
+        .on_press_maybe((!read_only).then_some(Message::OpenSaveAsNewView))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`

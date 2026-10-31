@@ -206,6 +206,7 @@ pub enum Message {
     OpenFilterPanel,
     /// "Save view…" in the display popover: ask for a name.
     OpenSaveView,
+    OpenSaveAsNewView,
     SaveViewNameChanged(String),
     /// Create the Saved view from the current board state.
     SaveViewSubmit,
@@ -549,6 +550,8 @@ pub struct App {
     /// Name being typed in the "Save view" prompt, and its validation error.
     save_view_name: String,
     save_view_error: Option<&'static str>,
+    /// The name prompt is saving the open view's working copy (Save as new view).
+    save_view_from_open: bool,
     /// The user's Home page as last reported by the server (see `db::home_page`).
     home_page: Option<crate::db::home_page::HomePage>,
     selected_team_id: Option<String>,
@@ -1417,7 +1420,14 @@ impl App {
             projects: &self.projects,
         };
         v.is_modified(&mirror)
-            .then(|| header::update_view_button(self.sync_read_only))
+            .then(|| {
+                iced::widget::row![
+                    header::update_view_button(self.sync_read_only),
+                    header::save_as_new_view_button(self.sync_read_only),
+                ]
+                .spacing(8)
+                .into()
+            })
     }
 
     fn enqueue_sync(
@@ -2007,6 +2017,7 @@ impl App {
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
+            save_view_from_open: false,
             home_page,
             last_notif_poll: None,
             inbox: Default::default(),
@@ -2269,6 +2280,17 @@ impl App {
                 if self.save_view_block_reason().is_none() {
                     self.save_view_name.clear();
                     self.save_view_error = None;
+                    self.save_view_from_open = false;
+                    self.modal = Modal::SaveView;
+                    return text_input::focus(save_view_input_id());
+                }
+            }
+
+            Message::OpenSaveAsNewView => {
+                if self.save_view_block_reason().is_none() && self.open_view.is_some() {
+                    self.save_view_name.clear();
+                    self.save_view_error = None;
+                    self.save_view_from_open = true;
                     self.modal = Modal::SaveView;
                     return text_input::focus(save_view_input_id());
                 }
@@ -2309,7 +2331,10 @@ impl App {
                     labels: &self.labels,
                     projects: &self.projects,
                 };
-                let query = crate::saved_view::new_view_query(&state, &mirror);
+                let query = match (&self.open_view, self.save_view_from_open) {
+                    (Some(v), true) => v.encoded(&mirror),
+                    _ => crate::saved_view::new_view_query(&state, &mirror),
+                };
                 let dropped_unassigned = crate::saved_view::has_unassigned(&state);
                 let query_json = serde_json::to_string(&query).unwrap_or_else(|_| "{}".into());
                 match crate::db::saved_views::create_local(&self.db(), &team_id, &name, &query_json)
