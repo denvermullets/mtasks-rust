@@ -1067,7 +1067,8 @@ impl App {
         let comment = Comment {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
-            issue_id,
+            issue_id: Some(issue_id),
+            project_id: None,
             author_id,
             body,
             parent_id,

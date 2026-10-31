@@ -423,7 +423,8 @@ impl CommentDto {
         Comment {
             id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
             remote_id: Some(self.id),
-            issue_id: issue_local_uuid,
+            issue_id: Some(issue_local_uuid),
+            project_id: None,
             author_id,
             body: self.body,
             parent_id: parent_local_uuid,

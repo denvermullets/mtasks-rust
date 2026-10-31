@@ -1347,7 +1347,16 @@ fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
     }
     // The comment is nested under its issue; both the issue and its team must be
     // synced before we can address the endpoint.
-    let issue = match queries::get_issue(&conn, &comment.issue_id) {
+    // Project comments are not pushed yet (the project path lands with a later ticket).
+    let comment_issue_id = match comment.owner() {
+        crate::db::models::CommentOwner::Issue(id) => id,
+        crate::db::models::CommentOwner::Project(_) => {
+            return Prep::Done(Outcome::DropAndLog(
+                "project comment push not supported yet".into(),
+            ))
+        }
+    };
+    let issue = match queries::get_issue(&conn, &comment_issue_id) {
         Ok(Some(i)) => i,
         Ok(None) => return Prep::Done(Outcome::DropAndLog("comment's issue missing".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
@@ -1614,7 +1623,12 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
         ("label", _) => team_remote(&queries::get_label(conn, id).ok()??.team_id),
         ("comment", _) => {
             let c = queries::get_comment(conn, id).ok()??;
-            team_remote(&queries::get_issue(conn, &c.issue_id).ok()??.team_id)
+            let team_id = match (&c.issue_id, &c.project_id) {
+                (Some(i), _) => queries::get_issue(conn, i).ok()??.team_id,
+                (None, Some(p)) => queries::get_project(conn, p).ok()??.team_id,
+                (None, None) => return None,
+            };
+            team_remote(&team_id)
         }
         ("dependency", _) => {
             let d = queries::get_issue_dependency(conn, id).ok()??;
@@ -2816,7 +2830,8 @@ mod tests {
         let mk = |id: &str, remote: Option<i64>, parent: Option<&str>| Comment {
             id: id.into(),
             remote_id: remote,
-            issue_id: "i1".into(),
+            issue_id: Some("i1".into()),
+            project_id: None,
             author_id: None,
             body: id.into(),
             parent_id: parent.map(String::from),
