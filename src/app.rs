@@ -20,7 +20,7 @@ use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
-use crate::palette_results::PaletteNav;
+use crate::palette_results::{PaletteData, PaletteNav};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
@@ -2503,13 +2503,23 @@ impl App {
             Message::OpenCommandPalette => {
                 // Never opens over another modal.
                 if self.modal == Modal::None {
-                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new());
+                    let team = self
+                        .selected_team_id
+                        .as_ref()
+                        .and_then(|id| self.teams.iter().find(|t| t.id == *id));
+                    let data = PaletteData { issues: &self.issues, team };
+                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new(&data));
                     return text_input::focus(command_palette::input_id());
                 }
             }
             Message::PaletteQueryChanged(query) => {
                 if let Modal::CommandPalette(ref mut palette) = self.modal {
-                    palette.set_query(query);
+                    let team = self
+                        .selected_team_id
+                        .as_ref()
+                        .and_then(|id| self.teams.iter().find(|t| t.id == *id));
+                    let data = PaletteData { issues: &self.issues, team };
+                    palette.set_query(query, &data);
                 }
             }
             Message::PaletteChoose(nav) => {
@@ -2518,6 +2528,8 @@ impl App {
                     // Same path as any other view navigation: commits open
                     // issue/project detail edits first.
                     PaletteNav::View(view) => return self.update(Message::NavigateToView(view)),
+                    // open_issue_detail commits any open detail edits first.
+                    PaletteNav::Issue(id) => return self.update(Message::OpenIssueDetail(id)),
                 }
             }
 
