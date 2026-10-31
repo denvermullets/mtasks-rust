@@ -382,6 +382,7 @@ async fn process(
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
         ("label", "update") => label_update(client, &entry.entity_id).await,
+        ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
         ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
@@ -1374,6 +1375,46 @@ async fn label_update(client: &ApiClient, entity_id: &str) -> Outcome {
     match labels::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
         Ok(_) => Outcome::Success,
         Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
+/// The local row is gone by drain time, so the payload captured at enqueue time
+/// (`{team_remote_id, remote_id}`) is all a label delete has.
+fn prep_label_delete(payload: Option<&str>) -> Prep<(i64, i64)> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog(
+            "label delete: no payload (legacy entry)".into(),
+        ));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "label delete: bad payload: {e}"
+            )))
+        }
+    };
+    match (
+        parsed.get("team_remote_id").and_then(|v| v.as_i64()),
+        parsed.get("remote_id").and_then(|v| v.as_i64()),
+    ) {
+        (Some(team), Some(id)) => Prep::Ready((team, id)),
+        _ => Prep::Done(Outcome::DropAndLog(
+            "label delete: missing ids in payload".into(),
+        )),
+    }
+}
+
+async fn label_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let (team_remote_id, remote_id) = match prep_label_delete(payload) {
+        Prep::Ready(ids) => ids,
+        Prep::Done(o) => return o,
+    };
+    // 204 and 404 both mean the label is gone.
+    match labels::delete(client, team_remote_id, remote_id).await {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(e) => classify_in_team(&e, team_remote_id),
     }
 }
 
@@ -3443,6 +3484,20 @@ mod tests {
             label_update_prep(&conn, "nope"),
             Prep::Done(Outcome::DropAndLog(_))
         ));
+    }
+
+    #[test]
+    fn label_delete_prep_reads_only_the_payload() {
+        match prep_label_delete(Some(r#"{"team_remote_id":700,"remote_id":11}"#)) {
+            Prep::Ready(ids) => assert_eq!(ids, (700, 11)),
+            _ => panic!("expected Ready"),
+        }
+        for bad in [None, Some("not json"), Some(r#"{"remote_id":11}"#)] {
+            assert!(matches!(
+                prep_label_delete(bad),
+                Prep::Done(Outcome::DropAndLog(_))
+            ));
+        }
     }
 
     #[test]

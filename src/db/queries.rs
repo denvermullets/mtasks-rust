@@ -913,6 +913,41 @@ pub fn edit_label(
     Ok(label.remote_id.is_some())
 }
 
+/// How many issues carry the label; the delete confirmation shows it.
+pub fn label_issue_count(conn: &Connection, label_id: &str) -> Result<usize> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM issue_labels WHERE label_id = ?1",
+        params![label_id],
+        |r| r.get::<_, i64>(0).map(|n| n as usize),
+    )
+}
+
+/// Delete a label locally with the same effect as the server tombstone: detach
+/// it from issues and projects and remove it in one transaction, retiring any
+/// pending queue entries for it. Returns the `label/delete` payload
+/// (`{team_remote_id, remote_id}`) when the label and its team are synced,
+/// i.e. when a delete must be queued; `None` otherwise (an unsynced label's
+/// create is simply retired).
+pub fn delete_label(conn: &Connection, label_id: &str) -> Result<Option<String>> {
+    let Some(label) = get_label(conn, label_id)? else {
+        return Ok(None);
+    };
+    let payload = match (label.remote_id, remote_id_for(conn, "teams", &label.team_id)?) {
+        (Some(remote_id), Some(team_remote_id)) => Some(
+            serde_json::json!({ "team_remote_id": team_remote_id, "remote_id": remote_id })
+                .to_string(),
+        ),
+        _ => None,
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_labels WHERE label_id = ?1", params![label_id])?;
+    tx.execute("DELETE FROM project_labels WHERE label_id = ?1", params![label_id])?;
+    tx.execute("DELETE FROM labels WHERE id = ?1", params![label_id])?;
+    retire_pending_sync(&tx, "label", label_id)?;
+    tx.commit()?;
+    Ok(payload)
+}
+
 /// Local UUIDs of the labels currently attached to `issue_id`. Used to preload
 /// the multi-select when editing an issue.
 pub fn label_ids_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<String>> {
@@ -2128,6 +2163,41 @@ mod tests {
         issue.assignee_id = None;
         update_issue(&conn, &issue).unwrap();
         assert_eq!(get_issue(&conn, "new1").unwrap().unwrap().assignee_id, None);
+    }
+
+    #[test]
+    fn delete_label_detaches_and_removes_in_one_go() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
+        assert_eq!(label_issue_count(&conn, "lab1").unwrap(), 1);
+        assert!(delete_label(&conn, "lab1").unwrap().is_none());
+        assert!(get_label(&conn, "lab1").unwrap().is_none());
+        assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+        assert_eq!(label_issue_count(&conn, "lab1").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_label_unsynced_retires_pending_create_and_queues_nothing() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        crate::db::sync_queue::enqueue(&conn, "label", "lab1", "create", None).unwrap();
+        assert!(delete_label(&conn, "lab1").unwrap().is_none());
+        assert_eq!(crate::db::sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_label_synced_returns_payload() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        set_label_remote_id(&conn, "lab1", 11).unwrap();
+        let team_id = get_label(&conn, "lab1").unwrap().unwrap().team_id;
+        conn.execute("UPDATE teams SET remote_id = 700 WHERE id = ?1", params![team_id])
+            .unwrap();
+        let payload = delete_label(&conn, "lab1").unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["team_remote_id"], 700);
+        assert_eq!(v["remote_id"], 11);
     }
 
     #[test]

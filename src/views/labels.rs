@@ -272,6 +272,20 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                                     },
                                     ..Default::default()
                                 }),
+                        )
+                        .push(
+                            button(text("Delete").size(13).color(iced::Color::WHITE))
+                                .on_press(Message::ConfirmDeleteLabel)
+                                .padding([8, 16])
+                                .style(move |_theme: &Theme, _status| button::Style {
+                                    background: Some(iced::Background::Color(t::danger())),
+                                    text_color: iced::Color::WHITE,
+                                    border: Border {
+                                        radius: 4.0.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }),
                         ),
                 )
                 .push_maybe(
