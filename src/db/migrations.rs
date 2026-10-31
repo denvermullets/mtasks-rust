@@ -502,6 +502,15 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 26,
+        name: "issue_events_sync_queue_link",
+        up: "
+            -- Link a local Activity row (a Pending change) to the sync_queue
+            -- entry that will push it. NULL for existing rows.
+            ALTER TABLE issue_events ADD COLUMN sync_queue_id INTEGER;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -683,6 +692,30 @@ mod tests {
                 .unwrap();
             assert_eq!(left, 0);
         }
+    }
+
+    #[test]
+    fn issue_events_sync_queue_link_is_nullable_and_keeps_rows() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 26) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)", [now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1', 'B', 0, 't1', ?1, ?1)", [now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1', 'i', 4, 'l1', 't1', ?1, ?1)", [now]).unwrap();
+        conn.execute("INSERT INTO issue_events (issue_id, kind, old_value, new_value, created_at) VALUES ('i1', 'title', 'a', 'b', ?1)", [now]).unwrap();
+        run(&conn).unwrap();
+        let row: (String, String, Option<i64>) = conn
+            .query_row("SELECT kind, new_value, sync_queue_id FROM issue_events WHERE issue_id = 'i1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(row, ("title".to_string(), "b".to_string(), None));
+        conn.execute("UPDATE issue_events SET sync_queue_id = 5", []).unwrap();
     }
 
     #[test]
