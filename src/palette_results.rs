@@ -4,17 +4,20 @@
 //! `push_*` function called from `palette_results`.
 
 use crate::app::View;
+use crate::db::models::Team;
 
 /// What a row is, shown as a label so rows can be scanned by kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteKind {
     View,
+    Team,
 }
 
 impl PaletteKind {
     pub fn label(self) -> &'static str {
         match self {
             PaletteKind::View => "View",
+            PaletteKind::Team => "Team",
         }
     }
 }
@@ -24,6 +27,8 @@ impl PaletteKind {
 pub enum PaletteNav {
     /// Switch view for the current team (`Message::NavigateToView`).
     View(View),
+    /// Open this team's Board (`Message::SelectTeamView(id, View::Board)`).
+    Team(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,8 +40,10 @@ pub struct PaletteRow {
 }
 
 /// Local data the palette searches. Later kinds add their fields here.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PaletteData {}
+#[derive(Debug, Clone, Default)]
+pub struct PaletteData {
+    pub teams: Vec<Team>,
+}
 
 /// Ordered palette rows for `query`. An empty (or blank) query lists every
 /// navigation target.
@@ -44,6 +51,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let needle = query.trim().to_lowercase();
     let mut rows = Vec::new();
     push_views(&needle, data, &mut rows);
+    push_teams(&needle, data, &mut rows);
     rows
 }
 
@@ -71,20 +79,85 @@ fn push_views(needle: &str, _data: &PaletteData, rows: &mut Vec<PaletteRow>) {
     }
 }
 
+fn push_teams(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    for team in data.teams.iter().filter(|t| t.archived_at.is_none()) {
+        if name_matches(needle, &team.name) || name_matches(needle, &team.identifier) {
+            rows.push(PaletteRow {
+                kind: PaletteKind::Team,
+                primary: team.name.clone(),
+                secondary: team.identifier.clone(),
+                nav: PaletteNav::Team(team.id.clone()),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn team(id: &str, name: &str, ident: &str, archived: bool) -> Team {
+        Team {
+            id: id.into(),
+            name: name.into(),
+            identifier: ident.into(),
+            remote_id: None,
+            archived_at: archived.then(|| "2026-01-01T00:00:00.000Z".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn data() -> PaletteData {
+        PaletteData {
+            teams: vec![
+                team("t1", "JAIT App", "JRST", false),
+                team("t2", "Rails API", "RAIL", false),
+                team("t3", "Old Stuff", "OLD", true),
+            ],
+        }
+    }
+
     fn names(query: &str) -> Vec<String> {
-        palette_results(query, &PaletteData::default())
+        palette_results(query, &data())
             .into_iter()
             .map(|r| r.primary)
             .collect()
     }
 
     #[test]
-    fn empty_query_lists_all_views_in_order() {
-        assert_eq!(names(""), ["Board", "Projects", "Roadmap", "My Issues"]);
+    fn empty_query_lists_views_then_teams_in_order() {
+        assert_eq!(
+            names(""),
+            ["Board", "Projects", "Roadmap", "My Issues", "JAIT App", "Rails API"]
+        );
+    }
+
+    #[test]
+    fn team_matches_name_substring_ignoring_case() {
+        assert_eq!(names("RAILS"), ["Rails API"]);
+        assert_eq!(names("app"), ["JAIT App"]);
+    }
+
+    #[test]
+    fn team_matches_identifier() {
+        assert_eq!(names("jrst"), ["JAIT App"]);
+        assert_eq!(names("rail"), ["Rails API"]);
+    }
+
+    #[test]
+    fn archived_teams_never_appear() {
+        assert!(names("old").is_empty());
+        assert!(!names("").contains(&"Old Stuff".to_string()));
+    }
+
+    #[test]
+    fn team_row_navigates_to_its_board() {
+        let rows = palette_results("rails", &data());
+        assert_eq!(rows[0].kind, PaletteKind::Team);
+        assert_eq!(rows[0].kind.label(), "Team");
+        assert_eq!(rows[0].secondary, "RAIL");
+        assert_eq!(rows[0].nav, PaletteNav::Team("t2".into()));
     }
 
     #[test]
@@ -115,7 +188,7 @@ mod tests {
 
     #[test]
     fn rows_carry_kind_and_navigation() {
-        let rows = palette_results("my", &PaletteData::default());
+        let rows = palette_results("my", &data());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, PaletteKind::View);
         assert_eq!(rows[0].kind.label(), "View");
