@@ -12,6 +12,7 @@ pub mod lanes;
 pub mod members;
 pub mod notifications;
 pub mod projects;
+pub mod recurring_issues;
 pub mod saved_views;
 pub mod teams;
 pub mod users;
@@ -27,6 +28,7 @@ pub use error::ApiError;
 pub use issues::IssueParams;
 pub use labels::LabelParams;
 pub use projects::ProjectParams;
+pub use recurring_issues::RecurringIssueParams;
 pub use users::{HomePageDto, MeDto, MeTokenDto};
 
 /// Percent-encode a query value (timestamps carry `:` and possibly `+`).

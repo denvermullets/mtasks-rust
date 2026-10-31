@@ -166,6 +166,7 @@ fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
         ("Board", "Current team", View::Board),
         ("Projects", "Current team", View::ProjectList),
         ("Roadmap", "Current team", View::Roadmap),
+        ("Recurring issues", "Current team", View::RecurringIssues),
         ("My Issues", "All teams", View::MyIssues),
         ("Inbox", "Notifications", View::Inbox),
     ];
@@ -392,7 +393,7 @@ mod tests {
     fn empty_query_lists_views_then_teams_in_order() {
         assert_eq!(
             names(""),
-            ["Board", "Projects", "Roadmap", "My Issues", "Inbox", "JAIT App", "Rails API"]
+            ["Board", "Projects", "Roadmap", "Recurring issues", "My Issues", "Inbox", "JAIT App", "Rails API"]
         );
     }
 
@@ -424,6 +425,7 @@ mod tests {
     #[test]
     fn partial_query_narrows_ignoring_case() {
         assert_eq!(names("proj"), ["Projects"]);
+        assert_eq!(names("recur"), ["Recurring issues"]);
         assert_eq!(names("ROAD"), ["Roadmap"]);
     }
 
@@ -434,7 +436,7 @@ mod tests {
 
     #[test]
     fn substring_matches_inside_name() {
-        assert_eq!(names("issues"), ["My Issues"]);
+        assert_eq!(names("issues"), ["Recurring issues", "My Issues"]);
     }
 
     #[test]
@@ -495,7 +497,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["View", "View", "View", "View", "View", "Project", "Project"]
+            ["View", "View", "View", "View", "View", "View", "Project", "Project"]
         );
     }
 
@@ -559,7 +561,7 @@ mod tests {
     #[test]
     fn typing_recomputes_rows() {
         let mut state = PaletteState::new(PaletteData::default());
-        assert_eq!(state.rows.len(), 5);
+        assert_eq!(state.rows.len(), 6);
         state.set_query("road".into());
         assert_eq!(state.rows.len(), 1);
     }
@@ -577,7 +579,7 @@ mod tests {
     fn down_wraps_to_first_and_up_wraps_to_last() {
         let mut state = PaletteState::new(PaletteData::default());
         state.move_selection(-1);
-        assert_eq!(state.selected, 4);
+        assert_eq!(state.selected, 5);
         state.move_selection(1);
         assert_eq!(state.selected, 0);
         state.move_selection(1);

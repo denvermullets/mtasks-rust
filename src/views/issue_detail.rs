@@ -108,6 +108,7 @@ pub fn view<'a>(
     issues: &'a [Issue],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
+    recurring_origin: Option<&'a str>,
     my_member_ids: &[String],
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
@@ -132,6 +133,7 @@ pub fn view<'a>(
         .padding(24)
         .width(Length::Fill)
         .push(breadcrumb)
+        .push_maybe(recurring_origin.map(|title| origin_line(title, &issue.team_id)))
         .push(
             text_input("Title", &detail.title)
                 .on_input(Message::IssueDetailTitleChanged)
@@ -367,6 +369,23 @@ fn issue_identifier(issue: &Issue, team: Option<&Team>) -> String {
         Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
         None => format!("#{}", issue.team_number.unwrap_or(0)),
     }
+}
+
+/// "From recurring issue: <title>" line; opens the team's Recurring issues view.
+fn origin_line<'a>(title: &'a str, team_id: &str) -> Element<'a, Message> {
+    button(
+        row![]
+            .spacing(4)
+            .push(text("From recurring issue:").size(12).color(t::text_muted()))
+            .push(text(title).size(12).color(t::text_secondary())),
+    )
+    .on_press(Message::SelectTeamView(
+        team_id.to_string(),
+        View::RecurringIssues,
+    ))
+    .padding(0)
+    .style(button::text)
+    .into()
 }
 
 /// Sidebar "Parent" value: a clickable `IDENT — title` that opens the parent.

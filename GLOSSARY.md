@@ -68,3 +68,21 @@ _Avoid_: Attachment, embedded file
 **Pending upload**:
 An Attachment or Inline image the user has added on the desktop that has not reached the server yet. It shows as pending until it lands, or as failed if the server refuses it.
 _Avoid_: Draft attachment, queued file
+
+### Scheduling
+
+**Recurring issue**:
+A schedule template, owned by a team, from which the server creates a new issue on each run (daily, weekly or monthly). It is not itself an issue and never appears on a board; the issues it creates keep a "From recurring issue" link back to it, and survive its deletion.
+_Avoid_: Recurring task, scheduled issue, issue template
+
+**Next run**:
+The date, in the Recurring issue's time zone, on which the server will next create an issue from it. The server calculates it, so the desktop shows "pending" instead of a date until a new schedule or start date has synced.
+_Avoid_: Due date (an issue's deadline), next occurrence
+
+**Starts on**:
+The date the user picks for a Recurring issue's first run, or the date to resume from when rescheduling. It is sent only with a schedule change, and defaults to today; editing it counts as a schedule change even when it is set back to today.
+_Avoid_: Start date (a project's date), first run
+
+**Paused**:
+The state of a Recurring issue that creates no issues until it is resumed. Pausing keeps the schedule; the opposite state is Active.
+_Avoid_: Disabled, inactive, stopped

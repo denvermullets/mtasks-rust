@@ -43,6 +43,34 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
+    /// Pause (false) or resume (true) a recurring issue (local id); local
+    /// write plus queued push.
+    ToggleRecurringActive(String, bool),
+    /// Open the recurring issue form prefilled to edit one (local id; JRST-177).
+    EditRecurringIssue(String),
+    /// Open the "New recurring issue" form (JRST-172) for the selected team.
+    NewRecurringIssue,
+    RecurringFormTitleChanged(String),
+    RecurringFormDescriptionChanged(iced::widget::text_editor::Action),
+    RecurringFormPriorityChanged(Priority),
+    /// `None` = server default.
+    RecurringFormTimeZoneChanged(Option<String>),
+    RecurringFormFrequencyChanged(crate::views::recurring_issue_form::Frequency),
+    RecurringFormIntervalChanged(String),
+    /// 0 = Sunday.
+    RecurringFormWeekdayChanged(i64),
+    RecurringFormDayOfMonthChanged(String),
+    RecurringFormStartsOnChanged(String),
+    RecurringFormAssigneeChanged(crate::views::recurring_issue_form::Choice),
+    RecurringFormProjectChanged(crate::views::recurring_issue_form::Choice),
+    RecurringFormLaneChanged(crate::views::recurring_issue_form::Choice),
+    RecurringFormLabelToggled(String),
+    /// Validate and save the form: local row plus queued create.
+    SaveRecurringIssue,
+    /// Ask to delete a recurring issue (local id); opens the confirm modal.
+    DeleteRecurring(String),
+    /// Confirmed: delete the recurring issue locally and queue the push.
+    DeleteRecurringConfirmed,
     /// Drop the open Saved view's unsaved changes (local only).
     RevertSavedView,
     /// Ask to delete a Saved view (local id).
@@ -371,12 +399,16 @@ pub enum Modal {
     DeleteConfirm(String),
     Settings,
     ProjectForm,
+    /// "New recurring issue" form; state in `App::recurring_form`.
+    RecurringForm,
     DeleteProjectConfirm(String),
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
+    /// Confirm deleting a recurring issue (local id) from its table.
+    DeleteRecurringConfirm(String),
     /// Confirm deleting a Saved view (local id) from the sidebar.
     DeleteSavedViewConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
@@ -492,6 +524,9 @@ pub enum View {
     ProjectList,
     ProjectDetail(String),
     Roadmap,
+    /// A team's Recurring issues table (JRST-159). Team-scoped; its rows live
+    /// in `App::recurring_rows`.
+    RecurringIssues,
     MyIssues,
     /// Notification Inbox. Not team-scoped, but unlike `MyIssues` it loads no
     /// cross-team issue data (the per-team data stays as is).
@@ -599,6 +634,8 @@ pub struct App {
     detail_activity: Vec<ActivityItem>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
+    /// Title of the recurring issue that spawned the open issue detail, if any.
+    detail_origin: Option<String>,
     /// Search + direction state for the open issue-dependency picker modal.
     issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
@@ -643,6 +680,11 @@ pub struct App {
     /// Inbox rows, selection and filter (JRST-91). Reloaded on entering the
     /// Inbox and after every poll.
     inbox: crate::inbox::InboxState,
+    /// Display rows of the selected team's Recurring issues (JRST-159),
+    /// reloaded by `reload_data` and on entering the view.
+    recurring_rows: Vec<crate::db::recurring_issues::RecurringIssueRow>,
+    /// Open "New recurring issue" form (JRST-172).
+    recurring_form: Option<crate::views::recurring_issue_form::RecurringFormState>,
     /// Report of the most recent successful poll (JRST-95 prune, JRST-96
     /// banners read `new_unread` + `backfill`).
     last_notif_poll: Option<PollReport>,
@@ -755,6 +797,8 @@ impl App {
             self.issue_labels.clear();
         }
 
+        self.reload_recurring(&conn);
+        self.reload_detail_origin(&conn);
         self.refresh_open_view();
 
         // Filters are global but hold per-team ids; drop the ones this data
@@ -807,11 +851,33 @@ impl App {
         if self.view == View::Inbox {
             self.reload_inbox();
         }
+        if self.view == View::RecurringIssues {
+            let conn = self.db();
+            self.reload_recurring(&conn);
+        }
         if crossing {
             self.focused_lane = 0;
             self.focused_issue = 0;
             self.reload_data();
         }
+    }
+
+    /// Re-read the selected team's Recurring issue rows from the mirror.
+    /// Refresh the open issue detail's "From recurring issue" title.
+    fn reload_detail_origin(&mut self, conn: &rusqlite::Connection) {
+        self.detail_origin = match &self.view {
+            View::IssueDetail(id) => crate::db::recurring_issues::origin_title(conn, id),
+            _ => None,
+        };
+    }
+
+    fn reload_recurring(&mut self, conn: &rusqlite::Connection) {
+        self.recurring_rows = match &self.selected_team_id {
+            Some(team_id) if self.view != View::MyIssues => {
+                crate::db::recurring_issues::list_rows(conn, team_id).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
     }
 
     /// Re-read the Inbox rows from the mirror, keeping the selection.
@@ -1506,6 +1572,7 @@ impl App {
         self.view = View::IssueDetail(issue.id.clone());
         let conn = self.db();
         self.load_detail_dependencies(&conn);
+        self.reload_detail_origin(&conn);
         Task::batch([
             self.fetch_comments_task(&conn, issue),
             self.fetch_activity_task(issue),
@@ -2010,6 +2077,7 @@ impl App {
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_references: Vec::new(),
+            detail_origin: None,
             issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
@@ -2045,6 +2113,8 @@ impl App {
             home_page,
             last_notif_poll: None,
             inbox: Default::default(),
+            recurring_rows: Vec::new(),
+            recurring_form: None,
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
@@ -2540,6 +2610,10 @@ impl App {
                     self.reload_data();
                 }
                 self.view = view;
+                if self.view == View::RecurringIssues {
+                    let conn = self.db();
+                    self.reload_recurring(&conn);
+                }
             }
 
             Message::InboxMove(delta) => {
@@ -3395,6 +3469,7 @@ impl App {
                 self.issue_form = None;
                 self.settings_form = None;
                 self.project_form = None;
+                self.recurring_form = None;
                 self.label_form = None;
                 self.team_members.clear();
                 self.csv_import = None;
@@ -4311,6 +4386,161 @@ impl App {
                 }
             }
 
+            Message::ToggleRecurringActive(id, active) => {
+                let conn = self.db();
+                let _ = crate::db::recurring_issues::set_active(&conn, &id, active);
+                self.reload_recurring(&conn);
+            }
+
+            Message::NewRecurringIssue => {
+                if self.selected_team_id.is_some() && self.modal == Modal::None {
+                    self.recurring_form = Some(
+                        crate::views::recurring_issue_form::RecurringFormState::new(
+                            chrono::Local::now().date_naive(),
+                        )
+                        .with_routing_options(&self.members, &self.projects, &self.lanes),
+                    );
+                    self.modal = Modal::RecurringForm;
+                }
+            }
+            Message::EditRecurringIssue(id) => {
+                if self.modal == Modal::None {
+                    let conn = self.db();
+                    if let Ok(Some(row)) = crate::db::recurring_issues::get(&conn, &id) {
+                        let labels =
+                            crate::db::recurring_issues::label_ids(&conn, &id).unwrap_or_default();
+                        self.recurring_form = Some(
+                            crate::views::recurring_issue_form::RecurringFormState::for_edit(
+                                &row,
+                                labels,
+                                chrono::Local::now().date_naive(),
+                            )
+                            .with_routing_options(&self.members, &self.projects, &self.lanes),
+                        );
+                        self.modal = Modal::RecurringForm;
+                    }
+                }
+            }
+            Message::RecurringFormTitleChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.title = v;
+                }
+            }
+            Message::RecurringFormDescriptionChanged(action) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.description.perform(action);
+                }
+            }
+            Message::RecurringFormTimeZoneChanged(z) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.time_zone = z;
+                }
+            }
+            Message::RecurringFormPriorityChanged(p) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.priority = p;
+                }
+            }
+            Message::RecurringFormFrequencyChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.frequency = v;
+                }
+            }
+            Message::RecurringFormIntervalChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.interval = v;
+                }
+            }
+            Message::RecurringFormWeekdayChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.weekday = v;
+                }
+            }
+            Message::RecurringFormDayOfMonthChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.day_of_month = v;
+                }
+            }
+            Message::RecurringFormStartsOnChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.starts_on = v;
+                    f.starts_on_touched = true;
+                }
+            }
+            Message::RecurringFormAssigneeChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.assignee = v;
+                }
+            }
+            Message::RecurringFormProjectChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.project = v;
+                }
+            }
+            Message::RecurringFormLaneChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.lane = v;
+                }
+            }
+            Message::RecurringFormLabelToggled(label_id) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.toggle_label(&label_id);
+                }
+            }
+            Message::SaveRecurringIssue => {
+                let (Some(form), Some(team_id)) =
+                    (self.recurring_form.as_mut(), self.selected_team_id.clone())
+                else {
+                    return Task::none();
+                };
+                if let Some(edit_id) = form.editing.clone() {
+                    match crate::views::recurring_issue_form::validate_edit(form) {
+                        Err(errors) => form.errors = errors,
+                        Ok(edit) => {
+                            let conn = self.db();
+                            if crate::db::recurring_issues::update_content(&conn, &edit_id, &edit)
+                                .is_ok()
+                            {
+                                self.modal = Modal::None;
+                                self.recurring_form = None;
+                                self.pending_sync_count =
+                                    sync_queue::pending_count(&conn).unwrap_or(0);
+                                self.reload_recurring(&conn);
+                                self.reload_detail_origin(&conn);
+                            }
+                        }
+                    }
+                    return Task::none();
+                }
+                match crate::views::recurring_issue_form::validate(form) {
+                    Err(errors) => form.errors = errors,
+                    Ok(new) => {
+                        let conn = self.db();
+                        if crate::db::recurring_issues::create(&conn, &team_id, &new).is_ok() {
+                            self.modal = Modal::None;
+                            self.recurring_form = None;
+                            self.pending_sync_count =
+                                sync_queue::pending_count(&conn).unwrap_or(0);
+                            self.reload_recurring(&conn);
+                        }
+                    }
+                }
+            }
+
+            Message::DeleteRecurring(id) => {
+                self.modal = Modal::DeleteRecurringConfirm(id);
+            }
+
+            Message::DeleteRecurringConfirmed => {
+                if let Modal::DeleteRecurringConfirm(ref id) = self.modal {
+                    let conn = self.db();
+                    let _ = crate::db::recurring_issues::delete_local(&conn, id);
+                    self.modal = Modal::None;
+                    self.reload_recurring(&conn);
+                    self.reload_detail_origin(&conn);
+                }
+            }
+
             Message::DeleteLabelConfirmed => {
                 if let Modal::DeleteLabelConfirm(ref label_id) = self.modal {
                     let label_id = label_id.clone();
@@ -4534,6 +4764,7 @@ impl App {
                             &self.issues,
                             parent,
                             sub_issues,
+                            self.detail_origin.as_deref(),
                             &my_member_ids,
                         )
                     }
@@ -4542,6 +4773,7 @@ impl App {
                 }
             }
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
+            View::RecurringIssues => crate::views::recurring_issues::view(&self.recurring_rows),
             View::Inbox => crate::views::inbox::view(&self.inbox),
         };
 
@@ -4669,6 +4901,13 @@ impl App {
                     base
                 }
             }
+            Modal::RecurringForm => match self.recurring_form {
+                Some(ref form) => {
+                    iced::widget::stack![base, crate::views::recurring_issue_form::view(form, &self.labels)]
+                        .into()
+                }
+                None => base,
+            },
             Modal::DeleteProjectConfirm(project_id) => {
                 let project_name = self
                     .projects
@@ -4713,6 +4952,23 @@ impl App {
                     .unwrap_or_default();
                 let count = queries::label_issue_count(&conn, label_id).unwrap_or(0);
                 iced::widget::stack![base, delete_label_confirm_modal(name, count)].into()
+            }
+            Modal::DeleteRecurringConfirm(id) => {
+                let title = self
+                    .recurring_rows
+                    .iter()
+                    .find(|r| r.id == *id)
+                    .map(|r| r.title.clone())
+                    .unwrap_or_default();
+                let body = format!(
+                    "Delete the recurring issue \"{title}\"? It will stop creating issues; \
+                     issues it already created are kept."
+                );
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Recurring Issue?", body, Message::DeleteRecurringConfirmed)
+                ]
+                .into()
             }
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
@@ -4806,6 +5062,7 @@ fn breadcrumb(
         View::Board => crumbs.push("Issues".into()),
         View::ProjectList => crumbs.push("Projects".into()),
         View::Roadmap => crumbs.push("Roadmap".into()),
+        View::RecurringIssues => crumbs.push("Recurring issues".into()),
         View::ProjectDetail(id) => {
             crumbs.push("Projects".into());
             if let Some(p) = projects.iter().find(|p| p.id == *id) {
