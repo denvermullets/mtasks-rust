@@ -406,6 +406,7 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
 }
 
 /// What a local team move changed, for the toast.
+#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMoveSummary {
     pub team_number: i32,
@@ -422,6 +423,7 @@ pub struct IssueMoveSummary {
 /// Move an issue to another local team in one transaction, mirroring the Rails
 /// `IssueTeamMover`. Not queued here; the normal `update_issue` path still
 /// never writes `team_id` / `team_number`.
+#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
 pub fn move_issue_to_team(
     conn: &Connection,
     issue_id: &str,
