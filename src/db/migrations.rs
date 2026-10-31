@@ -517,16 +517,45 @@ const MIGRATIONS: &[Migration] = &[
         up: "
             -- Activity now comes from the server. Drop every guessed row
             -- (sync-derived rows, backfilled/created rows) except local edits
-            -- whose issue still has an unsynced `issue` queue entry: those
-            -- become Pending changes. Link rule: each survivor points at the
-            -- LATEST (highest id) unsynced `issue` entry for its issue.
+            -- that still have an unsynced queue entry: those become Pending
+            -- changes. Field edits match an unsynced `issue` entry for their
+            -- issue; dependency edits (blocking / blocked_by) match an unsynced
+            -- `dependency` entry for their edge (a create via the edge row, a
+            -- delete via the blocking issue's remote id in the payload, since
+            -- the edge row is gone). Link rule: the EARLIEST matching entry
+            -- whose created_at >= the event's created_at, else the latest.
+            CREATE TEMP TABLE m27_candidates AS
+            SELECT e.id AS event_id, q.id AS queue_id,
+                   q.created_at AS queue_at, e.created_at AS event_at
+              FROM issue_events e
+              JOIN sync_queue q ON q.synced_at IS NULL AND (
+                   (e.kind NOT IN ('blocking', 'blocked_by')
+                    AND q.entity_type = 'issue' AND q.entity_id = e.issue_id)
+                OR (e.kind IN ('blocking', 'blocked_by')
+                    AND q.entity_type = 'dependency'
+                    AND ((e.new_ref IS NOT NULL AND q.action = 'create'
+                          AND EXISTS (
+                              SELECT 1 FROM issue_dependencies d
+                               WHERE d.id = q.entity_id
+                                 AND d.blocking_issue_id = CASE e.kind
+                                     WHEN 'blocking' THEN e.issue_id ELSE e.new_ref END
+                                 AND d.blocked_issue_id = CASE e.kind
+                                     WHEN 'blocking' THEN e.new_ref ELSE e.issue_id END))
+                      OR (e.old_ref IS NOT NULL AND q.action = 'delete'
+                          AND json_extract(q.payload, '$.issue_remote_id') = (
+                              SELECT i.remote_id FROM issues i
+                               WHERE i.id = CASE e.kind
+                                     WHEN 'blocking' THEN e.issue_id ELSE e.old_ref END)))))
+             WHERE e.source = 'local' AND e.kind <> 'created';
             UPDATE issue_events
-               SET sync_queue_id = (
-                   SELECT MAX(q.id) FROM sync_queue q
-                    WHERE q.entity_type = 'issue'
-                      AND q.entity_id = issue_events.issue_id
-                      AND q.synced_at IS NULL)
+               SET sync_queue_id = COALESCE(
+                   (SELECT c.queue_id FROM m27_candidates c
+                     WHERE c.event_id = issue_events.id AND c.queue_at >= c.event_at
+                     ORDER BY c.queue_at, c.queue_id LIMIT 1),
+                   (SELECT MAX(c.queue_id) FROM m27_candidates c
+                     WHERE c.event_id = issue_events.id))
              WHERE source = 'local' AND kind <> 'created';
+            DROP TABLE m27_candidates;
             DELETE FROM issue_events
              WHERE kind = 'created'
                 OR source <> 'local'
@@ -742,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_keeps_only_queued_local_events_linked_to_latest_entry() {
+    fn upgrade_keeps_only_queued_local_events_linked_to_their_own_entry() {
         let conn = open_mem();
         conn.execute_batch(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
@@ -755,35 +784,92 @@ mod tests {
         let now = "2026-01-01T00:00:00.000Z";
         conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)", [now]).unwrap();
         conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1', 'B', 0, 't1', ?1, ?1)", [now]).unwrap();
-        for id in ["queued", "multi", "unqueued", "synced_only"] {
+        for id in ["queued", "multi", "unqueued", "synced_only", "two", "dep_a", "dep_b", "dep_c"] {
             conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES (?1, 'i', 4, 'l1', 't1', ?2, ?2)", [id, now]).unwrap();
         }
         conn.execute("DELETE FROM issue_events", []).unwrap();
-        let ev = |issue: &str, source: &str, kind: &str| {
+        let ev_at = |issue: &str, source: &str, kind: &str, at: &str| {
             conn.execute(
                 "INSERT INTO issue_events (issue_id, source, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
-                [issue, source, kind, now],
+                [issue, source, kind, at],
             )
             .unwrap();
         };
-        let q = |issue: &str, entity: &str, synced: Option<&str>| -> i64 {
+        let ev = |issue: &str, source: &str, kind: &str| ev_at(issue, source, kind, now);
+        let q_at = |issue: &str, entity: &str, synced: Option<&str>, at: &str| -> i64 {
             conn.execute(
                 "INSERT INTO sync_queue (entity_type, entity_id, action, created_at, synced_at) VALUES (?1, ?2, 'update', ?3, ?4)",
-                rusqlite::params![entity, issue, now, synced],
+                rusqlite::params![entity, issue, at, synced],
             )
             .unwrap();
             conn.last_insert_rowid()
         };
+        let q = |issue: &str, entity: &str, synced: Option<&str>| q_at(issue, entity, synced, now);
         // queued: local edit + a sync row + a created row; one pending entry.
         ev("queued", "local", "title");
         ev("queued", "sync", "title");
         ev("queued", "local", "created");
         let q_queued = q("queued", "issue", None);
-        // multi: two pending entries (plus a comment entry); link the latest issue one.
+        // multi: two pending entries (plus a comment entry); the event is
+        // not newer than either, so it links to the earliest one.
         ev("multi", "local", "priority");
-        q("multi", "issue", None);
         let q_multi = q("multi", "issue", None);
+        q("multi", "issue", None);
         q("multi", "comment", None);
+        // two: an event before each unsynced entry links to its own entry; an
+        // event newer than every entry falls back to the latest.
+        let (t1, t2, t3, t4) = (
+            "2026-02-01T00:00:00.000Z",
+            "2026-02-02T00:00:00.000Z",
+            "2026-02-03T00:00:00.000Z",
+            "2026-02-04T00:00:00.000Z",
+        );
+        ev_at("two", "local", "title", t1);
+        let q_two_a = q_at("two", "issue", None, t2);
+        ev_at("two", "local", "priority", t3);
+        let q_two_b = q_at("two", "issue", None, t4);
+        ev_at("two", "local", "status", "2026-02-05T00:00:00.000Z");
+        // Dependency edits: events on both issues link to the unsynced
+        // `dependency` entry for the edge (create via the edge row, delete via
+        // the blocking issue's remote id in the payload).
+        conn.execute("UPDATE issues SET remote_id = 77 WHERE id = 'dep_a'", []).unwrap();
+        conn.execute(
+            "INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, kind, direction, created_at, updated_at)
+             VALUES ('d1', 'dep_a', 'dep_b', 'blocks', 'blocking', ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+        let dep_q = |id: &str, action: &str, payload: Option<&str>, synced: Option<&str>| -> i64 {
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id, action, payload, created_at, synced_at) VALUES ('dependency', ?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, action, payload, t2, synced],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let q_dep_create = dep_q("d1", "create", None, None);
+        let dev = |issue: &str, kind: &str, old: Option<&str>, new: Option<&str>| {
+            conn.execute(
+                "INSERT INTO issue_events (issue_id, source, kind, old_ref, new_ref, created_at) VALUES (?1, 'local', ?2, ?3, ?4, ?5)",
+                rusqlite::params![issue, kind, old, new, t1],
+            )
+            .unwrap();
+        };
+        dev("dep_a", "blocking", None, Some("dep_b"));
+        dev("dep_b", "blocked_by", None, Some("dep_a"));
+        // A removal whose edge row is gone.
+        let q_dep_delete = dep_q("gone", "delete", Some(r#"{"issue_remote_id":77,"remote_id":5}"#), None);
+        dev("dep_a", "blocking", Some("dep_b"), None);
+        dev("dep_b", "blocked_by", Some("dep_a"), None);
+        // An already-synced dependency entry does not count.
+        conn.execute(
+            "INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, kind, direction, created_at, updated_at)
+             VALUES ('d2', 'dep_a', 'dep_c', 'blocks', 'blocking', ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+        dep_q("d2", "create", None, Some(now));
+        dev("dep_c", "blocked_by", None, Some("dep_a"));
         // unqueued: local edit but nothing pending.
         ev("unqueued", "local", "title");
         // synced_only: local edit whose only entry is already synced.
@@ -793,18 +879,26 @@ mod tests {
         run(&conn).unwrap();
 
         let mut stmt = conn
-            .prepare("SELECT issue_id, source, kind, sync_queue_id FROM issue_events ORDER BY issue_id")
+            .prepare("SELECT issue_id, kind, sync_queue_id FROM issue_events ORDER BY issue_id, id")
             .unwrap();
-        let rows: Vec<(String, String, String, Option<i64>)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        let rows: Vec<(String, String, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
+        let row = |i: &str, k: &str, q: i64| (i.to_string(), k.to_string(), Some(q));
         assert_eq!(
             rows,
             vec![
-                ("multi".into(), "local".into(), "priority".into(), Some(q_multi)),
-                ("queued".into(), "local".into(), "title".into(), Some(q_queued)),
+                row("dep_a", "blocking", q_dep_create),
+                row("dep_a", "blocking", q_dep_delete),
+                row("dep_b", "blocked_by", q_dep_create),
+                row("dep_b", "blocked_by", q_dep_delete),
+                row("multi", "priority", q_multi),
+                row("queued", "title", q_queued),
+                row("two", "title", q_two_a),
+                row("two", "priority", q_two_b),
+                row("two", "status", q_two_b),
             ]
         );
     }
