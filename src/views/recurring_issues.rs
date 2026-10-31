@@ -55,9 +55,21 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         }
     }
 
+    let toolbar = row![]
+        .padding([8, 16])
+        .push(container(text("")).width(Length::Fill))
+        .push(
+            button(text("New recurring issue").size(12))
+                .on_press(Message::NewRecurringIssue)
+                .padding([4, 10])
+                .style(button::secondary),
+        );
+
     container(
         column![]
             .width(Length::Fill)
+            .push(toolbar)
+            .push(rule())
             .push(header)
             .push(rule())
             .push(scrollable(body).height(Length::Fill)),
@@ -126,8 +138,12 @@ fn toggle_action<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     .into()
 }
 
-/// "2026-11-06 MT": the next run date and zone; "-" with no date.
+/// "2026-11-06 MT": the next run date and zone; "pending" while an unsynced
+/// create or reschedule makes the date untrustworthy; "-" with no date.
 pub fn next_run_label(r: &RecurringIssueRow) -> String {
+    if r.next_run_pending {
+        return "pending".to_string();
+    }
     match (&r.next_run_on, &r.time_zone_label) {
         (Some(d), Some(z)) => format!("{d} {z}"),
         (Some(d), None) => d.clone(),
@@ -252,6 +268,30 @@ mod tests {
     fn state_label_reads_active_or_paused() {
         assert_eq!(state_label(true), "Active");
         assert_eq!(state_label(false), "Paused");
+    }
+
+    fn row(next_run_on: Option<&str>, pending: bool) -> RecurringIssueRow {
+        RecurringIssueRow {
+            id: "r".into(),
+            title: "T".into(),
+            active: true,
+            schedule: "Every day".into(),
+            next_run_on: next_run_on.map(String::from),
+            time_zone_label: Some("MT".into()),
+            next_run_pending: pending,
+            assignee: None,
+            project_name: None,
+            lane: "First lane".into(),
+            labels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn next_run_shows_pending_instead_of_a_date() {
+        assert_eq!(next_run_label(&row(Some("2026-11-06"), true)), "pending");
+        assert_eq!(next_run_label(&row(None, true)), "pending");
+        assert_eq!(next_run_label(&row(Some("2026-11-06"), false)), "2026-11-06 MT");
+        assert_eq!(next_run_label(&row(None, false)), "-");
     }
 
     #[test]

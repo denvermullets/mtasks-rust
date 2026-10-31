@@ -434,7 +434,7 @@ fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> 
         ),
         next_run_on: r.next_run_on.clone(),
         time_zone_label: r.time_zone.as_deref().map(time_zone_label),
-        next_run_pending: sync_queue::has_pending_entry(conn, ENTITY_TYPE, &r.id)?,
+        next_run_pending: next_run_pending(conn, &r.id)?,
         assignee: local_assignee.or_else(|| r.assignee_name.clone()),
         project_name,
         lane: lane.unwrap_or_else(|| FIRST_LANE.to_string()),
@@ -548,6 +548,87 @@ pub fn set_active(conn: &Connection, id: &str, active: bool) -> Result<Option<i6
         Ok(())
     })
     .map(Some)
+}
+
+/// A recurring issue as the create form hands it over, already validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewRecurringIssue {
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: Priority,
+    /// "daily" | "weekly" | "monthly".
+    pub frequency: String,
+    pub interval: i64,
+    /// Set only for weekly (0 = Sunday).
+    pub weekday: Option<i64>,
+    /// Set only for monthly.
+    pub day_of_month: Option<i64>,
+    /// First run date, `YYYY-MM-DD`.
+    pub starts_on: String,
+}
+
+/// Payload of a `recurring_issue` / `create` queue entry: `{"starts_on":...}`.
+/// The other fields are re-read from the row at push time.
+pub fn create_payload(starts_on: &str) -> String {
+    serde_json::json!({ "starts_on": starts_on }).to_string()
+}
+
+/// The `starts_on` carried by a create or update payload, if any.
+pub fn payload_starts_on(payload: Option<&str>) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(payload?).ok()?;
+    v.get("starts_on")?.as_str().map(String::from)
+}
+
+/// Create a recurring issue locally (time zone `NULL`, i.e. the creator's
+/// preference; active; no next run until the server answers) and queue the
+/// `create` push carrying `starts_on`, atomically. Returns the new local id.
+pub fn create(conn: &Connection, local_team_id: &str, new: &NewRecurringIssue) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    let payload = create_payload(&new.starts_on);
+    write_queued(conn, &id, "create", Some(&payload), |c| {
+        let now = crate::db::now_iso();
+        c.execute(
+            "INSERT INTO recurring_issues (id, team_id, title, description, priority, frequency,
+                interval, weekday, day_of_month, time_zone, active, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, 1, ?10, ?10)",
+            params![
+                id,
+                local_team_id,
+                new.title,
+                new.description,
+                new.priority.to_i32(),
+                new.frequency,
+                new.interval,
+                new.weekday,
+                new.day_of_month,
+                now
+            ],
+        )?;
+        Ok(())
+    })?;
+    Ok(id)
+}
+
+/// True while a local write that moves the schedule is unsynced, so the shown
+/// next run is not trustworthy: a queued `create`, or a queued `update` whose
+/// payload carries `starts_on`. Pause/resume and content-only edits don't count.
+pub fn next_run_pending(conn: &Connection, id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT action, payload FROM sync_queue
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
+    )?;
+    let entries = stmt.query_map(params![ENTITY_TYPE, id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+    for e in entries {
+        let (action, payload) = e?;
+        if action == "create"
+            || (action == "update" && payload_starts_on(payload.as_deref()).is_some())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Delete a recurring issue locally and queue the server delete, atomically.
@@ -810,6 +891,52 @@ mod tests {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap();
         rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn new_weekly() -> NewRecurringIssue {
+        NewRecurringIssue {
+            title: "Water plants".into(),
+            description: Some("all of them".into()),
+            priority: Priority::High,
+            frequency: "weekly".into(),
+            interval: 2,
+            weekday: Some(3),
+            day_of_month: None,
+            starts_on: "2026-11-04".into(),
+        }
+    }
+
+    #[test]
+    fn create_inserts_the_row_and_queues_one_create_carrying_starts_on() {
+        let conn = setup();
+        let id = create(&conn, "t1", &new_weekly()).unwrap();
+        let row = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.title, "Water plants");
+        assert_eq!(row.priority, Priority::High);
+        assert_eq!((row.weekday, row.day_of_month, row.interval), (Some(3), None, 2));
+        assert_eq!(row.time_zone, None);
+        assert!(row.active);
+        assert_eq!(row.remote_id, None);
+        let pending = pending_entries(&conn);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, "create");
+        assert_eq!(payload_starts_on(pending[0].2.as_deref()), Some("2026-11-04".into()));
+        let rows = list_rows(&conn, "t1").unwrap();
+        assert_eq!(rows[0].schedule, "Every 2 weeks on Wednesday");
+        assert!(rows[0].next_run_pending);
+    }
+
+    #[test]
+    fn next_run_pending_ignores_pause_and_content_edits_but_counts_starts_on() {
+        let conn = setup();
+        let id = create(&conn, "t1", &new_weekly()).unwrap();
+        conn.execute("UPDATE sync_queue SET synced_at = ?1", params![NOW]).unwrap();
+        assert!(!next_run_pending(&conn, &id).unwrap());
+        set_active(&conn, &id, false).unwrap();
+        assert!(!next_run_pending(&conn, &id).unwrap());
+        let p = update_payload(&["frequency"], Some("2026-11-11"));
+        sync_queue::enqueue(&conn, ENTITY_TYPE, &id, "update", Some(&p)).unwrap();
+        assert!(next_run_pending(&conn, &id).unwrap());
     }
 
     #[test]

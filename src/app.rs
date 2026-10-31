@@ -46,6 +46,19 @@ pub enum Message {
     /// Pause (false) or resume (true) a recurring issue (local id); local
     /// write plus queued push.
     ToggleRecurringActive(String, bool),
+    /// Open the "New recurring issue" form (JRST-172) for the selected team.
+    NewRecurringIssue,
+    RecurringFormTitleChanged(String),
+    RecurringFormDescriptionChanged(iced::widget::text_editor::Action),
+    RecurringFormPriorityChanged(Priority),
+    RecurringFormFrequencyChanged(crate::views::recurring_issue_form::Frequency),
+    RecurringFormIntervalChanged(String),
+    /// 0 = Sunday.
+    RecurringFormWeekdayChanged(i64),
+    RecurringFormDayOfMonthChanged(String),
+    RecurringFormStartsOnChanged(String),
+    /// Validate and save the form: local row plus queued create.
+    SaveRecurringIssue,
     /// Ask to delete a recurring issue (local id); opens the confirm modal.
     DeleteRecurring(String),
     /// Confirmed: delete the recurring issue locally and queue the push.
@@ -378,6 +391,8 @@ pub enum Modal {
     DeleteConfirm(String),
     Settings,
     ProjectForm,
+    /// "New recurring issue" form; state in `App::recurring_form`.
+    RecurringForm,
     DeleteProjectConfirm(String),
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
@@ -660,6 +675,8 @@ pub struct App {
     /// Display rows of the selected team's Recurring issues (JRST-159),
     /// reloaded by `reload_data` and on entering the view.
     recurring_rows: Vec<crate::db::recurring_issues::RecurringIssueRow>,
+    /// Open "New recurring issue" form (JRST-172).
+    recurring_form: Option<crate::views::recurring_issue_form::RecurringFormState>,
     /// Report of the most recent successful poll (JRST-95 prune, JRST-96
     /// banners read `new_unread` + `backfill`).
     last_notif_poll: Option<PollReport>,
@@ -2089,6 +2106,7 @@ impl App {
             last_notif_poll: None,
             inbox: Default::default(),
             recurring_rows: Vec::new(),
+            recurring_form: None,
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
@@ -3443,6 +3461,7 @@ impl App {
                 self.issue_form = None;
                 self.settings_form = None;
                 self.project_form = None;
+                self.recurring_form = None;
                 self.label_form = None;
                 self.team_members.clear();
                 self.csv_import = None;
@@ -4365,6 +4384,77 @@ impl App {
                 self.reload_recurring(&conn);
             }
 
+            Message::NewRecurringIssue => {
+                if self.selected_team_id.is_some() && self.modal == Modal::None {
+                    self.recurring_form = Some(
+                        crate::views::recurring_issue_form::RecurringFormState::new(
+                            chrono::Local::now().date_naive(),
+                        ),
+                    );
+                    self.modal = Modal::RecurringForm;
+                }
+            }
+            Message::RecurringFormTitleChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.title = v;
+                }
+            }
+            Message::RecurringFormDescriptionChanged(action) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.description.perform(action);
+                }
+            }
+            Message::RecurringFormPriorityChanged(p) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.priority = p;
+                }
+            }
+            Message::RecurringFormFrequencyChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.frequency = v;
+                }
+            }
+            Message::RecurringFormIntervalChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.interval = v;
+                }
+            }
+            Message::RecurringFormWeekdayChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.weekday = v;
+                }
+            }
+            Message::RecurringFormDayOfMonthChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.day_of_month = v;
+                }
+            }
+            Message::RecurringFormStartsOnChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.starts_on = v;
+                }
+            }
+            Message::SaveRecurringIssue => {
+                let (Some(form), Some(team_id)) =
+                    (self.recurring_form.as_mut(), self.selected_team_id.clone())
+                else {
+                    return Task::none();
+                };
+                match crate::views::recurring_issue_form::validate(form) {
+                    Err(errors) => form.errors = errors,
+                    Ok(new) => {
+                        let conn = self.db();
+                        if crate::db::recurring_issues::create(&conn, &team_id, &new).is_ok() {
+                            self.modal = Modal::None;
+                            self.recurring_form = None;
+                            self.pending_sync_count =
+                                sync_queue::pending_count(&conn).unwrap_or(0);
+                            self.reload_recurring(&conn);
+                        }
+                    }
+                }
+            }
+
             Message::DeleteRecurring(id) => {
                 self.modal = Modal::DeleteRecurringConfirm(id);
             }
@@ -4738,6 +4828,13 @@ impl App {
                     base
                 }
             }
+            Modal::RecurringForm => match self.recurring_form {
+                Some(ref form) => {
+                    iced::widget::stack![base, crate::views::recurring_issue_form::view(form)]
+                        .into()
+                }
+                None => base,
+            },
             Modal::DeleteProjectConfirm(project_id) => {
                 let project_name = self
                     .projects

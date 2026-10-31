@@ -14,6 +14,7 @@ pub mod placeholder;
 pub mod progress_chart;
 pub mod project_detail;
 pub mod projects;
+pub mod recurring_issue_form;
 pub mod recurring_issues;
 pub mod roadmap;
 pub mod settings;
