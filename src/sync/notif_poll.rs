@@ -97,6 +97,7 @@ pub fn apply_response(
         }),
         Conditional::Modified { data, etag } => {
             let new_unread = mirror::apply_poll(conn, &data, now)?;
+            mirror::prune(conn, now)?;
             if let Some(tag) = etag {
                 mirror::set_etag(conn, &tag)?;
             }
@@ -215,9 +216,9 @@ mod tests {
     fn not_modified_leaves_mirror_untouched() {
         let conn = mem();
         let env = envelope(&[(2, None)], 1, "2026-10-30T12:00:00.000Z");
-        apply_response(&conn, Conditional::Modified { data: env, etag: None }, true, "t").unwrap();
+        apply_response(&conn, Conditional::Modified { data: env, etag: None }, true, "2026-10-30T12:00:01.000Z").unwrap();
         let before = mirror::cursor(&conn).unwrap();
-        let r = apply_response(&conn, Conditional::NotModified, false, "t2").unwrap();
+        let r = apply_response(&conn, Conditional::NotModified, false, "2026-10-30T12:00:02.000Z").unwrap();
         assert!(!r.changed && r.new_unread.is_empty() && !r.backfill);
         assert_eq!(r.unread_count, 1);
         assert_eq!(mirror::cursor(&conn).unwrap(), before);
@@ -227,10 +228,10 @@ mod tests {
     fn redelivered_and_read_rows_update_without_reporting_new() {
         let conn = mem();
         let first = envelope(&[(2, None)], 1, "2026-10-30T12:00:00.000Z");
-        apply_response(&conn, Conditional::Modified { data: first, etag: None }, true, "t").unwrap();
+        apply_response(&conn, Conditional::Modified { data: first, etag: None }, true, "2026-10-30T12:00:01.000Z").unwrap();
         // Read on the web: same row, read_at set, count drops.
         let second = envelope(&[(2, Some("2026-10-30T12:05:00Z"))], 0, "2026-10-30T12:05:01.000Z");
-        let r = apply_response(&conn, Conditional::Modified { data: second, etag: None }, false, "t").unwrap();
+        let r = apply_response(&conn, Conditional::Modified { data: second, etag: None }, false, "2026-10-30T12:05:02.000Z").unwrap();
         assert!(r.new_unread.is_empty() && !r.backfill);
         assert_eq!(r.unread_count, 0);
         let rows = mirror::inbox_list(&conn, mirror::Filter::All).unwrap();
