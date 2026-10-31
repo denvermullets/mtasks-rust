@@ -16,9 +16,6 @@
 //! The paging decisions ([`first_cursor`], [`advance`]) are pure; the network
 //! loop ([`collect_history`]) only feeds them pages.
 
-// Unused until the detail view triggers a fetch (JRST-149); drop then.
-#![allow(dead_code)]
-
 use std::future::Future;
 
 use rusqlite::{params, Connection, OptionalExtension};
