@@ -268,6 +268,51 @@ pub fn apply_server_comment_tombstone(
     Ok(true)
 }
 
+/// Ids of `root_id` and all its descendant replies, parents before children.
+fn comment_subtree_ids(conn: &Connection, root_id: &str) -> Result<Vec<String>> {
+    let mut ids = vec![root_id.to_string()];
+    let mut i = 0;
+    while i < ids.len() {
+        let mut stmt = conn.prepare("SELECT id FROM comments WHERE parent_id = ?1")?;
+        let kids: Vec<String> = stmt
+            .query_map(params![ids[i]], |r| r.get(0))?
+            .collect::<Result<_>>()?;
+        ids.extend(kids);
+        i += 1;
+    }
+    Ok(ids)
+}
+
+/// Number of replies (any depth) under a comment.
+pub fn comment_reply_count(conn: &Connection, comment_id: &str) -> Result<usize> {
+    Ok(comment_subtree_ids(conn, comment_id)?.len() - 1)
+}
+
+/// Locally delete a comment that never reached the server, with its whole reply
+/// subtree, and retire their pending `comment/create` entries so nothing is
+/// pushed. Nothing is enqueued. Refuses (returns 0) when the comment has a
+/// `remote_id`. Returns the number of comments removed.
+pub fn delete_unsynced_comment(conn: &Connection, comment_id: &str) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let remote_id: Option<Option<i64>> = tx
+        .query_row(
+            "SELECT remote_id FROM comments WHERE id = ?1",
+            params![comment_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if !matches!(remote_id, Some(None)) {
+        return Ok(0);
+    }
+    let ids = comment_subtree_ids(&tx, comment_id)?;
+    for id in ids.iter().rev() {
+        tx.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "comment", id)?;
+    }
+    tx.commit()?;
+    Ok(ids.len())
+}
+
 /// Apply a server tombstone for an issue dependency (Rails destroys blocking
 /// edges when an issue completes): delete the local edge with this remote id
 /// and retire its pending sync entries. Edges are team-scoped through their
@@ -1818,6 +1863,70 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].body, "edited");
         assert_eq!(all[0].remote_id, Some(42));
+    }
+
+    fn queue_comment_create(conn: &Connection, id: &str) {
+        crate::db::sync_queue::enqueue(conn, "comment", id, "create", Some("{}")).unwrap();
+    }
+
+    fn pending_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// c1 -> c2 -> c3, c1 -> c4, plus an unrelated top-level c5.
+    fn seed_reply_tree(conn: &Connection) {
+        let tree = [
+            ("c1", None),
+            ("c2", Some("c1")),
+            ("c3", Some("c2")),
+            ("c4", Some("c1")),
+            ("c5", None),
+        ];
+        for (id, parent) in tree {
+            let mut c = make_comment(id, None, id, NOW);
+            c.parent_id = parent.map(str::to_string);
+            insert_comment(conn, &c).unwrap();
+            queue_comment_create(conn, id);
+        }
+    }
+
+    #[test]
+    fn delete_unsynced_comment_removes_subtree_and_retires_creates() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        assert_eq!(comment_reply_count(&conn, "c1").unwrap(), 3);
+        assert_eq!(delete_unsynced_comment(&conn, "c1").unwrap(), 4);
+        let left: Vec<String> = comments_for_issue(&conn, "i1")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(left, ["c5"]);
+        // Only the unrelated comment's create is still pending, and no delete queued.
+        assert_eq!(pending_count(&conn), 1);
+        let deletes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE action = 'delete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(deletes, 0);
+    }
+
+    #[test]
+    fn delete_unsynced_comment_refuses_a_synced_comment() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        set_comment_remote_id(&conn, "c1", 9).unwrap();
+        assert_eq!(delete_unsynced_comment(&conn, "c1").unwrap(), 0);
+        assert_eq!(comments_for_issue(&conn, "i1").unwrap().len(), 5);
+        assert_eq!(pending_count(&conn), 5);
     }
 
     #[test]
