@@ -4,13 +4,15 @@
 //! `push_*` function called from `palette_results`.
 
 use crate::app::View;
-use crate::db::models::Team;
+use crate::db::models::{Issue, Team};
+use crate::issue_match::IssueQuery;
 
 /// What a row is, shown as a label so rows can be scanned by kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteKind {
     View,
     Team,
+    Issue,
 }
 
 impl PaletteKind {
@@ -18,6 +20,7 @@ impl PaletteKind {
         match self {
             PaletteKind::View => "View",
             PaletteKind::Team => "Team",
+            PaletteKind::Issue => "Issue",
         }
     }
 }
@@ -29,6 +32,8 @@ pub enum PaletteNav {
     View(View),
     /// Open this team's Board (`Message::SelectTeamView(id, View::Board)`).
     Team(String),
+    /// Open this issue's detail (`App::open_issue_detail`).
+    Issue(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,9 +44,14 @@ pub struct PaletteRow {
     pub nav: PaletteNav,
 }
 
-/// Local data the palette searches. Later kinds add their fields here.
+/// Local data the palette searches, owned so `PaletteState` can keep it and
+/// recompute rows on every keystroke. Later kinds add their fields here.
 #[derive(Debug, Clone, Default)]
 pub struct PaletteData {
+    /// The current team's issues (archived ones are filtered out here).
+    pub issues: Vec<Issue>,
+    /// The current team; `None` or archived yields no issue rows.
+    pub team: Option<Team>,
     pub teams: Vec<Team>,
 }
 
@@ -59,6 +69,7 @@ fn cap_rows(mut rows: Vec<PaletteRow>, max: usize) -> Vec<PaletteRow> {
 pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let needle = query.trim().to_lowercase();
     let mut rows = Vec::new();
+    push_issues(query, data, &mut rows);
     push_views(&needle, data, &mut rows);
     push_teams(&needle, data, &mut rows);
     cap_rows(rows, MAX_ROWS)
@@ -67,6 +78,34 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
 /// Case-insensitive substring match; `needle` is already trimmed and lowercased.
 fn name_matches(needle: &str, name: &str) -> bool {
     name.to_lowercase().contains(needle)
+}
+
+/// Current-team issues matching `query` via the shared matcher: highest team
+/// number first, unsynced (no number) issues after the numbered ones.
+fn push_issues(query: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    let Some(team) = data.team.as_ref().filter(|t| t.archived_at.is_none()) else {
+        return;
+    };
+    let query = IssueQuery::parse(query);
+    let mut found: Vec<&Issue> = data
+        .issues
+        .iter()
+        .filter(|i| i.archived_at.is_none() && query.matches(i, &team.identifier))
+        .collect();
+    // Stable: ties (e.g. several unnumbered issues) keep their input order.
+    found.sort_by_key(|i| std::cmp::Reverse(i.team_number));
+    for issue in found {
+        let identifier = match issue.team_number {
+            Some(n) => format!("{}-{}", team.identifier, n),
+            None => "Unsynced".to_string(),
+        };
+        rows.push(PaletteRow {
+            kind: PaletteKind::Issue,
+            primary: identifier,
+            secondary: issue.title.clone(),
+            nav: PaletteNav::Issue(issue.id.clone()),
+        });
+    }
 }
 
 fn push_views(needle: &str, _data: &PaletteData, rows: &mut Vec<PaletteRow>) {
@@ -119,12 +158,96 @@ mod tests {
 
     fn data() -> PaletteData {
         PaletteData {
+            issues: Vec::new(),
+            team: None,
             teams: vec![
                 team("t1", "JAIT App", "JRST", false),
                 team("t2", "Rails API", "RAIL", false),
                 team("t3", "Old Stuff", "OLD", true),
             ],
         }
+    }
+
+    fn eng(archived: bool) -> Team {
+        team("t", "Eng", "ENG", archived)
+    }
+
+    fn issue(id: &str, num: Option<i32>, title: &str, archived: bool) -> Issue {
+        Issue {
+            id: id.into(),
+            title: title.into(),
+            description: None,
+            priority: 0,
+            team_number: num,
+            due_date: None,
+            estimate: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
+            lane_id: "l".into(),
+            team_id: "t".into(),
+            project_id: None,
+            parent_issue_id: None,
+            assignee_id: None,
+            creator_id: None,
+            archived_at: archived.then(|| "2026-01-01".to_string()),
+            remote_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn issue_ids(query: &str, team: &Team, issues: &[Issue]) -> Vec<String> {
+        let data = PaletteData { issues: issues.to_vec(), team: Some(team.clone()), teams: Vec::new() };
+        palette_results(query, &data)
+            .into_iter()
+            .filter_map(|r| match r.nav {
+                PaletteNav::Issue(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn identifier_and_number_find_current_team_issue() {
+        let t = eng(false);
+        let issues = [issue("a", Some(42), "Fix", false), issue("b", Some(7), "Other", false)];
+        for q in ["ENG-42", "eng-42", "42"] {
+            assert_eq!(issue_ids(q, &t, &issues), ["a"], "query {q}");
+        }
+        assert!(issue_ids("OPS-42", &t, &issues).is_empty());
+    }
+
+    #[test]
+    fn title_matches_highest_number_first_unsynced_last() {
+        let t = eng(false);
+        let issues = [
+            issue("u", None, "login local", false),
+            issue("a", Some(3), "Login bug", false),
+            issue("b", Some(9), "login page", false),
+            issue("c", Some(5), "unrelated", false),
+        ];
+        assert_eq!(issue_ids("login", &t, &issues), ["b", "a", "u"]);
+    }
+
+    #[test]
+    fn archived_issues_and_archived_team_are_left_out() {
+        let issues = [issue("a", Some(1), "thing", true), issue("b", Some(2), "thing", false)];
+        assert_eq!(issue_ids("thing", &eng(false), &issues), ["b"]);
+        assert!(issue_ids("thing", &eng(true), &issues).is_empty());
+    }
+
+    #[test]
+    fn issues_come_before_views_and_empty_query_has_none() {
+        let t = eng(false);
+        let issues = [issue("a", Some(1), "board fix", false)];
+        let data = PaletteData { issues: issues.to_vec(), team: Some(t), teams: Vec::new() };
+        let rows = palette_results("board", &data);
+        assert_eq!(rows[0].kind, PaletteKind::Issue);
+        assert_eq!(rows[0].primary, "ENG-1");
+        assert_eq!(rows[0].secondary, "board fix");
+        assert_eq!(rows[1].kind, PaletteKind::View);
+        assert!(palette_results("", &data).iter().all(|r| r.kind == PaletteKind::View));
     }
 
     fn names(query: &str) -> Vec<String> {

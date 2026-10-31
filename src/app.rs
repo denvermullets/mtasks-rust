@@ -20,7 +20,7 @@ use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
-use crate::palette_results::PaletteNav;
+use crate::palette_results::{PaletteData, PaletteNav};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
@@ -571,6 +571,16 @@ pub struct App {
 }
 
 impl App {
+    /// Snapshot of what the command palette searches, taken when it opens.
+    fn palette_data(&self) -> PaletteData {
+        let team = self
+            .selected_team_id
+            .as_ref()
+            .and_then(|id| self.teams.iter().find(|t| t.id == *id))
+            .cloned();
+        PaletteData { issues: self.issues.clone(), team, teams: self.teams.clone() }
+    }
+
     fn db(&self) -> rusqlite::Connection {
         connection::open().expect("Failed to open database")
     }
@@ -2504,9 +2514,7 @@ impl App {
                 // Never opens over another modal.
                 if self.modal == Modal::None {
                     self.modal = Modal::CommandPalette(command_palette::PaletteState::new(
-                        crate::palette_results::PaletteData {
-                            teams: self.teams.clone(),
-                        },
+                        self.palette_data(),
                     ));
                     return text_input::focus(command_palette::input_id());
                 }
@@ -2526,6 +2534,8 @@ impl App {
                     PaletteNav::Team(id) => {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
+                    // open_issue_detail commits any open detail edits first.
+                    PaletteNav::Issue(id) => return self.update(Message::OpenIssueDetail(id)),
                 }
             }
 
