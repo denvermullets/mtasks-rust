@@ -76,6 +76,18 @@ pub struct OpenView {
     pub baseline: BoardState,
 }
 
+/// A modelled key's value for Modified detection. `visible_properties` is a
+/// set (toggling a property off and on re-appends it), so its order is ignored.
+fn normalized(q: &RawQuery, key: &str) -> Option<String> {
+    let v = q.get(key)?;
+    if key != "visible_properties" {
+        return Some(v.clone());
+    }
+    let mut parts: Vec<&str> = v.split(',').collect();
+    parts.sort_unstable();
+    Some(parts.join(","))
+}
+
 impl OpenView {
     /// Open `sv`, falling back to `local` for keys the view doesn't set.
     pub fn open(sv: &crate::db::saved_views::SavedView, mirror: &Mirror, local: &BoardState) -> Self {
@@ -114,7 +126,7 @@ impl OpenView {
     pub fn is_modified(&self, mirror: &Mirror) -> bool {
         let now = self.encoded(mirror);
         let saved = encode(&self.baseline, &self.raw, mirror);
-        MODELLED_KEYS.iter().any(|k| now.get(*k) != saved.get(*k))
+        MODELLED_KEYS.iter().any(|k| normalized(&now, k) != normalized(&saved, k))
     }
 
     /// The working copy was saved as the view's new definition: it becomes the
@@ -1044,6 +1056,18 @@ mod tests {
         ov.state.search.clear();
         ov.state.filters.assignees = vec!["m-a".into()];
         assert!(ov.is_modified(&m));
+    }
+
+    #[test]
+    fn toggling_a_property_off_and_on_is_not_modified() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("visible_properties", "id,priority,labels")]);
+        let m = fx.mirror();
+        assert!(!ov.is_modified(&m));
+        ov.state.display.toggle_property(CardProperty::Id);
+        assert!(ov.is_modified(&m));
+        ov.state.display.toggle_property(CardProperty::Id);
+        assert!(!ov.is_modified(&m));
     }
 
     #[test]

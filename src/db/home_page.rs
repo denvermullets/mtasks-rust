@@ -1,38 +1,98 @@
-//! The user's Home page as last reported by the server, kept locally as
-//! `{kind, remote id}` so a launch can resolve it even offline.
-//!
-//! Stored in `pull_cursors` (scope `user`, resource `home_page`) as
-//! `"<kind>:<id>"`; no row means no Home page.
+//! The user's Home page as last reported by the server, kept locally in the
+//! single-row `home_page` table so a launch can resolve it even offline.
+//! No row means no Home page.
 
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
-use super::queries::{clear_pull_cursor, get_pull_cursor, set_pull_cursor};
 use crate::api::HomePageDto;
-
-const SCOPE: &str = "user";
-const RESOURCE: &str = "home_page";
+use crate::db::models::Team;
+use crate::db::saved_views::SavedView;
 
 /// Queue `entity_type` for a locally-set Home page awaiting push.
 pub const QUEUE_ENTITY: &str = "home_page";
 
-/// A stored Home page target. `kind` is `team`, `view` or `dashboard`.
+/// What the Home page points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HomeTarget {
+    /// A team, by remote id.
+    Team(i64),
+    /// A Saved view, by remote id.
+    View(i64),
+    /// A Saved view chosen before its create has pushed (local uuid);
+    /// `adopt_view` swaps it for `View` once it has a remote id.
+    LocalView(String),
+    /// A dashboard, by remote id (not shown on the desktop yet).
+    Dashboard(i64),
+}
+
+impl HomeTarget {
+    /// Build from the wire `{kind, id}`; unknown kinds are `None`.
+    pub fn from_wire(kind: &str, id: i64) -> Option<Self> {
+        match kind {
+            "team" => Some(Self::Team(id)),
+            "view" => Some(Self::View(id)),
+            "dashboard" => Some(Self::Dashboard(id)),
+            _ => None,
+        }
+    }
+}
+
+/// A stored Home page target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HomePage {
-    pub kind: String,
-    pub remote_id: i64,
-    /// Set instead of `remote_id` (then 0) for a Saved view chosen before its
-    /// create has pushed; `adopt_view` swaps it for the remote id.
-    pub local_id: Option<String>,
+    pub target: HomeTarget,
+}
+
+impl HomePage {
+    /// True if this Home page is the given Saved view (by remote or local id).
+    pub fn matches_view(&self, view: &SavedView) -> bool {
+        match &self.target {
+            HomeTarget::View(id) => view.remote_id == Some(*id),
+            HomeTarget::LocalView(local) => &view.id == local,
+            _ => false,
+        }
+    }
+
+    /// True if this Home page is the given team.
+    pub fn matches_team(&self, team: &Team) -> bool {
+        matches!(&self.target, HomeTarget::Team(id) if team.remote_id == Some(*id))
+    }
+}
+
+fn store(conn: &Connection, target: &HomeTarget) -> Result<()> {
+    let (kind, remote_id, local): (&str, i64, Option<&str>) = match target {
+        HomeTarget::Team(id) => ("team", *id, None),
+        HomeTarget::View(id) => ("view", *id, None),
+        HomeTarget::LocalView(l) => ("view", 0, Some(l)),
+        HomeTarget::Dashboard(id) => ("dashboard", *id, None),
+    };
+    conn.execute(
+        "INSERT INTO home_page (id, kind, remote_id, local_view_id) VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, remote_id = excluded.remote_id,
+            local_view_id = excluded.local_view_id",
+        params![kind, remote_id, local],
+    )?;
+    Ok(())
+}
+
+fn clear(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM home_page", [])?;
+    Ok(())
 }
 
 /// The stored Home page, if any.
 pub fn get(conn: &Connection) -> Result<Option<HomePage>> {
-    Ok(get_pull_cursor(conn, SCOPE, RESOURCE)?.and_then(|raw| {
-        let (kind, id) = raw.split_once(':')?;
-        if let Some(local) = id.strip_prefix('~') {
-            return Some(HomePage { kind: kind.to_string(), remote_id: 0, local_id: Some(local.to_string()) });
-        }
-        Some(HomePage { kind: kind.to_string(), remote_id: id.parse().ok()?, local_id: None })
+    let row = conn
+        .query_row("SELECT kind, remote_id, local_view_id FROM home_page WHERE id = 1", [], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?))
+        })
+        .optional()?;
+    Ok(row.and_then(|(kind, id, local)| {
+        let target = match local {
+            Some(l) if kind == "view" => HomeTarget::LocalView(l),
+            _ => HomeTarget::from_wire(&kind, id)?,
+        };
+        Some(HomePage { target })
     }))
 }
 
@@ -49,7 +109,9 @@ fn write_pending(conn: &Connection) -> Result<bool> {
 /// Set the Home page locally and queue the write. The stored home changes at
 /// once (offline too); while the write is pending `/me` cannot overwrite it.
 pub fn set_local(conn: &Connection, kind: &str, remote_id: i64) -> Result<()> {
-    set_pull_cursor(conn, SCOPE, RESOURCE, &format!("{kind}:{remote_id}"))?;
+    if let Some(target) = HomeTarget::from_wire(kind, remote_id) {
+        store(conn, &target)?;
+    }
     let payload = serde_json::json!({ "kind": kind, "id": remote_id }).to_string();
     super::sync_queue::enqueue(conn, QUEUE_ENTITY, "home", "update", Some(&payload))
 }
@@ -62,24 +124,28 @@ pub fn set_view_local(conn: &Connection, view_id: &str, remote_id: Option<i64>) 
     if let Some(rid) = remote_id {
         return set_local(conn, "view", rid);
     }
-    set_pull_cursor(conn, SCOPE, RESOURCE, &format!("view:~{view_id}"))?;
+    store(conn, &HomeTarget::LocalView(view_id.to_string()))?;
     let payload = serde_json::json!({ "kind": "view", "local_id": view_id }).to_string();
     super::sync_queue::enqueue(conn, QUEUE_ENTITY, "home", "update", Some(&payload))
+}
+
+fn is_local_view(conn: &Connection, local_id: &str) -> Result<bool> {
+    Ok(get(conn)?.is_some_and(|h| matches!(&h.target, HomeTarget::LocalView(l) if l == local_id)))
 }
 
 /// A view just got its remote id: if it is the stored home by local id, store
 /// the remote id instead.
 pub fn adopt_view(conn: &Connection, local_id: &str, remote_id: i64) -> Result<()> {
-    if get(conn)?.is_some_and(|h| h.kind == "view" && h.local_id.as_deref() == Some(local_id)) {
-        set_pull_cursor(conn, SCOPE, RESOURCE, &format!("view:{remote_id}"))?;
+    if is_local_view(conn, local_id)? {
+        store(conn, &HomeTarget::View(remote_id))?;
     }
     Ok(())
 }
 
 /// Clear the stored home if it is the unpushed view `local_id`.
 pub fn clear_if_local_view(conn: &Connection, local_id: &str) -> Result<()> {
-    if get(conn)?.is_some_and(|h| h.kind == "view" && h.local_id.as_deref() == Some(local_id)) {
-        clear_pull_cursor(conn, SCOPE, RESOURCE)?;
+    if is_local_view(conn, local_id)? {
+        clear(conn)?;
     }
     Ok(())
 }
@@ -102,18 +168,18 @@ pub fn resolve_payload(conn: &Connection, payload: Option<&str>) -> Resolved {
         .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
         .and_then(|v| v.get("local_id")?.as_str().map(str::to_string));
     let Some(local) = local else { return Resolved::Bad };
-    match conn.query_row("SELECT remote_id FROM saved_views WHERE id = ?1", [&local], |r| r.get::<_, Option<i64>>(0)) {
-        Ok(Some(id)) => Resolved::Ready("view".into(), id),
-        Ok(None) => Resolved::Waiting,
-        Err(_) => Resolved::Bad,
+    match super::saved_views::remote_id_of(conn, &local) {
+        Ok(Some(Some(id))) => Resolved::Ready("view".into(), id),
+        Ok(Some(None)) => Resolved::Waiting,
+        Ok(None) | Err(_) => Resolved::Bad,
     }
 }
 
 /// Clear the stored home if it points at the Saved view `remote_id`. Nothing
 /// is queued: the server treats a missing view as the default home.
 pub fn clear_if_view(conn: &Connection, remote_id: i64) -> Result<()> {
-    if get(conn)?.is_some_and(|h| h.kind == "view" && h.local_id.is_none() && h.remote_id == remote_id) {
-        clear_pull_cursor(conn, SCOPE, RESOURCE)?;
+    if get(conn)?.is_some_and(|h| h.target == HomeTarget::View(remote_id)) {
+        clear(conn)?;
     }
     Ok(())
 }
@@ -124,15 +190,16 @@ pub fn parse_payload(payload: Option<&str>) -> Option<(String, i64)> {
     Some((v.get("kind")?.as_str()?.to_string(), v.get("id")?.as_i64()?))
 }
 
-/// Store what `/me` reported: a value replaces the stored home, `None` clears
-/// it. Skipped while a local `home_page` write is pending.
+/// Store what `/me` reported: a value replaces the stored home, `None` (or a
+/// kind this app does not know) clears it. Skipped while a local `home_page`
+/// write is pending.
 pub fn apply_me(conn: &Connection, reported: Option<&HomePageDto>) -> Result<()> {
     if write_pending(conn)? {
         return Ok(());
     }
-    match reported {
-        Some(h) => set_pull_cursor(conn, SCOPE, RESOURCE, &format!("{}:{}", h.kind, h.id)),
-        None => clear_pull_cursor(conn, SCOPE, RESOURCE),
+    match reported.and_then(|h| HomeTarget::from_wire(&h.kind, h.id)) {
+        Some(t) => store(conn, &t),
+        None => clear(conn),
     }
 }
 
@@ -152,28 +219,25 @@ pub enum LaunchTarget {
 /// view whose team is missing) resolve to `Default`.
 pub fn launch_target(
     home: Option<&HomePage>,
-    teams: &[crate::db::models::Team],
-    views: &std::collections::HashMap<String, Vec<crate::db::saved_views::SavedView>>,
+    teams: &[Team],
+    views: &std::collections::HashMap<String, Vec<SavedView>>,
 ) -> LaunchTarget {
     let Some(h) = home else { return LaunchTarget::Default };
-    match h.kind.as_str() {
-        "team" => teams
+    match &h.target {
+        HomeTarget::Team(_) => teams
             .iter()
-            .find(|t| t.remote_id == Some(h.remote_id))
+            .find(|t| h.matches_team(t))
             .map_or(LaunchTarget::Default, |t| LaunchTarget::Team(t.id.clone())),
-        "view" => views
+        HomeTarget::View(_) | HomeTarget::LocalView(_) => views
             .values()
             .flatten()
-            .find(|v| match &h.local_id {
-                Some(l) => &v.id == l,
-                None => v.remote_id == Some(h.remote_id),
-            })
+            .find(|v| h.matches_view(v))
             .filter(|v| teams.iter().any(|t| t.id == v.team_id))
             .map_or(LaunchTarget::Default, |v| LaunchTarget::View {
                 view_id: v.id.clone(),
                 team_id: v.team_id.clone(),
             }),
-        _ => LaunchTarget::Default,
+        HomeTarget::Dashboard(_) => LaunchTarget::Default,
     }
 }
 
@@ -205,7 +269,7 @@ mod tests {
     fn set_local_stores_at_once_and_queues_the_put() {
         let conn = mem();
         set_local(&conn, "team", 7).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "team".into(), remote_id: 7, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Team(7) }));
         let pending = crate::db::sync_queue::pending_entries(&conn).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!((pending[0].entity_type.as_str(), pending[0].action.as_str()), ("home_page", "update"));
@@ -218,7 +282,7 @@ mod tests {
         apply_me(&conn, Some(&dto("team", 1))).unwrap();
         set_local(&conn, "team", 2).unwrap();
         apply_me(&conn, Some(&dto("team", 1))).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "team".into(), remote_id: 2, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Team(2) }));
     }
 
     #[test]
@@ -229,14 +293,14 @@ mod tests {
         let id = crate::db::sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
         crate::db::sync_queue::mark_synced(&conn, id).unwrap();
         apply_me(&conn, Some(&dto("view", 5))).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "view".into(), remote_id: 5, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::View(5) }));
     }
 
     #[test]
     fn a_synced_view_is_set_like_a_team() {
         let conn = mem();
         set_view_local(&conn, "v1", Some(50)).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "view".into(), remote_id: 50, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::View(50) }));
         let p = crate::db::sync_queue::pending_entries(&conn).unwrap();
         assert_eq!(parse_payload(p[0].payload.as_deref()), Some(("view".into(), 50)));
     }
@@ -253,7 +317,7 @@ mod tests {
         let v = crate::db::saved_views::create_local(&conn, "t1", "Mine", "{}").unwrap();
         set_view_local(&conn, &v.id, None).unwrap();
         let h = get(&conn).unwrap().unwrap();
-        assert_eq!((h.kind.as_str(), h.local_id.as_deref()), ("view", Some(v.id.as_str())));
+        assert_eq!(h.target, HomeTarget::LocalView(v.id.clone()));
         // FIFO: the view's create is queued before the home write.
         let p = crate::db::sync_queue::pending_entries(&conn).unwrap();
         assert_eq!((p[0].entity_type.as_str(), p[1].entity_type.as_str()), ("saved_view", "home_page"));
@@ -269,7 +333,7 @@ mod tests {
         };
         crate::db::saved_views::adopt_created(&conn, &v.id, &dto).unwrap();
         assert_eq!(resolve_payload(&conn, p[1].payload.as_deref()), Resolved::Ready("view".into(), 88));
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "view".into(), remote_id: 88, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::View(88) }));
     }
 
     #[test]
@@ -294,7 +358,7 @@ mod tests {
     fn stores_kind_and_remote_id() {
         let conn = mem();
         apply_me(&conn, Some(&dto("view", 42))).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "view".into(), remote_id: 42, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::View(42) }));
     }
 
     #[test]
@@ -302,7 +366,7 @@ mod tests {
         let conn = mem();
         apply_me(&conn, Some(&dto("team", 1))).unwrap();
         apply_me(&conn, Some(&dto("dashboard", 9))).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "dashboard".into(), remote_id: 9, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Dashboard(9) }));
     }
 
     #[test]
@@ -320,7 +384,7 @@ mod tests {
         queue_home_write(&conn, false);
         apply_me(&conn, Some(&dto("view", 2))).unwrap();
         apply_me(&conn, None).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "team".into(), remote_id: 1, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Team(1) }));
     }
 
     #[test]
@@ -328,7 +392,7 @@ mod tests {
         let conn = mem();
         queue_home_write(&conn, true);
         apply_me(&conn, Some(&dto("view", 2))).unwrap();
-        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "view".into(), remote_id: 2, local_id: None }));
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::View(2) }));
     }
 
     fn team(id: &str, remote: Option<i64>, archived: bool) -> crate::db::models::Team {
@@ -356,7 +420,7 @@ mod tests {
     }
 
     fn home(kind: &str, id: i64) -> Option<HomePage> {
-        Some(HomePage { kind: kind.into(), remote_id: id, local_id: None })
+        Some(HomePage { target: HomeTarget::from_wire(kind, id).unwrap_or(HomeTarget::Dashboard(-1)) })
     }
 
     fn fixture() -> (Vec<crate::db::models::Team>, std::collections::HashMap<String, Vec<crate::db::saved_views::SavedView>>) {

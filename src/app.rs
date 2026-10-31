@@ -1414,8 +1414,8 @@ impl App {
             + usize::from(!header::needle(self.active_search()).is_empty())
     }
 
-    /// The header's view actions (Update view, Save as new view, Revert): only on
-    /// a Modified open view on the Board.
+    /// The header's view actions on an open view on the Board: Update view, Save
+    /// as new view and Revert (only when Modified), then always Rename and Delete.
     fn update_view_action(&self) -> Option<Element<'_, Message>> {
         let v = self.open_view.as_ref()?;
         if self.view != View::Board {
@@ -1427,16 +1427,19 @@ impl App {
             labels: &self.labels,
             projects: &self.projects,
         };
-        v.is_modified(&mirror)
-            .then(|| {
-                iced::widget::row![
-                    header::update_view_button(self.sync_read_only),
-                    header::save_as_new_view_button(self.sync_read_only),
-                    header::revert_button(),
-                ]
-                .spacing(8)
-                .into()
-            })
+        let mut actions = iced::widget::row![].spacing(8);
+        if v.is_modified(&mirror) {
+            actions = actions
+                .push(header::update_view_button(self.sync_read_only))
+                .push(header::save_as_new_view_button(self.sync_read_only))
+                .push(header::revert_button());
+        }
+        Some(
+            actions
+                .push(header::rename_view_button(&v.view_id, self.sync_read_only))
+                .push(header::delete_view_button(&v.view_id, self.sync_read_only))
+                .into(),
+        )
     }
 
     fn enqueue_sync(
@@ -2258,8 +2261,14 @@ impl App {
                 let Some(sv) = found else {
                     return Task::none();
                 };
+                // The board's own search, read before the team switch may clear it.
+                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
+                    self.search_query.clone()
+                } else {
+                    String::new()
+                };
                 // Switch team first when needed (this drops any open view).
-                let task = if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
+                let task =if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
                     || self.view != View::Board
                 {
                     self.expanded_teams.insert(sv.team_id.clone());
@@ -2270,7 +2279,7 @@ impl App {
                 let local = crate::saved_view::BoardState {
                     display: self.config.display.clone(),
                     filters: self.config.filters.clone(),
-                    search: String::new(),
+                    search: board_search,
                 };
                 let mirror = crate::saved_view::Mirror {
                     lanes: &self.lanes,
@@ -2349,8 +2358,8 @@ impl App {
                             self.enqueue_sync(
                                 "saved_view",
                                 &view_id,
-                                "update",
-                                Some(crate::sync::engine::SAVED_VIEW_RENAME_PAYLOAD),
+                                "rename",
+                                None,
                             );
                             self.modal = Modal::None;
                             self.save_view_name.clear();
@@ -2676,6 +2685,7 @@ impl App {
                     if let Err(e) = crate::db::home_page::set_local(&self.db(), "team", rid) {
                         eprintln!("[home_page] set failed: {e}");
                     }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
                 } else {
                     self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
                 }
@@ -4310,24 +4320,19 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let team_sidebar = team_list::view(
-            &self.teams,
-            self.selected_team_id.as_deref(),
-            &self.expanded_teams,
-            &self.view,
-            self.team_menu_open.as_deref(),
-            self.show_archived_teams,
-            self.notif_unread_count,
-            crate::db::home_page::get(&self.db())
-                .ok()
-                .flatten()
-                .filter(|h| h.kind == "team")
-                .map(|h| h.remote_id),
-            self.sync_read_only,
-            &self.saved_views,
-            self.open_view.as_ref().map(|v| v.view_id.as_str()),
-            self.home_page.as_ref(),
-        );
+        let team_sidebar = team_list::view(team_list::SidebarState {
+            teams: &self.teams,
+            selected_team_id: self.selected_team_id.as_deref(),
+            expanded_teams: &self.expanded_teams,
+            current_view: &self.view,
+            team_menu_open: self.team_menu_open.as_deref(),
+            show_archived: self.show_archived_teams,
+            unread_count: self.notif_unread_count,
+            read_only: self.sync_read_only,
+            saved_views: &self.saved_views,
+            open_view_id: self.open_view.as_ref().map(|v| v.view_id.as_str()),
+            home: self.home_page.as_ref(),
+        });
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
             team_list::footer(self.selected_team_id.is_some()),

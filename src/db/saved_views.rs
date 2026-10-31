@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::queries::{find_team_by_remote_id, get_pull_cursor, set_pull_cursor};
+use super::queries::{clear_pull_cursor, find_team_by_remote_id, get_pull_cursor, set_pull_cursor};
 use super::sync_queue;
 
 /// `team_id` value used in `pull_cursors` (Saved views are fetched cross-team).
@@ -73,6 +73,10 @@ pub fn apply_pulled(
             applied.skipped_unmirrored += 1;
             continue;
         };
+        if has_pending_delete(conn, row.id)? {
+            applied.skipped_pending += 1;
+            continue;
+        }
         let existing = find_by_remote_id(conn, row.id)?;
         if let Some(local) = &existing {
             if sync_queue::has_pending_entry(conn, ENTITY_TYPE, &local.id)? {
@@ -102,6 +106,25 @@ pub fn apply_pulled(
         set_pull_cursor(conn, SCOPE, RESOURCE, t)?;
     }
     Ok(applied)
+}
+
+/// True while a `saved_view` delete for `remote_id` is queued and unpushed.
+/// The local row is already gone then, so a pull must not bring it back.
+fn has_pending_delete(conn: &Connection, remote_id: i64) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_queue
+         WHERE entity_type = ?1 AND action = 'delete' AND synced_at IS NULL
+           AND json_extract(payload, '$.remote_id') = ?2)",
+        params![ENTITY_TYPE, remote_id],
+        |r| r.get(0),
+    )
+}
+
+/// A view's remote id by local id: `None` if there is no such view,
+/// `Some(None)` if it exists but has not been pushed yet.
+pub fn remote_id_of(conn: &Connection, local_id: &str) -> Result<Option<Option<i64>>> {
+    conn.query_row("SELECT remote_id FROM saved_views WHERE id = ?1", params![local_id], |r| r.get(0))
+        .optional()
 }
 
 /// Delete mirrored views the user-level tombstone feed reports (idempotent, so
@@ -198,12 +221,12 @@ pub fn delete_local(conn: &Connection, view_id: &str) -> Result<Option<String>> 
 
 /// Add a new view to `team_id` (local uuid), last in the sidebar, and queue
 /// its `saved_view` create. `query` is the encoded Rails query as JSON text.
-/// Position mirrors Rails (highest + 1) until the push adopts the server's.
+/// Position mirrors Rails (highest in the team + 1) until the push adopts the server's.
 pub fn create_local(conn: &Connection, team_id: &str, name: &str, query: &str) -> Result<SavedView> {
     let tx = conn.unchecked_transaction()?;
     let position: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(position), 0) + 1 FROM saved_views",
-        [],
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM saved_views WHERE team_id = ?1",
+        params![team_id],
         |r| r.get(0),
     )?;
     let view = SavedView {
@@ -309,6 +332,13 @@ pub fn cursor(conn: &Connection) -> Result<Option<String>> {
     get_pull_cursor(conn, SCOPE, RESOURCE)
 }
 
+/// A team was just mirrored for the first time. Views pulled for it earlier
+/// were skipped (unmirrored) while the cursor moved on, so forget the cursor:
+/// the next pull is a full fetch and brings them in.
+pub fn on_team_mirrored(conn: &Connection) -> Result<()> {
+    clear_pull_cursor(conn, SCOPE, RESOURCE)
+}
+
 fn from_row(r: &rusqlite::Row) -> Result<SavedView> {
     Ok(SavedView {
         id: r.get(0)?,
@@ -338,6 +368,74 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn a_pull_does_not_resurrect_a_view_with_a_pending_delete() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({}))], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        let payload = delete_local(&conn, &id).unwrap().unwrap();
+        sync_queue::enqueue(&conn, ENTITY_TYPE, &id, "delete", Some(&payload)).unwrap();
+        let a = apply_pulled(&conn, &[view(5, 700, "A", json!({})), view(6, 700, "B", json!({}))], None).unwrap();
+        assert_eq!((a.upserted, a.skipped_pending), (1, 1));
+        assert!(find_by_remote_id(&conn, 5).unwrap().is_none());
+        // Once the delete has pushed, a listing that still has it is honoured.
+        conn.execute("UPDATE sync_queue SET synced_at = 'x'", []).unwrap();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({}))], None).unwrap();
+        assert!(find_by_remote_id(&conn, 5).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_late_mirrored_team_gets_its_views_on_the_next_full_pull() {
+        let conn = setup();
+        // The pull sees a view on a team not mirrored yet; the cursor moves on.
+        let rows = [view(9, 701, "Late", json!({}))];
+        let a = apply_pulled(&conn, &rows, Some("T5")).unwrap();
+        assert_eq!(a.skipped_unmirrored, 1);
+        assert_eq!(cursor(&conn).unwrap().as_deref(), Some("T5"));
+        // The team is mirrored afterwards: the cursor resets so the next pull is full.
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t2', 'U', 'U', 701, '', '')",
+            [],
+        )
+        .unwrap();
+        on_team_mirrored(&conn).unwrap();
+        assert_eq!(cursor(&conn).unwrap(), None);
+        apply_pulled(&conn, &rows, Some("T6")).unwrap();
+        assert!(find_by_remote_id(&conn, 9).unwrap().is_some());
+        // Other cursors are untouched.
+        assert_eq!(deleted_cursor(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn a_new_view_goes_last_within_its_own_team() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
+             VALUES ('t2', 'U', 'U', 701, '', '')",
+            [],
+        )
+        .unwrap();
+        let mut a = view(1, 700, "A", json!({}));
+        a.position = 3;
+        let mut b = view(2, 701, "B", json!({}));
+        b.position = 40;
+        apply_pulled(&conn, &[a, b], None).unwrap();
+        assert_eq!(create_local(&conn, "t1", "N", "{}").unwrap().position, 4);
+        assert_eq!(create_local(&conn, "t2", "M", "{}").unwrap().position, 41);
+    }
+
+    #[test]
+    fn remote_id_of_distinguishes_unpushed_from_missing() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({}))], None).unwrap();
+        let pushed = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        let local = create_local(&conn, "t1", "N", "{}").unwrap().id;
+        assert_eq!(remote_id_of(&conn, &pushed).unwrap(), Some(Some(5)));
+        assert_eq!(remote_id_of(&conn, &local).unwrap(), Some(None));
+        assert_eq!(remote_id_of(&conn, "nope").unwrap(), None);
     }
 
     #[test]
