@@ -12,6 +12,7 @@ use crate::app::Message;
 use crate::db::recurring_issues::RecurringIssueRow;
 use crate::theme as t;
 
+const COL_NEXT_RUN: f32 = 150.0;
 const COL_STATE: f32 = 110.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
@@ -22,6 +23,7 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .padding([8, 16])
         .align_y(Alignment::Center)
         .push(header_cell("Title", Length::Fill))
+        .push(header_cell("Next run", Length::Fixed(COL_NEXT_RUN)))
         .push(header_cell("State", Length::Fixed(COL_STATE)));
 
     let mut body = column![].width(Length::Fill);
@@ -81,6 +83,15 @@ pub fn state_label(active: bool) -> &'static str {
     }
 }
 
+/// "2026-11-06 MT": the next run date and zone; "-" with no date.
+pub fn next_run_label(r: &RecurringIssueRow) -> String {
+    match (&r.next_run_on, &r.time_zone_label) {
+        (Some(d), Some(z)) => format!("{d} {z}"),
+        (Some(d), None) => d.clone(),
+        (None, _) => "-".to_string(),
+    }
+}
+
 fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     let title = container(
         text(&r.title)
@@ -93,6 +104,14 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .wrapping(text::Wrapping::None),
     )
     .width(Length::Fill);
+
+    let next_run = container(
+        text(next_run_label(r))
+            .size(12)
+            .color(t::text_secondary())
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fixed(COL_NEXT_RUN));
 
     let dot = if r.active {
         t::priority_low()
@@ -114,6 +133,7 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .padding([10, 16])
             .align_y(Alignment::Center)
             .push(title)
+            .push(next_run)
             .push(state),
     )
     .width(Length::Fill)
