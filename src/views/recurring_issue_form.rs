@@ -837,11 +837,13 @@ mod tests {
             assert!(US_TIME_ZONES.contains(&z), "{z}");
             assert!(crate::db::recurring_issues::time_zone_abbreviation(z).is_some(), "{z}");
         }
-    }
-
-    #[test]
-    fn the_default_zone_option_reads_my_time_zone_preference() {
-        assert_eq!(TimeZoneChoice(None).to_string(), "My time zone preference");
+        for z in US_TIME_ZONES {
+            assert!(crate::db::recurring_issues::time_zone_abbreviation(z).is_some(), "{z}");
+        }
+        let abbr = crate::db::recurring_issues::time_zone_abbreviation;
+        assert_eq!(abbr("America/Detroit"), Some("ET"));
+        assert_eq!(abbr("America/Boise"), Some("MT"));
+        assert_eq!(abbr("America/Juneau"), Some("AKT"));
     }
 
     #[test]

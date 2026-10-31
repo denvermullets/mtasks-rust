@@ -380,14 +380,35 @@ pub const FIRST_LANE: &str = "First lane";
 /// Abbreviation for an ActiveSupport zone name (US zones), else `None`.
 pub fn time_zone_abbreviation(name: &str) -> Option<&'static str> {
     Some(match name {
-        "Eastern Time (US & Canada)" => "ET",
-        "Central Time (US & Canada)" => "CT",
-        "Mountain Time (US & Canada)" => "MT",
+        "Eastern Time (US & Canada)"
+        | "Indiana (East)"
+        | "America/Detroit"
+        | "America/Indiana/Marengo"
+        | "America/Indiana/Petersburg"
+        | "America/Indiana/Vevay"
+        | "America/Indiana/Vincennes"
+        | "America/Indiana/Winamac"
+        | "America/Kentucky/Louisville"
+        | "America/Kentucky/Monticello" => "ET",
+        "Central Time (US & Canada)"
+        | "America/Indiana/Knox"
+        | "America/Indiana/Tell_City"
+        | "America/Menominee"
+        | "America/North_Dakota/Beulah"
+        | "America/North_Dakota/Center"
+        | "America/North_Dakota/New_Salem" => "CT",
+        "Mountain Time (US & Canada)" | "America/Boise" => "MT",
         "Arizona" => "MST",
         "Pacific Time (US & Canada)" => "PT",
-        "Alaska" => "AKT",
+        "Alaska"
+        | "America/Anchorage"
+        | "America/Juneau"
+        | "America/Metlakatla"
+        | "America/Nome"
+        | "America/Sitka"
+        | "America/Yakutat" => "AKT",
         "Hawaii" => "HST",
-        "Indiana (East)" => "ET",
+        "America/Adak" => "HAT",
         "UTC" => "UTC",
         _ => return None,
     })
