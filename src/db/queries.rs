@@ -451,7 +451,6 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
 }
 
 /// What a local team move changed, for the toast.
-#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMoveSummary {
     pub team_number: i32,
@@ -468,7 +467,6 @@ pub struct IssueMoveSummary {
 /// Move an issue to another local team in one transaction, mirroring the Rails
 /// `IssueTeamMover`. Not queued here; the normal `update_issue` path still
 /// never writes `team_id` / `team_number`.
-#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
 pub fn move_issue_to_team(
     conn: &Connection,
     issue_id: &str,
@@ -565,6 +563,59 @@ pub fn move_issue_to_team(
         labels_removed,
         sub_issues_detached,
     })
+}
+
+impl IssueMoveSummary {
+    /// One-line toast text: where the issue went and what the move cleared.
+    pub fn toast(&self, target_team_name: &str) -> String {
+        let mut cleared: Vec<String> = Vec::new();
+        if self.lane_fell_back {
+            cleared.push("lane reset to first".into());
+        }
+        if self.assignee_cleared {
+            cleared.push("assignee".into());
+        }
+        if self.project_cleared {
+            cleared.push("project".into());
+        }
+        if self.parent_cleared {
+            cleared.push("parent".into());
+        }
+        if self.labels_removed > 0 {
+            cleared.push(format!("{} label(s)", self.labels_removed));
+        }
+        if self.sub_issues_detached > 0 {
+            cleared.push(format!("{} sub-issue link(s)", self.sub_issues_detached));
+        }
+        if cleared.is_empty() {
+            format!("Moved to {target_team_name}")
+        } else {
+            format!("Moved to {target_team_name}; cleared: {}", cleared.join(", "))
+        }
+    }
+}
+
+/// Queue the `issue/move` push for an issue that was just moved locally out of
+/// `source_team_id` (see [`move_issue_to_team`]). The payload captures the
+/// remote ids now, since the source team is gone from the row afterwards; a
+/// target team without a remote id is left null and resolved at push time.
+/// Returns false (nothing queued) when the server has never seen the issue:
+/// its pending create already posts to the new team.
+pub fn queue_issue_move(conn: &Connection, issue_id: &str, source_team_id: &str) -> Result<bool> {
+    let issue = get_issue(conn, issue_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let Some(issue_remote_id) = issue.remote_id else {
+        return Ok(false);
+    };
+    let payload = serde_json::json!({
+        "source_team_id": source_team_id,
+        "target_team_id": issue.team_id,
+        "source_team_remote_id": remote_id_for(conn, "teams", source_team_id)?,
+        "issue_remote_id": issue_remote_id,
+        "target_team_remote_id": remote_id_for(conn, "teams", &issue.team_id)?,
+    })
+    .to_string();
+    super::sync_queue::enqueue(conn, "issue", issue_id, "move", Some(&payload))?;
+    Ok(true)
 }
 
 pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> Result<()> {
@@ -2375,6 +2426,80 @@ mod tests {
         let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
         assert_eq!(issue_row(&conn, "i1").parent_issue_id, None);
         assert!(s.parent_cleared);
+    }
+
+    fn move_entries(conn: &Connection) -> Vec<crate::db::models::SyncQueueEntry> {
+        crate::db::sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.entity_type == "issue" && e.action == "move")
+            .collect()
+    }
+
+    #[test]
+    fn queue_move_captures_remote_ids_before_the_team_changes() {
+        let conn = move_setup();
+        conn.execute_batch(
+            "UPDATE teams SET remote_id = 100 WHERE id = 't1';
+             UPDATE teams SET remote_id = 200 WHERE id = 't2';
+             UPDATE issues SET remote_id = 55 WHERE id = 'i1';",
+        )
+        .unwrap();
+        move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert!(queue_issue_move(&conn, "i1", "t1").unwrap());
+        let entries = move_entries(&conn);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entity_id, "i1");
+        let p: serde_json::Value =
+            serde_json::from_str(entries[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(p["source_team_remote_id"], 100);
+        assert_eq!(p["issue_remote_id"], 55);
+        assert_eq!(p["target_team_remote_id"], 200);
+        assert_eq!(p["target_team_id"], "t2");
+    }
+
+    #[test]
+    fn queue_move_keeps_unknown_target_remote_id_null() {
+        let conn = move_setup();
+        conn.execute_batch(
+            "UPDATE teams SET remote_id = 100 WHERE id = 't1';
+             UPDATE issues SET remote_id = 55 WHERE id = 'i1';",
+        )
+        .unwrap();
+        move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert!(queue_issue_move(&conn, "i1", "t1").unwrap());
+        let p: serde_json::Value =
+            serde_json::from_str(move_entries(&conn)[0].payload.as_deref().unwrap()).unwrap();
+        assert!(p["target_team_remote_id"].is_null());
+    }
+
+    #[test]
+    fn queue_move_skips_an_issue_the_server_has_never_seen() {
+        // Its pending create already posts to the new team.
+        let conn = move_setup();
+        move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert!(!queue_issue_move(&conn, "i1", "t1").unwrap());
+        assert!(move_entries(&conn).is_empty());
+    }
+
+    #[test]
+    fn move_toast_names_the_team_and_what_was_cleared() {
+        let conn = move_setup();
+        conn.execute("UPDATE issues SET assignee_id='m2', project_id='p1' WHERE id='i1'", [])
+            .unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(s.toast("T2"), "Moved to T2; cleared: lane reset to first, assignee, project");
+        let plain = IssueMoveSummary {
+            team_number: 1,
+            lane_id: "l".into(),
+            lane_fell_back: false,
+            assignee_cleared: false,
+            project_cleared: false,
+            parent_cleared: false,
+            labels_removed: 0,
+            sub_issues_detached: 0,
+        };
+        assert_eq!(plain.toast("T2"), "Moved to T2");
     }
 
     #[test]

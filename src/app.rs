@@ -26,7 +26,7 @@ use crate::views::{
     board, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
-    team_list, team_members, toast,
+    team_list, team_members, team_picker, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -124,6 +124,10 @@ pub enum Message {
     DependencyPickerSelected(String),
     /// Remove a dependency edge by its local dependency-row UUID.
     RemoveDependency(String),
+    /// Open the "Move to team" picker for an issue (local UUID).
+    OpenMoveTeamPicker(String),
+    /// A target team (local UUID) was chosen in the move picker.
+    MoveTeamSelected(String),
 
     // Labels
     OpenLabels,
@@ -293,6 +297,8 @@ pub enum Modal {
     Labels,
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
+    /// Team picker for moving an issue (local UUID); see `team_picker`.
+    MoveTeam(String),
     /// "Add project to roadmap" picker; carries the lane a chosen project lands in.
     RoadmapAdd(RoadmapCommitment),
     /// Read-only members panel for a team (local UUID).
@@ -1185,6 +1191,42 @@ impl App {
         }
     }
 
+    /// Move `issue_id` to `target_team_id`: apply the local move rules at once,
+    /// queue `issue/move`, and toast what was cleared. Any open detail edits are
+    /// flushed first so they are queued before the move. The moved issue leaves
+    /// the current team's list, so an open detail for it is closed.
+    fn move_issue_to_team(&mut self, issue_id: &str, target_team_id: &str) {
+        self.commit_issue_detail();
+        let conn = self.db();
+        let Ok(Some(issue)) = queries::get_issue(&conn, issue_id) else {
+            return;
+        };
+        match queries::move_issue_to_team(&conn, issue_id, target_team_id) {
+            Ok(summary) => {
+                let _ = queries::queue_issue_move(&conn, issue_id, &issue.team_id);
+                let name = self
+                    .teams
+                    .iter()
+                    .find(|t| t.id == target_team_id)
+                    .map_or("team", |t| t.name.as_str())
+                    .to_string();
+                self.push_toast(summary.toast(&name), ToastKind::Info, false);
+                if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
+                    let back = if self.detail_from_my_issues {
+                        View::MyIssues
+                    } else {
+                        View::Board
+                    };
+                    self.detail_from_my_issues = false;
+                    self.issue_detail = None;
+                    self.switch_view(back);
+                }
+                self.reload_data();
+            }
+            Err(e) => self.push_toast(format!("Move failed: {e}"), ToastKind::Error, false),
+        }
+    }
+
     /// Remove a dependency edge. Captures the remote ids the sync delete needs
     /// BEFORE dropping the local row (mirrors the issue-delete path). A
     /// never-synced edge (no `remote_id`) is deleted locally with nothing
@@ -1964,6 +2006,14 @@ impl App {
             Message::RemoveDependency(dep_id) => {
                 self.remove_dependency(&dep_id);
             }
+            Message::OpenMoveTeamPicker(issue_id) => {
+                self.modal = Modal::MoveTeam(issue_id);
+            }
+            Message::MoveTeamSelected(target_id) => {
+                if let Modal::MoveTeam(issue_id) = std::mem::replace(&mut self.modal, Modal::None) {
+                    self.move_issue_to_team(&issue_id, &target_id);
+                }
+            }
 
             Message::ConfirmDeleteFocusedIssue => {
                 if let Some(issue) = self.focused_issue() {
@@ -2555,6 +2605,15 @@ impl App {
                     for f in report.failures() {
                         match &f.kind {
                             SyncErrorKind::Auth | SyncErrorKind::Network | SyncErrorKind::TeamAccess => {}
+                            // A refused move (422/404) is dropped; the next full pull
+                            // restores the issue, so the toast just carries the reason.
+                            SyncErrorKind::Validation(errs) if f.entity_type == "issue_move" => {
+                                error_toasts
+                                    .push((format!("Move rejected: {}", errs.join("; ")), false));
+                            }
+                            SyncErrorKind::Other if f.entity_type == "issue_move" => {
+                                error_toasts.push((format!("Move rejected: {}", f.message), false));
+                            }
                             SyncErrorKind::Validation(errs) if f.entity_type == "issue" => {
                                 validation_issue = Some((f.entity_id.clone(), errs.clone()));
                             }
@@ -3395,6 +3454,15 @@ impl App {
                 }
                 _ => base,
             },
+            Modal::MoveTeam(issue_id) => {
+                let source = self
+                    .issues
+                    .iter()
+                    .find(|i| i.id == *issue_id)
+                    .map(|i| i.team_id.as_str());
+                let targets = team_picker::move_targets(&self.teams, source.unwrap_or_default());
+                iced::widget::stack![base, team_picker::view(&targets)].into()
+            }
             Modal::RoadmapAdd(commitment) => {
                 let modal =
                     roadmap_view::add_modal_view(*commitment, &self.projects, self.selected_team());
