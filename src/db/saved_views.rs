@@ -119,6 +119,7 @@ pub fn apply_tombstones(
             "DELETE FROM saved_views WHERE remote_id = ?1",
             params![row.record_id],
         )?;
+        super::home_page::clear_if_view(conn, row.record_id)?;
     }
     if let Some(t) = server_time {
         set_pull_cursor(conn, SCOPE, DELETED_RESOURCE, t)?;
@@ -186,6 +187,9 @@ pub fn delete_local(conn: &Connection, view_id: &str) -> Result<Option<String>> 
         params![ENTITY_TYPE, view_id, crate::db::now_iso()],
     )?;
     tx.commit()?;
+    if let Some(Some(id)) = remote_id {
+        super::home_page::clear_if_view(conn, id)?;
+    }
     Ok(remote_id
         .flatten()
         .map(|id| serde_json::json!({ "remote_id": id }).to_string()))
@@ -425,5 +429,51 @@ mod tests {
         apply_tombstones(&conn, &[], None).unwrap();
         assert_eq!(deleted_cursor(&conn).unwrap().as_deref(), Some("D1"));
         assert_eq!(cursor(&conn).unwrap(), None);
+    }
+
+    fn home_is(conn: &Connection, kind: &str, id: i64) {
+        crate::db::home_page::apply_me(conn, Some(&crate::api::HomePageDto { kind: kind.into(), id })).unwrap();
+    }
+
+    #[test]
+    fn deleting_the_home_view_locally_clears_home_without_queuing_a_home_write() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({}))], None).unwrap();
+        home_is(&conn, "view", 5);
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        delete_local(&conn, &id).unwrap();
+        assert_eq!(crate::db::home_page::get(&conn).unwrap(), None);
+        assert!(sync_queue::pending_entries(&conn).unwrap().iter().all(|e| e.entity_type != "home_page"));
+    }
+
+    #[test]
+    fn deleting_another_view_keeps_home() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({})), view(6, 700, "B", json!({}))], None).unwrap();
+        home_is(&conn, "view", 5);
+        let id = find_by_remote_id(&conn, 6).unwrap().unwrap().id;
+        delete_local(&conn, &id).unwrap();
+        assert!(crate::db::home_page::get(&conn).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_team_home_with_the_same_id_survives_a_view_delete() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({}))], None).unwrap();
+        home_is(&conn, "team", 5);
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        delete_local(&conn, &id).unwrap();
+        apply_tombstones(&conn, &[tomb("SavedView", 5)], None).unwrap();
+        assert!(crate::db::home_page::get(&conn).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_tombstone_for_the_home_view_clears_home() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({}))], None).unwrap();
+        home_is(&conn, "view", 5);
+        apply_tombstones(&conn, &[tomb("SavedView", 5)], None).unwrap();
+        assert_eq!(crate::db::home_page::get(&conn).unwrap(), None);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
     }
 }
