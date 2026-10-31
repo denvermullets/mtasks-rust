@@ -9,6 +9,7 @@ mod issue_match;
 mod keys;
 mod lane_icon;
 mod mentions;
+mod palette_results;
 mod scroll;
 mod sync;
 mod theme;
