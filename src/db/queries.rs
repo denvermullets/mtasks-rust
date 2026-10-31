@@ -1243,6 +1243,22 @@ pub fn edit_issue_queued(
     Ok(id)
 }
 
+fn max_event_id(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM issue_events", [], |r| r.get(0))?)
+}
+
+/// Link every unlinked local event written after `events_before` (a dependency
+/// change writes one on each of its two issues) to the queue entry that will
+/// push it, making them Pending changes.
+fn link_new_local_events(conn: &Connection, events_before: i64, queue_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE issue_events SET sync_queue_id = ?1
+         WHERE id > ?2 AND source = 'local' AND sync_queue_id IS NULL",
+        params![queue_id, events_before],
+    )?;
+    Ok(())
+}
+
 /// [`update_issue`] plus its `issue/update` queue entry (payload = the issue
 /// JSON), atomically.
 pub fn update_issue_queued(conn: &Connection, issue: &Issue) -> Result<i64> {
@@ -1256,8 +1272,10 @@ pub fn update_issue_queued(conn: &Connection, issue: &Issue) -> Result<i64> {
 /// atomically. A UNIQUE-constraint failure leaves no queue entry behind.
 pub fn insert_issue_dependency_queued(conn: &Connection, dep: &IssueDependency) -> Result<i64> {
     let tx = conn.unchecked_transaction()?;
+    let events_before = max_event_id(&tx)?;
     insert_issue_dependency(&tx, dep)?;
     let id = super::sync_queue::enqueue_returning_id(&tx, "dependency", &dep.id, "create", None)?;
+    link_new_local_events(&tx, events_before, id)?;
     tx.commit()?;
     Ok(id)
 }
@@ -1300,7 +1318,11 @@ pub fn delete_issue_dependency_queued(conn: &Connection, dep_id: &str) -> Result
         )?),
         None => None,
     };
+    let events_before = max_event_id(&tx)?;
     delete_issue_dependency(&tx, dep_id)?;
+    if let Some(qid) = queued {
+        link_new_local_events(&tx, events_before, qid)?;
+    }
     tx.commit()?;
     Ok(queued)
 }

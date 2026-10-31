@@ -43,12 +43,30 @@ pub struct FetchState {
 /// re-delivered at a cursor overlap replace themselves rather than duplicate.
 /// The fetch state is written in the same transaction: a `Some` cursor replaces
 /// the stored one (`None` keeps it), and `fully_fetched` only ever flips to true.
+///
+/// Also prunes settled Pending changes (see [`prune_settled`]), treating the
+/// fetch as having started now. Callers that know when the request actually
+/// began should use [`store_batch_at`].
 pub fn store_batch(
     conn: &Connection,
     issue_id: &str,
     entries: &[ActivityEntry],
     cursor: Option<&str>,
     fully_fetched: bool,
+) -> Result<()> {
+    store_batch_at(conn, issue_id, entries, cursor, fully_fetched, &super::now_iso())
+}
+
+/// [`store_batch`] with the local time (`db::now_iso()` format) at which the
+/// fetch began. Pending changes whose queue entry synced at or before that
+/// instant are pruned in the same transaction.
+pub fn store_batch_at(
+    conn: &Connection,
+    issue_id: &str,
+    entries: &[ActivityEntry],
+    cursor: Option<&str>,
+    fully_fetched: bool,
+    fetch_started_at: &str,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     {
@@ -86,7 +104,30 @@ pub fn store_batch(
             fully_fetched = MAX(fully_fetched, excluded.fully_fetched)",
         params![issue_id, cursor, fully_fetched],
     )?;
+    prune_settled(&tx, issue_id, fetch_started_at)?;
     tx.commit()
+}
+
+/// Remove the issue's settled Pending changes: local `issue_events` rows linked
+/// to a sync-queue entry that has synced AND whose `synced_at` is not later
+/// than `fetch_started_at`, i.e. the server had already applied the change
+/// when the fetch began, so the fetched Activity carries it.
+///
+/// Both timestamps are local-clock `db::now_iso()` strings (fixed-width UTC, so
+/// string comparison orders them). The server's `X-Server-Time` cursor is never
+/// compared with `synced_at`: that would mix clocks. Comparing against the
+/// fetch's *start* (not its completion) also keeps a fetch that was already in
+/// flight when a push landed from pruning a change its response may predate.
+/// A queue entry that is unsynced, or missing, never settles. Returns the
+/// number of rows removed.
+pub fn prune_settled(conn: &Connection, issue_id: &str, fetch_started_at: &str) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM issue_events
+         WHERE issue_id = ?1 AND source = 'local' AND sync_queue_id IN (
+             SELECT id FROM sync_queue
+             WHERE synced_at IS NOT NULL AND synced_at <= ?2)",
+        params![issue_id, fetch_started_at],
+    )
 }
 
 /// The issue's fetch state; the default (no cursor, not fully fetched) if none stored.
@@ -368,16 +409,55 @@ fn created_item(conn: &Connection, issue_id: &str) -> Result<Option<ActivityItem
     }
 }
 
-/// One line per change in a version entry. Changes this layer can't word yet
-/// produce no line.
+/// One line per change in a version entry. Changes this layer can't word
+/// (unknown fields) are covered by a single fallback line: the server's
+/// description with tags stripped (JRST-135), once per entry.
 fn version_lines(conn: &Connection, entry: &StoredEntry) -> Vec<String> {
     let Some(changes) = entry.payload["changes"].as_array() else {
         return Vec::new();
     };
-    changes
+    let mut unknown = false;
+    let mut lines: Vec<String> = changes
         .iter()
-        .filter_map(|c| plain_change_line(c).or_else(|| reference_change_line(conn, c)))
-        .collect()
+        .filter_map(|c| {
+            let line = plain_change_line(c).or_else(|| reference_change_line(conn, c));
+            unknown |= line.is_none();
+            line
+        })
+        .collect();
+    if unknown {
+        let text = strip_html(&entry.description);
+        if !text.is_empty() {
+            lines.push(text);
+        }
+    }
+    lines
+}
+
+/// Server HTML as plain text: tags removed, common entities decoded,
+/// whitespace collapsed.
+fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                out.push(' ');
+            }
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Reference fields (JRST-134): each side is resolved to the local entity's
@@ -439,16 +519,33 @@ fn local_ref_name(conn: &Connection, table: &str, remote_id: i64) -> Option<Stri
 
 /// One line for a dependency entry, worded from this issue's side using
 /// `direction` and `event` (the server description is worded from the blocking
-/// side). JRST-138 adds the relates / duplicates / duplicated_by arms.
+/// side). `relates`, `duplicates` and `duplicated_by` are worded here.
 fn dependency_line(entry: &StoredEntry) -> Option<String> {
-    let kind = match entry.payload["direction"].as_str()? {
-        "blocking" => EventKind::Blocking,
-        "blocked_by" => EventKind::BlockedBy,
-        _ => return None,
-    };
+    let direction = entry.payload["direction"].as_str()?;
     let other = entry.payload["other_issue"]["identifier"]
         .as_str()
         .map(str::to_string);
+    let kind = match direction {
+        "blocking" => EventKind::Blocking,
+        "blocked_by" => EventKind::BlockedBy,
+        "relates" | "duplicates" | "duplicated_by" => {
+            let (added, removed, generic) = match direction {
+                "relates" => ("now related to", "no longer related to", "changed related issues"),
+                "duplicates" => ("now a duplicate of", "no longer a duplicate of", "changed duplicate issues"),
+                _ => ("now duplicated by", "no longer duplicated by", "changed duplicate issues"),
+            };
+            let verb = match entry.payload["event"].as_str()? {
+                "create" => added,
+                "destroy" => removed,
+                _ => return None,
+            };
+            return Some(match other {
+                Some(id) => format!("{verb} {id}"),
+                None => generic.to_string(),
+            });
+        }
+        _ => return None,
+    };
     let (old, new) = match entry.payload["event"].as_str()? {
         "create" => (None, other),
         "destroy" => (other, None),
@@ -879,13 +976,55 @@ mod jrst137_tests {
 
     #[test]
     fn unsupported_direction_or_event_yields_no_line() {
-        assert!(lines("relates", "create", OTHER).is_empty());
+        assert!(lines("sideways", "create", OTHER).is_empty());
         assert!(lines("blocking", "weird", OTHER).is_empty());
+        assert!(lines("relates", "weird", OTHER).is_empty());
     }
 
     #[test]
     fn missing_other_issue_uses_generic_wording() {
         assert_eq!(lines("blocking", "create", r#""other_issue":null"#), ["changed blocking issues"]);
+    }
+}
+
+#[cfg(test)]
+mod jrst138_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn lines(direction: &str, event: &str, other: &str) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let body = format!(
+            r#"[{{"type":"dependency","id":1,"cursor":"dependency:1","created_at":"2026-07-06T00:00:00Z",
+            "event":"{event}","kind":"relates","direction":"{direction}",{other},
+            "actor":{{"id":2,"name":"ryan"}},"description":"x"}}]"#
+        );
+        let entries: Vec<ActivityEntry> = serde_json::from_str(&body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        activity_for_issue(&conn, "i1").unwrap().into_iter().skip(1).map(|i| i.text).collect()
+    }
+
+    const OTHER: &str = r#""other_issue":{"id":2,"identifier":"MTK-2","title":"X"}"#;
+
+    #[test]
+    fn all_six_direction_event_combinations() {
+        assert_eq!(lines("relates", "create", OTHER), ["now related to MTK-2"]);
+        assert_eq!(lines("relates", "destroy", OTHER), ["no longer related to MTK-2"]);
+        assert_eq!(lines("duplicates", "create", OTHER), ["now a duplicate of MTK-2"]);
+        assert_eq!(lines("duplicates", "destroy", OTHER), ["no longer a duplicate of MTK-2"]);
+        assert_eq!(lines("duplicated_by", "create", OTHER), ["now duplicated by MTK-2"]);
+        assert_eq!(lines("duplicated_by", "destroy", OTHER), ["no longer duplicated by MTK-2"]);
+    }
+
+    #[test]
+    fn missing_other_issue_uses_generic_wording() {
+        assert_eq!(lines("relates", "create", r#""other_issue":null"#), ["changed related issues"]);
+        assert_eq!(lines("duplicated_by", "destroy", r#""other_issue":null"#), ["changed duplicate issues"]);
     }
 }
 
@@ -1037,6 +1176,220 @@ mod jrst141_tests {
             ("created the issue".to_string(), ItemOrigin::Server),
             ("changed priority from None to High".to_string(), ItemOrigin::Pending),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod jrst143_tests {
+    use super::*;
+    use crate::db::{migrations, queries, sync_queue};
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i2','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        conn
+    }
+
+    fn edit(conn: &Connection, id: &str) -> i64 {
+        let mut issue = queries::get_issue(conn, id).unwrap().unwrap();
+        issue.priority = 1;
+        queries::update_issue_queued(conn, &issue).unwrap()
+    }
+
+    fn pending(conn: &Connection, id: &str) -> usize {
+        activity_for_issue(conn, id).unwrap().iter().filter(|i| i.origin == ItemOrigin::Pending).count()
+    }
+
+    fn synced_at(conn: &Connection, qid: i64, at: &str) {
+        conn.execute("UPDATE sync_queue SET synced_at = ?1 WHERE id = ?2", params![at, qid]).unwrap();
+    }
+
+    #[test]
+    fn synced_then_fetched_after_is_pruned() {
+        let conn = mem();
+        let q = edit(&conn, "i1");
+        synced_at(&conn, q, "2026-02-01T00:00:00.000Z");
+        store_batch_at(&conn, "i1", &[], None, false, "2026-02-01T00:00:01.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+    }
+
+    #[test]
+    fn synced_but_fetch_started_earlier_is_kept() {
+        let conn = mem();
+        let q = edit(&conn, "i1");
+        synced_at(&conn, q, "2026-02-01T00:00:05.000Z");
+        store_batch_at(&conn, "i1", &[], None, false, "2026-02-01T00:00:01.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 1);
+        // A later fetch settles it.
+        store_batch_at(&conn, "i1", &[], None, false, "2026-02-01T00:00:09.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+    }
+
+    #[test]
+    fn unsynced_change_is_kept_whatever_the_fetch_time() {
+        let conn = mem();
+        edit(&conn, "i1");
+        store_batch_at(&conn, "i1", &[], None, false, "2999-01-01T00:00:00.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 1);
+    }
+
+    #[test]
+    fn only_the_fetched_issue_is_pruned() {
+        let conn = mem();
+        let q1 = edit(&conn, "i1");
+        let q2 = edit(&conn, "i2");
+        synced_at(&conn, q1, "2026-02-01T00:00:00.000Z");
+        synced_at(&conn, q2, "2026-02-01T00:00:00.000Z");
+        store_batch_at(&conn, "i1", &[], None, false, "2026-03-01T00:00:00.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+        assert_eq!(pending(&conn, "i2"), 1);
+    }
+
+    #[test]
+    fn mark_synced_then_plain_store_batch_prunes() {
+        let conn = mem();
+        let q = edit(&conn, "i1");
+        sync_queue::mark_synced(&conn, q).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store_batch(&conn, "i1", &[], None, false).unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+    }
+
+    #[test]
+    fn unqueued_local_events_are_untouched() {
+        let conn = mem();
+        let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
+        issue.priority = 1;
+        queries::update_issue(&conn, &issue).unwrap();
+        store_batch_at(&conn, "i1", &[], None, false, "2999-01-01T00:00:00.000Z").unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM issue_events WHERE issue_id='i1' AND sync_queue_id IS NULL", [], |r| r.get(0)).unwrap();
+        assert!(n >= 1);
+    }
+}
+
+
+#[cfg(test)]
+mod jrst142_tests {
+    use super::*;
+    use crate::db::models::IssueDependency;
+    use crate::db::{migrations, queries};
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        for id in ["a", "b"] {
+            conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES (?1,?1,4,'l1','t1',?2,?2)", params![id, now]).unwrap();
+        }
+        conn
+    }
+
+    fn dep(remote_id: Option<i64>) -> IssueDependency {
+        IssueDependency {
+            id: "d1".into(),
+            remote_id,
+            blocking_issue_id: "a".into(),
+            blocked_issue_id: "b".into(),
+            kind: "blocks".into(),
+            direction: "blocking".into(),
+            created_at: "2026-01-02T00:00:00.000Z".into(),
+            updated_at: "2026-01-02T00:00:00.000Z".into(),
+        }
+    }
+
+    fn pending(conn: &Connection, id: &str) -> usize {
+        activity_for_issue(conn, id).unwrap().iter().filter(|i| i.origin == ItemOrigin::Pending).count()
+    }
+
+    #[test]
+    fn add_is_pending_on_both_issues() {
+        let conn = mem();
+        let q = queries::insert_issue_dependency_queued(&conn, &dep(None)).unwrap();
+        assert_eq!((pending(&conn, "a"), pending(&conn, "b")), (1, 1));
+        let linked: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_events WHERE sync_queue_id = ?1", [q], |r| r.get(0))
+            .unwrap();
+        assert_eq!(linked, 2);
+    }
+
+    #[test]
+    fn remove_of_synced_edge_is_pending_on_both_issues() {
+        let conn = mem();
+        queries::insert_issue_dependency(&conn, &dep(Some(9))).unwrap();
+        conn.execute("UPDATE teams SET remote_id = 1", []).unwrap();
+        conn.execute("UPDATE issues SET remote_id = 5 WHERE id = 'a'", []).unwrap();
+        let q = queries::delete_issue_dependency_queued(&conn, "d1").unwrap();
+        assert!(q.is_some());
+        assert_eq!((pending(&conn, "a"), pending(&conn, "b")), (1, 1));
+    }
+
+    #[test]
+    fn unqueued_remove_is_not_pending() {
+        let conn = mem();
+        queries::insert_issue_dependency(&conn, &dep(None)).unwrap();
+        assert_eq!(queries::delete_issue_dependency_queued(&conn, "d1").unwrap(), None);
+        assert_eq!((pending(&conn, "a"), pending(&conn, "b")), (0, 0));
+    }
+
+    #[test]
+    fn failed_add_leaves_nothing_linked() {
+        let conn = mem();
+        queries::insert_issue_dependency_queued(&conn, &dep(None)).unwrap();
+        assert!(queries::insert_issue_dependency_queued(&conn, &dep(None)).is_err());
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+    }
+}
+
+#[cfg(test)]
+mod jrst135_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn texts(description: &str, changes: &str) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let body = serde_json::json!([{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z",
+            "actor":null,"event":"update","description":description,
+            "changes":serde_json::from_str::<Value>(changes).unwrap()}]);
+        let entries: Vec<ActivityEntry> = serde_json::from_value(body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        activity_for_issue(&conn, "i1").unwrap()[1..].iter().map(|i| i.text.clone()).collect()
+    }
+
+    #[test]
+    fn only_unknown_field_shows_stripped_description() {
+        let t = texts("<p>Ryan set <b>story points</b> &amp; more</p>", r#"[{"field":"story_points","from":1,"to":2}]"#);
+        assert_eq!(t, ["Ryan set story points & more"]);
+    }
+
+    #[test]
+    fn mixed_known_and_unknown_surfaces_both() {
+        let t = texts("<p>changed sprint</p>", r#"[{"field":"title","from":"a","to":"b"},{"field":"sprint","from":null,"to":"S1"}]"#);
+        assert_eq!(t, ["changed the title", "changed sprint"]);
+    }
+
+    #[test]
+    fn several_unknown_changes_emit_one_fallback() {
+        let t = texts("<p>did things</p>", r#"[{"field":"a","from":1,"to":2},{"field":"b","from":1,"to":2}]"#);
+        assert_eq!(t, ["did things"]);
+    }
+
+    #[test]
+    fn all_known_has_no_fallback_and_empty_description_adds_nothing() {
+        assert_eq!(texts("<p>x</p>", r#"[{"field":"title","from":"a","to":"b"}]"#), ["changed the title"]);
+        assert!(texts("<p> </p>", r#"[{"field":"zzz","from":1,"to":2}]"#).is_empty());
     }
 }
 
