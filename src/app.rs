@@ -178,6 +178,10 @@ pub enum Message {
     PaletteQueryChanged(String),
     /// A palette row was chosen; closes the palette and navigates.
     PaletteChoose(crate::palette_results::PaletteNav),
+    /// Up/Down in the palette: move the highlight by this many rows (wraps).
+    PaletteMove(i32),
+    /// Enter in the palette: choose the highlighted row, if any.
+    PaletteSubmit,
 
     // Header bar
     /// Header search box changed; filters the current view's items.
@@ -1796,6 +1800,17 @@ impl App {
                 {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
                 }
+                if matches!(self.modal, Modal::CommandPalette(_)) {
+                    match key {
+                        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                            return self.update(Message::PaletteMove(1));
+                        }
+                        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                            return self.update(Message::PaletteMove(-1));
+                        }
+                        _ => {}
+                    }
+                }
                 let modal_open = self.modal != Modal::None;
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
@@ -2510,6 +2525,20 @@ impl App {
             Message::PaletteQueryChanged(query) => {
                 if let Modal::CommandPalette(ref mut palette) = self.modal {
                     palette.set_query(query);
+                }
+            }
+            Message::PaletteMove(delta) => {
+                if let Modal::CommandPalette(ref mut palette) = self.modal {
+                    palette.move_selection(delta);
+                }
+            }
+            Message::PaletteSubmit => {
+                let nav = match self.modal {
+                    Modal::CommandPalette(ref palette) => palette.chosen(),
+                    _ => None,
+                };
+                if let Some(nav) = nav {
+                    return self.update(Message::PaletteChoose(nav));
                 }
             }
             Message::PaletteChoose(nav) => {

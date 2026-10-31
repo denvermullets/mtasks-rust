@@ -5,13 +5,15 @@ use iced::widget::{button, column, container, mouse_area, row, text, text_input}
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::palette_results::{palette_results, PaletteData, PaletteRow};
+use crate::palette_results::{palette_results, PaletteData, PaletteNav, PaletteRow};
 use crate::theme as t;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaletteState {
     pub query: String,
     pub rows: Vec<PaletteRow>,
+    /// Index of the highlighted row; always 0 when there are no rows.
+    pub selected: usize,
 }
 
 impl PaletteState {
@@ -19,6 +21,7 @@ impl PaletteState {
         let mut state = PaletteState {
             query: String::new(),
             rows: Vec::new(),
+            selected: 0,
         };
         state.set_query(String::new());
         state
@@ -28,6 +31,20 @@ impl PaletteState {
     pub fn set_query(&mut self, query: String) {
         self.rows = palette_results(&query, &PaletteData::default());
         self.query = query;
+        self.selected = 0;
+    }
+
+    /// Move the highlight by `delta` rows, wrapping at both ends.
+    pub fn move_selection(&mut self, delta: i32) {
+        let n = self.rows.len() as i32;
+        if n > 0 {
+            self.selected = (self.selected as i32 + delta).rem_euclid(n) as usize;
+        }
+    }
+
+    /// Where Enter goes: the highlighted row's target, if any.
+    pub fn chosen(&self) -> Option<PaletteNav> {
+        self.rows.get(self.selected).map(|r| r.nav.clone())
     }
 }
 
@@ -42,12 +59,14 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
         text_input("Search views, teams, projects, issues\u{2026}", &state.query)
             .id(input_id())
             .on_input(Message::PaletteQueryChanged)
+            .on_submit(Message::PaletteSubmit)
             .padding(8)
             .size(14)
             .width(Length::Fill),
     );
     let mut list = column![].spacing(2);
-    for r in &state.rows {
+    for (i, r) in state.rows.iter().enumerate() {
+        let highlighted = i == state.selected;
         list = list.push(
             button(
                 row![
@@ -64,8 +83,8 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
             .on_press(Message::PaletteChoose(r.nav.clone()))
             .padding([6, 8])
             .width(Length::Fill)
-            .style(|_theme: &Theme, status| button::Style {
-                background: matches!(status, button::Status::Hovered)
+            .style(move |_theme: &Theme, status| button::Style {
+                background: (highlighted || matches!(status, button::Status::Hovered))
                     .then(|| iced::Background::Color(t::bg_card_focused())),
                 text_color: t::text_primary(),
                 border: Border {
@@ -121,5 +140,43 @@ mod tests {
         assert_eq!(state.rows.len(), 4);
         state.set_query("road".into());
         assert_eq!(state.rows.len(), 1);
+    }
+
+    #[test]
+    fn first_row_highlighted_on_open_and_after_typing() {
+        let mut state = PaletteState::new();
+        assert_eq!(state.selected, 0);
+        state.move_selection(1);
+        state.set_query("o".into());
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn down_wraps_to_first_and_up_wraps_to_last() {
+        let mut state = PaletteState::new();
+        state.move_selection(-1);
+        assert_eq!(state.selected, 3);
+        state.move_selection(1);
+        assert_eq!(state.selected, 0);
+        state.move_selection(1);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn move_with_no_rows_stays_put() {
+        let mut state = PaletteState::new();
+        state.set_query("zzz".into());
+        state.move_selection(1);
+        state.move_selection(-1);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.chosen(), None);
+    }
+
+    #[test]
+    fn chosen_is_the_highlighted_rows_target() {
+        let mut state = PaletteState::new();
+        assert_eq!(state.chosen(), Some(PaletteNav::View(crate::app::View::Board)));
+        state.move_selection(-1);
+        assert_eq!(state.chosen(), Some(PaletteNav::View(crate::app::View::MyIssues)));
     }
 }
