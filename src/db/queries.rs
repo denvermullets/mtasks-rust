@@ -144,7 +144,8 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
-    events::record_created(conn, issue, Source::Local)?;
+    // No stored "created" event: the activity derives that line at read time.
+    events::record_initial_parent(conn, issue, Source::Local)?;
     Ok(())
 }
 
@@ -2782,6 +2783,13 @@ mod tests {
     }
 
     #[test]
+    fn local_insert_stores_no_created_event() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("n0", None, None)).unwrap();
+        assert!(events::events_for_issue(&conn, "n0").unwrap().is_empty());
+    }
+
+    #[test]
     fn local_writes_record_events_and_not_sync_queue() {
         let conn = setup();
         conn.execute(
@@ -2802,7 +2810,6 @@ mod tests {
         assert_eq!(
             event_lines(&conn, "n1"),
             vec![
-                "created the issue",
                 "changed status from Backlog to In Progress",
                 "changed priority from None to High",
                 "changed the title",
