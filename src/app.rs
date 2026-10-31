@@ -51,6 +51,8 @@ pub enum Message {
     RecurringFormTitleChanged(String),
     RecurringFormDescriptionChanged(iced::widget::text_editor::Action),
     RecurringFormPriorityChanged(Priority),
+    /// `None` = server default.
+    RecurringFormTimeZoneChanged(Option<String>),
     RecurringFormFrequencyChanged(crate::views::recurring_issue_form::Frequency),
     RecurringFormIntervalChanged(String),
     /// 0 = Sunday.
@@ -4402,6 +4404,11 @@ impl App {
             Message::RecurringFormDescriptionChanged(action) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.description.perform(action);
+                }
+            }
+            Message::RecurringFormTimeZoneChanged(z) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.time_zone = z;
                 }
             }
             Message::RecurringFormPriorityChanged(p) => {

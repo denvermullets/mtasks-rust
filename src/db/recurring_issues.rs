@@ -387,6 +387,7 @@ pub fn time_zone_abbreviation(name: &str) -> Option<&'static str> {
         "Pacific Time (US & Canada)" => "PT",
         "Alaska" => "AKT",
         "Hawaii" => "HST",
+        "Indiana (East)" => "ET",
         "UTC" => "UTC",
         _ => return None,
     })
@@ -565,6 +566,8 @@ pub struct NewRecurringIssue {
     pub day_of_month: Option<i64>,
     /// First run date, `YYYY-MM-DD`.
     pub starts_on: String,
+    /// ActiveSupport zone name; `None` lets the server use the creator's.
+    pub time_zone: Option<String>,
 }
 
 /// Payload of a `recurring_issue` / `create` queue entry: `{"starts_on":...}`.
@@ -590,7 +593,7 @@ pub fn create(conn: &Connection, local_team_id: &str, new: &NewRecurringIssue) -
         c.execute(
             "INSERT INTO recurring_issues (id, team_id, title, description, priority, frequency,
                 interval, weekday, day_of_month, time_zone, active, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, 1, ?10, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?11, 1, ?10, ?10)",
             params![
                 id,
                 local_team_id,
@@ -601,7 +604,8 @@ pub fn create(conn: &Connection, local_team_id: &str, new: &NewRecurringIssue) -
                 new.interval,
                 new.weekday,
                 new.day_of_month,
-                now
+                now,
+                new.time_zone
             ],
         )?;
         Ok(())
@@ -931,6 +935,7 @@ mod tests {
             weekday: Some(3),
             day_of_month: None,
             starts_on: "2026-11-04".into(),
+            time_zone: None,
         }
     }
 
@@ -989,6 +994,16 @@ mod tests {
         let rows = list_rows(&conn, "t1").unwrap();
         assert_eq!(rows[0].schedule, "Every 2 weeks on Wednesday");
         assert!(rows[0].next_run_pending);
+    }
+
+    #[test]
+    fn create_writes_the_chosen_time_zone() {
+        let conn = setup();
+        let mut new = new_weekly();
+        new.time_zone = Some("Arizona".into());
+        let id = create(&conn, "t1", &new).unwrap();
+        assert_eq!(get(&conn, &id).unwrap().unwrap().time_zone.as_deref(), Some("Arizona"));
+        assert_eq!(list_rows(&conn, "t1").unwrap()[0].time_zone_label.as_deref(), Some("MST"));
     }
 
     #[test]
