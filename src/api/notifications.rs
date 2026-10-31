@@ -35,6 +35,24 @@ pub async fn mark_read(client: &ApiClient, remote_id: i64) -> Result<(), ApiErro
     Ok(())
 }
 
+/// Response of `PATCH /notifications/read_all`.
+#[derive(Debug, serde::Deserialize)]
+pub struct ReadAllResponse {
+    #[allow(dead_code)]
+    pub marked: i64,
+    pub unread_count: i64,
+}
+
+/// `PATCH /api/v1/notifications/read_all` with `{"before": ts}`: marks every
+/// unread Notification created at or before `before`. Idempotent.
+pub async fn mark_all_read(client: &ApiClient, before: &str) -> Result<ReadAllResponse, ApiError> {
+    client
+        .patch(READ_ALL_PATH, &serde_json::json!({ "before": before }))
+        .await
+}
+
+const READ_ALL_PATH: &str = "api/v1/notifications/read_all";
+
 fn read_path(remote_id: i64) -> String {
     format!("api/v1/notifications/{remote_id}/read")
 }
@@ -56,6 +74,13 @@ mod tests {
     #[test]
     fn read_path_targets_the_member_route() {
         assert_eq!(read_path(12), "api/v1/notifications/12/read");
+    }
+
+    #[test]
+    fn read_all_path_and_response_decode() {
+        assert_eq!(READ_ALL_PATH, "api/v1/notifications/read_all");
+        let r: ReadAllResponse = serde_json::from_str(r#"{"marked": 3, "unread_count": 1}"#).unwrap();
+        assert_eq!((r.marked, r.unread_count), (3, 1));
     }
 
     const SAMPLE: &str = r#"{

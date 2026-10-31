@@ -318,6 +318,7 @@ pub enum Message {
     InboxIssueFetched(i64, Result<(), String>),
     /// Leave an issue detail opened from the Inbox and return there.
     BackToInbox,
+    InboxMarkAllRead,
     /// Switch the Inbox to the other filter (f).
     InboxToggleFilter,
     /// Set the Inbox filter (filter tabs).
@@ -2035,6 +2036,15 @@ impl App {
                 self.detail_from_inbox = false;
                 self.issue_detail = None;
                 self.switch_view(View::Inbox);
+            }
+            Message::InboxMarkAllRead => {
+                let conn = self.db();
+                let now = crate::db::now_iso();
+                if crate::db::notifications::mark_all_read(&conn, &now).unwrap_or(0) > 0 {
+                    self.notif_unread_count =
+                        crate::db::notifications::unread_count(&conn).unwrap_or(0);
+                    self.reload_inbox();
+                }
             }
             Message::InboxSelect(i) => {
                 if i < self.inbox.items.len() {
