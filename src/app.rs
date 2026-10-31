@@ -646,7 +646,28 @@ impl App {
                 .cloned()
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
+            saved_views: self.palette_saved_views(),
         }
+    }
+
+    /// Saved views of unarchived teams, for the palette.
+    fn palette_saved_views(&self) -> Vec<crate::palette_results::SearchableSavedView> {
+        self.teams
+            .iter()
+            .filter(|t| t.archived_at.is_none())
+            .flat_map(|t| {
+                self.saved_views
+                    .get(&t.id)
+                    .into_iter()
+                    .flatten()
+                    .map(|v| crate::palette_results::SearchableSavedView {
+                        id: v.id.clone(),
+                        team_id: v.team_id.clone(),
+                        team_name: t.name.clone(),
+                        name: v.name.clone(),
+                    })
+            })
+            .collect()
     }
 
     /// Before opening an issue or project from the palette: when it belongs to
@@ -3052,6 +3073,7 @@ impl App {
                     PaletteNav::Team(id) => {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
+                    PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
