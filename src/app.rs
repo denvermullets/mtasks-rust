@@ -729,6 +729,8 @@ impl App {
             self.issue_labels.clear();
         }
 
+        self.refresh_open_view();
+
         // Filters are global but hold per-team ids; drop the ones this data
         // doesn't contain (My Issues loads every team, so its ids all stay).
         if self.selected_team_id.is_some()
@@ -1019,6 +1021,47 @@ impl App {
         if let Some(v) = &self.open_view {
             if !v.stays_open(self.selected_team_id.as_deref(), on_board) {
                 self.open_view = None;
+            }
+        }
+    }
+
+    /// Reconcile the open Saved view with the freshly loaded mirror: follow a
+    /// pulled change (see `OpenView::refresh`), or, if the view is gone (a
+    /// server tombstone), land on the team's board.
+    fn refresh_open_view(&mut self) {
+        let Some(v) = &mut self.open_view else {
+            return;
+        };
+        let latest = self
+            .saved_views
+            .values()
+            .flatten()
+            .find(|sv| sv.id == v.view_id);
+        match latest {
+            Some(sv) => {
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                let local = crate::saved_view::BoardState {
+                    display: self.config.display.clone(),
+                    filters: self.config.filters.clone(),
+                    search: String::new(),
+                };
+                v.refresh(sv, &mirror, &local);
+            }
+            None => {
+                self.open_view = None;
+                if matches!(self.view, View::IssueDetail(_)) {
+                    self.commit_issue_detail();
+                    self.detail_from_my_issues = false;
+                    self.detail_from_inbox = false;
+                }
+                self.view = View::Board;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
             }
         }
     }
