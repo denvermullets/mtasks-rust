@@ -12,7 +12,7 @@ use crate::db::models::{
     Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
-use crate::db::events::{self, IssueEvent};
+use crate::db::activity::ActivityItem;
 use crate::db::{connection, queries, sync_queue};
 use crate::display::{
     self, CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy, SubGroup, ViewMode,
@@ -594,7 +594,7 @@ pub struct App {
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
     /// Local change history for the open issue (see `db::events`).
-    detail_events: Vec<IssueEvent>,
+    detail_activity: Vec<ActivityItem>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
     /// Search + direction state for the open issue-dependency picker modal.
@@ -826,20 +826,21 @@ impl App {
             self.detail_deps =
                 queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
-            self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
+            self.detail_activity =
+                crate::db::activity::activity_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
         } else if let View::ProjectDetail(ref project_id) = self.view {
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments =
                 queries::comments_for_project(conn, project_id).unwrap_or_default();
-            self.detail_events.clear();
+            self.detail_activity.clear();
             return;
         } else {
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments.clear();
-            self.detail_events.clear();
+            self.detail_activity.clear();
         }
     }
 
@@ -2004,7 +2005,7 @@ impl App {
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_comments: Vec::new(),
-            detail_events: Vec::new(),
+            detail_activity: Vec::new(),
             detail_references: Vec::new(),
             issue_picker: None,
             focused_lane: 0,
@@ -4525,7 +4526,7 @@ impl App {
                             project_name,
                             &self.detail_deps,
                             &self.detail_comments,
-                            &self.detail_events,
+                            &self.detail_activity,
                             &self.detail_references,
                             &self.issues,
                             parent,
