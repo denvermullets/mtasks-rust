@@ -43,12 +43,30 @@ pub struct FetchState {
 /// re-delivered at a cursor overlap replace themselves rather than duplicate.
 /// The fetch state is written in the same transaction: a `Some` cursor replaces
 /// the stored one (`None` keeps it), and `fully_fetched` only ever flips to true.
+///
+/// Also prunes settled Pending changes (see [`prune_settled`]), treating the
+/// fetch as having started now. Callers that know when the request actually
+/// began should use [`store_batch_at`].
 pub fn store_batch(
     conn: &Connection,
     issue_id: &str,
     entries: &[ActivityEntry],
     cursor: Option<&str>,
     fully_fetched: bool,
+) -> Result<()> {
+    store_batch_at(conn, issue_id, entries, cursor, fully_fetched, &super::now_iso())
+}
+
+/// [`store_batch`] with the local time (`db::now_iso()` format) at which the
+/// fetch began. Pending changes whose queue entry synced at or before that
+/// instant are pruned in the same transaction.
+pub fn store_batch_at(
+    conn: &Connection,
+    issue_id: &str,
+    entries: &[ActivityEntry],
+    cursor: Option<&str>,
+    fully_fetched: bool,
+    fetch_started_at: &str,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     {
@@ -86,7 +104,30 @@ pub fn store_batch(
             fully_fetched = MAX(fully_fetched, excluded.fully_fetched)",
         params![issue_id, cursor, fully_fetched],
     )?;
+    prune_settled(&tx, issue_id, fetch_started_at)?;
     tx.commit()
+}
+
+/// Remove the issue's settled Pending changes: local `issue_events` rows linked
+/// to a sync-queue entry that has synced AND whose `synced_at` is not later
+/// than `fetch_started_at`, i.e. the server had already applied the change
+/// when the fetch began, so the fetched Activity carries it.
+///
+/// Both timestamps are local-clock `db::now_iso()` strings (fixed-width UTC, so
+/// string comparison orders them). The server's `X-Server-Time` cursor is never
+/// compared with `synced_at`: that would mix clocks. Comparing against the
+/// fetch's *start* (not its completion) also keeps a fetch that was already in
+/// flight when a push landed from pruning a change its response may predate.
+/// A queue entry that is unsynced, or missing, never settles. Returns the
+/// number of rows removed.
+pub fn prune_settled(conn: &Connection, issue_id: &str, fetch_started_at: &str) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM issue_events
+         WHERE issue_id = ?1 AND source = 'local' AND sync_queue_id IN (
+             SELECT id FROM sync_queue
+             WHERE synced_at IS NOT NULL AND synced_at <= ?2)",
+        params![issue_id, fetch_started_at],
+    )
 }
 
 /// The issue's fetch state; the default (no cursor, not fully fetched) if none stored.
@@ -1019,5 +1060,98 @@ mod jrst141_tests {
             ("created the issue".to_string(), ItemOrigin::Server),
             ("changed priority from None to High".to_string(), ItemOrigin::Pending),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod jrst143_tests {
+    use super::*;
+    use crate::db::{migrations, queries, sync_queue};
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i2','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        conn
+    }
+
+    fn edit(conn: &Connection, id: &str) -> i64 {
+        let mut issue = queries::get_issue(conn, id).unwrap().unwrap();
+        issue.priority = 1;
+        queries::update_issue_queued(conn, &issue).unwrap()
+    }
+
+    fn pending(conn: &Connection, id: &str) -> usize {
+        activity_for_issue(conn, id).unwrap().iter().filter(|i| i.origin == ItemOrigin::Pending).count()
+    }
+
+    fn synced_at(conn: &Connection, qid: i64, at: &str) {
+        conn.execute("UPDATE sync_queue SET synced_at = ?1 WHERE id = ?2", params![at, qid]).unwrap();
+    }
+
+    #[test]
+    fn synced_then_fetched_after_is_pruned() {
+        let conn = mem();
+        let q = edit(&conn, "i1");
+        synced_at(&conn, q, "2026-02-01T00:00:00.000Z");
+        store_batch_at(&conn, "i1", &[], None, false, "2026-02-01T00:00:01.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+    }
+
+    #[test]
+    fn synced_but_fetch_started_earlier_is_kept() {
+        let conn = mem();
+        let q = edit(&conn, "i1");
+        synced_at(&conn, q, "2026-02-01T00:00:05.000Z");
+        store_batch_at(&conn, "i1", &[], None, false, "2026-02-01T00:00:01.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 1);
+        // A later fetch settles it.
+        store_batch_at(&conn, "i1", &[], None, false, "2026-02-01T00:00:09.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+    }
+
+    #[test]
+    fn unsynced_change_is_kept_whatever_the_fetch_time() {
+        let conn = mem();
+        edit(&conn, "i1");
+        store_batch_at(&conn, "i1", &[], None, false, "2999-01-01T00:00:00.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 1);
+    }
+
+    #[test]
+    fn only_the_fetched_issue_is_pruned() {
+        let conn = mem();
+        let q1 = edit(&conn, "i1");
+        let q2 = edit(&conn, "i2");
+        synced_at(&conn, q1, "2026-02-01T00:00:00.000Z");
+        synced_at(&conn, q2, "2026-02-01T00:00:00.000Z");
+        store_batch_at(&conn, "i1", &[], None, false, "2026-03-01T00:00:00.000Z").unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+        assert_eq!(pending(&conn, "i2"), 1);
+    }
+
+    #[test]
+    fn mark_synced_then_plain_store_batch_prunes() {
+        let conn = mem();
+        let q = edit(&conn, "i1");
+        sync_queue::mark_synced(&conn, q).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store_batch(&conn, "i1", &[], None, false).unwrap();
+        assert_eq!(pending(&conn, "i1"), 0);
+    }
+
+    #[test]
+    fn unqueued_local_events_are_untouched() {
+        let conn = mem();
+        let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
+        issue.priority = 1;
+        queries::update_issue(&conn, &issue).unwrap();
+        store_batch_at(&conn, "i1", &[], None, false, "2999-01-01T00:00:00.000Z").unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM issue_events WHERE issue_id='i1' AND sync_queue_id IS NULL", [], |r| r.get(0)).unwrap();
+        assert!(n >= 1);
     }
 }
