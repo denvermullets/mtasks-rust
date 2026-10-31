@@ -152,6 +152,7 @@ fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
         ("Projects", "Current team", View::ProjectList),
         ("Roadmap", "Current team", View::Roadmap),
         ("My Issues", "All teams", View::MyIssues),
+        ("Inbox", "Notifications", View::Inbox),
     ];
     for (name, scope, view) in views {
         if name_matches(needle, name) {
@@ -364,7 +365,7 @@ mod tests {
     fn empty_query_lists_views_then_teams_in_order() {
         assert_eq!(
             names(""),
-            ["Board", "Projects", "Roadmap", "My Issues", "JAIT App", "Rails API"]
+            ["Board", "Projects", "Roadmap", "My Issues", "Inbox", "JAIT App", "Rails API"]
         );
     }
 
@@ -407,6 +408,13 @@ mod tests {
     #[test]
     fn substring_matches_inside_name() {
         assert_eq!(names("issues"), ["My Issues"]);
+    }
+
+    #[test]
+    fn inbox_row_navigates_to_the_inbox() {
+        let rows = palette_results("inbox", &data());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nav, PaletteNav::View(View::Inbox));
     }
 
     #[test]
@@ -460,7 +468,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["View", "View", "View", "View", "Project", "Project"]
+            ["View", "View", "View", "View", "View", "Project", "Project"]
         );
     }
 
@@ -480,7 +488,7 @@ mod tests {
     #[test]
     fn typing_recomputes_rows() {
         let mut state = PaletteState::new(PaletteData::default());
-        assert_eq!(state.rows.len(), 4);
+        assert_eq!(state.rows.len(), 5);
         state.set_query("road".into());
         assert_eq!(state.rows.len(), 1);
     }
@@ -498,7 +506,7 @@ mod tests {
     fn down_wraps_to_first_and_up_wraps_to_last() {
         let mut state = PaletteState::new(PaletteData::default());
         state.move_selection(-1);
-        assert_eq!(state.selected, 3);
+        assert_eq!(state.selected, 4);
         state.move_selection(1);
         assert_eq!(state.selected, 0);
         state.move_selection(1);
@@ -520,6 +528,6 @@ mod tests {
         let mut state = PaletteState::new(PaletteData::default());
         assert_eq!(state.chosen(), Some(PaletteNav::View(View::Board)));
         state.move_selection(-1);
-        assert_eq!(state.chosen(), Some(PaletteNav::View(View::MyIssues)));
+        assert_eq!(state.chosen(), Some(PaletteNav::View(View::Inbox)));
     }
 }
