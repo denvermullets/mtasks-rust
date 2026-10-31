@@ -7,9 +7,9 @@ use crate::app::{DepDirection, Message};
 use crate::db::models::{Issue, Team};
 use crate::theme as t;
 
-/// State for the searchable issue-dependency picker modal. `direction` records
-/// which sidebar section opened it (Blocking vs Blocked-by) so the create
-/// handler knows how to orient the new edge.
+/// State for the searchable issue-dependency picker modal. `direction` is the
+/// chosen link kind (defaulting to the sidebar section that opened it); the
+/// create handler uses it to orient the new edge.
 pub struct IssuePickerState {
     pub query: String,
     pub direction: DepDirection,
@@ -33,10 +33,18 @@ pub fn view<'a>(
     team: Option<&'a Team>,
     excluded: &HashSet<&str>,
 ) -> Element<'a, Message> {
-    let title = match state.direction {
-        DepDirection::Blocking => "Add blocking issue",
-        DepDirection::BlockedBy => "Add blocked-by issue",
-    };
+    // Kind chips: the active one is highlighted, disabled kinds are inert.
+    let mut kinds = row![].spacing(6);
+    for kind in DepDirection::ALL {
+        let active = kind == state.direction;
+        let mut chip = button(text(kind.label()).size(12))
+            .padding([4, 10])
+            .style(if active { button::primary } else { button::secondary });
+        if kind.enabled() {
+            chip = chip.on_press(Message::SetDependencyKind(kind));
+        }
+        kinds = kinds.push(chip);
+    }
     let identifier = |issue: &Issue| match team {
         Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
         None => format!("#{}", issue.team_number.unwrap_or(0)),
@@ -88,7 +96,9 @@ pub fn view<'a>(
     let content = column![]
         .spacing(14)
         .width(Length::Fixed(440.0))
-        .push(text(title).size(18).color(t::text_primary()))
+        .push(text("Add link").size(18).color(t::text_primary()))
+        .push(kinds)
+        .push(text("Tab / Shift+Tab to change kind").size(11).color(t::text_muted()))
         .push(
             text_input("Search issues…", &state.query)
                 .on_input(Message::DependencyPickerSearchChanged)
