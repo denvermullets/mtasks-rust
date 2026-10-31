@@ -1,6 +1,6 @@
 use iced::keyboard::{self, Key, Modifiers};
 
-use crate::app::Message;
+use crate::app::{Message, View};
 
 pub fn handle_key_press(
     key: Key,
@@ -28,6 +28,7 @@ pub fn handle_key_press(
             "f" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
             "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
+            "I" | "i" if modifiers.shift() => Some(Message::NavigateToView(View::Inbox)),
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
             "s" if modifiers.is_empty() => Some(Message::SyncNow),
             "," if modifiers.is_empty() => Some(Message::OpenSettings),
@@ -126,6 +127,31 @@ mod tests {
             Some(Message::MoveFocusedIssueToTeam)
         ));
         assert!(press("t", false, false).is_none());
+    }
+
+    #[test]
+    fn shift_i_opens_inbox_on_any_view() {
+        for on_board in [true, false] {
+            let m = handle_key_press(
+                Key::Character("I".into()),
+                Modifiers::SHIFT,
+                false,
+                false,
+                on_board,
+            );
+            assert!(matches!(m, Some(Message::NavigateToView(View::Inbox))));
+        }
+    }
+
+    #[test]
+    fn shift_i_ignored_while_modal_open() {
+        let m = handle_key_press(Key::Character("I".into()), Modifiers::SHIFT, true, false, true);
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn plain_i_does_nothing() {
+        assert!(press("i", false, true).is_none());
     }
 
     #[test]

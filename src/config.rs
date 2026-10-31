@@ -34,6 +34,14 @@ pub struct Config {
     /// launch, so changes apply after a restart.
     #[serde(default = "default_font")]
     pub font: String,
+    /// Post native macOS banners for new inbox notifications when the window
+    /// is unfocused. Local-only, never synced.
+    #[serde(default = "default_true")]
+    pub native_notifications: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_theme() -> String {
@@ -60,6 +68,7 @@ impl Default for Config {
             filters: Filters::default(),
             theme: default_theme(),
             font: default_font(),
+            native_notifications: true,
         }
     }
 }
@@ -138,6 +147,16 @@ mod tests {
         assert!(!toml::to_string_pretty(&cfg)
             .unwrap()
             .contains("sync_interval"));
+    }
+
+    #[test]
+    fn native_notifications_defaults_on_and_round_trips() {
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert!(old.native_notifications);
+        let mut cfg = Config::default();
+        cfg.native_notifications = false;
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(!back.native_notifications);
     }
 
     #[test]

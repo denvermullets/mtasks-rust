@@ -222,6 +222,7 @@ pub enum Message {
     SettingsThemeChanged(t::ThemeChoice),
     /// Font picked in Settings: saves to config; applies after restart.
     SettingsFontChanged(fonts::FontChoice),
+    SettingsNativeNotificationsToggled(bool),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
@@ -2713,6 +2714,15 @@ impl App {
                 self.save_config_change(new_cfg);
             }
 
+            Message::SettingsNativeNotificationsToggled(on) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.native_notifications = on;
+                if let Some(ref mut form) = self.settings_form {
+                    form.native_notifications = on;
+                }
+                self.save_config_change(new_cfg);
+            }
+
             Message::ExportCsv => {
                 let Some(team) = self.selected_team().cloned() else {
                     return Task::none();
@@ -3075,12 +3085,11 @@ impl App {
                     if self.view == View::Inbox {
                         self.reload_inbox();
                     }
-                    // JRST-99 wires the Settings toggle in place of `true`.
                     crate::sync::banner::post(crate::db::notifications::banners_to_fire(
                         &report.new_unread,
                         self.scheduler.is_focused(),
                         report.backfill,
-                        true,
+                        self.config.native_notifications,
                     ));
                     self.last_notif_poll = Some(report);
                 }
