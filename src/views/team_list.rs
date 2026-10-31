@@ -17,6 +17,8 @@ pub fn view<'a>(
     team_menu_open: Option<&'a str>,
     show_archived: bool,
     unread_count: i64,
+    home_team_remote_id: Option<i64>,
+    read_only: bool,
     saved_views: &'a HashMap<String, Vec<SavedView>>,
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(0).width(Length::Fill);
@@ -136,7 +138,14 @@ pub fn view<'a>(
                     synced.then(|| Message::OpenTeamWebSettings(team.id.clone(), section)),
                 )
             };
+            let is_home = team.remote_id.is_some() && team.remote_id == home_team_remote_id;
+            let home_label = if is_home { "Home page \u{2713}" } else { "Set as home" };
+            let can_set_home = synced && !read_only && !is_home;
             col = col
+                .push(menu_row(
+                    home_label,
+                    can_set_home.then(|| Message::SetTeamAsHome(team.id.clone())),
+                ))
                 .push(menu_row(
                     "Members",
                     Some(Message::OpenTeamMembers(team.id.clone())),
