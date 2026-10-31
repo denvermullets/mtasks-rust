@@ -12,6 +12,7 @@ pub mod lanes;
 pub mod members;
 pub mod notifications;
 pub mod projects;
+pub mod recurring_issues;
 pub mod saved_views;
 pub mod teams;
 pub mod users;

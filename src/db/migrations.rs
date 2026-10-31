@@ -562,6 +562,52 @@ const MIGRATIONS: &[Migration] = &[
                 OR sync_queue_id IS NULL;
         ",
     },
+    Migration {
+        version: 28,
+        name: "recurring_issues",
+        up: "
+            -- Local mirror of a team's Recurring issues (schedule templates the
+            -- server spawns issues from). `time_zone` NULL means the creator's
+            -- preference, not yet resolved by the server. Assignee/project/lane
+            -- are local refs, nulled when the target goes; `assignee_name` is the
+            -- server's name, kept for display. The pull cursor lives in
+            -- pull_cursors (resource 'recurring_issues').
+            CREATE TABLE IF NOT EXISTS recurring_issues (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                description TEXT,
+                priority INTEGER NOT NULL DEFAULT 4,
+                frequency TEXT NOT NULL,
+                interval INTEGER NOT NULL DEFAULT 1,
+                weekday INTEGER,
+                day_of_month INTEGER,
+                time_zone TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                next_run_on TEXT,
+                last_run_at TEXT,
+                assignee_id TEXT REFERENCES members(id) ON DELETE SET NULL,
+                assignee_name TEXT,
+                project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                lane_id TEXT REFERENCES lanes(id) ON DELETE SET NULL,
+                creator_remote_id INTEGER,
+                creator_name TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_recurring_issues_team_id
+                ON recurring_issues (team_id);
+
+            CREATE TABLE IF NOT EXISTS recurring_issue_labels (
+                recurring_issue_id TEXT NOT NULL REFERENCES recurring_issues(id) ON DELETE CASCADE,
+                label_id TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+                PRIMARY KEY (recurring_issue_id, label_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_recurring_issue_labels_label_id
+                ON recurring_issue_labels (label_id);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -701,6 +747,8 @@ mod tests {
             "home_page",
             "issue_activity_entries",
             "issue_activity_state",
+            "recurring_issues",
+            "recurring_issue_labels",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }
@@ -709,6 +757,24 @@ mod tests {
             applied_versions(&conn),
             MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn upgrade_from_v27_adds_the_recurring_issue_tables() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 28) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        assert!(!table_exists(&conn, "recurring_issues"));
+        run(&conn).unwrap();
+        assert!(table_exists(&conn, "recurring_issues"));
+        assert!(table_exists(&conn, "recurring_issue_labels"));
+        assert_eq!(applied_versions(&conn).last(), Some(&28));
     }
 
     #[test]

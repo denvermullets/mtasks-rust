@@ -5,6 +5,7 @@ pub mod migrations;
 pub mod models;
 pub mod notifications;
 pub mod queries;
+pub mod recurring_issues;
 pub mod saved_views;
 pub mod sync_queue;
 

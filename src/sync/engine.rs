@@ -2599,6 +2599,8 @@ impl SyncEngine {
                 pull_labels_step(client, target.remote_id, &target.local_id).await,
                 pull_members_step(client, target.remote_id, &target.local_id).await,
                 pull_projects_step(client, target.remote_id, &target.local_id).await,
+                // Before issues, so a spawned issue can resolve its recurring issue.
+                pull_recurring_issues_step(client, target.remote_id, &target.local_id).await,
             ];
             match pull_issues_step(client, target.remote_id, &target.local_id).await {
                 Ok(pull) => {
@@ -2998,6 +3000,45 @@ async fn pull_saved_view_tombstones_step(client: &ApiClient) -> Result<(), Strin
         "phase=pull_deleted_user",
         "ok",
         &format!("mode={} rows={} removed={removed}", pull_mode(&since), page.rows.len()),
+    );
+    Ok(())
+}
+
+/// Pull a team's recurring issues. `updated_since` = stored cursor minus the
+/// overlap (the server filter is strict `>`); the first pull omits it. The
+/// cursor advances to `X-Server-Time` only when the batch was applied.
+async fn pull_recurring_issues_step(
+    client: &ApiClient,
+    team_remote_id: i64,
+    local_team_id: &str,
+) -> Result<(), String> {
+    let since = {
+        let conn = open()?;
+        crate::db::recurring_issues::cursor(&conn, local_team_id)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
+    };
+    let page = crate::api::recurring_issues::list_page(client, team_remote_id, since.as_deref())
+        .await
+        .map_err(|e| format!("recurring_issues: {e}"))?;
+    let conn = open()?;
+    let applied = crate::db::recurring_issues::apply_pulled(
+        &conn,
+        local_team_id,
+        &page.rows,
+        page.server_time.as_deref(),
+    )
+    .map_err(|e| format!("db (recurring issues): {e}"))?;
+    sync_log(
+        &phase_scope("pull_recurring_issues", Some(team_remote_id)),
+        "ok",
+        &format!(
+            "mode={} rows={} upserted={} skipped_pending={}",
+            pull_mode(&since),
+            page.rows.len(),
+            applied.upserted,
+            applied.skipped_pending
+        ),
     );
     Ok(())
 }
