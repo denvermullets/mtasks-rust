@@ -421,14 +421,15 @@ mod tests {
         with.label_ids = vec![1, 2];
         apply_pulled(&conn, "t1", &[with, rec(6, "Without", NOW)], None).unwrap();
         let rows = list_rows(&conn, "t1").unwrap();
+        let by = |t: &str| rows.iter().find(|r| r.title == t).unwrap().labels.clone();
         assert_eq!(
-            rows[0].labels,
+            by("With"),
             vec![
                 ("Alpha".to_string(), None),
                 ("Zed".to_string(), Some("#ff0000".to_string()))
             ]
         );
-        assert!(rows[1].labels.is_empty());
+        assert!(by("Without").is_empty());
     }
 
     #[test]
