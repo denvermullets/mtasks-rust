@@ -1839,6 +1839,22 @@ fn recurring_issue_update_prep(
                 .map(|v| params.lane_id = Some(v)),
             "label_ids" => recurring_label_remote_ids(conn, &row.id)
                 .map(|v| params.label_ids = Some(v)),
+            "frequency" => {
+                params.frequency = Some(row.frequency.clone());
+                Ok(())
+            }
+            "interval" => {
+                params.interval = Some(row.interval);
+                Ok(())
+            }
+            "weekday" => {
+                params.weekday = row.weekday;
+                Ok(())
+            }
+            "day_of_month" => {
+                params.day_of_month = row.day_of_month;
+                Ok(())
+            }
             _ => Ok(()),
         };
         if let Err(o) = r {
@@ -4765,6 +4781,32 @@ mod tests {
         let payload = crate::db::recurring_issues::update_payload(&["active"], Some("2026-11-05"));
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
             Prep::Ready(p) => assert_eq!(p.params.starts_on.as_deref(), Some("2026-11-05")),
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn recurring_issue_schedule_prep_sends_schedule_fields_and_starts_on() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, Some(5));
+        conn.execute(
+            "UPDATE recurring_issues SET frequency = 'weekly', interval = 2, weekday = 3
+             WHERE id = 'r1'",
+            [],
+        )
+        .unwrap();
+        let payload = crate::db::recurring_issues::update_payload(
+            &["frequency", "interval", "weekday"],
+            Some("2026-11-10"),
+        );
+        match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
+            Prep::Ready(p) => assert_eq!(
+                serde_json::to_value(&p.params).unwrap(),
+                serde_json::json!({
+                    "frequency": "weekly", "interval": 2, "weekday": 3,
+                    "starts_on": "2026-11-10"
+                })
+            ),
             _ => panic!("expected Ready"),
         }
     }

@@ -551,9 +551,23 @@ pub fn set_active(conn: &Connection, id: &str, active: bool) -> Result<Option<i6
     .map(Some)
 }
 
-/// The content and routing of a recurring issue as the edit form hands it
-/// over, already validated. No schedule fields: rescheduling (JRST-178) adds
-/// its own write that carries `starts_on`.
+/// The schedule part of an edit, as the form hands it over, already validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleEdit {
+    /// "daily" | "weekly" | "monthly".
+    pub frequency: String,
+    pub interval: i64,
+    /// Set only for weekly (0 = Sunday) / monthly; `None` otherwise.
+    pub weekday: Option<i64>,
+    pub day_of_month: Option<i64>,
+    /// `YYYY-MM-DD`; sent only when the schedule counts as changed.
+    pub starts_on: String,
+    /// The user moved starts-on off its default (today).
+    pub starts_on_moved: bool,
+}
+
+/// The content, routing and schedule of a recurring issue as the edit form
+/// hands it over, already validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecurringEdit {
     pub title: String,
@@ -567,16 +581,15 @@ pub struct RecurringEdit {
     pub time_zone: Option<String>,
     /// Local label ids; the full set after the edit.
     pub label_ids: Vec<String>,
+    pub schedule: ScheduleEdit,
 }
 
-/// Save a content / routing edit locally and queue ONE `update` push naming
-/// only the fields that actually changed, atomically. The payload carries no
-/// `starts_on`, so the server keeps `next_run_on`. Returns the queue entry id,
-/// or `None` when the row is missing or nothing changed (nothing written).
-///
-/// Seam for JRST-178: a schedule edit should be a sibling write that updates
-/// frequency / interval / weekday / day_of_month, adds those names to
-/// `changed`, and passes `Some(starts_on)` to [`update_payload`].
+/// Save a content / routing / schedule edit locally and queue ONE `update`
+/// push naming only the fields that actually changed, atomically. The payload
+/// carries `starts_on` only when the schedule changed (a schedule field differs
+/// or starts-on was moved off its default), so a content-only edit leaves the
+/// server's `next_run_on` alone. Returns the queue entry id, or `None` when
+/// the row is missing or nothing changed (nothing written).
 pub fn update_content(conn: &Connection, id: &str, edit: &RecurringEdit) -> Result<Option<i64>> {
     let Some(old) = get(conn, id)? else {
         return Ok(None);
@@ -611,14 +624,34 @@ pub fn update_content(conn: &Connection, id: &str, edit: &RecurringEdit) -> Resu
     if old_labels != new_labels {
         changed.push("label_ids");
     }
-    if changed.is_empty() {
+    let sch = &edit.schedule;
+    let mut schedule_changed = sch.starts_on_moved;
+    if old.frequency != sch.frequency {
+        changed.push("frequency");
+        schedule_changed = true;
+    }
+    if old.interval != sch.interval {
+        changed.push("interval");
+        schedule_changed = true;
+    }
+    if old.weekday != sch.weekday {
+        changed.push("weekday");
+        schedule_changed = true;
+    }
+    if old.day_of_month != sch.day_of_month {
+        changed.push("day_of_month");
+        schedule_changed = true;
+    }
+    if changed.is_empty() && !schedule_changed {
         return Ok(None);
     }
-    let payload = update_payload(&changed, None);
+    let starts_on = schedule_changed.then_some(sch.starts_on.as_str());
+    let payload = update_payload(&changed, starts_on);
     write_queued(conn, id, "update", Some(&payload), |c| {
         c.execute(
             "UPDATE recurring_issues SET title = ?1, description = ?2, priority = ?3,
-                assignee_id = ?4, project_id = ?5, lane_id = ?6, time_zone = ?7, updated_at = ?8
+                assignee_id = ?4, project_id = ?5, lane_id = ?6, time_zone = ?7, updated_at = ?8,
+                frequency = ?10, interval = ?11, weekday = ?12, day_of_month = ?13
              WHERE id = ?9",
             params![
                 edit.title,
@@ -629,7 +662,11 @@ pub fn update_content(conn: &Connection, id: &str, edit: &RecurringEdit) -> Resu
                 edit.lane_id,
                 time_zone,
                 crate::db::now_iso(),
-                id
+                id,
+                sch.frequency,
+                sch.interval,
+                sch.weekday,
+                sch.day_of_month
             ],
         )?;
         c.execute(
@@ -986,7 +1023,57 @@ mod tests {
             lane_id: r.lane_id,
             time_zone: r.time_zone,
             label_ids: label_ids(conn, id).unwrap(),
+            schedule: ScheduleEdit {
+                frequency: r.frequency,
+                interval: r.interval,
+                weekday: r.weekday,
+                day_of_month: r.day_of_month,
+                starts_on: "2026-11-01".into(),
+                starts_on_moved: false,
+            },
         }
+    }
+
+    #[test]
+    fn a_schedule_edit_carries_starts_on_and_marks_next_run_pending() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(1, "Daily", NOW)], None).unwrap();
+        let id = list_for_team(&conn, "t1").unwrap()[0].id.clone();
+        let mut edit = edit_of(&conn, &id);
+        edit.schedule.frequency = "weekly".into();
+        edit.schedule.interval = 2;
+        edit.schedule.weekday = Some(3);
+        edit.schedule.starts_on = "2026-11-10".into();
+        assert!(update_content(&conn, &id, &edit).unwrap().is_some());
+        let q = queued(&conn);
+        assert_eq!(q.len(), 1);
+        let (changed, starts_on) = parse_update_payload(q[0].1.as_deref());
+        assert_eq!(changed, ["frequency", "interval", "weekday"]);
+        assert_eq!(starts_on.as_deref(), Some("2026-11-10"));
+        let row = get(&conn, &id).unwrap().unwrap();
+        assert_eq!((row.frequency.as_str(), row.interval, row.weekday), ("weekly", 2, Some(3)));
+        assert!(next_run_pending(&conn, &id).unwrap());
+    }
+
+    #[test]
+    fn moving_only_starts_on_reschedules_and_a_content_edit_after_does_not() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(1, "Daily", NOW)], None).unwrap();
+        let id = list_for_team(&conn, "t1").unwrap()[0].id.clone();
+        let mut edit = edit_of(&conn, &id);
+        edit.schedule.starts_on = "2026-12-01".into();
+        edit.schedule.starts_on_moved = true;
+        update_content(&conn, &id, &edit).unwrap();
+        let (changed, starts_on) = parse_update_payload(queued(&conn)[0].1.as_deref());
+        assert!(changed.is_empty());
+        assert_eq!(starts_on.as_deref(), Some("2026-12-01"));
+
+        let mut edit = edit_of(&conn, &id);
+        edit.title = "Renamed".into();
+        update_content(&conn, &id, &edit).unwrap();
+        let (changed, starts_on) = parse_update_payload(queued(&conn)[1].1.as_deref());
+        assert_eq!(changed, ["title"]);
+        assert_eq!(starts_on, None);
     }
 
     #[test]

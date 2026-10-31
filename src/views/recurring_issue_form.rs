@@ -1,9 +1,9 @@
 //! "New recurring issue" / "Edit recurring issue" modal (JRST-172, JRST-177).
 //!
 //! The same state serves both: `editing: Some(local id)` is edit mode, which
-//! saves through [`validate_edit`] (content and routing only; the schedule is
-//! shown as text, not editable). JRST-178 makes the schedule fields live in
-//! edit mode and adds its own write that carries `starts_on`.
+//! saves through [`validate_edit`] (content, routing and the live schedule
+//! fields). Starts-on defaults to today in edit mode; it only reschedules when
+//! the schedule fields or starts-on differ from the stored row / the default.
 //!
 //! Extension points for the follow-up form tickets:
 //! - State: add a field to [`RecurringFormState`] (and its default in `new`).
@@ -22,7 +22,9 @@ use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Priority, Project};
-use crate::db::recurring_issues::{NewRecurringIssue, RecurringEdit, RecurringIssue, FIRST_LANE};
+use crate::db::recurring_issues::{
+    NewRecurringIssue, RecurringEdit, RecurringIssue, ScheduleEdit, FIRST_LANE,
+};
 use crate::theme as t;
 use crate::views::labels as labels_view;
 
@@ -181,6 +183,9 @@ pub struct RecurringFormState {
     pub day_of_month: String,
     /// Raw `YYYY-MM-DD` text.
     pub starts_on: String,
+    /// What `starts_on` defaulted to (today); an edit that leaves it alone
+    /// doesn't count as moving the schedule.
+    pub default_starts_on: String,
     /// Pick lists (first entry is the empty choice) and the current picks.
     pub assignee_options: Vec<Choice>,
     pub project_options: Vec<Choice>,
@@ -224,6 +229,7 @@ impl RecurringFormState {
             weekday: i64::from(today.weekday().num_days_from_sunday()),
             day_of_month: today.day().to_string(),
             starts_on: today.format("%Y-%m-%d").to_string(),
+            default_starts_on: today.format("%Y-%m-%d").to_string(),
             time_zone: None,
             label_ids: Vec::new(),
             errors: FormErrors::default(),
@@ -252,9 +258,6 @@ impl RecurringFormState {
         }
         if let Some(d) = row.day_of_month {
             f.day_of_month = d.to_string();
-        }
-        if let Some(d) = &row.next_run_on {
-            f.starts_on = d.clone();
         }
         f.time_zone = row.time_zone.clone();
         f.stored_time_zone = row.time_zone.clone();
@@ -339,17 +342,13 @@ impl FormErrors {
     }
 }
 
-/// Check the form against the server's rules (title present, interval 1-365,
-/// weekday 0-6 for weekly, day of month 1-31 for monthly, valid starts-on
-/// date). Ok carries the db write; Err every failing field at once.
-pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErrors> {
-    let mut errors = FormErrors::default();
-
-    let title = form.title.trim();
-    if title.is_empty() {
-        errors.title = Some("Title can't be blank".into());
-    }
-
+/// The schedule rules shared by create and edit: interval 1-365, weekday 0-6
+/// for weekly, day of month 1-31 for monthly, valid starts-on date. Failures
+/// land in `errors`; the returned values are only meaningful when it stays empty.
+fn validate_schedule(
+    form: &RecurringFormState,
+    errors: &mut FormErrors,
+) -> (i64, Option<i64>, Option<i64>, String) {
     let interval = match form.interval.trim().parse::<i64>() {
         Ok(n) if (1..=365).contains(&n) => n,
         _ => {
@@ -379,6 +378,21 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
     if NaiveDate::parse_from_str(starts_on, "%Y-%m-%d").is_err() {
         errors.starts_on = Some("Starts on must be a valid date (YYYY-MM-DD)".into());
     }
+    (interval, weekday, day_of_month, starts_on.to_string())
+}
+
+/// Check the form against the server's rules (title present, interval 1-365,
+/// weekday 0-6 for weekly, day of month 1-31 for monthly, valid starts-on
+/// date). Ok carries the db write; Err every failing field at once.
+pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErrors> {
+    let mut errors = FormErrors::default();
+
+    let title = form.title.trim();
+    if title.is_empty() {
+        errors.title = Some("Title can't be blank".into());
+    }
+
+    let (interval, weekday, day_of_month, starts_on) = validate_schedule(form, &mut errors);
 
     if let Some(z) = &form.time_zone {
         if !US_TIME_ZONES.contains(&z.as_str()) {
@@ -403,7 +417,7 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
         interval,
         weekday,
         day_of_month,
-        starts_on: starts_on.to_string(),
+        starts_on,
         assignee_id: form.assignee.id.clone(),
         project_id: form.project.id.clone(),
         lane_id: form.lane.id.clone(),
@@ -412,8 +426,8 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
     })
 }
 
-/// Check an edit: only the title (and the zone) can fail, since the schedule
-/// isn't editable here. A time zone outside [`US_TIME_ZONES`] is accepted when
+/// Check an edit: title, the live schedule fields and the zone. Starts-on
+/// defaults to today and only counts as moving the schedule when changed. A time zone outside [`US_TIME_ZONES`] is accepted when
 /// it is the zone already stored on the row.
 pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, FormErrors> {
     let mut errors = FormErrors::default();
@@ -421,6 +435,7 @@ pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, FormErr
     if title.is_empty() {
         errors.title = Some("Title can't be blank".into());
     }
+    let (interval, weekday, day_of_month, starts_on) = validate_schedule(form, &mut errors);
     if let Some(z) = &form.time_zone {
         if !US_TIME_ZONES.contains(&z.as_str()) && form.stored_time_zone.as_ref() != Some(z) {
             errors.time_zone = Some("Time zone must be one of the listed zones".into());
@@ -443,6 +458,14 @@ pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, FormErr
         lane_id: form.lane.id.clone(),
         time_zone: form.time_zone.clone(),
         label_ids: form.label_ids.clone(),
+        schedule: ScheduleEdit {
+            frequency: form.frequency.as_str().to_string(),
+            interval,
+            weekday,
+            day_of_month,
+            starts_on_moved: starts_on != form.default_starts_on,
+            starts_on,
+        },
     })
 }
 
@@ -555,20 +578,7 @@ pub fn view<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a
                 ),
         )
         .push_maybe(error_line(&form.errors.starts_on));
-    // Editing: the schedule is read-only text until JRST-178 makes it editable.
     let editing = form.editing.is_some();
-    if editing {
-        schedule = column![]
-            .spacing(10)
-            .push(
-                column![]
-                    .spacing(4)
-                    .push(text("Schedule").size(12).color(t::text_muted()))
-                    .push_maybe(
-                        form.summary().map(|s| text(s).size(13).color(t::text_secondary())),
-                    ),
-            );
-    }
     schedule = schedule
         .push(
             column![]
@@ -584,11 +594,7 @@ pub fn view<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a
                 )),
         )
         .push_maybe(error_line(&form.errors.time_zone))
-        .push_maybe(
-            form.summary()
-                .filter(|_| !editing)
-                .map(|s| text(s).size(13).color(t::text_secondary())),
-        );
+        .push_maybe(form.summary().map(|s| text(s).size(13).color(t::text_secondary())));
 
     let form_content = column![]
         .spacing(14)
@@ -885,7 +891,8 @@ mod tests {
         assert_eq!((f.title.as_str(), f.description.text().trim_end()), ("Water", "Ferns"));
         assert_eq!(f.priority, Priority::High);
         assert_eq!((f.frequency, f.interval.as_str(), f.weekday), (Frequency::Weekly, "2", 5));
-        assert_eq!(f.starts_on, "2026-11-06");
+        // Starts-on defaults to today, not the row's next run.
+        assert_eq!(f.starts_on, "2026-11-04");
         assert_eq!(f.assignee.label, "Ann");
         // A stored id that isn't offered stays selected rather than clearing.
         assert_eq!(f.project.id.as_deref(), Some("missing"));
@@ -906,6 +913,24 @@ mod tests {
         other.time_zone = Some("Alaska".into());
         other.title = " ".into();
         assert!(validate_edit(&other).unwrap_err().title.is_some());
+    }
+
+    #[test]
+    fn edit_validation_checks_the_schedule_and_flags_a_moved_starts_on() {
+        let mut f = RecurringFormState::for_edit(&stored_row(), vec![], today());
+        let e = validate_edit(&f).unwrap();
+        assert!(!e.schedule.starts_on_moved);
+        assert_eq!(e.schedule.starts_on, "2026-11-04");
+        assert_eq!(
+            (e.schedule.frequency.as_str(), e.schedule.interval, e.schedule.weekday),
+            ("weekly", 2, Some(5))
+        );
+        f.starts_on = "2026-12-01".into();
+        assert!(validate_edit(&f).unwrap().schedule.starts_on_moved);
+        f.interval = "0".into();
+        f.starts_on = "nope".into();
+        let errs = validate_edit(&f).unwrap_err();
+        assert!(errs.interval.is_some() && errs.starts_on.is_some());
     }
 
     #[test]
