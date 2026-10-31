@@ -682,8 +682,36 @@ pub fn apply_response(conn: &Connection, id: &str, dto: &RecurringIssueDto) -> R
     tx.commit()
 }
 
+/// Finish a successful create push in one transaction: save the remote id,
+/// mark the queue entry synced, and overwrite the row and labels with the
+/// response (next run, resolved time zone, last run, timestamps). Any failure
+/// rolls all of it back, so the entry stays pending. Marking the entry synced
+/// is what clears "next run pending".
+pub fn commit_created(
+    conn: &mut Connection,
+    id: &str,
+    entry_id: i64,
+    dto: &RecurringIssueDto,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    // The remote id goes in first so the upsert's ON CONFLICT(remote_id) hits
+    // this row instead of inserting a second one.
+    tx.execute(
+        "UPDATE recurring_issues SET remote_id = ?1 WHERE id = ?2",
+        params![dto.id, id],
+    )?;
+    let team_id: String = tx.query_row(
+        "SELECT team_id FROM recurring_issues WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    upsert_row(&tx, id, &team_id, dto)?;
+    replace_labels(&tx, id, &dto.label_ids)?;
+    super::sync_queue::mark_synced(&tx, entry_id)?;
+    tx.commit()
+}
+
 /// Local label ids joined to a recurring issue, sorted.
-#[allow(dead_code)] // used by the view/push tickets
 pub fn label_ids(conn: &Connection, id: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT label_id FROM recurring_issue_labels WHERE recurring_issue_id = ?1
@@ -904,6 +932,43 @@ mod tests {
             day_of_month: None,
             starts_on: "2026-11-04".into(),
         }
+    }
+
+    #[test]
+    fn commit_created_saves_remote_id_marks_synced_and_clears_next_run_pending() {
+        let mut conn = setup();
+        let id = create(&conn, "t1", &new_weekly()).unwrap();
+        let entry_id = sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        assert!(next_run_pending(&conn, &id).unwrap());
+
+        let mut dto = rec(41, "Water plants", "2026-02-01T00:00:00.000Z");
+        dto.time_zone = Some("Eastern Time (US & Canada)".into());
+        dto.next_run_on = Some("2026-11-04".into());
+        commit_created(&mut conn, &id, entry_id, &dto).unwrap();
+
+        let row = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.remote_id, Some(41));
+        assert_eq!(row.next_run_on.as_deref(), Some("2026-11-04"));
+        assert_eq!(row.time_zone.as_deref(), Some("Eastern Time (US & Canada)"));
+        assert_eq!(list_for_team(&conn, "t1").unwrap().len(), 1);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+        assert!(!next_run_pending(&conn, &id).unwrap());
+    }
+
+    #[test]
+    fn commit_created_rolls_back_when_the_entry_cannot_be_marked() {
+        let mut conn = setup();
+        let id = create(&conn, "t1", &new_weekly()).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER no_mark BEFORE UPDATE ON sync_queue
+             BEGIN SELECT RAISE(ABORT, 'nope'); END;",
+        )
+        .unwrap();
+        let entry_id = sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        assert!(commit_created(&mut conn, &id, entry_id, &rec(41, "X", NOW)).is_err());
+        let row = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.remote_id, None);
+        assert_eq!(row.title, "Water plants");
     }
 
     #[test]
