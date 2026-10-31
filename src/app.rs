@@ -367,9 +367,9 @@ impl DepDirection {
         }
     }
 
-    /// Relates and duplicates links can't be created yet.
+    /// Duplicates links can't be created yet.
     pub fn enabled(self) -> bool {
-        matches!(self, DepDirection::Blocking | DepDirection::BlockedBy)
+        !matches!(self, DepDirection::Duplicates | DepDirection::DuplicatedBy)
     }
 
     /// The next (or previous) enabled kind, wrapping around.
@@ -1214,6 +1214,12 @@ impl App {
             self.push_toast("An issue can't depend on itself", ToastKind::Error, false);
             return;
         }
+        let conn = self.db();
+        // Rails allows one link per pair, in either order and of any kind.
+        if queries::issue_dependency_pair_exists(&conn, &current_id, target_id).unwrap_or(false) {
+            self.push_toast("Those issues are already linked", ToastKind::Error, false);
+            return;
+        }
         let (blocking_issue_id, blocked_issue_id, kind) =
             direction.stored_edge(&current_id, target_id);
         let now = crate::db::now_iso();
@@ -1229,7 +1235,6 @@ impl App {
             created_at: now.clone(),
             updated_at: now,
         };
-        let conn = self.db();
         match queries::insert_issue_dependency(&conn, &dep) {
             Ok(()) => {
                 self.enqueue_sync("dependency", &dep.id, "create", None);
@@ -3855,7 +3860,8 @@ mod tests {
     #[test]
     fn dep_direction_cycles_only_through_enabled_kinds() {
         assert_eq!(DepDirection::Blocking.cycle(true), DepDirection::BlockedBy);
-        assert_eq!(DepDirection::BlockedBy.cycle(true), DepDirection::Blocking);
-        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::BlockedBy);
+        assert_eq!(DepDirection::BlockedBy.cycle(true), DepDirection::Relates);
+        assert_eq!(DepDirection::Relates.cycle(true), DepDirection::Blocking);
+        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::Relates);
     }
 }
