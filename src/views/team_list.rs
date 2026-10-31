@@ -14,6 +14,7 @@ pub fn view<'a>(
     current_view: &'a View,
     team_menu_open: Option<&'a str>,
     show_archived: bool,
+    unread_count: i64,
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(0).width(Length::Fill);
 
@@ -25,6 +26,7 @@ pub fn view<'a>(
         Message::NavigateToView(View::MyIssues),
         14,
     ));
+    col = col.push(inbox_row(*current_view == View::Inbox, unread_count));
 
     // Teams section. The archived toggle only appears once there's something
     // archived to reveal.
@@ -226,6 +228,45 @@ fn menu_row<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Messag
 
 /// A clickable navigation row with optional active (selected) highlight.
 /// `left_pad` controls indentation (top-level vs. nested sub-row).
+/// Unread badge text: hidden at zero (or below), capped at "99+".
+pub fn badge_label(count: i64) -> Option<String> {
+    match count {
+        i64::MIN..=0 => None,
+        1..=99 => Some(count.to_string()),
+        _ => Some("99+".into()),
+    }
+}
+
+/// The Inbox sidebar entry: label plus an unread badge when there is any.
+fn inbox_row<'a>(active: bool, unread_count: i64) -> Element<'a, Message> {
+    let content = row![text("Inbox").size(14).color(if active {
+        t::text_primary()
+    } else {
+        t::text_secondary()
+    })]
+    .spacing(8)
+    .align_y(iced::Alignment::Center)
+    .push(iced::widget::horizontal_space())
+    .push_maybe(badge_label(unread_count).map(|label| {
+        container(text(label).size(11).color(t::text_primary()))
+            .padding([1, 6])
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::accent())),
+                border: Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+    }));
+    button(content)
+        .on_press(Message::NavigateToView(View::Inbox))
+        .padding([6, 14])
+        .width(Length::Fill)
+        .style(move |_theme: &Theme, _status| selected_row_style(active))
+        .into()
+}
+
 fn nav_row<'a>(
     label: &'a str,
     active: bool,
@@ -275,5 +316,19 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
             radius: 0.0.into(),
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::badge_label;
+
+    #[test]
+    fn badge_hidden_at_zero_and_capped() {
+        assert_eq!(badge_label(0), None);
+        assert_eq!(badge_label(-3), None);
+        assert_eq!(badge_label(7).as_deref(), Some("7"));
+        assert_eq!(badge_label(99).as_deref(), Some("99"));
+        assert_eq!(badge_label(100).as_deref(), Some("99+"));
     }
 }

@@ -438,6 +438,9 @@ pub enum View {
     ProjectDetail(String),
     Roadmap,
     MyIssues,
+    /// Notification Inbox. Not team-scoped, but unlike `MyIssues` it loads no
+    /// cross-team issue data (the per-team data stays as is).
+    Inbox,
 }
 
 /// Sort key for the Projects table (mirrors the Rails index sort options).
@@ -3513,6 +3516,7 @@ impl App {
             &self.view,
             self.team_menu_open.as_deref(),
             self.show_archived_teams,
+            self.notif_unread_count,
         );
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
@@ -3678,6 +3682,8 @@ impl App {
                 }
             }
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
+            // Placeholder until "Inbox list" (JRST-91) fills it.
+            View::Inbox => placeholder::view("Inbox"),
         };
 
         let token_configured = self
@@ -3903,6 +3909,9 @@ fn breadcrumb(
     if *view == View::MyIssues {
         return vec!["My Issues".into()];
     }
+    if *view == View::Inbox {
+        return vec!["Inbox".into()];
+    }
     let mut crumbs = vec![team
         .map(|t| t.identifier.clone())
         .unwrap_or_else(|| "JAIT".into())];
@@ -3927,7 +3936,7 @@ fn breadcrumb(
                 crumbs.push("Issues".into());
             }
         }
-        View::MyIssues => {}
+        View::MyIssues | View::Inbox => {}
     }
     crumbs
 }
@@ -4201,6 +4210,7 @@ mod tests {
         assert_eq!(crumbs(View::Roadmap), ["JAIT", "Roadmap"]);
         assert_eq!(crumbs(View::IssueDetail("i1".into())), ["JAIT", "JAIT-184"]);
         assert_eq!(crumbs(View::MyIssues), ["My Issues"]);
+        assert_eq!(crumbs(View::Inbox), ["Inbox"]);
         // Missing project falls back to the list crumb rather than a blank.
         assert_eq!(
             crumbs(View::ProjectDetail("gone".into())),
