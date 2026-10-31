@@ -118,6 +118,10 @@ pub enum Message {
     BackToMyIssues,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
+    /// Step the open picker's link kind (Tab forward, Shift+Tab back).
+    CycleDependencyKind(bool),
+    /// Set the open picker's link kind (clicking a kind chip).
+    SetDependencyKind(DepDirection),
     /// The picker's search box changed.
     DependencyPickerSearchChanged(String),
     /// A target issue (local UUID) was chosen in the picker → create the edge.
@@ -139,6 +143,8 @@ pub enum Message {
     EditLabelNameChanged(String),
     EditLabelColorChanged(String),
     SaveLabelEdit,
+    ConfirmDeleteLabel,
+    DeleteLabelConfirmed,
     /// Toggle a label on the issue targeted by the label modal (by local UUID).
     ToggleIssueLabel(String),
     SaveIssueLabels,
@@ -295,6 +301,8 @@ pub enum Modal {
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
     Labels,
+    /// Confirm deleting the label being edited (local id) from the labels panel.
+    DeleteLabelConfirm(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
     /// Team picker for moving an issue (local UUID); see `team_picker`.
@@ -338,13 +346,57 @@ fn team_web_url(base_url: &str, team_remote_id: i64, section: TeamWebSection) ->
     )
 }
 
-/// Which dependency section a picker/add-action targets, relative to the open
-/// issue. `Blocking` = the open issue blocks the target; `BlockedBy` = the target
-/// blocks the open issue.
+/// The link kind a picker/add-action creates, relative to the open issue.
+/// `Blocking` = the open issue blocks the target; `BlockedBy` = the target
+/// blocks the open issue; the rest read the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepDirection {
     Blocking,
     BlockedBy,
+    Relates,
+    Duplicates,
+    DuplicatedBy,
+}
+
+impl DepDirection {
+    pub const ALL: [DepDirection; 5] = [
+        DepDirection::Blocking,
+        DepDirection::BlockedBy,
+        DepDirection::Relates,
+        DepDirection::Duplicates,
+        DepDirection::DuplicatedBy,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DepDirection::Blocking => "Blocking",
+            DepDirection::BlockedBy => "Blocked by",
+            DepDirection::Relates => "Relates to",
+            DepDirection::Duplicates => "Duplicates",
+            DepDirection::DuplicatedBy => "Duplicated by",
+        }
+    }
+
+    /// The next (or previous) kind, wrapping around.
+    pub fn cycle(self, forward: bool) -> DepDirection {
+        let n = Self::ALL.len();
+        let start = Self::ALL.iter().position(|d| *d == self).unwrap_or(0);
+        let i = if forward { start + 1 } else { start + n - 1 };
+        Self::ALL[i % n]
+    }
+
+    /// The stored edge for linking `current` to `target` in this kind. The link's
+    /// source goes in `blocking_issue_id`. Returns `(source, target, kind)`.
+    pub fn stored_edge(self, current: &str, target: &str) -> (String, String, &'static str) {
+        let (cur, tgt) = (current.to_string(), target.to_string());
+        match self {
+            DepDirection::Blocking => (cur, tgt, "blocks"),
+            DepDirection::BlockedBy => (tgt, cur, "blocks"),
+            DepDirection::Relates => (cur, tgt, "relates"),
+            DepDirection::Duplicates => (cur, tgt, "duplicates"),
+            DepDirection::DuplicatedBy => (tgt, cur, "duplicates"),
+        }
+    }
 }
 
 /// Which screen the right-hand pane renders. `MyIssues` is the board across
@@ -1162,23 +1214,27 @@ impl App {
             self.push_toast("An issue can't depend on itself", ToastKind::Error, false);
             return;
         }
-        // A row means `blocking_issue_id` blocks `blocked_issue_id`.
-        let (blocking_issue_id, blocked_issue_id) = match direction {
-            DepDirection::Blocking => (current_id, target_id.to_string()),
-            DepDirection::BlockedBy => (target_id.to_string(), current_id),
-        };
+        let conn = self.db();
+        // Rails allows one link per pair, in either order and of any kind.
+        if queries::issue_dependency_pair_exists(&conn, &current_id, target_id).unwrap_or(false) {
+            self.push_toast("Those issues are already linked", ToastKind::Error, false);
+            return;
+        }
+        let (blocking_issue_id, blocked_issue_id, kind) =
+            direction.stored_edge(&current_id, target_id);
         let now = crate::db::now_iso();
         let dep = IssueDependency {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
             blocking_issue_id,
             blocked_issue_id,
-            kind: "blocks".into(),
-            direction: "blocking".into(),
+            kind: kind.into(),
+            direction: crate::api::dependencies::direction_for_edge(kind)
+                .as_str()
+                .into(),
             created_at: now.clone(),
             updated_at: now,
         };
-        let conn = self.db();
         match queries::insert_issue_dependency(&conn, &dep) {
             Ok(()) => {
                 self.enqueue_sync("dependency", &dep.id, "create", None);
@@ -1632,6 +1688,11 @@ impl App {
                         }
                     }
                 }
+                if self.modal == Modal::IssuePicker
+                    && key == keyboard::Key::Named(keyboard::key::Named::Tab)
+                {
+                    return self.update(Message::CycleDependencyKind(!modifiers.shift()));
+                }
                 let modal_open = self.modal != Modal::None;
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
@@ -1992,6 +2053,16 @@ impl App {
             Message::OpenDependencyPicker(direction) => {
                 self.issue_picker = Some(issue_picker::IssuePickerState::new(direction));
                 self.modal = Modal::IssuePicker;
+            }
+            Message::CycleDependencyKind(forward) => {
+                if let Some(ref mut picker) = self.issue_picker {
+                    picker.direction = picker.direction.cycle(forward);
+                }
+            }
+            Message::SetDependencyKind(kind) => {
+                if let Some(ref mut picker) = self.issue_picker {
+                    picker.direction = kind;
+                }
             }
             Message::DependencyPickerSearchChanged(query) => {
                 if let Some(ref mut picker) = self.issue_picker {
@@ -2941,7 +3012,9 @@ impl App {
             Message::DeleteCommentConfirmed => {
                 if let Modal::DeleteCommentConfirm(ref comment_id) = self.modal {
                     let conn = self.db();
-                    let _ = queries::delete_unsynced_comment(&conn, comment_id);
+                    if let Ok((_, Some(payload))) = queries::delete_comment(&conn, comment_id) {
+                        self.enqueue_sync("comment", comment_id, "delete", Some(payload.as_str()));
+                    }
                     if let Some(d) = &mut self.issue_detail {
                         if d.reply_to.as_deref() == Some(comment_id.as_str()) {
                             d.reply_to = None;
@@ -3095,6 +3168,28 @@ impl App {
                         }
                     }
                 }
+            }
+
+            Message::ConfirmDeleteLabel => {
+                if let Some(id) = self.label_form.as_ref().and_then(|f| f.editing_id.clone()) {
+                    self.modal = Modal::DeleteLabelConfirm(id);
+                }
+            }
+
+            Message::DeleteLabelConfirmed => {
+                if let Modal::DeleteLabelConfirm(ref label_id) = self.modal {
+                    let label_id = label_id.clone();
+                    if let Ok(Some(payload)) = queries::delete_label(&self.db(), &label_id) {
+                        self.enqueue_sync("label", &label_id, "delete", Some(payload.as_str()));
+                    }
+                    if let Some(ref mut form) = self.label_form {
+                        form.selected_label_ids.retain(|id| *id != label_id);
+                        form.editing_id = None;
+                        form.edit_error = None;
+                    }
+                }
+                self.modal = Modal::Labels;
+                self.reload_data();
             }
 
             Message::ToggleIssueLabel(label_id) => {
@@ -3433,6 +3528,16 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::DeleteLabelConfirm(label_id) => {
+                let conn = self.db();
+                let name = queries::get_label(&conn, label_id)
+                    .ok()
+                    .flatten()
+                    .map(|l| l.name)
+                    .unwrap_or_default();
+                let count = queries::label_issue_count(&conn, label_id).unwrap_or(0);
+                iced::widget::stack![base, delete_label_confirm_modal(name, count)].into()
+            }
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
@@ -3441,9 +3546,13 @@ impl App {
                 (Some(picker), Some(detail)) => {
                     // Exclude the open issue itself and any issue already linked
                     // in this direction (a duplicate would hit the UNIQUE edge).
+                    let d = &self.detail_deps;
                     let existing = match picker.direction {
-                        DepDirection::Blocking => &self.detail_deps.blocking,
-                        DepDirection::BlockedBy => &self.detail_deps.blocked_by,
+                        DepDirection::Blocking => &d.blocking,
+                        DepDirection::BlockedBy => &d.blocked_by,
+                        DepDirection::Relates => &d.related,
+                        DepDirection::Duplicates => &d.duplicates,
+                        DepDirection::DuplicatedBy => &d.duplicated_by,
                     };
                     let mut excluded: HashSet<&str> =
                         existing.iter().map(|l| l.issue_id.as_str()).collect();
@@ -3666,6 +3775,15 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
     )
 }
 
+fn delete_label_confirm_modal<'a>(name: String, issues: usize) -> Element<'a, Message> {
+    let body = match issues {
+        0 => format!("Delete the label \"{name}\"? No issues carry it."),
+        1 => format!("Delete the label \"{name}\"? It will be removed from 1 issue."),
+        n => format!("Delete the label \"{name}\"? It will be removed from {n} issues."),
+    };
+    delete_modal("Delete Label?", body, Message::DeleteLabelConfirmed)
+}
+
 fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
     let body = match replies {
         0 => "Delete this comment?".to_string(),
@@ -3827,5 +3945,26 @@ mod tests {
         let teams = vec![team("a", true)];
         assert_eq!(default_team_id(&teams).as_deref(), Some("a"));
         assert_eq!(default_team_id(&[]), None);
+    }
+
+    #[test]
+    fn dep_direction_stores_source_and_kind() {
+        let edge = |d: DepDirection| d.stored_edge("me", "other");
+        assert_eq!(edge(DepDirection::Blocking), ("me".into(), "other".into(), "blocks"));
+        assert_eq!(edge(DepDirection::BlockedBy), ("other".into(), "me".into(), "blocks"));
+        assert_eq!(edge(DepDirection::Relates), ("me".into(), "other".into(), "relates"));
+        assert_eq!(edge(DepDirection::Duplicates), ("me".into(), "other".into(), "duplicates"));
+        assert_eq!(
+            edge(DepDirection::DuplicatedBy),
+            ("other".into(), "me".into(), "duplicates")
+        );
+    }
+
+    #[test]
+    fn dep_direction_cycles_through_every_kind() {
+        assert_eq!(DepDirection::Relates.cycle(true), DepDirection::Duplicates);
+        assert_eq!(DepDirection::Duplicates.cycle(true), DepDirection::DuplicatedBy);
+        assert_eq!(DepDirection::DuplicatedBy.cycle(true), DepDirection::Blocking);
+        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::DuplicatedBy);
     }
 }

@@ -1,7 +1,7 @@
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
 use super::events::{self, Source};
-use super::models::{Comment, Issue, IssueDependency, Label, Lane, Member, Project, Team};
+use super::models::{Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
 
@@ -239,8 +239,10 @@ pub fn apply_server_comment_tombstone(
 ) -> Result<bool> {
     let local: Option<String> = conn
         .query_row(
-            "SELECT c.id FROM comments c JOIN issues i ON i.id = c.issue_id
-             WHERE c.remote_id = ?1 AND i.team_id = ?2",
+            "SELECT c.id FROM comments c
+             LEFT JOIN issues i ON i.id = c.issue_id
+             LEFT JOIN projects p ON p.id = c.project_id
+             WHERE c.remote_id = ?1 AND COALESCE(i.team_id, p.team_id) = ?2",
             params![remote_id, team_id],
             |r| r.get(0),
         )
@@ -311,6 +313,43 @@ pub fn delete_unsynced_comment(conn: &Connection, comment_id: &str) -> Result<us
     }
     tx.commit()?;
     Ok(ids.len())
+}
+
+/// Delete the user's own comment and its reply subtree. A comment the server
+/// has seen also yields the `comment/delete` queue payload, captured before the
+/// rows go: `{team_remote_id, issue_remote_id, remote_id}`. Unsynced comments
+/// are dropped as by [`delete_unsynced_comment`] and yield no payload. Returns
+/// `(removed count, payload)`.
+pub fn delete_comment(conn: &Connection, comment_id: &str) -> Result<(usize, Option<String>)> {
+    let Some(comment) = get_comment(conn, comment_id)? else {
+        return Ok((0, None));
+    };
+    let Some(remote_id) = comment.remote_id else {
+        return Ok((delete_unsynced_comment(conn, comment_id)?, None));
+    };
+    let owner_remote = match comment.owner() {
+        CommentOwner::Issue(issue_id) => get_issue(conn, &issue_id)?.and_then(|i| {
+            let team = remote_id_for(conn, "teams", &i.team_id).ok().flatten()?;
+            Some((team, i.remote_id?))
+        }),
+        CommentOwner::Project(_) => None,
+    };
+    let tx = conn.unchecked_transaction()?;
+    let ids = comment_subtree_ids(&tx, comment_id)?;
+    for id in ids.iter().rev() {
+        tx.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "comment", id)?;
+    }
+    tx.commit()?;
+    let payload = owner_remote.map(|(team_remote_id, issue_remote_id)| {
+        serde_json::json!({
+            "team_remote_id": team_remote_id,
+            "issue_remote_id": issue_remote_id,
+            "remote_id": remote_id,
+        })
+        .to_string()
+    });
+    Ok((ids.len(), payload))
 }
 
 /// Apply a server tombstone for an issue dependency (Rails destroys blocking
@@ -925,6 +964,41 @@ pub fn edit_label(
     Ok(label.remote_id.is_some())
 }
 
+/// How many issues carry the label; the delete confirmation shows it.
+pub fn label_issue_count(conn: &Connection, label_id: &str) -> Result<usize> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM issue_labels WHERE label_id = ?1",
+        params![label_id],
+        |r| r.get::<_, i64>(0).map(|n| n as usize),
+    )
+}
+
+/// Delete a label locally with the same effect as the server tombstone: detach
+/// it from issues and projects and remove it in one transaction, retiring any
+/// pending queue entries for it. Returns the `label/delete` payload
+/// (`{team_remote_id, remote_id}`) when the label and its team are synced,
+/// i.e. when a delete must be queued; `None` otherwise (an unsynced label's
+/// create is simply retired).
+pub fn delete_label(conn: &Connection, label_id: &str) -> Result<Option<String>> {
+    let Some(label) = get_label(conn, label_id)? else {
+        return Ok(None);
+    };
+    let payload = match (label.remote_id, remote_id_for(conn, "teams", &label.team_id)?) {
+        (Some(remote_id), Some(team_remote_id)) => Some(
+            serde_json::json!({ "team_remote_id": team_remote_id, "remote_id": remote_id })
+                .to_string(),
+        ),
+        _ => None,
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_labels WHERE label_id = ?1", params![label_id])?;
+    tx.execute("DELETE FROM project_labels WHERE label_id = ?1", params![label_id])?;
+    tx.execute("DELETE FROM labels WHERE id = ?1", params![label_id])?;
+    retire_pending_sync(&tx, "label", label_id)?;
+    tx.commit()?;
+    Ok(payload)
+}
+
 /// Local UUIDs of the labels currently attached to `issue_id`. Used to preload
 /// the multi-select when editing an issue.
 pub fn label_ids_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<String>> {
@@ -990,6 +1064,18 @@ pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<Is
         IssueDependency::from_row,
     )
     .optional()
+}
+
+/// Whether the two issues are already linked, in either order and of any kind
+/// (Rails allows one link per pair).
+pub fn issue_dependency_pair_exists(conn: &Connection, a: &str, b: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_dependencies
+         WHERE (blocking_issue_id = ?1 AND blocked_issue_id = ?2)
+            OR (blocking_issue_id = ?2 AND blocked_issue_id = ?1))",
+        params![a, b],
+        |r| r.get(0),
+    )
 }
 
 /// Insert a new local dependency row. Errors on the `UNIQUE(blocking_issue_id,
@@ -1970,6 +2056,49 @@ mod tests {
         assert_eq!(deletes, 0);
     }
 
+    fn link_remote_owner(conn: &Connection) {
+        conn.execute_batch(
+            "UPDATE issues SET remote_id = 50 WHERE id = 'i1';
+             UPDATE teams SET remote_id = 7 WHERE id = (SELECT team_id FROM issues WHERE id = 'i1');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn delete_comment_synced_root_captures_payload_and_retires_subtree() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        link_remote_owner(&conn);
+        set_comment_remote_id(&conn, "c1", 9).unwrap();
+        set_comment_remote_id(&conn, "c2", 10).unwrap();
+        let (removed, payload) = delete_comment(&conn, "c1").unwrap();
+        assert_eq!(removed, 4);
+        let payload: serde_json::Value = serde_json::from_str(&payload.unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"team_remote_id": 7, "issue_remote_id": 50, "remote_id": 9})
+        );
+        assert_eq!(comments_for_issue(&conn, "i1").unwrap().len(), 1);
+        // Pending creates for the subtree are retired; only c5's remains.
+        assert_eq!(pending_count(&conn), 1);
+    }
+
+    #[test]
+    fn delete_comment_unsynced_root_has_no_payload() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        link_remote_owner(&conn);
+        let (removed, payload) = delete_comment(&conn, "c1").unwrap();
+        assert_eq!(removed, 4);
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn delete_comment_unknown_id_removes_nothing() {
+        let conn = setup();
+        assert_eq!(delete_comment(&conn, "nope").unwrap(), (0, None));
+    }
+
     #[test]
     fn delete_unsynced_comment_refuses_a_synced_comment() {
         let conn = setup();
@@ -2100,6 +2229,41 @@ mod tests {
     }
 
     #[test]
+    fn delete_label_detaches_and_removes_in_one_go() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
+        assert_eq!(label_issue_count(&conn, "lab1").unwrap(), 1);
+        assert!(delete_label(&conn, "lab1").unwrap().is_none());
+        assert!(get_label(&conn, "lab1").unwrap().is_none());
+        assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+        assert_eq!(label_issue_count(&conn, "lab1").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_label_unsynced_retires_pending_create_and_queues_nothing() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        crate::db::sync_queue::enqueue(&conn, "label", "lab1", "create", None).unwrap();
+        assert!(delete_label(&conn, "lab1").unwrap().is_none());
+        assert_eq!(crate::db::sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_label_synced_returns_payload() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        set_label_remote_id(&conn, "lab1", 11).unwrap();
+        let team_id = get_label(&conn, "lab1").unwrap().unwrap().team_id;
+        conn.execute("UPDATE teams SET remote_id = 700 WHERE id = ?1", params![team_id])
+            .unwrap();
+        let payload = delete_label(&conn, "lab1").unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["team_remote_id"], 700);
+        assert_eq!(v["remote_id"], 11);
+    }
+
+    #[test]
     fn deleting_a_label_cascades_to_issue_labels() {
         let conn = setup();
         insert_label(&conn, &make_label("lab1", "bug")).unwrap();
@@ -2211,6 +2375,16 @@ mod tests {
         insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
         // Same ordered (blocking, blocked) pair violates the UNIQUE constraint.
         assert!(insert_issue_dependency(&conn, &make_dependency("d2", "i1", "i2")).is_err());
+    }
+
+    #[test]
+    fn issue_dependency_pair_exists_matches_either_order() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        assert!(!issue_dependency_pair_exists(&conn, "i1", "i2").unwrap());
+        insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
+        assert!(issue_dependency_pair_exists(&conn, "i1", "i2").unwrap());
+        assert!(issue_dependency_pair_exists(&conn, "i2", "i1").unwrap());
     }
 
     #[test]

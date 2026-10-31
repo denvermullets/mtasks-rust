@@ -1,10 +1,11 @@
 use iced::widget::{button, column, container, pick_list, row, text, text_editor, text_input};
-use iced::{Border, Element, Length, Theme};
+use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Issue, Label, Lane, Priority};
 use crate::theme as t;
 use crate::views::labels as labels_view;
+use crate::views::lane_icon;
 
 pub struct IssueFormState {
     pub title: String,
@@ -125,6 +126,10 @@ pub fn view<'a>(
         })
         .collect();
     let selected_lane = lane_options.iter().find(|l| l.id == form.lane_id).cloned();
+    let selected_icon = lanes
+        .iter()
+        .find(|l| l.id == form.lane_id)
+        .map(|l| lane_icon::icon_for(l.category.as_deref()));
 
     let form_content = column![]
         .spacing(14)
@@ -177,9 +182,15 @@ pub fn view<'a>(
                         .spacing(4)
                         .width(Length::Fill)
                         .push(text("Lane").size(12).color(t::text_muted()))
-                        .push(pick_list(lane_options, selected_lane, |l: LaneOption| {
-                            Message::IssueLaneChanged(l.id)
-                        })),
+                        .push(
+                            row![]
+                                .spacing(8)
+                                .align_y(Alignment::Center)
+                                .push_maybe(selected_icon.map(lane_icon::view))
+                                .push(pick_list(lane_options, selected_lane, |l: LaneOption| {
+                                    Message::IssueLaneChanged(l.id)
+                                })),
+                        ),
                 ),
         )
         .push(labels_section(form, labels))

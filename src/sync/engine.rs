@@ -26,7 +26,7 @@ use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
     ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
 };
-use crate::db::models::{Issue, Priority, Project, SyncQueueEntry};
+use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
 use crate::sync::cursor;
 
@@ -383,7 +383,9 @@ async fn process(
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
         ("label", "update") => label_update(client, &entry.entity_id).await,
+        ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
+        ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
@@ -1521,6 +1523,46 @@ async fn label_update(client: &ApiClient, entity_id: &str) -> Outcome {
     }
 }
 
+/// The local row is gone by drain time, so the payload captured at enqueue time
+/// (`{team_remote_id, remote_id}`) is all a label delete has.
+fn prep_label_delete(payload: Option<&str>) -> Prep<(i64, i64)> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog(
+            "label delete: no payload (legacy entry)".into(),
+        ));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "label delete: bad payload: {e}"
+            )))
+        }
+    };
+    match (
+        parsed.get("team_remote_id").and_then(|v| v.as_i64()),
+        parsed.get("remote_id").and_then(|v| v.as_i64()),
+    ) {
+        (Some(team), Some(id)) => Prep::Ready((team, id)),
+        _ => Prep::Done(Outcome::DropAndLog(
+            "label delete: missing ids in payload".into(),
+        )),
+    }
+}
+
+async fn label_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let (team_remote_id, remote_id) = match prep_label_delete(payload) {
+        Prep::Ready(ids) => ids,
+        Prep::Done(o) => return o,
+    };
+    // 204 and 404 both mean the label is gone.
+    match labels::delete(client, team_remote_id, remote_id).await {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(e) => classify_in_team(&e, team_remote_id),
+    }
+}
+
 // ── Comments ──────────────────────────────────────────────────────────────
 
 struct CommentCreatePrep {
@@ -1589,6 +1631,63 @@ fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
 
 /// Remote id of a reply's parent. A parent that hasn't synced yet leaves the
 /// reply pending (the queue is FIFO so the parent normally goes first).
+struct CommentDeletePrep {
+    team_remote_id: i64,
+    issue_remote_id: i64,
+    remote_id: i64,
+}
+
+/// Like the other deletes, relies entirely on the payload captured at enqueue
+/// time (`{team_remote_id, issue_remote_id, remote_id}`): the local row is gone.
+fn prep_comment_delete(payload: Option<&str>) -> Prep<CommentDeletePrep> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog(
+            "comment delete: no payload (legacy entry)".into(),
+        ));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => return Prep::Done(Outcome::DropAndLog(format!("comment delete: bad payload: {e}"))),
+    };
+    let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
+    match (field("team_remote_id"), field("issue_remote_id"), field("remote_id")) {
+        (Some(team_remote_id), Some(issue_remote_id), Some(remote_id)) => {
+            Prep::Ready(CommentDeletePrep {
+                team_remote_id,
+                issue_remote_id,
+                remote_id,
+            })
+        }
+        _ => Prep::Done(Outcome::DropAndLog(
+            "comment delete: incomplete payload".into(),
+        )),
+    }
+}
+
+async fn comment_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let prep = match prep_comment_delete(payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    let result =
+        comments::delete(client, prep.team_remote_id, prep.issue_remote_id, prep.remote_id).await;
+    comment_delete_outcome(result, prep.team_remote_id)
+}
+
+/// 204 and a resource 404 both mean the comment is gone. A 403 (not the token
+/// scope one) is dropped with the server's message so the user sees a toast;
+/// the next per-issue comment fetch upserts the comment back.
+fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> Outcome {
+    match result {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(ApiError::Forbidden(m)) if !is_token_scope_message(&m) => {
+            Outcome::DropAndLog(format!("forbidden: {m}"))
+        }
+        Err(e) => classify_in_team(&e, team_remote_id),
+    }
+}
+
 fn resolve_comment_parent(
     conn: &rusqlite::Connection,
     comment: &crate::db::models::Comment,
@@ -1636,6 +1735,7 @@ struct DependencyCreatePrep {
     team_remote_id: i64,
     issue_remote_id: i64,
     target_remote_id: i64,
+    direction: Direction,
     local_id: String,
 }
 
@@ -1683,6 +1783,7 @@ fn prep_dependency_create(entity_id: &str) -> Prep<DependencyCreatePrep> {
         team_remote_id,
         issue_remote_id,
         target_remote_id,
+        direction: dependencies::direction_for_edge(&dep.kind),
         local_id: dep.id,
     })
 }
@@ -1697,13 +1798,13 @@ async fn dependency_create(client: &ApiClient, entity_id: &str, entry_id: i64) -
         prep.team_remote_id,
         prep.issue_remote_id,
         prep.target_remote_id,
-        Direction::Blocking,
+        prep.direction,
     )
     .await
     {
         Ok(resp) => {
-            // The desktop only sends `blocking`, so the response direction is
-            // already relative to the source side; store what Rails echoed.
+            // The create is posted from the source side, so the response
+            // direction is already relative to it; store what Rails echoed.
             let conn = match open() {
                 Ok(c) => c,
                 Err(e) => return Outcome::LeavePending(e),
@@ -2656,14 +2757,14 @@ fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto
     failed
 }
 
-/// Write feed comments locally (idempotent). Project comments and comments on
-/// issues we do not have (or have tombstoned) are ignored. Replies are applied
+/// Write feed comments locally (idempotent). Comments on issues or projects we
+/// do not have (or issues we have tombstoned) are ignored. Replies are applied
 /// after their parents, however the feed ordered them; a parent that cannot be
 /// found locally leaves the reply top-level rather than blocking the cursor.
 /// Returns how many rows hit a DB error.
 fn apply_pulled_comments(conn: &Connection, dtos: Vec<CommentDto>) -> usize {
     let mut failed = 0;
-    let mut remaining: Vec<CommentDto> = dtos.into_iter().filter(|d| d.issue_id.is_some()).collect();
+    let mut remaining: Vec<CommentDto> = dtos.into_iter().filter(|d| d.issue_id.is_some() || d.project_id.is_some()).collect();
     loop {
         let before = remaining.len();
         let mut deferred = Vec::new();
@@ -2708,23 +2809,31 @@ fn apply_one_comment(
     dto: CommentDto,
     parent_local: Option<String>,
 ) -> Result<(), String> {
-    let Some(issue_remote) = dto.issue_id else {
+    let owner = if let Some(issue_remote) = dto.issue_id {
+        let issue = match queries::find_issue_by_remote_id(conn, issue_remote) {
+            Ok(Some(i)) => i,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("db (find issue): {e}")),
+        };
+        if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote)
+            .map_err(|e| format!("db (tombstone): {e}"))?
+        {
+            return Ok(());
+        }
+        CommentOwner::Issue(issue.id)
+    } else if let Some(project_remote) = dto.project_id {
+        match queries::find_project_by_remote_id(conn, project_remote) {
+            Ok(Some(p)) => CommentOwner::Project(p.id),
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("db (find project): {e}")),
+        }
+    } else {
         return Ok(());
     };
-    let issue = match queries::find_issue_by_remote_id(conn, issue_remote) {
-        Ok(Some(i)) => i,
-        Ok(None) => return Ok(()),
-        Err(e) => return Err(format!("db (find issue): {e}")),
-    };
-    if queries::is_issue_tombstoned_by_remote_id(conn, issue_remote)
-        .map_err(|e| format!("db (tombstone): {e}"))?
-    {
-        return Ok(());
-    }
     let existing = queries::find_comment_by_remote_id(conn, dto.id)
         .map_err(|e| format!("db (find comment): {e}"))?
         .map(|c| c.id);
-    let comment = dto.into_model(conn, issue.id, existing, parent_local);
+    let comment = dto.into_model(conn, owner, existing, parent_local);
     queries::upsert_comment(conn, &comment).map_err(|e| format!("db (upsert comment): {e}"))
 }
 
@@ -3107,6 +3216,54 @@ mod tests {
     }
 
     #[test]
+    fn comment_delete_prep_proceeds_only_on_complete_payload() {
+        let full = r#"{"team_remote_id":7,"issue_remote_id":50,"remote_id":9}"#;
+        match prep_comment_delete(Some(full)) {
+            Prep::Ready(p) => assert_eq!((p.team_remote_id, p.issue_remote_id, p.remote_id), (7, 50, 9)),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+        for bad in [None, Some("not json"), Some(r#"{"team_remote_id":7,"remote_id":9}"#)] {
+            assert!(matches!(
+                prep_comment_delete(bad),
+                Prep::Done(Outcome::DropAndLog(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn comment_delete_204_and_resource_404_are_success() {
+        assert!(matches!(comment_delete_outcome(Ok(()), 7), Outcome::Success));
+        let gone = Err(ApiError::NotFound("Comment not found".into()));
+        assert!(matches!(comment_delete_outcome(gone, 7), Outcome::Success));
+    }
+
+    #[test]
+    fn comment_delete_403_drops_with_server_message() {
+        let msg = "Only the author or a team admin can delete this";
+        match comment_delete_outcome(Err(ApiError::Forbidden(msg.into())), 7) {
+            Outcome::DropAndLog(r) => {
+                assert_eq!(r, format!("forbidden: {msg}"));
+                assert_eq!(SyncErrorKind::from_push_reason(&r), Some(SyncErrorKind::Forbidden));
+            }
+            other => panic!("expected drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_delete_scope_403_and_team_404_keep_existing_handling() {
+        let scope = Err(ApiError::Forbidden("Token lacks required scope".into()));
+        assert!(matches!(
+            comment_delete_outcome(scope, 7),
+            Outcome::PausePushes(PushPause::Forbidden, _)
+        ));
+        let team = Err(ApiError::NotFound("Team not found or access denied".into()));
+        assert!(matches!(
+            comment_delete_outcome(team, 7),
+            Outcome::TeamAccessLost(7, _)
+        ));
+    }
+
+    #[test]
     fn top_level_comment_has_no_parent() {
         let (conn, _) = reply_fixture(Some(1));
         let top = queries::get_comment(&conn, "p").unwrap().unwrap();
@@ -3475,6 +3632,20 @@ mod tests {
     }
 
     #[test]
+    fn label_delete_prep_reads_only_the_payload() {
+        match prep_label_delete(Some(r#"{"team_remote_id":700,"remote_id":11}"#)) {
+            Prep::Ready(ids) => assert_eq!(ids, (700, 11)),
+            _ => panic!("expected Ready"),
+        }
+        for bad in [None, Some("not json"), Some(r#"{"remote_id":11}"#)] {
+            assert!(matches!(
+                prep_label_delete(bad),
+                Prep::Done(Outcome::DropAndLog(_))
+            ));
+        }
+    }
+
+    #[test]
     fn build_label_ids_resolves_remote_ids() {
         let conn = setup_labels_db();
         insert_test_label(&conn, "lab1", Some(11));
@@ -3683,6 +3854,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             replies: None,
             issue_id: Some(500),
+            project_id: None,
         }
     }
 
@@ -4140,6 +4312,7 @@ mod tests {
             updated_at: "2026-02-01T00:00:00.000Z".into(),
             replies: None,
             issue_id: issue,
+            project_id: None,
         }
     }
 
@@ -4174,11 +4347,11 @@ mod tests {
     }
 
     #[test]
-    fn feed_comments_skip_project_and_unknown_issue_without_failing() {
+    fn feed_comments_skip_ownerless_and_unknown_issue_without_failing() {
         let conn = setup_labels_db();
         conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
         let dtos = vec![
-            feed_comment(1, None, None, "project comment"),
+            feed_comment(1, None, None, "ownerless"),
             feed_comment(2, None, Some(999), "unknown issue"),
             // Parent never seen: stored top-level, not a failure.
             feed_comment(3, Some(77), Some(50), "orphan reply"),
@@ -4187,6 +4360,60 @@ mod tests {
         let all = queries::comments_for_issue(&conn, "i1").unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].parent_id, None);
+    }
+
+    fn feed_project_comment(id: i64, parent: Option<i64>, project: i64, body: &str) -> CommentDto {
+        CommentDto {
+            issue_id: None,
+            project_id: Some(project),
+            ..feed_comment(id, parent, None, body)
+        }
+    }
+
+    fn insert_test_project(conn: &Connection, id: &str, remote: i64) {
+        exec(
+            conn,
+            &format!(
+                "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+                 VALUES ('{id}', {remote}, 't1', 'P', '2026-01-01', '2026-01-01')"
+            ),
+        );
+    }
+
+    #[test]
+    fn feed_applies_project_comments_parents_first_and_skips_unknown_project() {
+        let conn = setup_labels_db();
+        insert_test_project(&conn, "p1", 80);
+        // Reply delivered before its parent; one row for a project we lack.
+        let dtos = vec![
+            feed_project_comment(2, Some(1), 80, "reply"),
+            feed_project_comment(1, None, 80, "top"),
+            feed_project_comment(3, None, 999, "unknown project"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 1 + 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM comments WHERE project_id='p1' AND issue_id IS NULL"),
+            2
+        );
+        let top = queries::find_comment_by_remote_id(&conn, 1).unwrap().unwrap();
+        let reply = queries::find_comment_by_remote_id(&conn, 2).unwrap().unwrap();
+        assert_eq!(top.parent_id, None);
+        assert_eq!(reply.parent_id.as_deref(), Some(top.id.as_str()));
+        assert_eq!(top.owner(), crate::db::models::CommentOwner::Project("p1".into()));
+    }
+
+    #[test]
+    fn comment_tombstone_deletes_project_comment_and_replies() {
+        let conn = setup_labels_db();
+        insert_test_project(&conn, "p1", 80);
+        let dtos = vec![
+            feed_project_comment(1, None, 80, "top"),
+            feed_project_comment(2, Some(1), 80, "reply"),
+        ];
+        assert_eq!(apply_pulled_comments(&conn, dtos), 0);
+        assert_eq!(apply_tombstones(&conn, "t1", &[tomb("Comment", 1)]), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM comments"), 0);
     }
 
     #[test]
