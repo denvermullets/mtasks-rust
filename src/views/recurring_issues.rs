@@ -5,7 +5,9 @@
 //! a `header_cell` in `view` and a cell in `recurring_row`; add a row action in
 //! `recurring_row` (a `mouse_area` / button on the row) with its own `Message`.
 
-use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text};
+use iced::widget::{
+    button, column, container, horizontal_rule, mouse_area, row, scrollable, text,
+};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
@@ -241,8 +243,7 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     }
     let labels = container(chips).width(Length::Fixed(COL_LABELS));
 
-    container(
-        row![]
+    let content = row![]
             .spacing(12)
             .padding([10, 16])
             .align_y(Alignment::Center)
@@ -254,10 +255,13 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .push(project)
             .push(lane)
             .push(labels)
-            .push(toggle_action(r)),
-    )
-    .width(Length::Fill)
-    .into()
+            .push(toggle_action(r));
+
+    // A click anywhere on the row opens the edit form; the action buttons
+    // capture their own presses first.
+    mouse_area(container(content).width(Length::Fill))
+        .on_press(Message::EditRecurringIssue(r.id.clone()))
+        .into()
 }
 
 #[cfg(test)]

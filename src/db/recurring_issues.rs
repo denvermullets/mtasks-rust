@@ -551,6 +551,103 @@ pub fn set_active(conn: &Connection, id: &str, active: bool) -> Result<Option<i6
     .map(Some)
 }
 
+/// The content and routing of a recurring issue as the edit form hands it
+/// over, already validated. No schedule fields: rescheduling (JRST-178) adds
+/// its own write that carries `starts_on`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurringEdit {
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: Priority,
+    /// Local member, project and lane ids; `None` clears the choice.
+    pub assignee_id: Option<String>,
+    pub project_id: Option<String>,
+    pub lane_id: Option<String>,
+    /// `None` keeps the stored zone (the server cannot unset one).
+    pub time_zone: Option<String>,
+    /// Local label ids; the full set after the edit.
+    pub label_ids: Vec<String>,
+}
+
+/// Save a content / routing edit locally and queue ONE `update` push naming
+/// only the fields that actually changed, atomically. The payload carries no
+/// `starts_on`, so the server keeps `next_run_on`. Returns the queue entry id,
+/// or `None` when the row is missing or nothing changed (nothing written).
+///
+/// Seam for JRST-178: a schedule edit should be a sibling write that updates
+/// frequency / interval / weekday / day_of_month, adds those names to
+/// `changed`, and passes `Some(starts_on)` to [`update_payload`].
+pub fn update_content(conn: &Connection, id: &str, edit: &RecurringEdit) -> Result<Option<i64>> {
+    let Some(old) = get(conn, id)? else {
+        return Ok(None);
+    };
+    let old_labels = label_ids(conn, id)?;
+    let mut new_labels = edit.label_ids.clone();
+    new_labels.sort();
+    new_labels.dedup();
+    let mut changed: Vec<&str> = Vec::new();
+    if old.title != edit.title {
+        changed.push("title");
+    }
+    if old.description != edit.description {
+        changed.push("description");
+    }
+    if old.priority != edit.priority {
+        changed.push("priority");
+    }
+    if old.assignee_id != edit.assignee_id {
+        changed.push("assignee_id");
+    }
+    if old.project_id != edit.project_id {
+        changed.push("project_id");
+    }
+    if old.lane_id != edit.lane_id {
+        changed.push("lane_id");
+    }
+    let time_zone = edit.time_zone.clone().or_else(|| old.time_zone.clone());
+    if old.time_zone != time_zone {
+        changed.push("time_zone");
+    }
+    if old_labels != new_labels {
+        changed.push("label_ids");
+    }
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    let payload = update_payload(&changed, None);
+    write_queued(conn, id, "update", Some(&payload), |c| {
+        c.execute(
+            "UPDATE recurring_issues SET title = ?1, description = ?2, priority = ?3,
+                assignee_id = ?4, project_id = ?5, lane_id = ?6, time_zone = ?7, updated_at = ?8
+             WHERE id = ?9",
+            params![
+                edit.title,
+                edit.description,
+                edit.priority.to_i32(),
+                edit.assignee_id,
+                edit.project_id,
+                edit.lane_id,
+                time_zone,
+                crate::db::now_iso(),
+                id
+            ],
+        )?;
+        c.execute(
+            "DELETE FROM recurring_issue_labels WHERE recurring_issue_id = ?1",
+            params![id],
+        )?;
+        for label_id in &new_labels {
+            c.execute(
+                "INSERT OR IGNORE INTO recurring_issue_labels (recurring_issue_id, label_id)
+                 VALUES (?1, ?2)",
+                params![id, label_id],
+            )?;
+        }
+        Ok(())
+    })
+    .map(Some)
+}
+
 /// A recurring issue as the create form hands it over, already validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRecurringIssue {
@@ -863,6 +960,98 @@ mod tests {
         set_issue_origin(&conn, "i1", Some(1)).unwrap();
         assert!(apply_tombstone(&conn, "t1", 1).unwrap());
         assert_eq!(origin_id(&conn, "i1").unwrap(), None);
+    }
+
+    fn queued(conn: &Connection) -> Vec<(String, Option<String>)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT action, payload FROM sync_queue
+                 WHERE entity_type = 'recurring_issue' ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect()
+    }
+
+    fn edit_of(conn: &Connection, id: &str) -> RecurringEdit {
+        let r = get(conn, id).unwrap().unwrap();
+        RecurringEdit {
+            title: r.title,
+            description: r.description,
+            priority: r.priority,
+            assignee_id: r.assignee_id,
+            project_id: r.project_id,
+            lane_id: r.lane_id,
+            time_zone: r.time_zone,
+            label_ids: label_ids(conn, id).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_content_edit_enqueues_one_update_without_starts_on() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(1, "Weekly", NOW)], None).unwrap();
+        let id = list_for_team(&conn, "t1").unwrap()[0].id.clone();
+        let mut edit = edit_of(&conn, &id);
+        edit.title = "Renamed".into();
+        edit.priority = Priority::High;
+        edit.assignee_id = Some("m1".into());
+        edit.lane_id = Some("l1".into());
+        edit.project_id = Some("p1".into());
+        edit.label_ids = vec!["lab2".into(), "lab1".into()];
+        edit.time_zone = Some("Tokyo".into());
+        assert!(update_content(&conn, &id, &edit).unwrap().is_some());
+
+        let q = queued(&conn);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].0, "update");
+        let (changed, starts_on) = parse_update_payload(q[0].1.as_deref());
+        assert_eq!(starts_on, None);
+        assert_eq!(
+            changed,
+            ["title", "priority", "assignee_id", "project_id", "lane_id", "time_zone", "label_ids"]
+        );
+        let row = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.title, "Renamed");
+        assert_eq!(row.time_zone.as_deref(), Some("Tokyo"));
+        assert_eq!(label_ids(&conn, &id).unwrap(), ["lab1", "lab2"]);
+        assert_eq!(list_rows(&conn, "t1").unwrap()[0].title, "Renamed");
+        // A content edit doesn't make the next run untrustworthy.
+        assert!(!next_run_pending(&conn, &id).unwrap());
+    }
+
+    #[test]
+    fn an_unchanged_edit_writes_nothing_and_a_missing_row_is_none() {
+        let conn = setup();
+        apply_pulled(&conn, "t1", &[rec(1, "Weekly", NOW)], None).unwrap();
+        let id = list_for_team(&conn, "t1").unwrap()[0].id.clone();
+        let edit = edit_of(&conn, &id);
+        assert_eq!(update_content(&conn, &id, &edit).unwrap(), None);
+        assert_eq!(update_content(&conn, "nope", &edit).unwrap(), None);
+        assert!(queued(&conn).is_empty());
+    }
+
+    #[test]
+    fn an_edit_can_clear_routing_and_a_missing_zone_keeps_the_stored_one() {
+        let conn = setup();
+        let mut dto = rec(1, "Weekly", NOW);
+        dto.time_zone = Some("Tokyo".into());
+        apply_pulled(&conn, "t1", &[dto], None).unwrap();
+        let id = list_for_team(&conn, "t1").unwrap()[0].id.clone();
+        let mut edit = edit_of(&conn, &id);
+        edit.lane_id = Some("l1".into());
+        update_content(&conn, &id, &edit).unwrap();
+        // Clear the lane again; time zone None must not clear the zone.
+        edit.lane_id = None;
+        edit.time_zone = None;
+        update_content(&conn, &id, &edit).unwrap();
+        let row = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.lane_id, None);
+        assert_eq!(row.time_zone.as_deref(), Some("Tokyo"));
+        let q = queued(&conn);
+        assert_eq!(parse_update_payload(q[1].1.as_deref()).0, ["lane_id"]);
     }
 
     fn rref(id: i64, name: &str) -> Option<RecordRef> {

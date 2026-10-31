@@ -1698,9 +1698,9 @@ fn recurring_issue_create_prep(
         title: Some(row.title),
         description: row.description,
         priority: Some(row.priority.as_rails_str().to_string()),
-        assignee_id,
-        project_id,
-        lane_id,
+        assignee_id: assignee_id.map(Some),
+        project_id: project_id.map(Some),
+        lane_id: lane_id.map(Some),
         frequency: Some(row.frequency),
         interval: Some(row.interval),
         weekday: row.weekday,
@@ -1741,6 +1741,17 @@ async fn recurring_issue_create(
         }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
+}
+
+/// Remote ids of a recurring issue's labels; waits (leave pending) while any
+/// has none yet.
+fn recurring_label_remote_ids(conn: &Connection, id: &str) -> Result<Vec<i64>, Outcome> {
+    let local = crate::db::recurring_issues::label_ids(conn, id)
+        .map_err(|e| Outcome::LeavePending(format!("db (labels): {e}")))?;
+    local
+        .iter()
+        .map(|l| require_remote_id(conn, "labels", l))
+        .collect()
 }
 
 struct RecurringIssueUpdatePrep {
@@ -1795,9 +1806,43 @@ fn recurring_issue_update_prep(
         starts_on,
         ..Default::default()
     };
+    // Referenced assignee, project, lane and labels must have remote ids first.
+    // A cleared reference is sent as an explicit null.
     for field in &changed {
-        if field == "active" {
-            params.active = Some(row.active);
+        let r = match field.as_str() {
+            "active" => {
+                params.active = Some(row.active);
+                Ok(())
+            }
+            "title" => {
+                params.title = Some(row.title.clone());
+                Ok(())
+            }
+            "description" => {
+                // Rails treats "" as blank, which is how a cleared description goes out.
+                params.description = Some(row.description.clone().unwrap_or_default());
+                Ok(())
+            }
+            "priority" => {
+                params.priority = Some(row.priority.as_rails_str().to_string());
+                Ok(())
+            }
+            "time_zone" => {
+                params.time_zone = row.time_zone.clone();
+                Ok(())
+            }
+            "assignee_id" => optional_remote_id(conn, "members", row.assignee_id.as_deref())
+                .map(|v| params.assignee_id = Some(v)),
+            "project_id" => optional_remote_id(conn, "projects", row.project_id.as_deref())
+                .map(|v| params.project_id = Some(v)),
+            "lane_id" => optional_remote_id(conn, "lanes", row.lane_id.as_deref())
+                .map(|v| params.lane_id = Some(v)),
+            "label_ids" => recurring_label_remote_ids(conn, &row.id)
+                .map(|v| params.label_ids = Some(v)),
+            _ => Ok(()),
+        };
+        if let Err(o) = r {
+            return Prep::Done(o);
         }
     }
     Prep::Ready(RecurringIssueUpdatePrep {
@@ -4725,6 +4770,89 @@ mod tests {
     }
 
     #[test]
+    fn recurring_issue_edit_prep_sends_changed_fields_without_starts_on() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, Some(5));
+        conn.execute(
+            "UPDATE recurring_issues SET title = 'New', priority = 1, description = NULL,
+                time_zone = 'Tokyo' WHERE id = 'r1'",
+            [],
+        )
+        .unwrap();
+        let payload = crate::db::recurring_issues::update_payload(
+            &["title", "priority", "description", "time_zone"],
+            None,
+        );
+        match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
+            Prep::Ready(p) => {
+                let body = serde_json::to_value(&p.params).unwrap();
+                assert_eq!(
+                    body,
+                    serde_json::json!({
+                        "title": "New", "priority": "high", "description": "",
+                        "time_zone": "Tokyo"
+                    })
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn recurring_issue_edit_prep_waits_for_references_and_sends_clears_as_null() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, Some(5));
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("UPDATE recurring_issues SET lane_id = 'l1' WHERE id = 'r1'", []).unwrap();
+        let payload = crate::db::recurring_issues::update_payload(
+            &["lane_id", "assignee_id", "project_id", "label_ids"],
+            None,
+        );
+        let waits = |c: &Connection| {
+            matches!(
+                recurring_issue_update_prep(c, "r1", Some(&payload)),
+                Prep::Done(Outcome::LeavePending(_))
+            )
+        };
+        // The lane has no remote id yet.
+        assert!(waits(&conn));
+        conn.execute("UPDATE lanes SET remote_id = 11 WHERE id = 'l1'", []).unwrap();
+        assert!(!waits(&conn));
+
+        insert_test_label(&conn, "lb1", None);
+        conn.execute(
+            "INSERT INTO recurring_issue_labels (recurring_issue_id, label_id) VALUES ('r1', 'lb1')",
+            [],
+        )
+        .unwrap();
+        assert!(waits(&conn));
+        conn.execute("UPDATE labels SET remote_id = 14 WHERE id = 'lb1'", []).unwrap();
+
+        conn.execute(
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at)
+             VALUES ('m1', 't1', 'Ann', 'a@x.io', ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+        conn.execute("UPDATE recurring_issues SET assignee_id = 'm1' WHERE id = 'r1'", []).unwrap();
+        assert!(waits(&conn));
+        conn.execute("UPDATE recurring_issues SET assignee_id = NULL WHERE id = 'r1'", []).unwrap();
+        match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
+            Prep::Ready(p) => {
+                let body = serde_json::to_value(&p.params).unwrap();
+                assert_eq!(
+                    body,
+                    serde_json::json!({
+                        "lane_id": 11, "assignee_id": null, "project_id": null,
+                        "label_ids": [14]
+                    })
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
     fn recurring_issue_create_prep_rereads_row_and_includes_starts_on() {
         let conn = setup_labels_db();
         insert_test_recurring(&conn, None);
@@ -4818,9 +4946,9 @@ mod tests {
         conn.execute("UPDATE labels SET remote_id = 14 WHERE id = 'lb1'", []).unwrap();
         match recurring_issue_create_prep(&conn, "r1", None) {
             Prep::Ready(p) => {
-                assert_eq!(p.params.lane_id, Some(11));
-                assert_eq!(p.params.project_id, Some(12));
-                assert_eq!(p.params.assignee_id, Some(13));
+                assert_eq!(p.params.lane_id, Some(Some(11)));
+                assert_eq!(p.params.project_id, Some(Some(12)));
+                assert_eq!(p.params.assignee_id, Some(Some(13)));
                 assert_eq!(p.params.label_ids, Some(vec![14]));
             }
             _ => panic!("expected Ready"),
