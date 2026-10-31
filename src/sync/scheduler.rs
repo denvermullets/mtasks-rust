@@ -79,6 +79,15 @@ pub enum Event {
     AuthPaused(bool),
 }
 
+/// What the driver should start for an admitted cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// The Data sync (push/pull) of the given kind.
+    Data(CycleKind),
+    /// A Notification poll.
+    Poll,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decision {
     /// The cadence of `run`; with no `run`, the cadence due soonest.
@@ -89,6 +98,17 @@ pub struct Decision {
     /// while a cycle is running or paused (a `CycleFinished` /
     /// `AuthPaused(false)` event re-arms it).
     pub next_delay: Option<Duration>,
+}
+
+impl Decision {
+    /// The cycle to start now, dispatched on `cadence`; `None` = just re-arm.
+    pub fn action(&self) -> Option<Run> {
+        match (self.run, self.cadence) {
+            (None, _) => None,
+            (Some(_), Cadence::Notifications) => Some(Run::Poll),
+            (Some(kind), Cadence::Data) => Some(Run::Data(kind)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +170,6 @@ impl Scheduler {
     }
 
     /// Like [`Scheduler::new`] but also scheduling the Notification poll.
-    #[allow(dead_code)] // wired up by the sync driver (JRST-88)
     pub fn with_notifications(now: Instant) -> Self {
         Self {
             notifications: true,
@@ -368,6 +387,39 @@ mod tests {
 
     fn finish(s: &mut Scheduler, at: Instant, success: bool) -> Decision {
         s.handle(Event::CycleFinished { success }, at)
+    }
+
+    #[test]
+    fn decision_action_dispatches_on_cadence() {
+        let d = |cadence, run| Decision {
+            cadence,
+            run,
+            next_delay: None,
+        };
+        assert_eq!(d(Cadence::Data, None).action(), None);
+        assert_eq!(d(Cadence::Notifications, None).action(), None);
+        assert_eq!(
+            d(Cadence::Data, Some(CycleKind::PushOnly)).action(),
+            Some(Run::Data(CycleKind::PushOnly))
+        );
+        assert_eq!(
+            d(Cadence::Notifications, Some(CycleKind::Full)).action(),
+            Some(Run::Poll)
+        );
+    }
+
+    #[test]
+    fn manual_sync_runs_data_then_poll_never_together() {
+        let t0 = Instant::now();
+        let mut s = Scheduler::with_notifications(t0);
+        let d = s.handle(Event::ManualSync, t0);
+        assert_eq!(d.action(), Some(Run::Data(CycleKind::Full)));
+        assert_eq!(d.next_delay, None);
+        let d = finish(&mut s, t0, true);
+        assert_eq!(d.action(), Some(Run::Poll));
+        let d = finish(&mut s, t0, true);
+        assert_eq!(d.action(), None);
+        assert!(d.next_delay.is_some());
     }
 
     #[test]
