@@ -192,6 +192,8 @@ pub struct FilterData<'a> {
     /// Project detail is already scoped to one project, so the project
     /// section is hidden and not counted.
     pub scoped_to_project: bool,
+    /// False while a Saved view is open: Rails can't store "unassigned".
+    pub offer_unassigned: bool,
 }
 
 fn option_group<'a>(
@@ -236,7 +238,9 @@ pub fn filter_view<'a>(
         .map(|m| (m.id.clone(), m.name.clone()))
         .collect();
     assignees.sort_by_key(|(_, n)| n.to_lowercase());
-    assignees.push((String::new(), "Unassigned".to_string()));
+    if data.offer_unassigned {
+        assignees.push((String::new(), "Unassigned".to_string()));
+    }
 
     let priorities = PRIORITY_TITLES
         .iter()

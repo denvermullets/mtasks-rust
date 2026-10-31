@@ -18,7 +18,8 @@ pub fn view<'a>(
     show_archived: bool,
     unread_count: i64,
     saved_views: &'a HashMap<String, Vec<SavedView>>,
-) -> Element<'a, Message> {
+    open_view_id: Option<&'a str>,
+)-> Element<'a, Message> {
     let mut col = column![].spacing(0).width(Length::Fill);
 
     // Workspace section
@@ -153,7 +154,7 @@ pub fn view<'a>(
                 ("Roadmap", View::Roadmap),
             ];
             for (label, view) in sub_rows {
-                let active = is_selected && *current_view == view;
+                let active = is_selected && *current_view == view && open_view_id.is_none();
                 col = col.push(nav_row(
                     label,
                     active,
@@ -161,13 +162,13 @@ pub fn view<'a>(
                     28,
                 ));
             }
-            // Saved views: display only; opening comes in a later ticket.
             for sv in saved_views.get(&team.id).into_iter().flatten() {
-                col = col.push(
-                    container(text(&sv.name).size(13).color(t::text_secondary()))
-                        .padding([6, 28])
-                        .width(Length::Fill),
-                );
+                col = col.push(nav_row(
+                    &sv.name,
+                    open_view_id == Some(sv.id.as_str()),
+                    Message::OpenSavedView(sv.id.clone()),
+                    28,
+                ));
             }
         }
     }
