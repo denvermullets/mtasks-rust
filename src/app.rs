@@ -20,7 +20,7 @@ use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
-use crate::palette_results::{PaletteData, PaletteNav};
+use crate::palette_results::{PaletteData, PaletteNav, PaletteState};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
@@ -340,7 +340,7 @@ pub enum Modal {
     /// Filter popover, anchored under the header.
     FilterPanel,
     /// Command palette (Cmd+K); see `command_palette`.
-    CommandPalette(command_palette::PaletteState),
+    CommandPalette(PaletteState),
 }
 
 /// Sections of the Rails team settings page (`/teams/:id/edit?section=…`).
@@ -581,9 +581,25 @@ impl App {
         PaletteData {
             issues: queries::searchable_issues(&conn).unwrap_or_default(),
             current_team_id: self.selected_team_id.clone(),
-            teams: self.teams.clone(),
-            projects: PaletteData::load_projects(&conn),
+            teams: self
+                .teams
+                .iter()
+                .filter(|t| t.archived_at.is_none())
+                .cloned()
+                .collect(),
+            projects: queries::searchable_projects(&conn).unwrap_or_default(),
         }
+    }
+
+    /// Before opening an issue or project from the palette: when it belongs to
+    /// another team (or we are on My Issues, whose data is mixed), select its
+    /// team like a sidebar click, so the sidebar follows and its data is loaded.
+    fn select_team_for_palette(&mut self, team_id: &str) -> Task<Message> {
+        if self.selected_team_id.as_deref() == Some(team_id) && self.view != View::MyIssues {
+            return Task::none();
+        }
+        self.expanded_teams.insert(team_id.to_string());
+        self.update(Message::SelectTeamView(team_id.to_string(), View::Board))
     }
 
     fn db(&self) -> rusqlite::Connection {
@@ -1811,20 +1827,10 @@ impl App {
                 {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
                 }
-                if matches!(self.modal, Modal::CommandPalette(_)) {
-                    match key {
-                        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
-                            return self.update(Message::PaletteMove(1));
-                        }
-                        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
-                            return self.update(Message::PaletteMove(-1));
-                        }
-                        _ => {}
-                    }
-                }
                 let modal_open = self.modal != Modal::None;
+                let palette_open = matches!(self.modal, Modal::CommandPalette(_));
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
-                if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
+                if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
                 }
             }
@@ -2529,7 +2535,7 @@ impl App {
             Message::OpenCommandPalette => {
                 // Never opens over another modal.
                 if self.modal == Modal::None {
-                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new(
+                    self.modal = Modal::CommandPalette(PaletteState::new(
                         self.palette_data(),
                     ));
                     return text_input::focus(command_palette::input_id());
@@ -2568,32 +2574,18 @@ impl App {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
                         };
-                        // Another team (or My Issues' mixed data): select the
-                        // issue's team first, like a sidebar click, so the
-                        // sidebar follows and the detail view has its data.
-                        if self.selected_team_id.as_deref() != Some(issue.team_id.as_str())
-                            || self.view == View::MyIssues
-                        {
-                            self.expanded_teams.insert(issue.team_id.clone());
-                            let _ = self.update(Message::SelectTeamView(
-                                issue.team_id.clone(),
-                                View::Board,
-                            ));
-                        }
+                        let select = self.select_team_for_palette(&issue.team_id);
                         // open_issue_detail commits any open detail edits first.
-                        return self.open_issue_detail(&issue);
+                        return Task::batch([select, self.open_issue_detail(&issue)]);
                     }
                     PaletteNav::Project { project_id, team_id } => {
-                        // Other team: switch (reloads its data) so the project is
-                        // in memory; current team opens without a reload.
-                        if self.selected_team_id.as_deref() != Some(team_id.as_str()) {
-                            let _ = self.update(Message::SelectTeamView(
-                                team_id.clone(),
-                                View::ProjectList,
-                            ));
-                        }
-                        self.expanded_teams.insert(team_id);
-                        return self.update(Message::OpenProjectDetail(project_id));
+                        // The switch reloads the team's data, so the project is
+                        // in memory when its detail opens.
+                        let select = self.select_team_for_palette(&team_id);
+                        return Task::batch([
+                            select,
+                            self.update(Message::OpenProjectDetail(project_id)),
+                        ]);
                     }
                 }
             }

@@ -39,11 +39,12 @@ pub fn issues_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Issue>> {
     rows.collect()
 }
 
-/// An issue plus its team's identifier, for cross-team search.
-#[derive(Debug, Clone)]
+/// An issue plus its team's identifier and name, for cross-team search.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchableIssue {
     pub issue: Issue,
     pub team_identifier: String,
+    pub team_name: String,
 }
 
 /// Every non-archived issue in every non-archived team, with its team's
@@ -53,7 +54,7 @@ pub fn searchable_issues(conn: &Connection) -> Result<Vec<SearchableIssue>> {
         "SELECT i.id, i.title, i.description, i.priority, i.team_number, i.due_date, i.estimate,
                 i.started_at, i.completed_at, i.canceled_at, i.lane_id, i.team_id,
                 i.project_id, i.parent_issue_id, i.assignee_id, i.creator_id, i.archived_at,
-                i.remote_id, i.created_at, i.updated_at, t.identifier
+                i.remote_id, i.created_at, i.updated_at, t.identifier, t.name
          FROM issues i JOIN teams t ON t.id = i.team_id
          WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND t.archived_at IS NULL
          ORDER BY i.created_at",
@@ -62,6 +63,35 @@ pub fn searchable_issues(conn: &Connection) -> Result<Vec<SearchableIssue>> {
         Ok(SearchableIssue {
             issue: Issue::from_row(row)?,
             team_identifier: row.get(20)?,
+            team_name: row.get(21)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// A project plus its team's id and name, for cross-team search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchableProject {
+    pub id: String,
+    pub name: String,
+    pub team_id: String,
+    pub team_name: String,
+}
+
+/// Every project of every non-archived team, in one query.
+pub fn searchable_projects(conn: &Connection) -> Result<Vec<SearchableProject>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.team_id, t.name
+         FROM projects p JOIN teams t ON t.id = p.team_id
+         WHERE t.archived_at IS NULL
+         ORDER BY p.name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SearchableProject {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            team_id: row.get(2)?,
+            team_name: row.get(3)?,
         })
     })?;
     rows.collect()
@@ -1896,12 +1926,43 @@ mod tests {
         let mut found: Vec<_> = searchable_issues(&conn)
             .unwrap()
             .into_iter()
-            .map(|s| (s.issue.id, s.team_identifier))
+            .map(|s| (s.issue.id, s.team_identifier, s.team_name))
             .collect();
         found.sort();
         assert_eq!(
             found,
-            [("i1".to_string(), "T".to_string()), ("i2".to_string(), "TWO".to_string())]
+            [
+                ("i1".to_string(), "T".to_string(), "T".to_string()),
+                ("i2".to_string(), "TWO".to_string(), "Two".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn searchable_projects_spans_teams_and_skips_archived_teams() {
+        let conn = setup();
+        conn.execute_batch(&format!(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+               VALUES ('t2', 'Two', 'TWO', '{NOW}', '{NOW}');
+             INSERT INTO teams (id, name, identifier, archived_at, created_at, updated_at)
+               VALUES ('t3', 'Dead', 'DEAD', '{NOW}', '{NOW}', '{NOW}');
+             INSERT INTO projects (id, team_id, name, created_at, updated_at)
+               VALUES ('p1', 't1', 'Alpha', '{NOW}', '{NOW}'),
+                      ('p2', 't2', 'Beta', '{NOW}', '{NOW}'),
+                      ('p3', 't3', 'Gone', '{NOW}', '{NOW}');"
+        ))
+        .unwrap();
+        let found: Vec<_> = searchable_projects(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.id, p.team_id, p.team_name))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("p1".to_string(), "t1".to_string(), "T".to_string()),
+                ("p2".to_string(), "t2".to_string(), "Two".to_string())
+            ]
         );
     }
 

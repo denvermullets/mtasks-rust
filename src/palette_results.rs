@@ -1,34 +1,15 @@
-//! Pure results function for the Command palette. The view only renders what
-//! this returns, so it is the main test seam. New target kinds (team, project,
-//! issue) are added as a `PaletteKind` variant, a `PaletteNav` variant, and a
-//! `push_*` function called from `palette_results`.
+//! Command palette logic with no rendering: the results function and the
+//! palette's state (query, rows, highlight). The view only renders a
+//! `PaletteState`, so this module is the main test seam. A new target kind
+//! is a `PaletteNav` variant (plus its `label`) and a `push_*` function
+//! called from `palette_results`.
 
 use crate::app::View;
 use crate::db::models::Team;
-use crate::db::queries::SearchableIssue;
+use crate::db::queries::{SearchableIssue, SearchableProject};
 use crate::issue_match::IssueQuery;
 
-/// What a row is, shown as a label so rows can be scanned by kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaletteKind {
-    View,
-    Team,
-    Issue,
-    Project,
-}
-
-impl PaletteKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            PaletteKind::View => "View",
-            PaletteKind::Team => "Team",
-            PaletteKind::Issue => "Issue",
-            PaletteKind::Project => "Project",
-        }
-    }
-}
-
-/// Where choosing a row goes.
+/// Where choosing a row goes; also says what kind of row it is.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteNav {
     /// Switch view for the current team (`Message::NavigateToView`).
@@ -41,76 +22,95 @@ pub enum PaletteNav {
     Project { project_id: String, team_id: String },
 }
 
+impl PaletteNav {
+    /// The kind label shown on a row, so rows can be scanned by kind.
+    pub fn label(&self) -> &'static str {
+        match self {
+            PaletteNav::View(_) => "View",
+            PaletteNav::Team(_) => "Team",
+            PaletteNav::Issue(_) => "Issue",
+            PaletteNav::Project { .. } => "Project",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaletteRow {
-    pub kind: PaletteKind,
     pub primary: String,
     pub secondary: String,
     pub nav: PaletteNav,
 }
 
-/// A project from any team, with the team facts the palette needs.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PaletteProject {
-    pub id: String,
-    pub name: String,
-    pub team_id: String,
-    pub team_name: String,
-    pub team_archived: bool,
-}
-
 /// Local data the palette searches, owned so `PaletteState` can keep it and
-/// recompute rows on every keystroke. Later kinds add their fields here.
-#[derive(Debug, Clone, Default)]
+/// recompute rows on every keystroke. Archived issues, teams, and the
+/// projects of archived teams are already left out when this is loaded.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PaletteData {
-    /// Every non-archived issue of every non-archived team (a snapshot taken
-    /// when the palette opens).
     pub issues: Vec<SearchableIssue>,
     /// The selected team; its issues rank first. `None` ranks none first.
     pub current_team_id: Option<String>,
     pub teams: Vec<Team>,
-    /// Projects of every team, loaded when the palette opens.
-    pub projects: Vec<PaletteProject>,
-}
-
-impl PaletteData {
-    /// Load every team's projects from the local database.
-    pub fn load_projects(conn: &rusqlite::Connection) -> Vec<PaletteProject> {
-        let mut projects = Vec::new();
-        for team in crate::db::queries::all_teams(conn).unwrap_or_default() {
-            for p in crate::db::queries::projects_for_team(conn, &team.id).unwrap_or_default() {
-                projects.push(PaletteProject {
-                    id: p.id,
-                    name: p.name,
-                    team_id: team.id.clone(),
-                    team_name: team.name.clone(),
-                    team_archived: team.archived_at.is_some(),
-                });
-            }
-        }
-        projects
-    }
+    pub projects: Vec<SearchableProject>,
 }
 
 /// Most rows the palette ever shows.
 pub const MAX_ROWS: usize = 20;
 
-/// Keep the first `max` rows; call after ordering so the best matches survive.
-fn cap_rows(mut rows: Vec<PaletteRow>, max: usize) -> Vec<PaletteRow> {
-    rows.truncate(max);
-    rows
-}
-
-/// Ordered palette rows for `query`. An empty (or blank) query lists every
-/// navigation target.
+/// Ordered palette rows for `query`, capped at `MAX_ROWS`. An empty (or
+/// blank) query lists every navigation target.
 pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let needle = query.trim().to_lowercase();
     let mut rows = Vec::new();
     push_issues(query, data, &mut rows);
-    push_views(&needle, data, &mut rows);
+    push_views(&needle, &mut rows);
     push_teams(&needle, data, &mut rows);
     push_projects(&needle, data, &mut rows);
-    cap_rows(rows, MAX_ROWS)
+    // After ordering, so the best matches survive.
+    rows.truncate(MAX_ROWS);
+    rows
+}
+
+/// An open palette: the query, its rows and the highlighted row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaletteState {
+    pub query: String,
+    pub rows: Vec<PaletteRow>,
+    /// Index of the highlighted row; always 0 when there are no rows.
+    pub selected: usize,
+    data: PaletteData,
+}
+
+impl PaletteState {
+    pub fn new(data: PaletteData) -> Self {
+        let mut state = PaletteState {
+            query: String::new(),
+            rows: Vec::new(),
+            data,
+            selected: 0,
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    /// Store the query and recompute the rows.
+    pub fn set_query(&mut self, query: String) {
+        self.rows = palette_results(&query, &self.data);
+        self.query = query;
+        self.selected = 0;
+    }
+
+    /// Move the highlight by `delta` rows, wrapping at both ends.
+    pub fn move_selection(&mut self, delta: i32) {
+        let n = self.rows.len() as i32;
+        if n > 0 {
+            self.selected = (self.selected as i32 + delta).rem_euclid(n) as usize;
+        }
+    }
+
+    /// Where Enter goes: the highlighted row's target, if any.
+    pub fn chosen(&self) -> Option<PaletteNav> {
+        self.rows.get(self.selected).map(|r| r.nav.clone())
+    }
 }
 
 /// Case-insensitive substring match; `needle` is already trimmed and lowercased.
@@ -126,28 +126,27 @@ fn push_issues(query: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
     let mut found: Vec<&SearchableIssue> = data
         .issues
         .iter()
-        .filter(|s| s.issue.archived_at.is_none() && query.matches(&s.issue, &s.team_identifier))
+        .filter(|s| query.matches(&s.issue, &s.team_identifier))
         .collect();
     // Stable: ties (e.g. several unnumbered issues) keep their input order.
     found.sort_by_key(|s| {
         let other_team = data.current_team_id.as_deref() != Some(s.issue.team_id.as_str());
         (other_team, std::cmp::Reverse(s.issue.team_number))
     });
-    for SearchableIssue { issue, team_identifier } in found {
-        let identifier = match issue.team_number {
-            Some(n) => format!("{team_identifier}-{n}"),
-            None => format!("{team_identifier} unsynced"),
-        };
+    for s in found {
+        let number = s
+            .issue
+            .team_number
+            .map_or_else(|| "\u{2014}".to_string(), |n| n.to_string());
         rows.push(PaletteRow {
-            kind: PaletteKind::Issue,
-            primary: identifier,
-            secondary: issue.title.clone(),
-            nav: PaletteNav::Issue(issue.id.clone()),
+            primary: format!("{}-{number}", s.team_identifier),
+            secondary: format!("{} \u{b7} {}", s.issue.title, s.team_name),
+            nav: PaletteNav::Issue(s.issue.id.clone()),
         });
     }
 }
 
-fn push_views(needle: &str, _data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
     let views = [
         ("Board", "Current team", View::Board),
         ("Projects", "Current team", View::ProjectList),
@@ -157,7 +156,6 @@ fn push_views(needle: &str, _data: &PaletteData, rows: &mut Vec<PaletteRow>) {
     for (name, scope, view) in views {
         if name_matches(needle, name) {
             rows.push(PaletteRow {
-                kind: PaletteKind::View,
                 primary: name.to_string(),
                 secondary: scope.to_string(),
                 nav: PaletteNav::View(view),
@@ -167,10 +165,9 @@ fn push_views(needle: &str, _data: &PaletteData, rows: &mut Vec<PaletteRow>) {
 }
 
 fn push_teams(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
-    for team in data.teams.iter().filter(|t| t.archived_at.is_none()) {
+    for team in &data.teams {
         if name_matches(needle, &team.name) || name_matches(needle, &team.identifier) {
             rows.push(PaletteRow {
-                kind: PaletteKind::Team,
                 primary: team.name.clone(),
                 secondary: team.identifier.clone(),
                 nav: PaletteNav::Team(team.id.clone()),
@@ -180,10 +177,9 @@ fn push_teams(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
 }
 
 fn push_projects(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
-    for p in data.projects.iter().filter(|p| !p.team_archived) {
+    for p in &data.projects {
         if name_matches(needle, &p.name) {
             rows.push(PaletteRow {
-                kind: PaletteKind::Project,
                 primary: p.name.clone(),
                 secondary: p.team_name.clone(),
                 nav: PaletteNav::Project {
@@ -200,13 +196,13 @@ mod tests {
     use super::*;
     use crate::db::models::Issue;
 
-    fn team(id: &str, name: &str, ident: &str, archived: bool) -> Team {
+    fn team(id: &str, name: &str, ident: &str) -> Team {
         Team {
             id: id.into(),
             name: name.into(),
             identifier: ident.into(),
             remote_id: None,
-            archived_at: archived.then(|| "2026-01-01T00:00:00.000Z".into()),
+            archived_at: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -214,18 +210,15 @@ mod tests {
 
     fn data() -> PaletteData {
         PaletteData {
-            issues: Vec::new(),
-            current_team_id: None,
-            projects: Vec::new(),
             teams: vec![
-                team("t1", "JAIT App", "JRST", false),
-                team("t2", "Rails API", "RAIL", false),
-                team("t3", "Old Stuff", "OLD", true),
+                team("t1", "JAIT App", "JRST"),
+                team("t2", "Rails API", "RAIL"),
             ],
+            ..PaletteData::default()
         }
     }
 
-    fn issue(id: &str, team: &str, num: Option<i32>, title: &str, archived: bool) -> Issue {
+    fn issue(id: &str, team: &str, num: Option<i32>, title: &str) -> Issue {
         Issue {
             id: id.into(),
             title: title.into(),
@@ -243,18 +236,19 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: archived.then(|| "2026-01-01".to_string()),
+            archived_at: None,
             remote_id: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
     }
 
-    /// Issue "ENG" team is "t-eng", "OPS" is "t-ops"; identifier derives from id.
+    /// Issue "ENG" team is "t-eng" named "ENG team"; identifier derives from id.
     fn si(id: &str, team_ident: &str, num: Option<i32>, title: &str) -> SearchableIssue {
         SearchableIssue {
-            issue: issue(id, &format!("t-{}", team_ident.to_lowercase()), num, title, false),
+            issue: issue(id, &format!("t-{}", team_ident.to_lowercase()), num, title),
             team_identifier: team_ident.into(),
+            team_name: format!("{team_ident} team"),
         }
     }
 
@@ -262,8 +256,7 @@ mod tests {
         PaletteData {
             issues,
             current_team_id: current.map(String::from),
-            teams: Vec::new(),
-            projects: Vec::new(),
+            ..PaletteData::default()
         }
     }
 
@@ -320,37 +313,44 @@ mod tests {
     }
 
     #[test]
-    fn without_a_current_team_issues_still_match_by_number_desc_per_team() {
+    fn without_a_current_team_issues_still_match() {
         let issues = vec![si("a", "AAA", Some(1), "x"), si("b", "BBB", Some(1), "x")];
         assert_eq!(issue_ids("x", None, issues).len(), 2);
     }
 
     #[test]
-    fn archived_issues_are_left_out() {
-        let mut archived = si("a", "ENG", Some(1), "thing");
-        archived.issue.archived_at = Some("2026-01-01".into());
-        let issues = vec![archived, si("b", "ENG", Some(2), "thing")];
-        assert_eq!(issue_ids("thing", Some("t-eng"), issues), ["b"]);
+    fn issue_row_shows_identifier_title_and_team() {
+        let data = issue_data(Some("t-eng"), vec![si("a", "OPS", Some(42), "Fix it")]);
+        let rows = palette_results("fix", &data);
+        assert_eq!(rows[0].primary, "OPS-42");
+        assert_eq!(rows[0].secondary, "Fix it \u{b7} OPS team");
     }
 
     #[test]
-    fn issue_row_shows_its_team_and_title() {
-        let data = issue_data(Some("t-eng"), vec![si("a", "OPS", Some(42), "Fix it"), si("u", "OPS", None, "Fix new")]);
-        let rows = palette_results("fix", &data);
-        let by_title = |t: &str| rows.iter().find(|r| r.secondary == t).unwrap();
-        assert_eq!(by_title("Fix it").primary, "OPS-42");
-        assert!(by_title("Fix new").primary.starts_with("OPS"));
+    fn unsynced_issue_row_shows_a_dash_for_its_number() {
+        let data = issue_data(Some("t-eng"), vec![si("u", "OPS", None, "Fix new")]);
+        assert_eq!(palette_results("fix", &data)[0].primary, "OPS-\u{2014}");
     }
 
     #[test]
     fn issues_come_before_views_and_empty_query_has_none() {
         let data = issue_data(Some("t-eng"), vec![si("a", "ENG", Some(1), "board fix")]);
         let rows = palette_results("board", &data);
-        assert_eq!(rows[0].kind, PaletteKind::Issue);
+        assert_eq!(rows[0].nav.label(), "Issue");
         assert_eq!(rows[0].primary, "ENG-1");
-        assert_eq!(rows[0].secondary, "board fix");
-        assert_eq!(rows[1].kind, PaletteKind::View);
-        assert!(palette_results("", &data).iter().all(|r| r.kind == PaletteKind::View));
+        assert_eq!(rows[1].nav.label(), "View");
+        assert!(palette_results("", &data).iter().all(|r| r.nav.label() == "View"));
+    }
+
+    #[test]
+    fn rows_are_capped_keeping_the_best_matches() {
+        let issues = (1..=25)
+            .map(|n| si(&format!("i{n}"), "ENG", Some(n), "login"))
+            .collect();
+        let rows = palette_results("login", &issue_data(Some("t-eng"), issues));
+        assert_eq!(rows.len(), MAX_ROWS);
+        assert_eq!(rows[0].primary, "ENG-25");
+        assert_eq!(rows[MAX_ROWS - 1].primary, "ENG-6");
     }
 
     fn names(query: &str) -> Vec<String> {
@@ -381,16 +381,9 @@ mod tests {
     }
 
     #[test]
-    fn archived_teams_never_appear() {
-        assert!(names("old").is_empty());
-        assert!(!names("").contains(&"Old Stuff".to_string()));
-    }
-
-    #[test]
     fn team_row_navigates_to_its_board() {
         let rows = palette_results("rails", &data());
-        assert_eq!(rows[0].kind, PaletteKind::Team);
-        assert_eq!(rows[0].kind.label(), "Team");
+        assert_eq!(rows[0].nav.label(), "Team");
         assert_eq!(rows[0].secondary, "RAIL");
         assert_eq!(rows[0].nav, PaletteNav::Team("t2".into()));
     }
@@ -421,22 +414,20 @@ mod tests {
         assert!(names("zzz").is_empty());
     }
 
-    fn project(id: &str, name: &str, team: &str, archived: bool) -> PaletteProject {
-        PaletteProject {
+    fn project(id: &str, name: &str, team: &str) -> SearchableProject {
+        SearchableProject {
             id: id.into(),
             name: name.into(),
             team_id: format!("t-{team}"),
             team_name: team.into(),
-            team_archived: archived,
         }
     }
 
     fn project_data() -> PaletteData {
         PaletteData {
             projects: vec![
-                project("p1", "Billing revamp", "Alpha", false),
-                project("p2", "Onboarding", "Beta", false),
-                project("p3", "Billing legacy", "Old", true),
+                project("p1", "Billing revamp", "Alpha"),
+                project("p2", "Onboarding", "Beta"),
             ],
             ..PaletteData::default()
         }
@@ -445,7 +436,7 @@ mod tests {
     fn project_rows(query: &str) -> Vec<PaletteRow> {
         palette_results(query, &project_data())
             .into_iter()
-            .filter(|r| r.kind == PaletteKind::Project)
+            .filter(|r| r.nav.label() == "Project")
             .collect()
     }
 
@@ -455,7 +446,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].primary, "Onboarding");
         assert_eq!(rows[0].secondary, "Beta");
-        assert_eq!(rows[0].kind.label(), "Project");
         assert_eq!(
             rows[0].nav,
             PaletteNav::Project { project_id: "p2".into(), team_id: "t-Beta".into() }
@@ -463,63 +453,73 @@ mod tests {
     }
 
     #[test]
-    fn projects_in_archived_teams_are_left_out() {
-        let rows = project_rows("billing");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].primary, "Billing revamp");
-        assert!(project_rows("legacy").is_empty());
-    }
-
-    #[test]
     fn empty_query_lists_projects_after_views() {
-        let rows = palette_results("", &project_data());
-        let kinds: Vec<_> = rows.iter().map(|r| r.kind).collect();
+        let labels: Vec<_> = palette_results("", &project_data())
+            .iter()
+            .map(|r| r.nav.label())
+            .collect();
         assert_eq!(
-            kinds,
-            [
-                PaletteKind::View,
-                PaletteKind::View,
-                PaletteKind::View,
-                PaletteKind::View,
-                PaletteKind::Project,
-                PaletteKind::Project,
-            ]
+            labels,
+            ["View", "View", "View", "View", "Project", "Project"]
         );
-    }
-
-    fn view_row(name: &str) -> PaletteRow {
-        PaletteRow {
-            kind: PaletteKind::View,
-            primary: name.to_string(),
-            secondary: String::new(),
-            nav: PaletteNav::View(View::Board),
-        }
-    }
-
-    #[test]
-    fn cap_keeps_the_first_rows_in_order() {
-        let rows: Vec<_> = ["a", "b", "c", "d"].into_iter().map(view_row).collect();
-        let capped: Vec<_> = cap_rows(rows, 2).into_iter().map(|r| r.primary).collect();
-        assert_eq!(capped, ["a", "b"]);
-    }
-
-    #[test]
-    fn cap_leaves_short_lists_alone() {
-        let rows = vec![view_row("a")];
-        assert_eq!(cap_rows(rows, 20).len(), 1);
-    }
-
-    #[test]
-    fn results_never_exceed_the_cap() {
-        assert!(palette_results("", &PaletteData::default()).len() <= MAX_ROWS);
     }
 
     #[test]
     fn rows_carry_kind_and_navigation() {
         let rows = palette_results("my", &data());
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, PaletteKind::View);
-        assert_eq!(rows[0].kind.label(), "View");
+        assert_eq!(rows[0].nav.label(), "View");
         assert_eq!(rows[0].nav, PaletteNav::View(View::MyIssues));
+    }
+
+    #[test]
+    fn palette_starts_with_empty_query() {
+        assert_eq!(PaletteState::new(PaletteData::default()).query, "");
+    }
+
+    #[test]
+    fn typing_recomputes_rows() {
+        let mut state = PaletteState::new(PaletteData::default());
+        assert_eq!(state.rows.len(), 4);
+        state.set_query("road".into());
+        assert_eq!(state.rows.len(), 1);
+    }
+
+    #[test]
+    fn first_row_highlighted_on_open_and_after_typing() {
+        let mut state = PaletteState::new(PaletteData::default());
+        assert_eq!(state.selected, 0);
+        state.move_selection(1);
+        state.set_query("o".into());
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn down_wraps_to_first_and_up_wraps_to_last() {
+        let mut state = PaletteState::new(PaletteData::default());
+        state.move_selection(-1);
+        assert_eq!(state.selected, 3);
+        state.move_selection(1);
+        assert_eq!(state.selected, 0);
+        state.move_selection(1);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn move_with_no_rows_stays_put() {
+        let mut state = PaletteState::new(PaletteData::default());
+        state.set_query("zzz".into());
+        state.move_selection(1);
+        state.move_selection(-1);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.chosen(), None);
+    }
+
+    #[test]
+    fn chosen_is_the_highlighted_rows_target() {
+        let mut state = PaletteState::new(PaletteData::default());
+        assert_eq!(state.chosen(), Some(PaletteNav::View(View::Board)));
+        state.move_selection(-1);
+        assert_eq!(state.chosen(), Some(PaletteNav::View(View::MyIssues)));
     }
 }
