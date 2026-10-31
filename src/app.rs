@@ -1061,7 +1061,17 @@ impl App {
         if let (Some(v), View::Board) = (&self.open_view, &self.view) {
             // The view's name replaces the "Issues" crumb.
             if let Some(last) = crumbs.last_mut() {
-                *last = v.name.clone();
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                *last = if v.is_modified(&mirror) {
+                    format!("{} (Modified)", v.name)
+                } else {
+                    v.name.clone()
+                };
             }
         }
         crumbs
