@@ -1015,6 +1015,18 @@ pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<Is
     .optional()
 }
 
+/// Whether the two issues are already linked, in either order and of any kind
+/// (Rails allows one link per pair).
+pub fn issue_dependency_pair_exists(conn: &Connection, a: &str, b: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_dependencies
+         WHERE (blocking_issue_id = ?1 AND blocked_issue_id = ?2)
+            OR (blocking_issue_id = ?2 AND blocked_issue_id = ?1))",
+        params![a, b],
+        |r| r.get(0),
+    )
+}
+
 /// Insert a new local dependency row. Errors on the `UNIQUE(blocking_issue_id,
 /// blocked_issue_id)` constraint when the edge already exists — callers surface
 /// that as a "already linked" toast rather than a hard failure.
@@ -2312,6 +2324,16 @@ mod tests {
         insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
         // Same ordered (blocking, blocked) pair violates the UNIQUE constraint.
         assert!(insert_issue_dependency(&conn, &make_dependency("d2", "i1", "i2")).is_err());
+    }
+
+    #[test]
+    fn issue_dependency_pair_exists_matches_either_order() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        assert!(!issue_dependency_pair_exists(&conn, "i1", "i2").unwrap());
+        insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
+        assert!(issue_dependency_pair_exists(&conn, "i1", "i2").unwrap());
+        assert!(issue_dependency_pair_exists(&conn, "i2", "i1").unwrap());
     }
 
     #[test]

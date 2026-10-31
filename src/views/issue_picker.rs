@@ -33,16 +33,14 @@ pub fn view<'a>(
     team: Option<&'a Team>,
     excluded: &HashSet<&str>,
 ) -> Element<'a, Message> {
-    // Kind chips: the active one is highlighted, disabled kinds are inert.
+    // Kind chips: the active one is highlighted.
     let mut kinds = row![].spacing(6);
     for kind in DepDirection::ALL {
         let active = kind == state.direction;
-        let mut chip = button(text(kind.label()).size(12))
+        let chip = button(text(kind.label()).size(12))
             .padding([4, 10])
-            .style(if active { button::primary } else { button::secondary });
-        if kind.enabled() {
-            chip = chip.on_press(Message::SetDependencyKind(kind));
-        }
+            .style(if active { button::primary } else { button::secondary })
+            .on_press(Message::SetDependencyKind(kind));
         kinds = kinds.push(chip);
     }
     let identifier = |issue: &Issue| match team {
