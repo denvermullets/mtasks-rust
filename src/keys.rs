@@ -66,9 +66,49 @@ pub fn handle_key_press(
     }
 }
 
+/// Keys bound only while the Inbox is showing. Checked before the global
+/// handler; `None` falls through to it.
+pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match key {
+        Key::Character(c) => match c.as_str() {
+            "j" => Some(Message::InboxMove(1)),
+            "k" => Some(Message::InboxMove(-1)),
+            _ => None,
+        },
+        Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::InboxMove(1)),
+        Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::InboxMove(-1)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_jk_move_selection() {
+        let j = Key::Character("j".into());
+        let k = Key::Character("k".into());
+        assert!(matches!(
+            handle_inbox_key(&j, Modifiers::empty()),
+            Some(Message::InboxMove(1))
+        ));
+        assert!(matches!(
+            handle_inbox_key(&k, Modifiers::empty()),
+            Some(Message::InboxMove(-1))
+        ));
+        assert!(handle_inbox_key(&k, Modifiers::COMMAND).is_none());
+    }
+
+    #[test]
+    fn jk_do_nothing_outside_the_inbox() {
+        // The global handler never binds j/k off the board.
+        assert!(press("j", false, false).is_none());
+        assert!(press("k", false, false).is_none());
+    }
 
     fn press(c: &str, modal_open: bool, on_board: bool) -> Option<Message> {
         handle_key_press(
