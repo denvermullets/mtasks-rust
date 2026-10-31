@@ -103,7 +103,14 @@ impl OpenView {
         MODELLED_KEYS.iter().any(|k| now.get(*k) != saved.get(*k))
     }
 
-    /// Whether the view is still the thing on screen: the selected team is its
+    /// The working copy was saved as the view's new definition: it becomes the
+    /// stored query and the baseline, so the view is no longer Modified.
+    pub fn mark_saved(&mut self, mirror: &Mirror) {
+        self.raw = self.encoded(mirror);
+        self.baseline = self.state.clone();
+    }
+
+    /// Whether the view is still the thing on screen:the selected team is its
     /// team and the pane is that team's board (or an issue opened from it).
     pub fn stays_open(&self, selected_team: Option<&str>, on_board_or_detail: bool) -> bool {
         on_board_or_detail && selected_team == Some(self.team_id.as_str())
@@ -913,6 +920,22 @@ mod tests {
         assert!(ov.is_modified(&m));
         ov.state.search.clear();
         ov.state.filters.assignees = vec!["m-a".into()];
+        assert!(ov.is_modified(&m));
+    }
+
+    #[test]
+    fn mark_saved_clears_modified_and_keeps_unknown_keys_in_the_stored_query() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("order_by", "priority"), ("future_key", "x")]);
+        let m = fx.mirror();
+        ov.state.display.order_by = OrderBy::Manual;
+        assert!(ov.is_modified(&m));
+        ov.mark_saved(&m);
+        assert!(!ov.is_modified(&m));
+        assert_eq!(ov.raw["future_key"], "x");
+        assert_eq!(ov.raw["order_by"], ov.encoded(&m)["order_by"]);
+        // Editing again after saving is Modified relative to the new definition.
+        ov.state.display.order_by = OrderBy::Priority;
         assert!(ov.is_modified(&m));
     }
 

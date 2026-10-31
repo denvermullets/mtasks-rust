@@ -19,6 +19,20 @@ pub async fn delete(client: &ApiClient, id: i64) -> Result<(), ApiError> {
     client.delete(&delete_path(id)).await
 }
 
+/// `PATCH /api/v1/saved_views/:id {saved_view:{query}}`: returns the view as
+/// the server now has it. `query` goes out as a JSON object.
+pub async fn update_query(
+    client: &ApiClient,
+    id: i64,
+    query: &serde_json::Value,
+) -> Result<SavedViewDto, ApiError> {
+    client.patch(&delete_path(id), &update_body(query)).await
+}
+
+fn update_body(query: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "saved_view": { "query": query } })
+}
+
 fn delete_path(id: i64) -> String {
     format!("api/v1/saved_views/{id}")
 }
@@ -30,6 +44,15 @@ fn list_path(updated_since: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_body_sends_the_query_as_an_object() {
+        let q = serde_json::json!({"view_mode":"list","lane_ids":"1,2"});
+        assert_eq!(
+            update_body(&q),
+            serde_json::json!({"saved_view":{"query":{"view_mode":"list","lane_ids":"1,2"}}})
+        );
+    }
 
     #[test]
     fn delete_path_names_the_view() {
