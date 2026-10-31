@@ -150,6 +150,11 @@ impl Want {
 }
 
 impl Scheduler {
+    /// Whether the window currently has focus (as last reported).
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
     /// New Data-only scheduler, focused and active. The first timed cycle is
     /// one focused interval after `now`; callers wanting a startup sync send
     /// `ManualSync`.
