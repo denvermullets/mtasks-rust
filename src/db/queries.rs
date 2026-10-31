@@ -774,7 +774,7 @@ pub fn delete_issue_dependency(conn: &Connection, dep_id: &str) -> Result<()> {
 }
 
 /// A resolved dependency edge for the issue-detail sidebar: the dependency row's
-/// own id/remote_id plus the issue on the far end (for display + navigation +
+/// own id/kind plus the issue on the far end (for display + navigation +
 /// removal).
 #[derive(Debug, Clone)]
 pub struct DependencyLink {
@@ -782,52 +782,71 @@ pub struct DependencyLink {
     pub issue_id: String,
     pub identifier: String,
     pub title: String,
+    /// `blocks` | `relates` | `duplicates` (the stored `kind`).
+    pub kind: String,
+    /// True when the viewed issue is the edge's source (`blocking_issue_id`).
+    pub is_source: bool,
 }
 
-/// Resolve dependency edges touching `issue_id`. `join_column` selects the side
-/// `issue_id` sits on; `return_column` is the issue on the other end to display.
-fn dependency_links(
-    conn: &Connection,
-    issue_id: &str,
-    join_column: &str,
-    return_column: &str,
-) -> Result<Vec<DependencyLink>> {
-    let sql = format!(
-        "SELECT d.id, i.id, i.team_number, i.title, t.identifier
+/// An issue's dependency edges split into the five sidebar sections.
+#[derive(Debug, Clone, Default)]
+pub struct DependencyGroups {
+    pub blocking: Vec<DependencyLink>,
+    pub blocked_by: Vec<DependencyLink>,
+    pub related: Vec<DependencyLink>,
+    pub duplicates: Vec<DependencyLink>,
+    pub duplicated_by: Vec<DependencyLink>,
+}
+
+/// Pure grouping of an issue's edges into sections by kind and orientation.
+/// Relates is symmetric, so it lands in `related` from either side; unknown
+/// kinds are dropped rather than shown under a wrong heading.
+pub fn group_dependency_links(links: Vec<DependencyLink>) -> DependencyGroups {
+    let mut g = DependencyGroups::default();
+    for link in links {
+        let bucket = match (link.kind.as_str(), link.is_source) {
+            ("blocks", true) => &mut g.blocking,
+            ("blocks", false) => &mut g.blocked_by,
+            ("relates", _) => &mut g.related,
+            ("duplicates", true) => &mut g.duplicates,
+            ("duplicates", false) => &mut g.duplicated_by,
+            _ => continue,
+        };
+        bucket.push(link);
+    }
+    g
+}
+
+/// Resolve every dependency edge touching `issue_id` (any kind, either side)
+/// and group it for the sidebar.
+pub fn dependency_groups_for_issue(conn: &Connection, issue_id: &str) -> Result<DependencyGroups> {
+    let mut stmt = conn.prepare(
+        "SELECT d.id, i.id, i.team_number, i.title, t.identifier, d.kind,
+                d.blocking_issue_id = ?1
          FROM issue_dependencies d
-         JOIN issues i ON i.id = d.{return_column}
+         JOIN issues i ON i.id = CASE WHEN d.blocking_issue_id = ?1
+                                      THEN d.blocked_issue_id
+                                      ELSE d.blocking_issue_id END
          JOIN teams t ON t.id = i.team_id
-         WHERE d.{join_column} = ?1 AND i.deleted_at IS NULL
-         ORDER BY i.created_at"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![issue_id], |row| {
-        let dep_id: String = row.get(0)?;
-        let far_issue_id: String = row.get(1)?;
-        let team_number: Option<i32> = row.get(2)?;
-        let title: String = row.get(3)?;
-        let team_identifier: String = row.get(4)?;
-        Ok(DependencyLink {
-            dep_id,
-            issue_id: far_issue_id,
-            identifier: format!("{team_identifier}-{}", team_number.unwrap_or(0)),
-            title,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Issues that THIS issue blocks — the "Blocking" sidebar section.
-pub fn blocking_links_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<DependencyLink>> {
-    dependency_links(conn, issue_id, "blocking_issue_id", "blocked_issue_id")
-}
-
-/// Issues that block THIS issue — the "Blocked by" sidebar section.
-pub fn blocked_by_links_for_issue(
-    conn: &Connection,
-    issue_id: &str,
-) -> Result<Vec<DependencyLink>> {
-    dependency_links(conn, issue_id, "blocked_issue_id", "blocking_issue_id")
+         WHERE (d.blocking_issue_id = ?1 OR d.blocked_issue_id = ?1)
+           AND i.deleted_at IS NULL
+         ORDER BY i.created_at",
+    )?;
+    let links = stmt
+        .query_map(params![issue_id], |row| {
+            let team_number: Option<i32> = row.get(2)?;
+            let team_identifier: String = row.get(4)?;
+            Ok(DependencyLink {
+                dep_id: row.get(0)?,
+                issue_id: row.get(1)?,
+                identifier: format!("{team_identifier}-{}", team_number.unwrap_or(0)),
+                title: row.get(3)?,
+                kind: row.get(5)?,
+                is_source: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(group_dependency_links(links))
 }
 
 pub fn set_issue_remote_id(conn: &Connection, issue_id: &str, remote_id: i64) -> Result<()> {
@@ -1723,26 +1742,85 @@ mod tests {
         }
     }
 
+    fn make_link(dep_id: &str, kind: &str, is_source: bool) -> DependencyLink {
+        DependencyLink {
+            dep_id: dep_id.into(),
+            issue_id: "far".into(),
+            identifier: "T-9".into(),
+            title: "far".into(),
+            kind: kind.into(),
+            is_source,
+        }
+    }
+
+    fn ids(links: &[DependencyLink]) -> Vec<&str> {
+        links.iter().map(|l| l.dep_id.as_str()).collect()
+    }
+
     #[test]
-    fn dependency_links_render_both_directions() {
+    fn grouping_splits_the_five_sections() {
+        let g = group_dependency_links(vec![
+            make_link("blocking", "blocks", true),
+            make_link("blocked_by", "blocks", false),
+            make_link("rel_src", "relates", true),
+            make_link("rel_tgt", "relates", false),
+            make_link("dup", "duplicates", true),
+            make_link("dup_by", "duplicates", false),
+        ]);
+        assert_eq!(ids(&g.blocking), ["blocking"]);
+        assert_eq!(ids(&g.blocked_by), ["blocked_by"]);
+        assert_eq!(ids(&g.related), ["rel_src", "rel_tgt"]);
+        assert_eq!(ids(&g.duplicates), ["dup"]);
+        assert_eq!(ids(&g.duplicated_by), ["dup_by"]);
+    }
+
+    #[test]
+    fn grouping_drops_unknown_kinds() {
+        let g = group_dependency_links(vec![make_link("x", "mystery", true)]);
+        assert!(g.blocking.is_empty() && g.related.is_empty() && g.duplicates.is_empty());
+    }
+
+    #[test]
+    fn dependency_groups_render_both_directions() {
         let conn = setup();
         // i1 blocks i2.
         insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
         insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
 
-        // From i1's perspective: it blocks i2, and is blocked by nothing.
-        let blocking = blocking_links_for_issue(&conn, "i1").unwrap();
-        assert_eq!(blocking.len(), 1);
-        assert_eq!(blocking[0].issue_id, "i2");
-        assert_eq!(blocking[0].identifier, "T-1");
-        assert!(blocked_by_links_for_issue(&conn, "i1").unwrap().is_empty());
+        let g1 = dependency_groups_for_issue(&conn, "i1").unwrap();
+        assert_eq!(g1.blocking.len(), 1);
+        assert_eq!(g1.blocking[0].issue_id, "i2");
+        assert_eq!(g1.blocking[0].identifier, "T-1");
+        assert!(g1.blocked_by.is_empty());
 
-        // From i2's perspective the same row is an inverse "blocked by" edge.
-        let blocked_by = blocked_by_links_for_issue(&conn, "i2").unwrap();
-        assert_eq!(blocked_by.len(), 1);
-        assert_eq!(blocked_by[0].issue_id, "i1");
-        assert_eq!(blocked_by[0].dep_id, "d1");
-        assert!(blocking_links_for_issue(&conn, "i2").unwrap().is_empty());
+        let g2 = dependency_groups_for_issue(&conn, "i2").unwrap();
+        assert_eq!(g2.blocked_by.len(), 1);
+        assert_eq!(g2.blocked_by[0].issue_id, "i1");
+        assert_eq!(g2.blocked_by[0].dep_id, "d1");
+        assert!(g2.blocking.is_empty());
+    }
+
+    #[test]
+    fn relates_and_duplicates_never_land_under_blocks() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        insert_issue(&conn, &make_issue("i3", None, None)).unwrap();
+        let mut rel = make_dependency("r", "i1", "i2");
+        rel.kind = "relates".into();
+        insert_issue_dependency(&conn, &rel).unwrap();
+        let mut dup = make_dependency("u", "i1", "i3");
+        dup.kind = "duplicates".into();
+        insert_issue_dependency(&conn, &dup).unwrap();
+
+        let g1 = dependency_groups_for_issue(&conn, "i1").unwrap();
+        assert!(g1.blocking.is_empty() && g1.blocked_by.is_empty());
+        assert_eq!(ids(&g1.related), ["r"]);
+        assert_eq!(ids(&g1.duplicates), ["u"]);
+        // Relates reads the same from the other issue; duplicates flips.
+        let g2 = dependency_groups_for_issue(&conn, "i2").unwrap();
+        assert_eq!(ids(&g2.related), ["r"]);
+        let g3 = dependency_groups_for_issue(&conn, "i3").unwrap();
+        assert_eq!(ids(&g3.duplicated_by), ["u"]);
     }
 
     #[test]
@@ -1760,7 +1838,7 @@ mod tests {
         insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
         insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
         delete_issue_dependency(&conn, "d1").unwrap();
-        assert!(blocking_links_for_issue(&conn, "i1").unwrap().is_empty());
+        assert!(dependency_groups_for_issue(&conn, "i1").unwrap().blocking.is_empty());
         assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
     }
 
