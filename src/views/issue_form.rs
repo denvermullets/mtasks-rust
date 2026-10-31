@@ -129,7 +129,7 @@ pub fn view<'a>(
     let selected_icon = lanes
         .iter()
         .find(|l| l.id == form.lane_id)
-        .map(|l| lane_icon::icon_for(l.category.as_deref()));
+        .map(|l| crate::lane_icon::icon_for(l.category.as_deref()));
 
     let form_content = column![]
         .spacing(14)

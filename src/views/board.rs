@@ -55,11 +55,10 @@ pub fn view<'a>(
             t::text_secondary()
         };
 
-        let mut header = row![].spacing(6).align_y(iced::Alignment::Center);
-        if let Some(icon) = col.lane_icon {
-            header = header.push(lane_icon::view(icon));
-        }
-        let header = header
+        let header = row![]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .push_maybe(col.lane_icon.map(lane_icon::view))
             .push(text(col.title.clone()).size(14).color(name_color))
             .push(
                 text(format!("{}", col.issues.len()))

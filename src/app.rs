@@ -2199,7 +2199,14 @@ impl App {
             }
             Message::MoveTeamSelected(target_id) => {
                 if let Modal::MoveTeam(issue_id) = std::mem::replace(&mut self.modal, Modal::None) {
-                    self.move_issue_to_team(&issue_id, &target_id);
+                    // Same rule as the picker: only synced, live teams.
+                    let ok = self
+                        .teams
+                        .iter()
+                        .any(|t| t.id == target_id && t.remote_id.is_some() && t.archived_at.is_none());
+                    if ok {
+                        self.move_issue_to_team(&issue_id, &target_id);
+                    }
                 }
             }
 
@@ -2470,6 +2477,11 @@ impl App {
             }
 
             Message::CloseModal => {
+                // Cancelling the label-delete confirm returns to the panel.
+                if matches!(self.modal, Modal::DeleteLabelConfirm(_)) {
+                    self.modal = Modal::Labels;
+                    return Task::none();
+                }
                 self.modal = Modal::None;
                 self.issue_form = None;
                 self.settings_form = None;
