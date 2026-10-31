@@ -82,6 +82,7 @@ pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
         },
         Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::InboxMove(1)),
         Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::InboxMove(-1)),
+        Key::Named(keyboard::key::Named::Enter) => Some(Message::InboxOpen),
         _ => None,
     }
 }
@@ -113,6 +114,15 @@ mod tests {
             Some(Message::InboxMarkRead)
         ));
         assert!(!matches!(press("r", false, false), Some(Message::InboxMarkRead)));
+    }
+
+    #[test]
+    fn inbox_enter_opens_the_issue() {
+        let enter = Key::Named(keyboard::key::Named::Enter);
+        assert!(matches!(
+            handle_inbox_key(&enter, Modifiers::empty()),
+            Some(Message::InboxOpen)
+        ));
     }
 
     #[test]

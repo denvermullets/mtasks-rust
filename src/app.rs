@@ -311,6 +311,13 @@ pub enum Message {
     InboxSelect(usize),
     /// Mark the selected Inbox Notification read (`r`).
     InboxMarkRead,
+    /// Open the selected Notification's issue and mark it read (Enter).
+    InboxOpen,
+    /// The one-shot fetch for a Notification's un-mirrored issue finished
+    /// (issue remote id, result).
+    InboxIssueFetched(i64, Result<(), String>),
+    /// Leave an issue detail opened from the Inbox and return there.
+    BackToInbox,
     /// Switch the Inbox to the other filter (f).
     InboxToggleFilter,
     /// Set the Inbox filter (filter tabs).
@@ -536,6 +543,8 @@ pub struct App {
     detail_deps: queries::DependencyGroups,
     /// The open issue detail was reached from My Issues, so Back returns there.
     detail_from_my_issues: bool,
+    /// The open issue detail was reached from the Inbox (Back returns there).
+    detail_from_inbox: bool,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -950,6 +959,9 @@ impl App {
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "My Issues".into());
         }
+        if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
+            crumbs.insert(0, "Inbox".into());
+        }
         crumbs
     }
 
@@ -1196,6 +1208,30 @@ impl App {
         self.open_issue_detail(&issue)
     }
 
+    /// Open `issue` from the Inbox: select its own team (like My Issues) so the
+    /// detail is that team's, and remember to return to the Inbox on Back.
+    fn open_issue_from_inbox(&mut self, issue: Issue) -> Task<Message> {
+        self.selected_team_id = Some(issue.team_id.clone());
+        self.view = View::Board;
+        self.reload_data();
+        self.detail_from_my_issues = false;
+        self.detail_from_inbox = true;
+        self.open_issue_detail(&issue)
+    }
+
+    /// Mark the selected Inbox Notification read in the mirror and refresh the
+    /// badge and rows. Returns the Notification (as it was) if one is selected.
+    fn mark_selected_inbox_read(&mut self) -> Option<crate::db::notifications::Notification> {
+        let selected = self.inbox.selected_item().cloned()?;
+        let conn = self.db();
+        let now = crate::db::now_iso();
+        if crate::db::notifications::mark_read(&conn, selected.remote_id, &now).unwrap_or(false) {
+            self.notif_unread_count = crate::db::notifications::unread_count(&conn).unwrap_or(0);
+            self.reload_inbox();
+        }
+        Some(selected)
+    }
+
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
         self.commit_issue_detail();
         self.commit_project_detail();
@@ -1408,10 +1444,13 @@ impl App {
                 if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
                     let back = if self.detail_from_my_issues {
                         View::MyIssues
+                    } else if self.detail_from_inbox {
+                        View::Inbox
                     } else {
                         View::Board
                     };
                     self.detail_from_my_issues = false;
+                    self.detail_from_inbox = false;
                     self.issue_detail = None;
                     self.switch_view(back);
                 }
@@ -1682,6 +1721,7 @@ impl App {
             issue_labels,
             detail_deps: Default::default(),
             detail_from_my_issues: false,
+            detail_from_inbox: false,
             detail_comments: Vec::new(),
             detail_events: Vec::new(),
             detail_references: Vec::new(),
@@ -1929,6 +1969,7 @@ impl App {
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
+                self.detail_from_inbox = false;
                 let from_my = self.view == View::MyIssues;
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
                     self.selected_team_id = Some(team_id);
@@ -1942,15 +1983,58 @@ impl App {
 
             Message::InboxMove(delta) => self.inbox.step(delta),
             Message::InboxMarkRead => {
-                if let Some(remote_id) = self.inbox.selected_item().map(|n| n.remote_id) {
-                    let conn = self.db();
-                    let now = crate::db::now_iso();
-                    if crate::db::notifications::mark_read(&conn, remote_id, &now).unwrap_or(false) {
-                        self.notif_unread_count =
-                            crate::db::notifications::unread_count(&conn).unwrap_or(0);
-                        self.reload_inbox();
+                self.mark_selected_inbox_read();
+            }
+            Message::InboxOpen => {
+                let Some(n) = self.mark_selected_inbox_read() else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                match crate::inbox::resolve_target(&conn, &n) {
+                    crate::inbox::OpenTarget::Local(issue) => {
+                        drop(conn);
+                        return self.open_issue_from_inbox(issue);
+                    }
+                    crate::inbox::OpenTarget::Fetch { team_remote_id, local_team_id, issue_remote_id } => {
+                        let base_url = self.config.api_base_url.trim().to_string();
+                        let token = self.config.api_token.clone().unwrap_or_default();
+                        let Ok(client) = ApiClient::new(base_url, token) else {
+                            self.push_toast("Can't open issue: not signed in", ToastKind::Error, false);
+                            return Task::none();
+                        };
+                        return Task::perform(
+                            async move {
+                                SyncEngine::fetch_issue(&client, team_remote_id, &local_team_id, issue_remote_id)
+                                    .await
+                            },
+                            move |r| Message::InboxIssueFetched(issue_remote_id, r),
+                        );
+                    }
+                    crate::inbox::OpenTarget::Unavailable => {
+                        self.push_toast("This notification has no issue to open", ToastKind::Info, false);
                     }
                 }
+            }
+            Message::InboxIssueFetched(issue_remote_id, result) => {
+                if self.view != View::Inbox {
+                    return Task::none();
+                }
+                let found = match result {
+                    Ok(()) => queries::find_issue_by_remote_id(&self.db(), issue_remote_id)
+                        .ok()
+                        .flatten(),
+                    Err(_) => None,
+                };
+                match found {
+                    Some(issue) => return self.open_issue_from_inbox(issue),
+                    None => self.push_toast("Couldn't load that issue", ToastKind::Error, false),
+                }
+            }
+            Message::BackToInbox => {
+                self.commit_issue_detail();
+                self.detail_from_inbox = false;
+                self.issue_detail = None;
+                self.switch_view(View::Inbox);
             }
             Message::InboxSelect(i) => {
                 if i < self.inbox.items.len() {
@@ -1972,6 +2056,7 @@ impl App {
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
+                self.detail_from_inbox = false;
                 self.switch_view(view);
             }
 
@@ -3614,7 +3699,11 @@ impl App {
             .then(|| self.active_filter_count()),
             self.new_action(),
             (self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)))
-                .then_some(Message::BackToMyIssues),
+                .then_some(Message::BackToMyIssues)
+                .or_else(|| {
+                    (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
+                        .then_some(Message::BackToInbox)
+                }),
         );
 
         let columns = if matches!(self.view, View::Board | View::MyIssues) {
