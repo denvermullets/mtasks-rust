@@ -69,6 +69,14 @@ pub fn handle_key_press(
 /// Keys bound only while the Inbox is showing. Checked before the global
 /// handler; `None` falls through to it.
 pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    if modifiers.shift() && !modifiers.command() && !modifiers.control() && !modifiers.alt() {
+        if let Key::Character(c) = key {
+            if c.as_str() == "R" || c.as_str() == "r" {
+                return Some(Message::InboxMarkAllRead);
+            }
+        }
+        return None;
+    }
     if !modifiers.is_empty() {
         return None;
     }
@@ -113,6 +121,16 @@ mod tests {
             Some(Message::InboxMarkRead)
         ));
         assert!(!matches!(press("r", false, false), Some(Message::InboxMarkRead)));
+    }
+
+    #[test]
+    fn inbox_shift_r_marks_all_read() {
+        let big = Key::Character("R".into());
+        assert!(matches!(
+            handle_inbox_key(&big, Modifiers::SHIFT),
+            Some(Message::InboxMarkAllRead)
+        ));
+        assert!(!matches!(press("R", false, false), Some(Message::InboxMarkAllRead)));
     }
 
     #[test]
