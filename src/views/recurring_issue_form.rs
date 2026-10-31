@@ -103,6 +103,58 @@ const PRIORITIES: [Priority; 5] = [
     Priority::None,
 ];
 
+/// ActiveSupport's `TimeZone.us_zones`, in the order and spelling the web form
+/// offers (`time_zone_select ... us_zones`). Keep in step with
+/// `db::recurring_issues::time_zone_abbreviation`.
+pub const US_TIME_ZONES: [&str; 29] = [
+    "America/Adak",
+    "Hawaii",
+    "Alaska",
+    "America/Anchorage",
+    "America/Metlakatla",
+    "America/Nome",
+    "America/Sitka",
+    "America/Yakutat",
+    "Pacific Time (US & Canada)",
+    "America/Boise",
+    "Arizona",
+    "Mountain Time (US & Canada)",
+    "America/Indiana/Knox",
+    "America/Indiana/Tell_City",
+    "America/Menominee",
+    "America/North_Dakota/Beulah",
+    "America/North_Dakota/Center",
+    "America/North_Dakota/New_Salem",
+    "Central Time (US & Canada)",
+    "America/Detroit",
+    "America/Indiana/Marengo",
+    "America/Indiana/Petersburg",
+    "America/Indiana/Vevay",
+    "America/Indiana/Vincennes",
+    "America/Indiana/Winamac",
+    "America/Kentucky/Louisville",
+    "America/Kentucky/Monticello",
+    "Eastern Time (US & Canada)",
+    "Indiana (East)",
+];
+
+/// Time zone choice for the pick list; `None` leaves the zone unset so the
+/// server uses the creator's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeZoneChoice(pub Option<&'static str>);
+
+impl std::fmt::Display for TimeZoneChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.unwrap_or("Default (my time zone)"))
+    }
+}
+
+fn time_zone_choices() -> Vec<TimeZoneChoice> {
+    std::iter::once(TimeZoneChoice(None))
+        .chain(US_TIME_ZONES.iter().map(|z| TimeZoneChoice(Some(z))))
+        .collect()
+}
+
 /// Open create form. Number and date fields are raw text so half-typed input
 /// is representable; [`validate`] parses them.
 pub struct RecurringFormState {
@@ -124,6 +176,8 @@ pub struct RecurringFormState {
     pub assignee: Choice,
     pub project: Choice,
     pub lane: Choice,
+    /// `None` = server default (the creator's zone).
+    pub time_zone: Option<String>,
     /// Local UUIDs of the labels toggled on in the chip grid.
     pub label_ids: Vec<String>,
     /// Inline errors from the last failed Save; cleared by a successful one.
@@ -153,6 +207,7 @@ impl RecurringFormState {
             weekday: i64::from(today.weekday().num_days_from_sunday()),
             day_of_month: today.day().to_string(),
             starts_on: today.format("%Y-%m-%d").to_string(),
+            time_zone: None,
             label_ids: Vec::new(),
             errors: FormErrors::default(),
         }
@@ -209,6 +264,7 @@ pub struct FormErrors {
     pub weekday: Option<String>,
     pub day_of_month: Option<String>,
     pub starts_on: Option<String>,
+    pub time_zone: Option<String>,
 }
 
 impl FormErrors {
@@ -258,6 +314,12 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
         errors.starts_on = Some("Starts on must be a valid date (YYYY-MM-DD)".into());
     }
 
+    if let Some(z) = &form.time_zone {
+        if !US_TIME_ZONES.contains(&z.as_str()) {
+            errors.time_zone = Some("Time zone must be one of the listed zones".into());
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -279,6 +341,7 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
         assignee_id: form.assignee.id.clone(),
         project_id: form.project.id.clone(),
         lane_id: form.lane.id.clone(),
+        time_zone: form.time_zone.clone(),
         label_ids: form.label_ids.clone(),
     })
 }
@@ -392,6 +455,24 @@ pub fn view<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a
                 ),
         )
         .push_maybe(error_line(&form.errors.starts_on))
+        .push(
+            column![]
+                .spacing(4)
+                .push(text("Time zone").size(12).color(t::text_muted()))
+                .push(pick_list(
+                    time_zone_choices(),
+                    Some(TimeZoneChoice(
+                        US_TIME_ZONES
+                            .iter()
+                            .copied()
+                            .find(|z| Some(*z) == form.time_zone.as_deref()),
+                    )),
+                    |c: TimeZoneChoice| {
+                        Message::RecurringFormTimeZoneChanged(c.0.map(String::from))
+                    },
+                )),
+        )
+        .push_maybe(error_line(&form.errors.time_zone))
         .push_maybe(form.summary().map(|s| text(s).size(13).color(t::text_secondary())));
 
     let form_content = column![]
@@ -597,6 +678,38 @@ mod tests {
             let mut f = valid();
             f.starts_on = bad.into();
             assert!(validate(&f).unwrap_err().starts_on.is_some(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn time_zone_defaults_to_unset_and_must_be_a_listed_zone() {
+        assert_eq!(validate(&valid()).unwrap().time_zone, None);
+        let mut f = valid();
+        f.time_zone = Some("Mountain Time (US & Canada)".into());
+        assert_eq!(
+            validate(&f).unwrap().time_zone.as_deref(),
+            Some("Mountain Time (US & Canada)")
+        );
+        f.time_zone = Some("Tokyo".into());
+        assert!(validate(&f).unwrap_err().time_zone.is_some());
+    }
+
+    #[test]
+    fn the_zone_list_is_unique_and_covers_the_abbreviation_map() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(US_TIME_ZONES.iter().all(|z| seen.insert(*z)));
+        for z in [
+            "Eastern Time (US & Canada)",
+            "Central Time (US & Canada)",
+            "Mountain Time (US & Canada)",
+            "Arizona",
+            "Pacific Time (US & Canada)",
+            "Alaska",
+            "Hawaii",
+            "Indiana (East)",
+        ] {
+            assert!(US_TIME_ZONES.contains(&z), "{z}");
+            assert!(crate::db::recurring_issues::time_zone_abbreviation(z).is_some(), "{z}");
         }
     }
 
