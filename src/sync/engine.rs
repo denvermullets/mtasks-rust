@@ -1491,6 +1491,7 @@ struct DependencyCreatePrep {
     team_remote_id: i64,
     issue_remote_id: i64,
     target_remote_id: i64,
+    direction: Direction,
     local_id: String,
 }
 
@@ -1538,6 +1539,7 @@ fn prep_dependency_create(entity_id: &str) -> Prep<DependencyCreatePrep> {
         team_remote_id,
         issue_remote_id,
         target_remote_id,
+        direction: dependencies::direction_for_edge(&dep.kind),
         local_id: dep.id,
     })
 }
@@ -1552,13 +1554,13 @@ async fn dependency_create(client: &ApiClient, entity_id: &str, entry_id: i64) -
         prep.team_remote_id,
         prep.issue_remote_id,
         prep.target_remote_id,
-        Direction::Blocking,
+        prep.direction,
     )
     .await
     {
         Ok(resp) => {
-            // The desktop only sends `blocking`, so the response direction is
-            // already relative to the source side; store what Rails echoed.
+            // The create is posted from the source side, so the response
+            // direction is already relative to it; store what Rails echoed.
             let conn = match open() {
                 Ok(c) => c,
                 Err(e) => return Outcome::LeavePending(e),

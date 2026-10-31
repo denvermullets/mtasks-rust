@@ -118,6 +118,10 @@ pub enum Message {
     BackToMyIssues,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
+    /// Step the open picker's link kind (Tab forward, Shift+Tab back).
+    CycleDependencyKind(bool),
+    /// Set the open picker's link kind (clicking a kind chip).
+    SetDependencyKind(DepDirection),
     /// The picker's search box changed.
     DependencyPickerSearchChanged(String),
     /// A target issue (local UUID) was chosen in the picker → create the edge.
@@ -332,13 +336,67 @@ fn team_web_url(base_url: &str, team_remote_id: i64, section: TeamWebSection) ->
     )
 }
 
-/// Which dependency section a picker/add-action targets, relative to the open
-/// issue. `Blocking` = the open issue blocks the target; `BlockedBy` = the target
-/// blocks the open issue.
+/// The link kind a picker/add-action creates, relative to the open issue.
+/// `Blocking` = the open issue blocks the target; `BlockedBy` = the target
+/// blocks the open issue; the rest read the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepDirection {
     Blocking,
     BlockedBy,
+    Relates,
+    Duplicates,
+    DuplicatedBy,
+}
+
+impl DepDirection {
+    pub const ALL: [DepDirection; 5] = [
+        DepDirection::Blocking,
+        DepDirection::BlockedBy,
+        DepDirection::Relates,
+        DepDirection::Duplicates,
+        DepDirection::DuplicatedBy,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DepDirection::Blocking => "Blocking",
+            DepDirection::BlockedBy => "Blocked by",
+            DepDirection::Relates => "Relates to",
+            DepDirection::Duplicates => "Duplicates",
+            DepDirection::DuplicatedBy => "Duplicated by",
+        }
+    }
+
+    /// Relates and duplicates links can't be created yet.
+    pub fn enabled(self) -> bool {
+        matches!(self, DepDirection::Blocking | DepDirection::BlockedBy)
+    }
+
+    /// The next (or previous) enabled kind, wrapping around.
+    pub fn cycle(self, forward: bool) -> DepDirection {
+        let n = Self::ALL.len();
+        let start = Self::ALL.iter().position(|d| *d == self).unwrap_or(0);
+        (1..=n)
+            .map(|step| {
+                let i = if forward { start + step } else { start + n - step };
+                Self::ALL[i % n]
+            })
+            .find(|d| d.enabled())
+            .unwrap_or(self)
+    }
+
+    /// The stored edge for linking `current` to `target` in this kind. The link's
+    /// source goes in `blocking_issue_id`. Returns `(source, target, kind)`.
+    pub fn stored_edge(self, current: &str, target: &str) -> (String, String, &'static str) {
+        let (cur, tgt) = (current.to_string(), target.to_string());
+        match self {
+            DepDirection::Blocking => (cur, tgt, "blocks"),
+            DepDirection::BlockedBy => (tgt, cur, "blocks"),
+            DepDirection::Relates => (cur, tgt, "relates"),
+            DepDirection::Duplicates => (cur, tgt, "duplicates"),
+            DepDirection::DuplicatedBy => (tgt, cur, "duplicates"),
+        }
+    }
 }
 
 /// Which screen the right-hand pane renders. `MyIssues` is the board across
@@ -1156,19 +1214,18 @@ impl App {
             self.push_toast("An issue can't depend on itself", ToastKind::Error, false);
             return;
         }
-        // A row means `blocking_issue_id` blocks `blocked_issue_id`.
-        let (blocking_issue_id, blocked_issue_id) = match direction {
-            DepDirection::Blocking => (current_id, target_id.to_string()),
-            DepDirection::BlockedBy => (target_id.to_string(), current_id),
-        };
+        let (blocking_issue_id, blocked_issue_id, kind) =
+            direction.stored_edge(&current_id, target_id);
         let now = crate::db::now_iso();
         let dep = IssueDependency {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
             blocking_issue_id,
             blocked_issue_id,
-            kind: "blocks".into(),
-            direction: "blocking".into(),
+            kind: kind.into(),
+            direction: crate::api::dependencies::direction_for_edge(kind)
+                .as_str()
+                .into(),
             created_at: now.clone(),
             updated_at: now,
         };
@@ -1590,6 +1647,11 @@ impl App {
                         }
                     }
                 }
+                if self.modal == Modal::IssuePicker
+                    && key == keyboard::Key::Named(keyboard::key::Named::Tab)
+                {
+                    return self.update(Message::CycleDependencyKind(!modifiers.shift()));
+                }
                 let modal_open = self.modal != Modal::None;
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
@@ -1950,6 +2012,18 @@ impl App {
             Message::OpenDependencyPicker(direction) => {
                 self.issue_picker = Some(issue_picker::IssuePickerState::new(direction));
                 self.modal = Modal::IssuePicker;
+            }
+            Message::CycleDependencyKind(forward) => {
+                if let Some(ref mut picker) = self.issue_picker {
+                    picker.direction = picker.direction.cycle(forward);
+                }
+            }
+            Message::SetDependencyKind(kind) => {
+                if let Some(ref mut picker) = self.issue_picker {
+                    if kind.enabled() {
+                        picker.direction = kind;
+                    }
+                }
             }
             Message::DependencyPickerSearchChanged(query) => {
                 if let Some(ref mut picker) = self.issue_picker {
@@ -3382,9 +3456,13 @@ impl App {
                 (Some(picker), Some(detail)) => {
                     // Exclude the open issue itself and any issue already linked
                     // in this direction (a duplicate would hit the UNIQUE edge).
+                    let d = &self.detail_deps;
                     let existing = match picker.direction {
-                        DepDirection::Blocking => &self.detail_deps.blocking,
-                        DepDirection::BlockedBy => &self.detail_deps.blocked_by,
+                        DepDirection::Blocking => &d.blocking,
+                        DepDirection::BlockedBy => &d.blocked_by,
+                        DepDirection::Relates => &d.related,
+                        DepDirection::Duplicates => &d.duplicates,
+                        DepDirection::DuplicatedBy => &d.duplicated_by,
                     };
                     let mut excluded: HashSet<&str> =
                         existing.iter().map(|l| l.issue_id.as_str()).collect();
@@ -3759,5 +3837,25 @@ mod tests {
         let teams = vec![team("a", true)];
         assert_eq!(default_team_id(&teams).as_deref(), Some("a"));
         assert_eq!(default_team_id(&[]), None);
+    }
+
+    #[test]
+    fn dep_direction_stores_source_and_kind() {
+        let edge = |d: DepDirection| d.stored_edge("me", "other");
+        assert_eq!(edge(DepDirection::Blocking), ("me".into(), "other".into(), "blocks"));
+        assert_eq!(edge(DepDirection::BlockedBy), ("other".into(), "me".into(), "blocks"));
+        assert_eq!(edge(DepDirection::Relates), ("me".into(), "other".into(), "relates"));
+        assert_eq!(edge(DepDirection::Duplicates), ("me".into(), "other".into(), "duplicates"));
+        assert_eq!(
+            edge(DepDirection::DuplicatedBy),
+            ("other".into(), "me".into(), "duplicates")
+        );
+    }
+
+    #[test]
+    fn dep_direction_cycles_only_through_enabled_kinds() {
+        assert_eq!(DepDirection::Blocking.cycle(true), DepDirection::BlockedBy);
+        assert_eq!(DepDirection::BlockedBy.cycle(true), DepDirection::Blocking);
+        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::BlockedBy);
     }
 }

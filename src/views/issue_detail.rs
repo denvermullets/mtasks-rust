@@ -11,6 +11,7 @@ use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
 use crate::theme as t;
 use crate::views::issue_form::LaneOption;
+use crate::views::lane_icon;
 use crate::views::projects::MemberOption;
 use crate::views::util::relative_time;
 
@@ -196,6 +197,10 @@ pub fn view<'a>(
         })
         .collect();
     let selected_lane = lane_options.iter().find(|l| l.id == issue.lane_id).cloned();
+    let selected_icon = lanes
+        .iter()
+        .find(|l| l.id == issue.lane_id)
+        .map(|l| lane_icon::icon_for(l.category.as_deref()));
 
     let project_options: Vec<ProjectOption> = std::iter::once(ProjectOption {
         id: None,
@@ -241,10 +246,16 @@ pub fn view<'a>(
         .push_maybe(parent.map(|p| section("Parent", parent_link(p, team))))
         .push(section(
             "Status",
-            pick_list(lane_options, selected_lane, |o: LaneOption| {
-                Message::IssueDetailStatusChanged(o.id)
-            })
-            .width(Length::Fill),
+            row![]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push_maybe(selected_icon.map(lane_icon::view))
+                .push(
+                    pick_list(lane_options, selected_lane, |o: LaneOption| {
+                        Message::IssueDetailStatusChanged(o.id)
+                    })
+                    .width(Length::Fill),
+                ),
         ))
         .push(section(
             "Priority",
@@ -431,7 +442,13 @@ fn sub_issue_row<'a>(
             .as_deref()
             .and_then(t::hex_to_color)
             .unwrap_or(t::text_muted());
-        container(text(&l.name).size(11).color(color))
+        container(
+            row![]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .push(lane_icon::view(lane_icon::icon_for(l.category.as_deref())))
+                .push(text(&l.name).size(11).color(color)),
+        )
             .padding([2, 8])
             .style(move |_theme: &Theme| container::Style {
                 border: Border {
