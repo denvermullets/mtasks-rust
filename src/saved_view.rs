@@ -436,6 +436,61 @@ pub fn encode(state: &BoardState, raw: &RawQuery, mirror: &Mirror) -> RawQuery {
     out
 }
 
+/// Rails rejects Saved view names longer than this.
+pub const MAX_NAME_LEN: usize = 80;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameError {
+    Blank,
+    TooLong,
+}
+
+impl NameError {
+    pub fn message(self) -> &'static str {
+        match self {
+            NameError::Blank => "Name can't be blank",
+            NameError::TooLong => "Name must be 80 characters or fewer",
+        }
+    }
+}
+
+/// Local check of a new view's name: trimmed, 1 to 80 characters.
+pub fn validate_name(name: &str) -> Result<String, NameError> {
+    let name = name.trim();
+    if name.is_empty() {
+        Err(NameError::Blank)
+    } else if name.chars().count() > MAX_NAME_LEN {
+        Err(NameError::TooLong)
+    } else {
+        Ok(name.to_string())
+    }
+}
+
+/// Why "Save view…" is unavailable, or `None` when it is offered.
+/// `on_team_board` is true only on a single team's Issues board (not My Issues,
+/// project pages and other cross-team or non-board views).
+pub fn save_block_reason(on_team_board: bool, read_only: bool) -> Option<&'static str> {
+    if !on_team_board {
+        Some("Open a single team's Issues board to save a view")
+    } else if read_only {
+        Some("Read-only token: can't save a view")
+    } else {
+        None
+    }
+}
+
+/// Whether the filters hold the Unassigned assignee, which Rails can't store.
+pub fn has_unassigned(state: &BoardState) -> bool {
+    state.filters.assignees.iter().any(String::is_empty)
+}
+
+/// The query for a brand-new view made from `state`. There is no stored query
+/// to preserve, so it is encoded over an empty one; Unassigned has no remote
+/// id and is dropped by the encode.
+pub fn new_view_query(state: &BoardState, mirror: &Mirror) -> RawQuery {
+    encode(state, &RawQuery::new(), mirror)
+}
+
 /// Local ids -> remote ids (records without a remote id can't be encoded),
 /// then the raw ids that resolve to no mirrored record, so they survive.
 fn remote_ids<'a>(
@@ -936,6 +991,40 @@ mod tests {
         let mut ov = open_with(&fx, &[("creator_ids", "4")]);
         ov.raw.insert("creator_ids".into(), "5".into());
         assert!(!ov.is_modified(&fx.mirror()));
+    }
+    #[test]
+    fn view_name_is_trimmed_and_must_be_1_to_80_chars() {
+        assert_eq!(validate_name("  Bugs  "), Ok("Bugs".to_string()));
+        assert_eq!(validate_name("   "), Err(NameError::Blank));
+        assert_eq!(validate_name(""), Err(NameError::Blank));
+        assert!(validate_name(&"a".repeat(80)).is_ok());
+        assert_eq!(validate_name(&"a".repeat(81)), Err(NameError::TooLong));
+        // Length counts characters, not bytes.
+        assert!(validate_name(&"é".repeat(80)).is_ok());
+    }
+
+    #[test]
+    fn save_is_offered_only_on_a_team_board_with_a_writable_token() {
+        assert_eq!(save_block_reason(true, false), None);
+        assert!(save_block_reason(false, false).unwrap().contains("team"));
+        assert!(save_block_reason(true, true).unwrap().contains("Read-only"));
+        // Not being on a team board is the more useful reason to show.
+        assert!(save_block_reason(false, true).unwrap().contains("team"));
+    }
+
+    #[test]
+    fn new_view_query_drops_unassigned_and_reports_it() {
+        let members = [member("m1", Some(5))];
+        let mirror = Mirror { lanes: &[], members: &members, labels: &[], projects: &[] };
+        let mut state = BoardState::default();
+        state.filters.assignees = vec!["m1".into(), String::new()];
+        state.search = "crash".into();
+        assert!(has_unassigned(&state));
+        let query = new_view_query(&state, &mirror);
+        assert_eq!(query.get("assignee_ids").map(String::as_str), Some("5"));
+        assert_eq!(query.get("q").map(String::as_str), Some("crash"));
+        state.filters.assignees = vec!["m1".into()];
+        assert!(!has_unassigned(&state));
     }
 
     fn sv_with(name: &str, pairs: &[(&str, &str)]) -> crate::db::saved_views::SavedView {

@@ -14,6 +14,27 @@ pub async fn list_page(
     client.get_list_page(&list_path(updated_since)).await
 }
 
+/// `POST /api/v1/teams/:team_id/saved_views` (201). `query` is the Rails query
+/// map (string values).
+pub async fn create(
+    client: &ApiClient,
+    team_id: i64,
+    name: &str,
+    query: &serde_json::Value,
+) -> Result<SavedViewDto, ApiError> {
+    client
+        .post(&create_path(team_id), &create_body(name, query))
+        .await
+}
+
+fn create_path(team_id: i64) -> String {
+    format!("api/v1/teams/{team_id}/saved_views")
+}
+
+fn create_body(name: &str, query: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "saved_view": { "name": name, "query": query } })
+}
+
 /// `DELETE /api/v1/saved_views/:id` (204).
 pub async fn delete(client: &ApiClient, id: i64) -> Result<(), ApiError> {
     client.delete(&delete_path(id)).await
@@ -33,6 +54,11 @@ mod tests {
 
     #[test]
     fn delete_path_names_the_view() {
+        assert_eq!(create_path(7), "api/v1/teams/7/saved_views");
+        assert_eq!(
+            create_body("A", &serde_json::json!({"q": "x"})),
+            serde_json::json!({"saved_view": {"name": "A", "query": {"q": "x"}}})
+        );
         assert_eq!(delete_path(5), "api/v1/saved_views/5");
     }
 

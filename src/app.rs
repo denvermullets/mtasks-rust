@@ -202,6 +202,11 @@ pub enum Message {
     OpenDisplayOptions,
     /// "Filter" button: open the filter popover.
     OpenFilterPanel,
+    /// "Save view…" in the display popover: ask for a name.
+    OpenSaveView,
+    SaveViewNameChanged(String),
+    /// Create the Saved view from the current board state.
+    SaveViewSubmit,
     /// Inert click target (swallows clicks inside a popover).
     Noop,
     SetViewMode(ViewMode),
@@ -362,6 +367,8 @@ pub enum Modal {
     DeleteLabelConfirm(String),
     /// Confirm deleting a Saved view (local id) from the sidebar.
     DeleteSavedViewConfirm(String),
+    /// Name prompt for saving the current board as a new Saved view.
+    SaveView,
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
     /// Team picker for moving an issue (local UUID); see `team_picker`.
@@ -537,6 +544,9 @@ pub struct App {
     /// The open Saved view's working copy; while set it stands in for the
     /// config's display options and filters and the header search.
     open_view: Option<crate::saved_view::OpenView>,
+    /// Name being typed in the "Save view" prompt, and its validation error.
+    save_view_name: String,
+    save_view_error: Option<&'static str>,
     /// The user's Home page as last reported by the server (see `db::home_page`).
     home_page: Option<crate::db::home_page::HomePage>,
     selected_team_id: Option<String>,
@@ -985,6 +995,12 @@ impl App {
     // The one accessor for the board's display options, filters and view
     // search. Everything outside this block goes through it; today it
     // resolves to the local state (the config plus the header search).
+
+    /// Why "Save view…" is unavailable right now, if it is.
+    fn save_view_block_reason(&self) -> Option<&'static str> {
+        let on_team_board = self.view == View::Board && self.selected_team_id.is_some();
+        crate::saved_view::save_block_reason(on_team_board, self.sync_read_only)
+    }
 
     fn board_display(&self) -> &DisplayOptions {
         match &self.open_view {
@@ -1971,6 +1987,8 @@ impl App {
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views,
             open_view: None,
+            save_view_name: String::new(),
+            save_view_error: None,
             home_page,
             last_notif_poll: None,
             inbox: Default::default(),
@@ -2227,6 +2245,75 @@ impl App {
                 self.focused_lane = 0;
                 self.focused_issue = 0;
                 return task;
+            }
+
+            Message::OpenSaveView => {
+                if self.save_view_block_reason().is_none() {
+                    self.save_view_name.clear();
+                    self.save_view_error = None;
+                    self.modal = Modal::SaveView;
+                    return text_input::focus(save_view_input_id());
+                }
+            }
+
+            Message::SaveViewNameChanged(name) => {
+                self.save_view_name = name;
+                self.save_view_error = None;
+            }
+
+            Message::SaveViewSubmit => {
+                if self.modal != Modal::SaveView {
+                    return Task::none();
+                }
+                if let Some(reason) = self.save_view_block_reason() {
+                    self.modal = Modal::None;
+                    self.push_toast(reason, ToastKind::Error, false);
+                    return Task::none();
+                }
+                let name = match crate::saved_view::validate_name(&self.save_view_name) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        self.save_view_error = Some(e.message());
+                        return Task::none();
+                    }
+                };
+                let Some(team_id) = self.selected_team_id.clone() else {
+                    return Task::none();
+                };
+                let state = crate::saved_view::BoardState {
+                    display: self.board_display().clone(),
+                    filters: self.board_filters().clone(),
+                    search: self.active_search().to_string(),
+                };
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                let query = crate::saved_view::new_view_query(&state, &mirror);
+                let dropped_unassigned = crate::saved_view::has_unassigned(&state);
+                let query_json = serde_json::to_string(&query).unwrap_or_else(|_| "{}".into());
+                match crate::db::saved_views::create_local(&self.db(), &team_id, &name, &query_json)
+                {
+                    Ok(sv) => {
+                        self.modal = Modal::None;
+                        self.save_view_name.clear();
+                        if dropped_unassigned {
+                            self.push_toast(
+                                "Unassigned isn't saved: Rails can't store it in a view",
+                                ToastKind::Info,
+                                false,
+                            );
+                        }
+                        self.reload_data();
+                        return self.update_inner(Message::OpenSavedView(sv.id));
+                    }
+                    Err(e) => {
+                        eprintln!("[saved_views] create failed: {e}");
+                        self.save_view_error = Some("Couldn't save the view");
+                    }
+                }
             }
 
             Message::ConfirmDeleteSavedView(view_id) => {
@@ -4298,7 +4385,7 @@ impl App {
         // Overlay modals
         let content: Element<'_, Message> = match &self.modal {
             Modal::DisplayOptions => {
-                let panel = display_panel::display_view(self.board_display());
+                let panel = display_panel::display_view(self.board_display(), self.save_view_block_reason());
                 iced::widget::stack![base, display_panel::popover(panel)].into()
             }
             Modal::FilterPanel => {
@@ -4375,6 +4462,11 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::SaveView => iced::widget::stack![
+                base,
+                save_view_modal(&self.save_view_name, self.save_view_error)
+            ]
+            .into(),
             Modal::DeleteSavedViewConfirm(view_id) => {
                 let name = self
                     .saved_views
@@ -4659,6 +4751,73 @@ fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
         n => format!("Delete this comment and its {n} replies?"),
     };
     delete_modal("Delete Comment?", body, Message::DeleteCommentConfirmed)
+}
+
+fn save_view_input_id() -> text_input::Id {
+    text_input::Id::new("save-view-name")
+}
+
+/// Name prompt for "Save view…".
+fn save_view_modal<'a>(name: &'a str, error: Option<&'static str>) -> Element<'a, Message> {
+    use iced::widget::{button, text};
+
+    let mut content = column![]
+        .spacing(12)
+        .push(text("Save view").size(18).color(t::text_primary()))
+        .push(
+            text_input("View name", name)
+                .id(save_view_input_id())
+                .on_input(Message::SaveViewNameChanged)
+                .on_submit(Message::SaveViewSubmit)
+                .padding([6, 10])
+                .size(14)
+                .width(Length::Fixed(320.0)),
+        );
+    if let Some(e) = error {
+        content = content.push(text(e).size(12).color(t::danger()));
+    }
+    content = content.push(
+        row![]
+            .spacing(8)
+            .push(
+                button(text("Save").size(14))
+                    .on_press(Message::SaveViewSubmit)
+                    .padding([8, 24])
+                    .style(button::primary),
+            )
+            .push(
+                button(text("Cancel").size(14))
+                    .on_press(Message::CloseModal)
+                    .padding([8, 24])
+                    .style(button::secondary),
+            ),
+    );
+
+    let modal =
+        container(content)
+            .padding(28)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::bg_modal())),
+                border: iced::Border {
+                    color: t::border(),
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            });
+
+    container(modal)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                0.0, 0.0, 0.0, 0.7,
+            ))),
+            ..Default::default()
+        })
+        .into()
 }
 
 fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'a, Message> {
