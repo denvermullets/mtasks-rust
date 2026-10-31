@@ -20,6 +20,7 @@ use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
+use crate::palette_results::PaletteNav;
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
@@ -175,6 +176,8 @@ pub enum Message {
     OpenCommandPalette,
     /// The palette's text field changed.
     PaletteQueryChanged(String),
+    /// A palette row was chosen; closes the palette and navigates.
+    PaletteChoose(crate::palette_results::PaletteNav),
 
     // Header bar
     /// Header search box changed; filters the current view's items.
@@ -2500,13 +2503,21 @@ impl App {
             Message::OpenCommandPalette => {
                 // Never opens over another modal.
                 if self.modal == Modal::None {
-                    self.modal = Modal::CommandPalette(command_palette::PaletteState::default());
+                    self.modal = Modal::CommandPalette(command_palette::PaletteState::new());
                     return text_input::focus(command_palette::input_id());
                 }
             }
             Message::PaletteQueryChanged(query) => {
                 if let Modal::CommandPalette(ref mut palette) = self.modal {
-                    palette.query = query;
+                    palette.set_query(query);
+                }
+            }
+            Message::PaletteChoose(nav) => {
+                self.modal = Modal::None;
+                match nav {
+                    // Same path as any other view navigation: commits open
+                    // issue/project detail edits first.
+                    PaletteNav::View(view) => return self.update(Message::NavigateToView(view)),
                 }
             }
 

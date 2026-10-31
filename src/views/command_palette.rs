@@ -1,15 +1,34 @@
 //! Command palette (Cmd+K): a searchable launcher modal. This shell has only
 //! the text field; result rows are added by later tickets.
 
-use iced::widget::{column, container, mouse_area, text_input};
+use iced::widget::{button, column, container, mouse_area, row, text, text_input};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::palette_results::{palette_results, PaletteData, PaletteRow};
 use crate::theme as t;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PaletteState {
     pub query: String,
+    pub rows: Vec<PaletteRow>,
+}
+
+impl PaletteState {
+    pub fn new() -> Self {
+        let mut state = PaletteState {
+            query: String::new(),
+            rows: Vec::new(),
+        };
+        state.set_query(String::new());
+        state
+    }
+
+    /// Store the query and recompute the rows.
+    pub fn set_query(&mut self, query: String) {
+        self.rows = palette_results(&query, &PaletteData::default());
+        self.query = query;
+    }
 }
 
 pub fn input_id() -> text_input::Id {
@@ -19,7 +38,7 @@ pub fn input_id() -> text_input::Id {
 /// Palette modal. A click on the backdrop closes it; a click on the panel
 /// itself is swallowed.
 pub fn view(state: &PaletteState) -> Element<'_, Message> {
-    let content = column![].spacing(14).width(Length::Fixed(520.0)).push(
+    let mut content = column![].spacing(14).width(Length::Fixed(520.0)).push(
         text_input("Search views, teams, projects, issues\u{2026}", &state.query)
             .id(input_id())
             .on_input(Message::PaletteQueryChanged)
@@ -27,6 +46,37 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
             .size(14)
             .width(Length::Fill),
     );
+    let mut list = column![].spacing(2);
+    for r in &state.rows {
+        list = list.push(
+            button(
+                row![
+                    text(r.kind.label())
+                        .size(11)
+                        .color(t::text_muted())
+                        .width(Length::Fixed(56.0)),
+                    text(r.primary.as_str()).size(14).color(t::text_primary()),
+                    text(r.secondary.as_str()).size(12).color(t::text_secondary()),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            )
+            .on_press(Message::PaletteChoose(r.nav.clone()))
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(|_theme: &Theme, status| button::Style {
+                background: matches!(status, button::Status::Hovered)
+                    .then(|| iced::Background::Color(t::bg_card_focused())),
+                text_color: t::text_primary(),
+                border: Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    content = content.push(list);
 
     let panel = container(content)
         .padding(20)
@@ -62,6 +112,14 @@ mod tests {
 
     #[test]
     fn palette_starts_with_empty_query() {
-        assert_eq!(PaletteState::default().query, "");
+        assert_eq!(PaletteState::new().query, "");
+    }
+
+    #[test]
+    fn typing_recomputes_rows() {
+        let mut state = PaletteState::new();
+        assert_eq!(state.rows.len(), 4);
+        state.set_query("road".into());
+        assert_eq!(state.rows.len(), 1);
     }
 }
