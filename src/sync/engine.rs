@@ -2713,6 +2713,7 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
             }
         }
 
+        let newly_mirrored = existing.is_none();
         let team = crate::db::models::Team::from(dto.clone());
         let team = if let Some(local) = existing {
             // Reuse the local UUID so foreign keys (lanes/issues/etc.) stay valid.
@@ -2723,7 +2724,6 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
         } else {
             team
         };
-        let newly_mirrored = existing.is_none();
         queries::upsert_team(&conn, &team).map_err(|e| format!("db (upsert team): {e}"))?;
         if newly_mirrored {
             // Saved views pulled for it earlier were skipped; refetch them all.
