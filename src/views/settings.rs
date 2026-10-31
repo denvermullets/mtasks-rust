@@ -3,6 +3,7 @@ use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::config::Config;
+use crate::fonts;
 use crate::theme as t;
 
 #[derive(Debug, Clone)]
@@ -10,7 +11,7 @@ pub struct SettingsFormState {
     pub api_base_url: String,
     pub api_token: String,
     pub theme: t::ThemeChoice,
-    pub font: crate::fonts::FontChoice,
+    pub font: fonts::FontChoice,
     pub status: Option<String>,
     pub testing: bool,
 }
@@ -21,7 +22,7 @@ impl SettingsFormState {
             api_base_url: cfg.api_base_url.clone(),
             api_token: cfg.api_token.clone().unwrap_or_default(),
             theme: t::choice_for_key(&cfg.theme),
-            font: crate::fonts::choice_for_key(&cfg.font),
+            font: fonts::choice_for_key(&cfg.font),
             status: None,
             testing: false,
         }
@@ -89,7 +90,7 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                 .push(text("Font").size(12).color(t::text_secondary()))
                 .push(
                     pick_list(
-                        crate::fonts::choices(),
+                        fonts::choices(),
                         Some(form.font),
                         Message::SettingsFontChanged,
                     )

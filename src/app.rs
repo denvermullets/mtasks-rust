@@ -15,6 +15,7 @@ use crate::db::models::{
 use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
 use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup, ViewMode};
+use crate::fonts;
 use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
@@ -185,9 +186,9 @@ pub enum Message {
     SettingsBaseUrlChanged(String),
     SettingsTokenChanged(String),
     /// Theme picked in Settings: applies live and saves to config immediately.
-    SettingsThemeChanged(crate::theme::ThemeChoice),
+    SettingsThemeChanged(t::ThemeChoice),
     /// Font picked in Settings: saves to config; applies after restart.
-    SettingsFontChanged(crate::fonts::FontChoice),
+    SettingsFontChanged(fonts::FontChoice),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
@@ -1447,8 +1448,21 @@ impl App {
         "JAIT — Issue Tracker".to_string()
     }
 
+    /// Adopt `new_cfg` for this session and persist it, surfacing a save
+    /// failure in the Settings form (and clearing a stale `config_error` on success).
+    fn save_config_change(&mut self, new_cfg: Config) {
+        let saved = config::save(&new_cfg);
+        self.config = new_cfg;
+        if let Some(ref mut form) = self.settings_form {
+            form.status = saved.as_ref().err().map(|e| format!("Error: {}", e));
+        }
+        if saved.is_ok() {
+            self.config_error = None;
+        }
+    }
+
     pub fn theme(&self) -> Theme {
-        crate::theme::iced_theme()
+        t::iced_theme()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -2247,32 +2261,22 @@ impl App {
             Message::SettingsThemeChanged(choice) => {
                 let mut new_cfg = self.config.clone();
                 new_cfg.theme = choice.key.to_string();
-                crate::theme::set_by_key(choice.key);
-                let saved = config::save(&new_cfg);
-                // Applied for this session even if the save fails.
-                self.config = new_cfg;
+                t::set_by_key(choice.key);
                 if let Some(ref mut form) = self.settings_form {
                     form.theme = choice;
-                    form.status = saved.as_ref().err().map(|e| format!("Error: {}", e));
                 }
-                if saved.is_ok() {
-                    self.config_error = None;
-                }
+                // Applied for this session even if the save fails.
+                self.save_config_change(new_cfg);
             }
 
             Message::SettingsFontChanged(choice) => {
                 let mut new_cfg = self.config.clone();
                 new_cfg.font = choice.key.to_string();
-                let saved = config::save(&new_cfg);
-                // No live apply: Iced fixes the default font at launch.
-                self.config = new_cfg;
                 if let Some(ref mut form) = self.settings_form {
                     form.font = choice;
-                    form.status = saved.as_ref().err().map(|e| format!("Error: {}", e));
                 }
-                if saved.is_ok() {
-                    self.config_error = None;
-                }
+                // No live apply: Iced fixes the default font at launch.
+                self.save_config_change(new_cfg);
             }
 
             Message::ExportCsv => {
