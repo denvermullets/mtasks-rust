@@ -69,14 +69,6 @@ impl IssueDetailState {
     pub fn description_text(&self) -> String {
         self.description.text()
     }
-
-    pub fn comment_text(&self) -> String {
-        self.comment_composer.text()
-    }
-
-    pub fn reply_text(&self) -> String {
-        self.reply_composer.text()
-    }
 }
 
 /// Project pick_list option; the leading `{ id: None }` entry is "No project".
@@ -160,13 +152,13 @@ pub fn view<'a>(
                 .on_action(Message::IssueDetailDescriptionChanged)
                 .key_binding(editor_binding(
                     None,
-                    suggesting(detail, EditorTarget::Description),
+                    suggesting(&detail.suggest, EditorTarget::Description),
                 ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(220.0)),
         )
-        .push_maybe(suggestion_list(detail, EditorTarget::Description))
+        .push_maybe(suggestion_list(&detail.suggest, EditorTarget::Description))
         .push_maybe(description_preview(
             &detail.description_text(),
             team,
@@ -604,17 +596,16 @@ pub fn editor_binding(
     }
 }
 
-fn suggesting(detail: &IssueDetailState, target: EditorTarget) -> bool {
-    detail.suggest.as_ref().is_some_and(|s| s.target == target)
+fn suggesting(suggest: &Option<SuggestState>, target: EditorTarget) -> bool {
+    suggest.as_ref().is_some_and(|s| s.target == target)
 }
 
 /// Autocomplete rows under the editor `target`, if its list is open.
 fn suggestion_list<'a>(
-    detail: &'a IssueDetailState,
+    suggest: &'a Option<SuggestState>,
     target: EditorTarget,
 ) -> Option<Element<'a, Message>> {
-    detail
-        .suggest
+    suggest
         .as_ref()
         .filter(|s| s.target == target)
         .map(suggestion_rows)
@@ -802,6 +793,17 @@ fn comments_section<'a>(
         .spacing(12)
         .push(text("Activity").size(13).color(t::text_secondary()));
 
+    let ctx = ThreadCtx {
+        members,
+        team,
+        teams,
+        issues,
+        my_member_ids,
+        can_reply: true,
+        reply_to: detail.reply_to.as_deref(),
+        reply_composer: &detail.reply_composer,
+        suggest: &detail.suggest,
+    };
     let items = events::timeline(events, comments);
     if items.is_empty() {
         col = col.push(text("No activity yet").size(12).color(t::text_muted()));
@@ -810,46 +812,89 @@ fn comments_section<'a>(
         match item {
             TimelineItem::Event(event) => col = col.push(event_row(event, members)),
             TimelineItem::Thread(thread) => {
-                for (depth, comment) in thread {
-                    col = col.push(comment_row(
-                        depth, comment, members, team, teams, issues, my_member_ids,
-                    ));
-                    if detail.reply_to.as_deref() == Some(comment.id.as_str()) {
-                        col = col.push(reply_composer(depth + 1, detail));
-                        col = col.push_maybe(
-                            suggestion_list(detail, EditorTarget::Reply)
-                                .map(|e| indent(depth + 1, e)),
-                        );
-                    }
-                }
+                col = push_thread(col, thread, &ctx);
             }
         }
     }
 
-    // Composer: multiline editor + "Comment" button.
-    let composer = column![]
+    col.push(new_comment_composer(
+        &detail.comment_composer,
+        &detail.suggest,
+    ))
+    .into()
+}
+
+/// What `push_thread` needs besides the comments themselves: lookups for
+/// rendering plus the open reply composer. Shared by issue and project detail.
+pub struct ThreadCtx<'a, 'b> {
+    pub members: &'a [Member],
+    pub team: Option<&'a Team>,
+    pub teams: &'a [Team],
+    pub issues: &'a [Issue],
+    /// Local ids of the current user's members; gates the Delete action.
+    pub my_member_ids: &'b [String],
+    /// Offer Reply on comments under the depth cap.
+    pub can_reply: bool,
+    pub reply_to: Option<&'a str>,
+    pub reply_composer: &'a text_editor::Content,
+    pub suggest: &'a Option<SuggestState>,
+}
+
+/// Append a threaded run of comments (indented replies, inline reply composer
+/// under the comment being replied to).
+pub fn push_thread<'a>(
+    mut col: iced::widget::Column<'a, Message>,
+    thread: Vec<(usize, &'a Comment)>,
+    ctx: &ThreadCtx<'a, '_>,
+) -> iced::widget::Column<'a, Message> {
+    for (depth, comment) in thread {
+        col = col.push(comment_row(
+            depth,
+            comment,
+            ctx.members,
+            ctx.team,
+            ctx.teams,
+            ctx.issues,
+            ctx.my_member_ids,
+            ctx.can_reply,
+        ));
+        if ctx.reply_to == Some(comment.id.as_str()) {
+            col = col.push(reply_composer(depth + 1, ctx.reply_composer, ctx.suggest));
+            col = col.push_maybe(
+                suggestion_list(ctx.suggest, EditorTarget::Reply).map(|e| indent(depth + 1, e)),
+            );
+        }
+    }
+    col
+}
+
+/// Composer: multiline editor + "Comment" button.
+pub fn new_comment_composer<'a>(
+    content: &'a text_editor::Content,
+    suggest: &'a Option<SuggestState>,
+) -> Element<'a, Message> {
+    column![]
         .spacing(8)
         .push(
-            text_editor(&detail.comment_composer)
+            text_editor(content)
                 .placeholder("Leave a comment…  (Cmd+Enter to send)")
                 .on_action(Message::CommentComposerChanged)
                 .key_binding(editor_binding(
                     Some(Message::SubmitComment),
-                    suggesting(detail, EditorTarget::Comment),
+                    suggesting(suggest, EditorTarget::Comment),
                 ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(80.0)),
         )
-        .push_maybe(suggestion_list(detail, EditorTarget::Comment))
+        .push_maybe(suggestion_list(suggest, EditorTarget::Comment))
         .push(
             button(text("Comment").size(13))
                 .on_press(Message::SubmitComment)
                 .padding([6, 14])
                 .style(button::primary),
-        );
-
-    col.push(composer).into()
+        )
+        .into()
 }
 
 /// One change-history line: "actor description  ·  3d ago".
@@ -885,16 +930,20 @@ fn indent<'a>(depth: usize, e: Element<'a, Message>) -> Element<'a, Message> {
 }
 
 /// Inline composer shown under the comment being replied to.
-fn reply_composer<'a>(depth: usize, detail: &'a IssueDetailState) -> Element<'a, Message> {
+fn reply_composer<'a>(
+    depth: usize,
+    content: &'a text_editor::Content,
+    suggest: &'a Option<SuggestState>,
+) -> Element<'a, Message> {
     let body = column![]
         .spacing(6)
         .push(
-            text_editor(&detail.reply_composer)
+            text_editor(content)
                 .placeholder("Write a reply…  (Cmd+Enter to send)")
                 .on_action(Message::ReplyComposerChanged)
                 .key_binding(editor_binding(
                     Some(Message::SubmitReply),
-                    suggesting(detail, EditorTarget::Reply),
+                    suggesting(suggest, EditorTarget::Reply),
                 ))
                 .padding(8)
                 .size(13)
@@ -932,6 +981,7 @@ fn comment_row<'a>(
     teams: &'a [Team],
     issues: &'a [Issue],
     my_member_ids: &[String],
+    can_reply: bool,
 ) -> Element<'a, Message> {
     let author = comment
         .author_id
@@ -966,7 +1016,8 @@ fn comment_row<'a>(
         .as_ref()
         .is_some_and(|aid| my_member_ids.contains(aid));
     let mut actions = row![].spacing(10);
-    if Comment::can_reply_at(depth) {
+    let can_reply = can_reply && Comment::can_reply_at(depth);
+    if can_reply {
         actions = actions.push(
             button(text("Reply").size(11).color(t::text_muted()))
                 .on_press(Message::StartReply(comment.id.clone()))
@@ -982,7 +1033,7 @@ fn comment_row<'a>(
                 .style(button::text),
         );
     }
-    if Comment::can_reply_at(depth) || can_delete {
+    if can_reply || can_delete {
         col = col.push(actions);
     }
 

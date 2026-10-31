@@ -14,8 +14,7 @@ struct CommentWrap<'a> {
     comment: &'a CommentParams,
 }
 
-/// Top-level comments on an issue. The server nests `replies` under each; v1
-/// ignores them (flat thread).
+/// Top-level comments on an issue. The server nests `replies` under each.
 pub async fn list(
     client: &ApiClient,
     team_id: i64,
@@ -23,6 +22,37 @@ pub async fn list(
 ) -> Result<Vec<CommentDto>, ApiError> {
     let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/comments");
     client.get_list(&path).await
+}
+
+/// What a comment is created under: an issue or a project (remote ids).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentTarget {
+    Issue(i64),
+    Project(i64),
+}
+
+impl CommentTarget {
+    fn path(self, team_id: i64) -> String {
+        match self {
+            CommentTarget::Issue(id) => format!("api/v1/teams/{team_id}/issues/{id}/comments"),
+            CommentTarget::Project(id) => project_comments_path(team_id, id),
+        }
+    }
+}
+
+fn project_comments_path(team_id: i64, project_id: i64) -> String {
+    format!("api/v1/teams/{team_id}/projects/{project_id}/comments")
+}
+
+/// Top-level comments on a project, with `replies` nested under each.
+pub async fn list_project(
+    client: &ApiClient,
+    team_id: i64,
+    project_id: i64,
+) -> Result<Vec<CommentDto>, ApiError> {
+    client
+        .get_list(&project_comments_path(team_id, project_id))
+        .await
 }
 
 /// Every comment in the team (issue and project comments, replies as flat rows)
@@ -51,11 +81,11 @@ fn team_comments_path(team_id: i64, updated_since: Option<&str>) -> String {
 pub async fn create(
     client: &ApiClient,
     team_id: i64,
-    issue_id: i64,
+    target: CommentTarget,
     params: &CommentParams,
     idempotency_key: &str,
 ) -> Result<CommentDto, ApiError> {
-    let path = format!("api/v1/teams/{team_id}/issues/{issue_id}/comments");
+    let path = target.path(team_id);
     client
         .post_with_header(
             &path,
@@ -86,6 +116,26 @@ fn comment_member_path(team_id: i64, issue_id: i64, comment_id: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_comments_path_nests_under_the_project() {
+        assert_eq!(
+            project_comments_path(3, 9),
+            "api/v1/teams/3/projects/9/comments"
+        );
+    }
+
+    #[test]
+    fn create_path_follows_the_target() {
+        assert_eq!(
+            CommentTarget::Issue(5).path(3),
+            "api/v1/teams/3/issues/5/comments"
+        );
+        assert_eq!(
+            CommentTarget::Project(9).path(3),
+            "api/v1/teams/3/projects/9/comments"
+        );
+    }
 
     #[test]
     fn comment_delete_path_nests_under_issue() {

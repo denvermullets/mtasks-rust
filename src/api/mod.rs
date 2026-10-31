@@ -14,7 +14,7 @@ pub mod teams;
 pub mod users;
 
 pub use client::{ApiClient, Conditional, Page};
-pub use comments::CommentParams;
+pub use comments::{CommentParams, CommentTarget};
 pub use dependencies::{Direction, IssueDependencyResponse};
 pub use dto::{
     CommentDto, IssueDependencyDto, IssueDto, IssueRef, LabelDto, LabelRef, LaneDto, MemberDto,

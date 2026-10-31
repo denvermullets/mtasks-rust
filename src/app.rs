@@ -79,7 +79,7 @@ pub enum Message {
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
 
-    // Issue detail — comments (flat thread, v1)
+    // Issue and project detail — comments (threaded)
     /// Composer text-editor action.
     CommentComposerChanged(iced::widget::text_editor::Action),
     /// "Comment" button pressed: persist the composer body locally + enqueue push.
@@ -101,6 +101,7 @@ pub enum Message {
     MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
+    ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
 
@@ -290,6 +291,14 @@ pub enum Message {
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
+}
+
+/// The comment composers of the open detail view (issue or project).
+struct CommentDrafts<'a> {
+    comment: &'a mut iced::widget::text_editor::Content,
+    reply_to: &'a mut Option<String>,
+    reply: &'a mut iced::widget::text_editor::Content,
+    suggest: &'a mut Option<crate::mentions::SuggestState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -666,6 +675,13 @@ impl App {
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
+        } else if let View::ProjectDetail(ref project_id) = self.view {
+            self.detail_references.clear();
+            self.detail_deps = Default::default();
+            self.detail_comments =
+                queries::comments_for_project(conn, project_id).unwrap_or_default();
+            self.detail_events.clear();
+            return;
         } else {
             self.detail_references.clear();
             self.detail_deps = Default::default();
@@ -695,11 +711,20 @@ impl App {
     /// Recompute the `@`/`#` suggestion list for `target` from its cursor.
     fn refresh_suggestions(&mut self, target: crate::mentions::EditorTarget) {
         use crate::mentions::{self as m, EditorTarget};
-        let Some(d) = &self.issue_detail else { return };
-        let content = match target {
-            EditorTarget::Description => &d.description,
-            EditorTarget::Comment => &d.comment_composer,
-            EditorTarget::Reply => &d.reply_composer,
+        // On project detail only the comment composers exist; the id excluded
+        // from `#` suggestions is the project's, which matches no issue.
+        let (content, exclude_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::ProjectDetail(_), _, Some(p)) => match target {
+                EditorTarget::Comment => (&p.comment_composer, p.project_id.as_str()),
+                EditorTarget::Reply => (&p.reply_composer, p.project_id.as_str()),
+                EditorTarget::Description => return,
+            },
+            (_, Some(d), _) => match target {
+                EditorTarget::Description => (&d.description, d.issue_id.as_str()),
+                EditorTarget::Comment => (&d.comment_composer, d.issue_id.as_str()),
+                EditorTarget::Reply => (&d.reply_composer, d.issue_id.as_str()),
+            },
+            _ => return,
         };
         // Column is a byte offset into the line (iced 0.13 / cosmic-text).
         let (line, col) = content.cursor_position();
@@ -711,12 +736,12 @@ impl App {
                 &self.members,
                 &self.issues,
                 &team.identifier,
-                &d.issue_id,
+                exclude_id,
             ),
             _ => None,
         };
-        if let Some(d) = &mut self.issue_detail {
-            d.suggest = state;
+        if let Some(slot) = self.open_suggest_mut() {
+            *slot = state;
         }
     }
 
@@ -767,7 +792,28 @@ impl App {
         if self.modal == Modal::IssueForm {
             return self.issue_form.as_mut().map(|f| &mut f.suggest);
         }
+        if matches!(self.view, View::ProjectDetail(_)) {
+            return self.project_detail.as_mut().map(|d| &mut d.suggest);
+        }
         self.issue_detail.as_mut().map(|d| &mut d.suggest)
+    }
+
+    /// The comment composers of whichever detail view is open (issue or project).
+    fn comment_drafts_mut(&mut self) -> Option<CommentDrafts<'_>> {
+        if matches!(self.view, View::ProjectDetail(_)) {
+            return self.project_detail.as_mut().map(|d| CommentDrafts {
+                comment: &mut d.comment_composer,
+                reply_to: &mut d.reply_to,
+                reply: &mut d.reply_composer,
+                suggest: &mut d.suggest,
+            });
+        }
+        self.issue_detail.as_mut().map(|d| CommentDrafts {
+            comment: &mut d.comment_composer,
+            reply_to: &mut d.reply_to,
+            reply: &mut d.reply_composer,
+            suggest: &mut d.suggest,
+        })
     }
 
     fn pick_suggestion(&mut self, idx: Option<usize>) {
@@ -776,6 +822,16 @@ impl App {
             if let Some(form) = &mut self.issue_form {
                 if let Some(s) = form.suggest.take() {
                     Self::insert_suggestion(&mut form.description, &s, idx);
+                }
+            }
+        } else if matches!(self.view, View::ProjectDetail(_)) {
+            if let Some(d) = self.comment_drafts_mut() {
+                if let Some(s) = d.suggest.take() {
+                    let content = match s.target {
+                        EditorTarget::Reply => d.reply,
+                        _ => d.comment,
+                    };
+                    Self::insert_suggestion(content, &s, idx);
                 }
             }
         } else if let Some(d) = &mut self.issue_detail {
@@ -1101,12 +1157,13 @@ impl App {
     }
 
     /// Persist a new comment (optionally a reply to local comment `parent_id`) on
-    /// the open detail issue and enqueue its push. Returns whether it was saved.
+    /// the open detail issue or project and enqueue its push. Returns whether it was saved.
     /// Replies beyond `MAX_NESTING_DEPTH` are refused (Rails rejects them too).
     fn create_comment(&mut self, body: String, parent_id: Option<String>) -> bool {
-        let issue_id = match &self.issue_detail {
-            Some(d) => d.issue_id.clone(),
-            None => return false,
+        let (issue_id, project_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::ProjectDetail(_), _, Some(p)) => (None, Some(p.project_id.clone())),
+            (_, Some(d), _) => (Some(d.issue_id.clone()), None),
+            _ => return false,
         };
         if body.is_empty() {
             return false;
@@ -1133,8 +1190,8 @@ impl App {
         let comment = Comment {
             id: uuid::Uuid::new_v4().to_string(),
             remote_id: None,
-            issue_id: Some(issue_id),
-            project_id: None,
+            issue_id,
+            project_id,
             author_id,
             body,
             parent_id,
@@ -1389,7 +1446,42 @@ impl App {
         self.commit_project_detail();
         self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
         self.view = View::ProjectDetail(project.id.clone());
-        Task::none()
+        let conn = self.db();
+        self.load_detail_dependencies(&conn);
+        self.fetch_project_comments_task(&conn, project)
+    }
+
+    /// Build the async task that fetches a project's comments (nested replies)
+    /// once when it is opened. No-op unless the project + team are synced and a
+    /// client can be built.
+    fn fetch_project_comments_task(
+        &self,
+        conn: &rusqlite::Connection,
+        project: &Project,
+    ) -> Task<Message> {
+        let Some(project_remote_id) = project.remote_id else {
+            return Task::none();
+        };
+        let Ok(Some(team_remote_id)) = queries::remote_id_for(conn, "teams", &project.team_id)
+        else {
+            return Task::none();
+        };
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            return Task::none();
+        };
+        let project_local_id = project.id.clone();
+        Task::perform(
+            async move {
+                let result =
+                    crate::api::comments::list_project(&client, team_remote_id, project_remote_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                (project_local_id, result)
+            },
+            |(id, result)| Message::ProjectCommentsFetched(id, result),
+        )
     }
 
     /// Apply a live sidebar change (Status/Priority/Lead) to the project behind
@@ -1938,8 +2030,8 @@ impl App {
 
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.comment_composer.perform(action);
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.comment.perform(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Comment);
             }
@@ -1951,50 +2043,50 @@ impl App {
                 }
             }
             Message::SubmitComment => {
-                let body = match &self.issue_detail {
-                    Some(d) => d.comment_text().trim().to_string(),
+                let body = match self.comment_drafts_mut() {
+                    Some(d) => d.comment.text().trim().to_string(),
                     None => return Task::none(),
                 };
                 if self.create_comment(body, None) {
-                    if let Some(d) = &mut self.issue_detail {
-                        d.comment_composer = iced::widget::text_editor::Content::new();
-                        d.suggest = None;
+                    if let Some(d) = self.comment_drafts_mut() {
+                        *d.comment = iced::widget::text_editor::Content::new();
+                        *d.suggest = None;
                     }
                 }
             }
             Message::StartReply(parent_id) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_to = Some(parent_id);
-                    d.suggest = None;
-                    d.reply_composer = iced::widget::text_editor::Content::new();
+                if let Some(d) = self.comment_drafts_mut() {
+                    *d.reply_to = Some(parent_id);
+                    *d.suggest = None;
+                    *d.reply = iced::widget::text_editor::Content::new();
                 }
             }
             Message::CancelReply => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_to = None;
-                    d.reply_composer = iced::widget::text_editor::Content::new();
-                    d.suggest = None;
+                if let Some(d) = self.comment_drafts_mut() {
+                    *d.reply_to = None;
+                    *d.reply = iced::widget::text_editor::Content::new();
+                    *d.suggest = None;
                 }
             }
             Message::ReplyComposerChanged(action) => {
-                if let Some(d) = &mut self.issue_detail {
-                    d.reply_composer.perform(action);
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.reply.perform(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Reply);
             }
             Message::SubmitReply => {
-                let (body, parent) = match &self.issue_detail {
-                    Some(d) => match &d.reply_to {
-                        Some(p) => (d.reply_text().trim().to_string(), p.clone()),
+                let (body, parent) = match self.comment_drafts_mut() {
+                    Some(d) => match d.reply_to {
+                        Some(p) => (d.reply.text().trim().to_string(), p.clone()),
                         None => return Task::none(),
                     },
                     None => return Task::none(),
                 };
                 if self.create_comment(body, Some(parent)) {
-                    if let Some(d) = &mut self.issue_detail {
-                        d.reply_to = None;
-                        d.reply_composer = iced::widget::text_editor::Content::new();
-                        d.suggest = None;
+                    if let Some(d) = self.comment_drafts_mut() {
+                        *d.reply_to = None;
+                        *d.reply = iced::widget::text_editor::Content::new();
+                        *d.suggest = None;
                     }
                 }
             }
@@ -2006,9 +2098,27 @@ impl App {
             Message::CommentsFetched(issue_id, result) => {
                 if let Ok(dtos) = result {
                     let conn = self.db();
-                    crate::api::dto::merge_comment_tree(&conn, &issue_id, dtos, None);
+                    crate::api::dto::merge_comment_tree(
+                        &conn,
+                        &crate::db::models::CommentOwner::Issue(issue_id),
+                        dtos,
+                        None,
+                    );
                     drop(conn);
                     // Refresh so the open detail's comment list reflects the merge.
+                    self.reload_data();
+                }
+            }
+            Message::ProjectCommentsFetched(project_id, result) => {
+                if let Ok(dtos) = result {
+                    let conn = self.db();
+                    crate::api::dto::merge_comment_tree(
+                        &conn,
+                        &crate::db::models::CommentOwner::Project(project_id),
+                        dtos,
+                        None,
+                    );
+                    drop(conn);
                     self.reload_data();
                 }
             }
@@ -3348,6 +3458,8 @@ impl App {
                             self.project_detail_issues(project_id, &needle),
                             &self.config.display,
                             &self.lanes,
+                            &self.teams,
+                            &self.detail_comments,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.

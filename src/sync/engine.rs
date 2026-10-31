@@ -24,7 +24,7 @@ use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
-    ApiError, CommentParams, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
+    ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
 };
 use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -1649,7 +1649,7 @@ async fn label_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
 
 struct CommentCreatePrep {
     team_remote_id: i64,
-    issue_remote_id: i64,
+    target: CommentTarget,
     params: CommentParams,
     local_id: String,
 }
@@ -1659,7 +1659,15 @@ fn prep_comment_create(entity_id: &str, entry_id: i64) -> Prep<CommentCreatePrep
         Ok(c) => c,
         Err(e) => return Prep::Done(Outcome::LeavePending(e)),
     };
-    let comment = match queries::get_comment(&conn, entity_id) {
+    prep_comment_create_in(&conn, entity_id, entry_id)
+}
+
+fn prep_comment_create_in(
+    conn: &Connection,
+    entity_id: &str,
+    entry_id: i64,
+) -> Prep<CommentCreatePrep> {
+    let comment = match queries::get_comment(conn, entity_id) {
         Ok(Some(c)) => c,
         Ok(None) => {
             return Prep::Done(Outcome::DropAndLog(format!(
@@ -1671,42 +1679,57 @@ fn prep_comment_create(entity_id: &str, entry_id: i64) -> Prep<CommentCreatePrep
     if comment.remote_id.is_some() {
         return Prep::Done(Outcome::Success);
     }
-    // The comment is nested under its issue; both the issue and its team must be
-    // synced before we can address the endpoint.
-    // Project comments are not pushed yet (the project path lands with a later ticket).
-    let comment_issue_id = match comment.owner() {
-        crate::db::models::CommentOwner::Issue(id) => id,
-        crate::db::models::CommentOwner::Project(_) => {
-            return Prep::Done(Outcome::DropAndLog(
-                "project comment push not supported yet".into(),
-            ))
+    // The comment is nested under its issue or project; the owner and its team
+    // must be synced before we can address the endpoint.
+    let (target, team_local_id, source_team) = match comment.owner() {
+        CommentOwner::Issue(id) => {
+            let issue = match queries::get_issue(conn, &id) {
+                Ok(Some(i)) => i,
+                Ok(None) => {
+                    return Prep::Done(Outcome::DropAndLog("comment's issue missing".into()))
+                }
+                Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+            };
+            match issue.remote_id {
+                Some(r) => match move_order(conn, &issue.id, entry_id) {
+                    Ok(src) => (CommentTarget::Issue(r), issue.team_id, src),
+                    Err(o) => return Prep::Done(o),
+                },
+                None => return Prep::Done(Outcome::LeavePending("issue not synced yet".into())),
+            }
+        }
+        CommentOwner::Project(id) => {
+            let project = match queries::get_project(conn, &id) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Prep::Done(Outcome::DropAndLog("comment's project missing".into()))
+                }
+                Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+            };
+            match project.remote_id {
+                Some(r) => (CommentTarget::Project(r), project.team_id, None),
+                None => {
+                    return Prep::Done(Outcome::LeavePending("project not synced yet".into()))
+                }
+            }
         }
     };
-    let issue = match queries::get_issue(&conn, &comment_issue_id) {
-        Ok(Some(i)) => i,
-        Ok(None) => return Prep::Done(Outcome::DropAndLog("comment's issue missing".into())),
-        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
-    };
-    let issue_remote_id = match issue.remote_id {
+    // An issue with a pending move is addressed under its source team.
+    let team_remote_id = match source_team {
         Some(id) => id,
-        None => return Prep::Done(Outcome::LeavePending("issue not synced yet".into())),
-    };
-    let team_remote_id = match move_order(&conn, &issue.id, entry_id) {
-        Ok(Some(src)) => src,
-        Ok(None) => match queries::remote_id_for(&conn, "teams", &issue.team_id) {
+        None => match queries::remote_id_for(conn, "teams", &team_local_id) {
             Ok(Some(id)) => id,
             Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
             Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
         },
-        Err(o) => return Prep::Done(o),
     };
-    let parent_remote_id = match resolve_comment_parent(&conn, &comment) {
+    let parent_remote_id = match resolve_comment_parent(conn, &comment) {
         Ok(p) => p,
         Err(o) => return Prep::Done(o),
     };
     Prep::Ready(CommentCreatePrep {
         team_remote_id,
-        issue_remote_id,
+        target,
         params: CommentParams {
             body: comment.body,
             parent_id: parent_remote_id,
@@ -1804,7 +1827,7 @@ async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
     match comments::create(
         client,
         prep.team_remote_id,
-        prep.issue_remote_id,
+        prep.target,
         &prep.params,
         &prep.local_id,
     )
@@ -3283,6 +3306,131 @@ mod tests {
         let reply = mk("r", None, Some("p"));
         queries::insert_comment(&conn, &reply).unwrap();
         (conn, reply)
+    }
+
+    /// A project (remote id `project_remote`) in team t1 (remote 700) with one
+    /// top-level project comment "pc".
+    fn project_comment_fixture(project_remote: Option<i64>) -> Connection {
+        let conn = setup_labels_db();
+        let remote = project_remote.map_or("NULL".to_string(), |r| r.to_string());
+        exec(
+            &conn,
+            &format!(
+                "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+                 VALUES ('p1', {remote}, 't1', 'P', 'x', 'x')"
+            ),
+        );
+        let c = crate::db::models::Comment {
+            id: "pc".into(),
+            remote_id: None,
+            issue_id: None,
+            project_id: Some("p1".into()),
+            author_id: None,
+            body: "hello".into(),
+            parent_id: None,
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(&conn, &c).unwrap();
+        conn
+    }
+
+    #[test]
+    fn project_comment_create_posts_to_the_project_path_once_synced() {
+        let conn = project_comment_fixture(Some(80));
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Ready(p) => {
+                assert_eq!(p.team_remote_id, 700);
+                assert_eq!(p.target, CommentTarget::Project(80));
+                assert_eq!(p.params.body, "hello");
+                assert_eq!(p.params.parent_id, None);
+            }
+            Prep::Done(_) => panic!("expected Ready"),
+        }
+    }
+
+    /// Adds a reply "pr" to the fixture's project comment "pc", whose remote id is
+    /// `parent_remote`.
+    fn add_project_reply(conn: &Connection, parent_remote: Option<i64>) {
+        if let Some(r) = parent_remote {
+            queries::set_comment_remote_id(conn, "pc", r).unwrap();
+        }
+        let reply = crate::db::models::Comment {
+            id: "pr".into(),
+            remote_id: None,
+            issue_id: None,
+            project_id: Some("p1".into()),
+            author_id: None,
+            body: "reply".into(),
+            parent_id: Some("pc".into()),
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(conn, &reply).unwrap();
+    }
+
+    #[test]
+    fn project_reply_waits_for_an_unsynced_parent() {
+        let conn = project_comment_fixture(Some(80));
+        add_project_reply(&conn, None);
+        match prep_comment_create_in(&conn, "pr", i64::MAX) {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("expected the reply to wait"),
+        }
+    }
+
+    #[test]
+    fn project_reply_sends_the_parent_remote_id_to_the_project_path() {
+        let conn = project_comment_fixture(Some(80));
+        add_project_reply(&conn, Some(31));
+        match prep_comment_create_in(&conn, "pr", i64::MAX) {
+            Prep::Ready(p) => {
+                assert_eq!(p.target, CommentTarget::Project(80));
+                assert_eq!(p.params.parent_id, Some(31));
+            }
+            Prep::Done(_) => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn project_comment_create_waits_for_the_project() {
+        let conn = project_comment_fixture(None);
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("expected the create to wait"),
+        }
+    }
+
+    #[test]
+    fn project_comment_create_waits_for_the_team() {
+        let conn = project_comment_fixture(Some(80));
+        exec(&conn, "UPDATE teams SET remote_id = NULL WHERE id = 't1'");
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Done(o) => assert!(is_retry(&o)),
+            Prep::Ready(_) => panic!("expected the create to wait"),
+        }
+    }
+
+    #[test]
+    fn issue_comment_create_still_posts_to_the_issue_path() {
+        let conn = setup_labels_db();
+        exec(&conn, "UPDATE issues SET remote_id = 55 WHERE id = 'i1'");
+        let c = crate::db::models::Comment {
+            id: "ic".into(),
+            remote_id: None,
+            issue_id: Some("i1".into()),
+            project_id: None,
+            author_id: None,
+            body: "hi".into(),
+            parent_id: None,
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        };
+        queries::insert_comment(&conn, &c).unwrap();
+        match prep_comment_create_in(&conn, "ic", i64::MAX) {
+            Prep::Ready(p) => assert_eq!(p.target, CommentTarget::Issue(55)),
+            Prep::Done(_) => panic!("expected Ready"),
+        }
     }
 
     #[test]
