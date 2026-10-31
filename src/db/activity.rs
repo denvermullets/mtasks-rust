@@ -481,7 +481,7 @@ mod display_tests {
 
     fn store(conn: &Connection, body: &str) {
         let entries: Vec<ActivityEntry> = serde_json::from_str(body).unwrap();
-        store_batch(conn, "i1", &entries).unwrap();
+        store_batch(conn, "i1", &entries, None, false).unwrap();
     }
 
     #[test]
