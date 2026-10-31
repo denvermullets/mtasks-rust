@@ -22,6 +22,7 @@ use rusqlite::Connection;
 
 use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
+use crate::api::recurring_issues::RecurringIssueDto;
 use crate::api::{
     comments, dependencies, issues, labels, lanes, members, projects, recurring_issues, teams,
     users, ApiClient, ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams,
@@ -383,8 +384,14 @@ async fn process(
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("recurring_issue", "create") => {
-            recurring_issue_create(client, &entry.entity_id, entry.payload.as_deref(), entry_id)
-                .await
+            recurring_issue_create(
+                client,
+                ctx,
+                &entry.entity_id,
+                entry.payload.as_deref(),
+                entry_id,
+            )
+            .await
         }
         ("recurring_issue", "update") => {
             recurring_issue_update(client, &entry.entity_id, entry.payload.as_deref()).await
@@ -1075,6 +1082,12 @@ fn commit_create(entry_id: i64, table: &str, local_id: &str, remote_id: i64) -> 
 //  - Projects: `GET projects?updated_since=<attempt>`; rows carry no creator,
 //              so match exact `name` and `created_at` >= attempt. Cannot
 //              verify the creator.
+//  - Recurring issues: `GET recurring_issues?updated_since=<attempt>`; match
+//              `creator.id` == token user (`/me`), exact `title`, the same
+//              frequency, interval, weekday and day of month, and
+//              `created_at` >= attempt. The adopted row is applied whole
+//              (`commit_created`), so a create whose POST succeeded but whose
+//              local commit failed is finished, not repeated.
 //  - Labels:   rows carry only `updated_at` (no created_at/creator, no
 //              updated_since filter), which says nothing about creation. List
 //              the team's labels and match `name` case-insensitively (Rails
@@ -1110,7 +1123,7 @@ fn record_attempt_on(conn: &Connection, entry_id: i64, table: &str) -> Result<At
 }
 
 fn linked_remote_ids(conn: &Connection, table: &str) -> Result<HashSet<i64>, String> {
-    if !matches!(table, "issues" | "projects" | "labels") {
+    if !matches!(table, "issues" | "projects" | "labels" | "recurring_issues") {
         return Err(format!("unknown reconcile table {table}"));
     }
     let mut stmt = conn
@@ -1228,6 +1241,50 @@ async fn find_issue_on_server(
         attempted_at,
         &attempt.taken,
     ))
+}
+
+/// Earliest-created recurring issue by this user with the same title and
+/// schedule, created after the attempt, not already linked to a local row.
+fn match_recurring_issue<'a>(
+    candidates: &'a [RecurringIssueDto],
+    me_id: i64,
+    params: &RecurringIssueParams,
+    attempted_at: &str,
+    taken: &HashSet<i64>,
+) -> Option<&'a RecurringIssueDto> {
+    candidates
+        .iter()
+        .filter(|d| {
+            Some(&d.title) == params.title.as_ref()
+                && Some(&d.frequency) == params.frequency.as_ref()
+                && Some(d.interval) == params.interval
+                && d.weekday == params.weekday
+                && d.day_of_month == params.day_of_month
+                && d.creator.as_ref().map(|c| c.id) == Some(me_id)
+                && created_after_attempt(&d.created_at, attempted_at)
+                && !taken.contains(&d.id)
+        })
+        .min_by(|a, b| a.created_at.cmp(&b.created_at))
+}
+
+async fn find_recurring_issue_on_server(
+    client: &ApiClient,
+    ctx: &CycleCtx,
+    team_remote_id: i64,
+    params: &RecurringIssueParams,
+    attempted_at: &str,
+    attempt: &Attempt,
+) -> Result<Option<RecurringIssueDto>, Outcome> {
+    // Without `/me` the creator can't be matched: stay pending, don't POST blind.
+    let me = match &ctx.me {
+        Ok(me) => me,
+        Err(e) => return Err(Outcome::LeavePending(format!("/me unavailable: {e}"))),
+    };
+    let candidates = recurring_issues::list_page(client, team_remote_id, Some(attempted_at))
+        .await
+        .map_err(|e| classify(&e))?
+        .rows;
+    Ok(match_recurring_issue(&candidates, me.id, params, attempted_at, &attempt.taken).cloned())
 }
 
 async fn find_project_on_server(
@@ -1679,16 +1736,12 @@ fn recurring_issue_create_prep(
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
     let refs = (|| -> Result<_, Outcome> {
-        let assignee_id = optional_remote_id(conn, "members", row.assignee_id.as_deref())?;
-        let project_id = optional_remote_id(conn, "projects", row.project_id.as_deref())?;
-        let lane_id = optional_remote_id(conn, "lanes", row.lane_id.as_deref())?;
-        let local_labels = db::label_ids(conn, &row.id)
-            .map_err(|e| Outcome::LeavePending(format!("db (labels): {e}")))?;
-        let mut label_ids = Vec::with_capacity(local_labels.len());
-        for local in &local_labels {
-            label_ids.push(require_remote_id(conn, "labels", local)?);
-        }
-        Ok((assignee_id, project_id, lane_id, label_ids))
+        Ok((
+            recurring_assignee_remote_id(conn, &row)?,
+            recurring_project_remote_id(conn, &row)?,
+            recurring_lane_remote_id(conn, &row)?,
+            recurring_label_remote_ids(conn, &row.id)?,
+        ))
     })();
     let (assignee_id, project_id, lane_id, label_ids) = match refs {
         Ok(r) => r,
@@ -1719,6 +1772,7 @@ fn recurring_issue_create_prep(
 
 async fn recurring_issue_create(
     client: &ApiClient,
+    ctx: &CycleCtx,
     entity_id: &str,
     payload: Option<&str>,
     entry_id: i64,
@@ -1727,20 +1781,70 @@ async fn recurring_issue_create(
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
+    // A retry (an earlier attempt began but the entry never finished) first
+    // looks for the row that attempt created, so a POST that succeeded but
+    // whose local commit failed is adopted instead of repeated.
+    let attempt = match record_attempt(entry_id, "recurring_issues") {
+        Ok(a) => a,
+        Err(o) => return o,
+    };
+    if let Some(since) = &attempt.previous {
+        match find_recurring_issue_on_server(
+            client,
+            ctx,
+            prep.team_remote_id,
+            &prep.params,
+            since,
+            &attempt,
+        )
+        .await
+        {
+            Ok(Some(dto)) => return commit_recurring_create(&prep.local_id, entry_id, &dto),
+            Ok(None) => {}
+            Err(o) => return o,
+        }
+    }
     // A 422 is dropped by `classify`; the row stays visible without a remote id.
     match recurring_issues::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => {
-            let committed = open().and_then(|mut conn| {
-                crate::db::recurring_issues::commit_created(&mut conn, &prep.local_id, entry_id, &dto)
-                    .map_err(|e| format!("commit recurring issue create: {e}"))
-            });
-            match committed {
-                Ok(()) => Outcome::Created,
-                Err(e) => Outcome::LeavePending(e),
-            }
-        }
+        Ok(dto) => commit_recurring_create(&prep.local_id, entry_id, &dto),
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
+}
+
+fn commit_recurring_create(local_id: &str, entry_id: i64, dto: &RecurringIssueDto) -> Outcome {
+    let committed = open().and_then(|mut conn| {
+        crate::db::recurring_issues::commit_created(&mut conn, local_id, entry_id, dto)
+            .map_err(|e| format!("commit recurring issue create: {e}"))
+    });
+    match committed {
+        Ok(()) => Outcome::Created,
+        Err(e) => Outcome::LeavePending(e),
+    }
+}
+
+// Remote ids of what a recurring issue references. Each waits (leaves the
+// entry pending) while the referenced record has no remote id yet; `None`
+// means nothing is referenced. Shared by the create and update preps.
+
+fn recurring_assignee_remote_id(
+    conn: &Connection,
+    row: &crate::db::recurring_issues::RecurringIssue,
+) -> Result<Option<i64>, Outcome> {
+    optional_remote_id(conn, "members", row.assignee_id.as_deref())
+}
+
+fn recurring_project_remote_id(
+    conn: &Connection,
+    row: &crate::db::recurring_issues::RecurringIssue,
+) -> Result<Option<i64>, Outcome> {
+    optional_remote_id(conn, "projects", row.project_id.as_deref())
+}
+
+fn recurring_lane_remote_id(
+    conn: &Connection,
+    row: &crate::db::recurring_issues::RecurringIssue,
+) -> Result<Option<i64>, Outcome> {
+    optional_remote_id(conn, "lanes", row.lane_id.as_deref())
 }
 
 /// Remote ids of a recurring issue's labels; waits (leave pending) while any
@@ -1782,6 +1886,7 @@ fn recurring_issue_update_prep(
     payload: Option<&str>,
 ) -> Prep<RecurringIssueUpdatePrep> {
     use crate::db::recurring_issues as db;
+    use db::ChangedField as F;
     let row = match db::get(conn, entity_id) {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -1801,61 +1906,61 @@ fn recurring_issue_update_prep(
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
-    let (changed, starts_on) = db::parse_update_payload(payload);
+    let db::UpdatePayload { changed, starts_on } = db::parse_update_payload(payload);
     let mut params = RecurringIssueParams {
         starts_on,
         ..Default::default()
     };
     // Referenced assignee, project, lane and labels must have remote ids first.
     // A cleared reference is sent as an explicit null.
-    for field in &changed {
-        let r = match field.as_str() {
-            "active" => {
+    for field in changed {
+        let r = match field {
+            F::Active => {
                 params.active = Some(row.active);
                 Ok(())
             }
-            "title" => {
+            F::Title => {
                 params.title = Some(row.title.clone());
                 Ok(())
             }
-            "description" => {
+            F::Description => {
                 // Rails treats "" as blank, which is how a cleared description goes out.
                 params.description = Some(row.description.clone().unwrap_or_default());
                 Ok(())
             }
-            "priority" => {
+            F::Priority => {
                 params.priority = Some(row.priority.as_rails_str().to_string());
                 Ok(())
             }
-            "time_zone" => {
+            F::TimeZone => {
                 params.time_zone = row.time_zone.clone();
                 Ok(())
             }
-            "assignee_id" => optional_remote_id(conn, "members", row.assignee_id.as_deref())
-                .map(|v| params.assignee_id = Some(v)),
-            "project_id" => optional_remote_id(conn, "projects", row.project_id.as_deref())
-                .map(|v| params.project_id = Some(v)),
-            "lane_id" => optional_remote_id(conn, "lanes", row.lane_id.as_deref())
-                .map(|v| params.lane_id = Some(v)),
-            "label_ids" => recurring_label_remote_ids(conn, &row.id)
+            F::AssigneeId => {
+                recurring_assignee_remote_id(conn, &row).map(|v| params.assignee_id = Some(v))
+            }
+            F::ProjectId => {
+                recurring_project_remote_id(conn, &row).map(|v| params.project_id = Some(v))
+            }
+            F::LaneId => recurring_lane_remote_id(conn, &row).map(|v| params.lane_id = Some(v)),
+            F::LabelIds => recurring_label_remote_ids(conn, &row.id)
                 .map(|v| params.label_ids = Some(v)),
-            "frequency" => {
+            F::Frequency => {
                 params.frequency = Some(row.frequency.clone());
                 Ok(())
             }
-            "interval" => {
+            F::Interval => {
                 params.interval = Some(row.interval);
                 Ok(())
             }
-            "weekday" => {
+            F::Weekday => {
                 params.weekday = row.weekday;
                 Ok(())
             }
-            "day_of_month" => {
+            F::DayOfMonth => {
                 params.day_of_month = row.day_of_month;
                 Ok(())
             }
-            _ => Ok(()),
         };
         if let Err(o) = r {
             return Prep::Done(o);
@@ -3980,6 +4085,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::db::recurring_issues::ChangedField as F;
 
     fn failure(kind: SyncErrorKind) -> SyncFailure {
         SyncFailure {
@@ -4743,7 +4849,7 @@ mod tests {
     fn recurring_issue_update_prep_rereads_row_and_waits_for_remote_ids() {
         let conn = setup_labels_db();
         insert_test_recurring(&conn, None);
-        let payload = crate::db::recurring_issues::update_payload(&["active"], None);
+        let payload = crate::db::recurring_issues::update_payload(&[crate::db::recurring_issues::ChangedField::Active], None);
         assert!(matches!(
             recurring_issue_update_prep(&conn, "r1", Some(&payload)),
             Prep::Done(Outcome::LeavePending(_))
@@ -4778,7 +4884,7 @@ mod tests {
     fn recurring_issue_update_prep_sends_starts_on_only_when_the_payload_has_one() {
         let conn = setup_labels_db();
         insert_test_recurring(&conn, Some(5));
-        let payload = crate::db::recurring_issues::update_payload(&["active"], Some("2026-11-05"));
+        let payload = crate::db::recurring_issues::update_payload(&[crate::db::recurring_issues::ChangedField::Active], Some("2026-11-05"));
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
             Prep::Ready(p) => assert_eq!(p.params.starts_on.as_deref(), Some("2026-11-05")),
             _ => panic!("expected Ready"),
@@ -4796,7 +4902,7 @@ mod tests {
         )
         .unwrap();
         let payload = crate::db::recurring_issues::update_payload(
-            &["frequency", "interval", "weekday"],
+            &[F::Frequency, F::Interval, F::Weekday],
             Some("2026-11-10"),
         );
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
@@ -4822,7 +4928,7 @@ mod tests {
         )
         .unwrap();
         let payload = crate::db::recurring_issues::update_payload(
-            &["title", "priority", "description", "time_zone"],
+            &[F::Title, F::Priority, F::Description, F::TimeZone],
             None,
         );
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
@@ -4847,7 +4953,7 @@ mod tests {
         let now = "2026-01-01T00:00:00.000Z";
         conn.execute("UPDATE recurring_issues SET lane_id = 'l1' WHERE id = 'r1'", []).unwrap();
         let payload = crate::db::recurring_issues::update_payload(
-            &["lane_id", "assignee_id", "project_id", "label_ids"],
+            &[F::LaneId, F::AssigneeId, F::ProjectId, F::LabelIds],
             None,
         );
         let waits = |c: &Connection| {
@@ -5751,6 +5857,57 @@ mod tests {
         assert_eq!(match_issue(&c, 7, "Fix", ATTEMPT, &none()), Some(11));
         let taken: HashSet<i64> = [11].into_iter().collect();
         assert_eq!(match_issue(&c, 7, "Fix", ATTEMPT, &taken), Some(10));
+    }
+
+    fn recurring_dto(id: i64, title: &str, creator: Option<i64>, created_at: &str) -> RecurringIssueDto {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": title, "priority": "no_priority",
+            "frequency": "weekly", "interval": 2, "weekday": 5, "day_of_month": null,
+            "active": true,
+            "creator": creator.map(|c| serde_json::json!({"id": c, "name": "n"})),
+            "created_at": created_at, "updated_at": created_at,
+        }))
+        .unwrap()
+    }
+
+    fn recurring_params(title: &str) -> RecurringIssueParams {
+        RecurringIssueParams {
+            title: Some(title.into()),
+            frequency: Some("weekly".into()),
+            interval: Some(2),
+            weekday: Some(5),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn recurring_match_requires_creator_title_schedule_and_time() {
+        let after = "2026-10-30T12:00:05.000Z";
+        let mut other_schedule = recurring_dto(3, "Water", Some(7), after);
+        other_schedule.interval = 1;
+        let c = vec![
+            recurring_dto(1, "Water", Some(8), after),
+            recurring_dto(2, "Other", Some(7), after),
+            other_schedule,
+            recurring_dto(4, "Water", Some(7), "2026-10-30T11:00:00.000Z"),
+            recurring_dto(5, "Water", None, after),
+            recurring_dto(6, "Water", Some(7), after),
+        ];
+        let p = recurring_params("Water");
+        assert_eq!(match_recurring_issue(&c, 7, &p, ATTEMPT, &none()).map(|d| d.id), Some(6));
+        assert!(match_recurring_issue(&c[..5], 7, &p, ATTEMPT, &none()).is_none());
+    }
+
+    #[test]
+    fn recurring_match_picks_earliest_and_skips_linked_ids() {
+        let c = vec![
+            recurring_dto(10, "Water", Some(7), "2026-10-30T12:00:09.000Z"),
+            recurring_dto(11, "Water", Some(7), "2026-10-30T12:00:02.000Z"),
+        ];
+        let p = recurring_params("Water");
+        assert_eq!(match_recurring_issue(&c, 7, &p, ATTEMPT, &none()).map(|d| d.id), Some(11));
+        let taken: HashSet<i64> = [11].into_iter().collect();
+        assert_eq!(match_recurring_issue(&c, 7, &p, ATTEMPT, &taken).map(|d| d.id), Some(10));
     }
 
     #[test]

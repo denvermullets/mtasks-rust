@@ -370,8 +370,16 @@ pub struct RecurringIssueRow {
     /// Local name of the lane spawned issues start in, or [`FIRST_LANE`] when
     /// none is set (the server then uses the team's first lane).
     pub lane: String,
-    /// Attached labels as `(name, hex color)`, sorted by name.
-    pub labels: Vec<(String, Option<String>)>,
+    /// Attached labels, sorted by name.
+    pub labels: Vec<LabelChip>,
+}
+
+/// A label as a row shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelChip {
+    pub name: String,
+    /// Hex color, if the label has one.
+    pub color: Option<String>,
 }
 
 /// Lane cell text for a recurring issue with no lane set.
@@ -380,14 +388,35 @@ pub const FIRST_LANE: &str = "First lane";
 /// Abbreviation for an ActiveSupport zone name (US zones), else `None`.
 pub fn time_zone_abbreviation(name: &str) -> Option<&'static str> {
     Some(match name {
-        "Eastern Time (US & Canada)" => "ET",
-        "Central Time (US & Canada)" => "CT",
-        "Mountain Time (US & Canada)" => "MT",
+        "Eastern Time (US & Canada)"
+        | "Indiana (East)"
+        | "America/Detroit"
+        | "America/Indiana/Marengo"
+        | "America/Indiana/Petersburg"
+        | "America/Indiana/Vevay"
+        | "America/Indiana/Vincennes"
+        | "America/Indiana/Winamac"
+        | "America/Kentucky/Louisville"
+        | "America/Kentucky/Monticello" => "ET",
+        "Central Time (US & Canada)"
+        | "America/Indiana/Knox"
+        | "America/Indiana/Tell_City"
+        | "America/Menominee"
+        | "America/North_Dakota/Beulah"
+        | "America/North_Dakota/Center"
+        | "America/North_Dakota/New_Salem" => "CT",
+        "Mountain Time (US & Canada)" | "America/Boise" => "MT",
         "Arizona" => "MST",
         "Pacific Time (US & Canada)" => "PT",
-        "Alaska" => "AKT",
+        "Alaska"
+        | "America/Anchorage"
+        | "America/Juneau"
+        | "America/Metlakatla"
+        | "America/Nome"
+        | "America/Sitka"
+        | "America/Yakutat" => "AKT",
         "Hawaii" => "HST",
-        "Indiana (East)" => "ET",
+        "America/Adak" => "HAT",
         "UTC" => "UTC",
         _ => return None,
     })
@@ -443,14 +472,19 @@ fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> 
     })
 }
 
-/// `(name, color)` of a recurring issue's labels, sorted by name.
-fn label_chips(conn: &Connection, id: &str) -> Result<Vec<(String, Option<String>)>> {
+/// The labels of a recurring issue, sorted by name.
+fn label_chips(conn: &Connection, id: &str) -> Result<Vec<LabelChip>> {
     let mut stmt = conn.prepare(
         "SELECT l.name, l.color FROM recurring_issue_labels ril
          JOIN labels l ON l.id = ril.label_id
          WHERE ril.recurring_issue_id = ?1 ORDER BY l.name, l.id",
     )?;
-    let rows = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(params![id], |r| {
+        Ok(LabelChip {
+            name: r.get(0)?,
+            color: r.get(1)?,
+        })
+    })?;
     rows.collect()
 }
 
@@ -509,27 +543,101 @@ pub fn write_queued(
 /// re-read from the row at push time), plus `"starts_on"` (`YYYY-MM-DD`) only
 /// when the change moves the schedule. Without `starts_on` the server keeps
 /// the stored `next_run_on` (a pause/resume must not reset the schedule).
-pub fn update_payload(changed: &[&str], starts_on: Option<&str>) -> String {
-    let mut v = serde_json::json!({ "changed": changed });
+pub fn update_payload(changed: &[ChangedField], starts_on: Option<&str>) -> String {
+    let names: Vec<&str> = changed.iter().map(|f| f.as_str()).collect();
+    let mut v = serde_json::json!({ "changed": names });
     if let Some(d) = starts_on {
         v["starts_on"] = serde_json::Value::String(d.to_string());
     }
     v.to_string()
 }
 
-/// Decode an update payload into (changed field names, starts_on). A missing
-/// or unparseable payload is "no known fields", no `starts_on`.
-pub fn parse_update_payload(payload: Option<&str>) -> (Vec<String>, Option<String>) {
+/// A field an `update` push can send. A closed set, so a misspelt field is a
+/// compile error rather than a silently ignored name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangedField {
+    Active,
+    Title,
+    Description,
+    Priority,
+    AssigneeId,
+    ProjectId,
+    LaneId,
+    TimeZone,
+    LabelIds,
+    Frequency,
+    Interval,
+    Weekday,
+    DayOfMonth,
+}
+
+impl ChangedField {
+    /// The name stored in the queued payload (also the Rails param name).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Title => "title",
+            Self::Description => "description",
+            Self::Priority => "priority",
+            Self::AssigneeId => "assignee_id",
+            Self::ProjectId => "project_id",
+            Self::LaneId => "lane_id",
+            Self::TimeZone => "time_zone",
+            Self::LabelIds => "label_ids",
+            Self::Frequency => "frequency",
+            Self::Interval => "interval",
+            Self::Weekday => "weekday",
+            Self::DayOfMonth => "day_of_month",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`]; `None` for a name this build doesn't know.
+    pub fn from_name(name: &str) -> Option<Self> {
+        const ALL: [ChangedField; 13] = [
+            ChangedField::Active,
+            ChangedField::Title,
+            ChangedField::Description,
+            ChangedField::Priority,
+            ChangedField::AssigneeId,
+            ChangedField::ProjectId,
+            ChangedField::LaneId,
+            ChangedField::TimeZone,
+            ChangedField::LabelIds,
+            ChangedField::Frequency,
+            ChangedField::Interval,
+            ChangedField::Weekday,
+            ChangedField::DayOfMonth,
+        ];
+        ALL.into_iter().find(|f| f.as_str() == name)
+    }
+}
+
+/// A decoded `update` payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdatePayload {
+    /// The fields to send; names this build doesn't know are dropped.
+    pub changed: Vec<ChangedField>,
+    /// Present only when the change moves the schedule.
+    pub starts_on: Option<String>,
+}
+
+/// Decode an update payload. A missing or unparseable payload is "no known
+/// fields", no `starts_on`.
+pub fn parse_update_payload(payload: Option<&str>) -> UpdatePayload {
     let Some(v) = payload.and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok()) else {
-        return (Vec::new(), None);
+        return UpdatePayload::default();
     };
     let changed = v
         .get("changed")
         .and_then(|c| c.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().and_then(ChangedField::from_name))
+                .collect()
+        })
         .unwrap_or_default();
     let starts_on = v.get("starts_on").and_then(|s| s.as_str()).map(String::from);
-    (changed, starts_on)
+    UpdatePayload { changed, starts_on }
 }
 
 /// Pause (`false`) or resume (`true`) a recurring issue locally and queue the
@@ -540,7 +648,7 @@ pub fn set_active(conn: &Connection, id: &str, active: bool) -> Result<Option<i6
     if get(conn, id)?.is_none() {
         return Ok(None);
     }
-    let payload = update_payload(&["active"], None);
+    let payload = update_payload(&[ChangedField::Active], None);
     write_queued(conn, id, "update", Some(&payload), |c| {
         c.execute(
             "UPDATE recurring_issues SET active = ?1, updated_at = ?2 WHERE id = ?3",
@@ -562,7 +670,7 @@ pub struct ScheduleEdit {
     pub day_of_month: Option<i64>,
     /// `YYYY-MM-DD`; sent only when the schedule counts as changed.
     pub starts_on: String,
-    /// The user moved starts-on off its default (today).
+    /// The user edited Starts on (even back to today), so it counts as a schedule change.
     pub starts_on_moved: bool,
 }
 
@@ -598,48 +706,48 @@ pub fn update_content(conn: &Connection, id: &str, edit: &RecurringEdit) -> Resu
     let mut new_labels = edit.label_ids.clone();
     new_labels.sort();
     new_labels.dedup();
-    let mut changed: Vec<&str> = Vec::new();
+    let mut changed: Vec<ChangedField> = Vec::new();
     if old.title != edit.title {
-        changed.push("title");
+        changed.push(ChangedField::Title);
     }
     if old.description != edit.description {
-        changed.push("description");
+        changed.push(ChangedField::Description);
     }
     if old.priority != edit.priority {
-        changed.push("priority");
+        changed.push(ChangedField::Priority);
     }
     if old.assignee_id != edit.assignee_id {
-        changed.push("assignee_id");
+        changed.push(ChangedField::AssigneeId);
     }
     if old.project_id != edit.project_id {
-        changed.push("project_id");
+        changed.push(ChangedField::ProjectId);
     }
     if old.lane_id != edit.lane_id {
-        changed.push("lane_id");
+        changed.push(ChangedField::LaneId);
     }
     let time_zone = edit.time_zone.clone().or_else(|| old.time_zone.clone());
     if old.time_zone != time_zone {
-        changed.push("time_zone");
+        changed.push(ChangedField::TimeZone);
     }
     if old_labels != new_labels {
-        changed.push("label_ids");
+        changed.push(ChangedField::LabelIds);
     }
     let sch = &edit.schedule;
     let mut schedule_changed = sch.starts_on_moved;
     if old.frequency != sch.frequency {
-        changed.push("frequency");
+        changed.push(ChangedField::Frequency);
         schedule_changed = true;
     }
     if old.interval != sch.interval {
-        changed.push("interval");
+        changed.push(ChangedField::Interval);
         schedule_changed = true;
     }
     if old.weekday != sch.weekday {
-        changed.push("weekday");
+        changed.push(ChangedField::Weekday);
         schedule_changed = true;
     }
     if old.day_of_month != sch.day_of_month {
-        changed.push("day_of_month");
+        changed.push(ChangedField::DayOfMonth);
         schedule_changed = true;
     }
     if changed.is_empty() && !schedule_changed {
@@ -880,6 +988,7 @@ pub fn label_ids(conn: &Connection, id: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::ChangedField as F;
     use crate::api::RecordRef;
 
     const NOW: &str = "2026-01-01T00:00:00.000Z";
@@ -1047,8 +1156,8 @@ mod tests {
         assert!(update_content(&conn, &id, &edit).unwrap().is_some());
         let q = queued(&conn);
         assert_eq!(q.len(), 1);
-        let (changed, starts_on) = parse_update_payload(q[0].1.as_deref());
-        assert_eq!(changed, ["frequency", "interval", "weekday"]);
+        let UpdatePayload { changed, starts_on } = parse_update_payload(q[0].1.as_deref());
+        assert_eq!(changed, [F::Frequency, F::Interval, F::Weekday]);
         assert_eq!(starts_on.as_deref(), Some("2026-11-10"));
         let row = get(&conn, &id).unwrap().unwrap();
         assert_eq!((row.frequency.as_str(), row.interval, row.weekday), ("weekly", 2, Some(3)));
@@ -1064,15 +1173,15 @@ mod tests {
         edit.schedule.starts_on = "2026-12-01".into();
         edit.schedule.starts_on_moved = true;
         update_content(&conn, &id, &edit).unwrap();
-        let (changed, starts_on) = parse_update_payload(queued(&conn)[0].1.as_deref());
+        let UpdatePayload { changed, starts_on } = parse_update_payload(queued(&conn)[0].1.as_deref());
         assert!(changed.is_empty());
         assert_eq!(starts_on.as_deref(), Some("2026-12-01"));
 
         let mut edit = edit_of(&conn, &id);
         edit.title = "Renamed".into();
         update_content(&conn, &id, &edit).unwrap();
-        let (changed, starts_on) = parse_update_payload(queued(&conn)[1].1.as_deref());
-        assert_eq!(changed, ["title"]);
+        let UpdatePayload { changed, starts_on } = parse_update_payload(queued(&conn)[1].1.as_deref());
+        assert_eq!(changed, [F::Title]);
         assert_eq!(starts_on, None);
     }
 
@@ -1094,11 +1203,19 @@ mod tests {
         let q = queued(&conn);
         assert_eq!(q.len(), 1);
         assert_eq!(q[0].0, "update");
-        let (changed, starts_on) = parse_update_payload(q[0].1.as_deref());
+        let UpdatePayload { changed, starts_on } = parse_update_payload(q[0].1.as_deref());
         assert_eq!(starts_on, None);
         assert_eq!(
             changed,
-            ["title", "priority", "assignee_id", "project_id", "lane_id", "time_zone", "label_ids"]
+            [
+                F::Title,
+                F::Priority,
+                F::AssigneeId,
+                F::ProjectId,
+                F::LaneId,
+                F::TimeZone,
+                F::LabelIds
+            ]
         );
         let row = get(&conn, &id).unwrap().unwrap();
         assert_eq!(row.title, "Renamed");
@@ -1138,7 +1255,7 @@ mod tests {
         assert_eq!(row.lane_id, None);
         assert_eq!(row.time_zone.as_deref(), Some("Tokyo"));
         let q = queued(&conn);
-        assert_eq!(parse_update_payload(q[1].1.as_deref()).0, ["lane_id"]);
+        assert_eq!(parse_update_payload(q[1].1.as_deref()).changed, [F::LaneId]);
     }
 
     fn rref(id: i64, name: &str) -> Option<RecordRef> {
@@ -1181,8 +1298,8 @@ mod tests {
         assert_eq!(
             by("With"),
             vec![
-                ("Alpha".to_string(), None),
-                ("Zed".to_string(), Some("#ff0000".to_string()))
+                LabelChip { name: "Alpha".into(), color: None },
+                LabelChip { name: "Zed".into(), color: Some("#ff0000".into()) }
             ]
         );
         assert!(by("Without").is_empty());
@@ -1344,7 +1461,7 @@ mod tests {
         assert!(!next_run_pending(&conn, &id).unwrap());
         set_active(&conn, &id, false).unwrap();
         assert!(!next_run_pending(&conn, &id).unwrap());
-        let p = update_payload(&["frequency"], Some("2026-11-11"));
+        let p = update_payload(&[F::Frequency], Some("2026-11-11"));
         sync_queue::enqueue(&conn, ENTITY_TYPE, &id, "update", Some(&p)).unwrap();
         assert!(next_run_pending(&conn, &id).unwrap());
     }
@@ -1391,16 +1508,19 @@ mod tests {
 
     #[test]
     fn update_payload_round_trips_and_only_schedule_changes_carry_starts_on() {
-        let p = update_payload(&["frequency", "interval"], Some("2026-11-05"));
+        let p = update_payload(&[F::Frequency, F::Interval], Some("2026-11-05"));
         assert_eq!(
             parse_update_payload(Some(&p)),
-            (
-                vec!["frequency".to_string(), "interval".to_string()],
-                Some("2026-11-05".to_string())
-            )
+            UpdatePayload {
+                changed: vec![F::Frequency, F::Interval],
+                starts_on: Some("2026-11-05".to_string())
+            }
         );
-        assert_eq!(parse_update_payload(None), (vec![], None));
-        assert_eq!(parse_update_payload(Some("junk")), (vec![], None));
+        // Names this build doesn't know are dropped, not an error.
+        let p = r#"{"changed":["title","nope"]}"#;
+        assert_eq!(parse_update_payload(Some(p)).changed, [F::Title]);
+        assert_eq!(parse_update_payload(None), UpdatePayload::default());
+        assert_eq!(parse_update_payload(Some("junk")), UpdatePayload::default());
     }
 
     #[test]

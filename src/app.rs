@@ -4464,6 +4464,7 @@ impl App {
             Message::RecurringFormStartsOnChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.starts_on = v;
+                    f.starts_on_touched = true;
                 }
             }
             Message::RecurringFormAssigneeChanged(v) => {
@@ -4536,6 +4537,7 @@ impl App {
                     let _ = crate::db::recurring_issues::delete_local(&conn, id);
                     self.modal = Modal::None;
                     self.reload_recurring(&conn);
+                    self.reload_detail_origin(&conn);
                 }
             }
 
