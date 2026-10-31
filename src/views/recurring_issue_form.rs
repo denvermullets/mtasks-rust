@@ -16,9 +16,10 @@ use iced::widget::{button, column, container, pick_list, row, text, text_editor,
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::models::Priority;
+use crate::db::models::{Label, Priority};
 use crate::db::recurring_issues::NewRecurringIssue;
 use crate::theme as t;
+use crate::views::labels as labels_view;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frequency {
@@ -92,6 +93,8 @@ pub struct RecurringFormState {
     pub day_of_month: String,
     /// Raw `YYYY-MM-DD` text.
     pub starts_on: String,
+    /// Local UUIDs of the labels toggled on in the chip grid.
+    pub label_ids: Vec<String>,
     /// Inline errors from the last failed Save; cleared by a successful one.
     pub errors: FormErrors,
 }
@@ -108,7 +111,17 @@ impl RecurringFormState {
             weekday: i64::from(today.weekday().num_days_from_sunday()),
             day_of_month: today.day().to_string(),
             starts_on: today.format("%Y-%m-%d").to_string(),
+            label_ids: Vec::new(),
             errors: FormErrors::default(),
+        }
+    }
+
+    /// Toggle a label's presence in the selected set.
+    pub fn toggle_label(&mut self, label_id: &str) {
+        if let Some(pos) = self.label_ids.iter().position(|id| id == label_id) {
+            self.label_ids.remove(pos);
+        } else {
+            self.label_ids.push(label_id.to_string());
         }
     }
 
@@ -205,6 +218,7 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
         weekday,
         day_of_month,
         starts_on: starts_on.to_string(),
+        label_ids: form.label_ids.clone(),
     })
 }
 
@@ -213,7 +227,25 @@ fn error_line<'a>(e: &'a Option<String>) -> Option<Element<'a, Message>> {
         .map(|m| text(m).size(12).color(t::danger()).into())
 }
 
-pub fn view<'a>(form: &'a RecurringFormState) -> Element<'a, Message> {
+fn labels_section<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a, Message> {
+    let content: Element<'a, Message> = if labels.is_empty() {
+        text("No labels yet.").size(12).color(t::text_muted()).into()
+    } else {
+        labels_view::chip_grid(
+            labels,
+            |l| form.label_ids.contains(&l.id),
+            |l| Message::RecurringFormLabelToggled(l.id.clone()),
+            4,
+        )
+    };
+    column![]
+        .spacing(6)
+        .push(text("Labels").size(12).color(t::text_muted()))
+        .push(content)
+        .into()
+}
+
+pub fn view<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a, Message> {
     let weekday_options: Vec<WeekdayOption> = (0..7).map(WeekdayOption).collect();
 
     let mut schedule = column![].spacing(10).push(
@@ -318,6 +350,7 @@ pub fn view<'a>(form: &'a RecurringFormState) -> Element<'a, Message> {
                 )),
         )
         .push(schedule)
+        .push(labels_section(form, labels))
         .push(
             row![]
                 .spacing(8)
@@ -457,6 +490,15 @@ mod tests {
             f.starts_on = bad.into();
             assert!(validate(&f).unwrap_err().starts_on.is_some(), "{bad}");
         }
+    }
+
+    #[test]
+    fn toggled_labels_reach_the_db_write() {
+        let mut f = valid();
+        f.toggle_label("a");
+        f.toggle_label("b");
+        f.toggle_label("a");
+        assert_eq!(validate(&f).unwrap().label_ids, vec!["b".to_string()]);
     }
 
     #[test]
