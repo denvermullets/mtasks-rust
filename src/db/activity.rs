@@ -256,10 +256,7 @@ pub struct ActivityItem {
 pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<ActivityItem>> {
     let mut items = Vec::new();
     for entry in entries_for_issue(conn, issue_id)? {
-        let actor = ActorSlot {
-            remote_id: entry.actor_remote_id,
-            name: entry.actor_name.clone(),
-        };
+        let actor = resolve_actor(conn, entry.actor_remote_id, entry.actor_name.as_deref())?;
         let texts = match entry.entry_type.as_str() {
             "version" => version_lines(&entry),
             _ => Vec::new(),
@@ -275,6 +272,19 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
         }
     }
     Ok(items)
+}
+
+/// Resolve an entry's actor: the local member with that remote id wins, then the
+/// name the server sent. No actor at all gives no name (never "Someone").
+fn resolve_actor(conn: &Connection, remote_id: Option<i64>, server_name: Option<&str>) -> Result<ActorSlot> {
+    let local = match remote_id {
+        Some(id) => crate::db::queries::find_member_by_remote_id(conn, id)?.map(|m| m.name),
+        None => None,
+    };
+    Ok(ActorSlot {
+        remote_id,
+        name: local.or_else(|| server_name.map(str::to_string)),
+    })
 }
 
 /// One line per change in a version entry. Changes this layer can't word yet
@@ -522,6 +532,35 @@ mod display_tests {
         let items = activity_for_issue(&conn, "i1").unwrap();
         assert_eq!(items[0].text, "changed priority from Low to Urgent");
         assert_eq!(items[1].text, "changed the title");
+        assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
+    }
+
+    fn one_change(actor: &str) -> String {
+        format!(r#"[{{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":{actor},"event":"update","description":"","changes":[{{"field":"title","from":"a","to":"b"}}]}}]"#)
+    }
+
+    #[test]
+    fn actor_prefers_mirrored_member_name() {
+        let conn = mem();
+        conn.execute("INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at) VALUES ('m1',2,'t1','Ryan V','r@x.com','n','n')", []).unwrap();
+        store(&conn, &one_change(r#"{"id":2,"name":"ryan"}"#));
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].actor, ActorSlot { remote_id: Some(2), name: Some("Ryan V".into()) });
+    }
+
+    #[test]
+    fn actor_not_mirrored_uses_server_name() {
+        let conn = mem();
+        store(&conn, &one_change(r#"{"id":9,"name":"ann"}"#));
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].actor, ActorSlot { remote_id: Some(9), name: Some("ann".into()) });
+    }
+
+    #[test]
+    fn null_actor_has_no_name() {
+        let conn = mem();
+        store(&conn, &one_change("null"));
+        let items = activity_for_issue(&conn, "i1").unwrap();
         assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
     }
 
