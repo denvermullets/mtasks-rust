@@ -116,6 +116,7 @@ pub fn view<'a>(
     issues: &'a [Issue],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
+    my_member_ids: &[String],
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -183,7 +184,9 @@ pub fn view<'a>(
                 .is_none()
                 .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
         )
-        .push(comments_section(comments, events, members, detail, team, teams, issues));
+        .push(comments_section(
+            comments, events, members, detail, team, teams, issues, my_member_ids,
+        ));
 
     // ---- Right sidebar: properties ----
     let lane_options: Vec<LaneOption> = lanes
@@ -742,7 +745,7 @@ fn referenced_in_section<'a>(
 
 /// Activity timeline: change events interleaved with threaded comments
 /// (oldest first), plus the top-level composer, appended to the bottom of the
-/// left column. Delete/edit are not supported by the API.
+/// left column. Own unsynced comments can be deleted locally.
 fn comments_section<'a>(
     comments: &'a [Comment],
     events: &'a [IssueEvent],
@@ -751,6 +754,7 @@ fn comments_section<'a>(
     team: Option<&'a Team>,
     teams: &'a [Team],
     issues: &'a [Issue],
+    my_member_ids: &[String],
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
@@ -765,7 +769,9 @@ fn comments_section<'a>(
             TimelineItem::Event(event) => col = col.push(event_row(event, members)),
             TimelineItem::Thread(thread) => {
                 for (depth, comment) in thread {
-                    col = col.push(comment_row(depth, comment, members, team, teams, issues));
+                    col = col.push(comment_row(
+                        depth, comment, members, team, teams, issues, my_member_ids,
+                    ));
                     if detail.reply_to.as_deref() == Some(comment.id.as_str()) {
                         col = col.push(reply_composer(depth + 1, detail));
                         col = col.push_maybe(
@@ -883,6 +889,7 @@ fn comment_row<'a>(
     team: Option<&'a Team>,
     teams: &'a [Team],
     issues: &'a [Issue],
+    my_member_ids: &[String],
 ) -> Element<'a, Message> {
     let author = comment
         .author_id
@@ -911,13 +918,32 @@ fn comment_row<'a>(
         issues,
         members,
     ));
+    // Delete is offered on the user's own comments that haven't reached the
+    // server yet.
+    let can_delete = comment.remote_id.is_none()
+        && comment
+            .author_id
+            .as_ref()
+            .is_some_and(|aid| my_member_ids.contains(aid));
+    let mut actions = row![].spacing(10);
     if Comment::can_reply_at(depth) {
-        col = col.push(
+        actions = actions.push(
             button(text("Reply").size(11).color(t::text_muted()))
                 .on_press(Message::StartReply(comment.id.clone()))
                 .padding(0)
                 .style(button::text),
         );
+    }
+    if can_delete {
+        actions = actions.push(
+            button(text("Delete").size(11).color(t::text_muted()))
+                .on_press(Message::ConfirmDeleteComment(comment.id.clone()))
+                .padding(0)
+                .style(button::text),
+        );
+    }
+    if Comment::can_reply_at(depth) || can_delete {
+        col = col.push(actions);
     }
 
     if depth == 0 {
