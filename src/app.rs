@@ -578,7 +578,12 @@ impl App {
             .as_ref()
             .and_then(|id| self.teams.iter().find(|t| t.id == *id))
             .cloned();
-        PaletteData { issues: self.issues.clone(), team, teams: self.teams.clone() }
+        PaletteData {
+            issues: self.issues.clone(),
+            team,
+            teams: self.teams.clone(),
+            projects: PaletteData::load_projects(&self.db()),
+        }
     }
 
     fn db(&self) -> rusqlite::Connection {
@@ -2536,6 +2541,18 @@ impl App {
                     }
                     // open_issue_detail commits any open detail edits first.
                     PaletteNav::Issue(id) => return self.update(Message::OpenIssueDetail(id)),
+                    PaletteNav::Project { project_id, team_id } => {
+                        // Other team: switch (reloads its data) so the project is
+                        // in memory; current team opens without a reload.
+                        if self.selected_team_id.as_deref() != Some(team_id.as_str()) {
+                            let _ = self.update(Message::SelectTeamView(
+                                team_id.clone(),
+                                View::ProjectList,
+                            ));
+                        }
+                        self.expanded_teams.insert(team_id);
+                        return self.update(Message::OpenProjectDetail(project_id));
+                    }
                 }
             }
 
