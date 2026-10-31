@@ -4,9 +4,6 @@
 //! creates/edits read the same as the web: "Every day", "Every 2 weeks on
 //! Wednesday", "Every month on the 1st". Pure, no UI wiring.
 
-// Unused until JRST-161 / JRST-172 wire it in; remove this allow then.
-#![allow(dead_code)]
-
 const DAY_NAMES: [&str; 7] = [
     "Sunday",
     "Monday",

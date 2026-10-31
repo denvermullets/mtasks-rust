@@ -12,6 +12,7 @@ use crate::app::Message;
 use crate::db::recurring_issues::RecurringIssueRow;
 use crate::theme as t;
 
+const COL_SCHEDULE: f32 = 200.0;
 const COL_STATE: f32 = 110.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
@@ -22,6 +23,7 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .padding([8, 16])
         .align_y(Alignment::Center)
         .push(header_cell("Title", Length::Fill))
+        .push(header_cell("Schedule", Length::Fixed(COL_SCHEDULE)))
         .push(header_cell("State", Length::Fixed(COL_STATE)));
 
     let mut body = column![].width(Length::Fill);
@@ -94,6 +96,14 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     )
     .width(Length::Fill);
 
+    let schedule = container(
+        text(&r.schedule)
+            .size(12)
+            .color(t::text_secondary())
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fixed(COL_SCHEDULE));
+
     let dot = if r.active {
         t::priority_low()
     } else {
@@ -114,6 +124,7 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .padding([10, 16])
             .align_y(Alignment::Center)
             .push(title)
+            .push(schedule)
             .push(state),
     )
     .width(Length::Fill)
