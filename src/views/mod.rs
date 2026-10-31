@@ -1,4 +1,5 @@
 pub mod board;
+pub mod command_palette;
 pub mod csv_import;
 pub mod display_panel;
 pub mod header;

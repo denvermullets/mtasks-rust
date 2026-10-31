@@ -20,10 +20,11 @@ use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
+use crate::palette_results::{PaletteData, PaletteNav, PaletteState};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
+    board, command_palette, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
     team_list, team_members, team_picker, toast,
@@ -171,6 +172,16 @@ pub enum Message {
     // UI
     CloseModal,
     ToggleHelp,
+    /// Cmd+K: open the command palette.
+    OpenCommandPalette,
+    /// The palette's text field changed.
+    PaletteQueryChanged(String),
+    /// A palette row was chosen; closes the palette and navigates.
+    PaletteChoose(crate::palette_results::PaletteNav),
+    /// Up/Down in the palette: move the highlight by this many rows (wraps).
+    PaletteMove(i32),
+    /// Enter in the palette: choose the highlighted row, if any.
+    PaletteSubmit,
 
     // Header bar
     /// Header search box changed; filters the current view's items.
@@ -328,6 +339,8 @@ pub enum Modal {
     DisplayOptions,
     /// Filter popover, anchored under the header.
     FilterPanel,
+    /// Command palette (Cmd+K); see `command_palette`.
+    CommandPalette(PaletteState),
 }
 
 /// Sections of the Rails team settings page (`/teams/:id/edit?section=…`).
@@ -562,6 +575,33 @@ pub struct App {
 }
 
 impl App {
+    /// Snapshot of what the command palette searches, taken when it opens.
+    fn palette_data(&self) -> PaletteData {
+        let conn = self.db();
+        PaletteData {
+            issues: queries::searchable_issues(&conn).unwrap_or_default(),
+            current_team_id: self.selected_team_id.clone(),
+            teams: self
+                .teams
+                .iter()
+                .filter(|t| t.archived_at.is_none())
+                .cloned()
+                .collect(),
+            projects: queries::searchable_projects(&conn).unwrap_or_default(),
+        }
+    }
+
+    /// Before opening an issue or project from the palette: when it belongs to
+    /// another team (or we are on My Issues, whose data is mixed), select its
+    /// team like a sidebar click, so the sidebar follows and its data is loaded.
+    fn select_team_for_palette(&mut self, team_id: &str) -> Task<Message> {
+        if self.selected_team_id.as_deref() == Some(team_id) && self.view != View::MyIssues {
+            return Task::none();
+        }
+        self.expanded_teams.insert(team_id.to_string());
+        self.update(Message::SelectTeamView(team_id.to_string(), View::Board))
+    }
+
     fn db(&self) -> rusqlite::Connection {
         connection::open().expect("Failed to open database")
     }
@@ -1788,8 +1828,9 @@ impl App {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
                 }
                 let modal_open = self.modal != Modal::None;
+                let palette_open = matches!(self.modal, Modal::CommandPalette(_));
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
-                if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, on_board) {
+                if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
                 }
             }
@@ -2489,6 +2530,64 @@ impl App {
                 self.label_form = None;
                 self.team_members.clear();
                 self.csv_import = None;
+            }
+
+            Message::OpenCommandPalette => {
+                // Never opens over another modal.
+                if self.modal == Modal::None {
+                    self.modal = Modal::CommandPalette(PaletteState::new(
+                        self.palette_data(),
+                    ));
+                    return text_input::focus(command_palette::input_id());
+                }
+            }
+            Message::PaletteQueryChanged(query) => {
+                if let Modal::CommandPalette(ref mut palette) = self.modal {
+                    palette.set_query(query);
+                }
+            }
+            Message::PaletteMove(delta) => {
+                if let Modal::CommandPalette(ref mut palette) = self.modal {
+                    palette.move_selection(delta);
+                }
+            }
+            Message::PaletteSubmit => {
+                let nav = match self.modal {
+                    Modal::CommandPalette(ref palette) => palette.chosen(),
+                    _ => None,
+                };
+                if let Some(nav) = nav {
+                    return self.update(Message::PaletteChoose(nav));
+                }
+            }
+            Message::PaletteChoose(nav) => {
+                self.modal = Modal::None;
+                match nav {
+                    // Same path as any other view navigation: commits open
+                    // issue/project detail edits first.
+                    PaletteNav::View(view) => return self.update(Message::NavigateToView(view)),
+                    // Same path as a sidebar team click, so selection follows.
+                    PaletteNav::Team(id) => {
+                        return self.update(Message::SelectTeamView(id, View::Board))
+                    }
+                    PaletteNav::Issue(id) => {
+                        let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
+                            return Task::none();
+                        };
+                        let select = self.select_team_for_palette(&issue.team_id);
+                        // open_issue_detail commits any open detail edits first.
+                        return Task::batch([select, self.open_issue_detail(&issue)]);
+                    }
+                    PaletteNav::Project { project_id, team_id } => {
+                        // The switch reloads the team's data, so the project is
+                        // in memory when its detail opens.
+                        let select = self.select_team_for_palette(&team_id);
+                        return Task::batch([
+                            select,
+                            self.update(Message::OpenProjectDetail(project_id)),
+                        ]);
+                    }
+                }
             }
 
             Message::ToggleHelp => {
@@ -3715,6 +3814,9 @@ impl App {
                 }
                 None => base,
             },
+            Modal::CommandPalette(palette) => {
+                iced::widget::stack![base, command_palette::view(palette)].into()
+            }
             Modal::None => base,
         };
 

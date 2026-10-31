@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::error::ApiError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Team {
     pub id: String,
     pub name: String,
@@ -214,7 +214,7 @@ impl ToSql for RoadmapCommitment {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
     pub title: String,
