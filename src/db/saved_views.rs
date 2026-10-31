@@ -187,6 +187,7 @@ pub fn delete_local(conn: &Connection, view_id: &str) -> Result<Option<String>> 
         params![ENTITY_TYPE, view_id, crate::db::now_iso()],
     )?;
     tx.commit()?;
+    super::home_page::clear_if_local_view(conn, view_id)?;
     if let Some(Some(id)) = remote_id {
         super::home_page::clear_if_view(conn, id)?;
     }
@@ -242,6 +243,7 @@ pub fn adopt_created(conn: &Connection, view_id: &str, dto: &SavedViewIn) -> Res
          WHERE id = ?1",
         params![view_id, dto.id, dto.position, query, dto.updated_at],
     )?;
+    super::home_page::adopt_view(conn, view_id, dto.id)?;
     Ok(())
 }
 

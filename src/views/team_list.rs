@@ -190,6 +190,18 @@ pub fn view<'a>(
                 .padding([6, 28])
                 .width(Length::Fill)
                 .style(move |_theme: &Theme, _status| selected_row_style(active));
+                // Set-as-home needs a writable token and is a no-op on the
+                // current home; disabled (muted) otherwise.
+                let is_home = is_home_view(home, sv);
+                let home_btn = button(text("\u{2302}").size(12).color(t::text_muted()))
+                    .on_press_maybe(
+                        (!read_only && !is_home).then(|| Message::SetSavedViewAsHome(sv.id.clone())),
+                    )
+                    .padding([6, 8])
+                    .style(|_theme: &Theme, _status| button::Style {
+                        background: None,
+                        ..Default::default()
+                    });
                 // Delete needs a writable token; disabled (muted) otherwise.
                 let delete_btn = button(text("\u{2715}").size(11).color(t::text_muted()))
                     .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteSavedView(sv.id.clone())))
@@ -199,7 +211,7 @@ pub fn view<'a>(
                         ..Default::default()
                     });
                 col = col.push(
-                    row![open_btn, delete_btn].align_y(iced::Alignment::Center),
+                    row![open_btn, home_btn, delete_btn].align_y(iced::Alignment::Center),
                 );
             }
         }
@@ -220,9 +232,14 @@ pub fn is_home_team(home: Option<&HomePage>, team: &Team) -> bool {
     matches!((home, team.remote_id), (Some(h), Some(id)) if h.kind == "team" && h.remote_id == id)
 }
 
-/// True when `home` is this Saved view. A view without a remote id never matches.
+/// True when `home` is this Saved view, by remote id or (chosen before its
+/// create pushed) by local id.
 pub fn is_home_view(home: Option<&HomePage>, view: &SavedView) -> bool {
-    matches!((home, view.remote_id), (Some(h), Some(id)) if h.kind == "view" && h.remote_id == id)
+    let Some(h) = home.filter(|h| h.kind == "view") else { return false };
+    match &h.local_id {
+        Some(l) => *l == view.id,
+        None => view.remote_id == Some(h.remote_id),
+    }
 }
 
 /// The small home glyph shown next to the Home page's row.
@@ -386,7 +403,7 @@ mod tests {
     use crate::db::saved_views::SavedView;
 
     fn home(kind: &str, id: i64) -> HomePage {
-        HomePage { kind: kind.into(), remote_id: id }
+        HomePage { kind: kind.into(), remote_id: id, local_id: None }
     }
 
     fn team(remote_id: Option<i64>) -> Team {
