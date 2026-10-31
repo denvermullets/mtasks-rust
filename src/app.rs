@@ -42,6 +42,9 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
+    /// Ask to delete a Saved view (local id).
+    ConfirmDeleteSavedView(String),
+    DeleteSavedViewConfirmed,
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
 
@@ -357,6 +360,8 @@ pub enum Modal {
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
+    /// Confirm deleting a Saved view (local id) from the sidebar.
+    DeleteSavedViewConfirm(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
     /// Team picker for moving an issue (local UUID); see `team_picker`.
@@ -2133,6 +2138,47 @@ impl App {
                 self.focused_lane = 0;
                 self.focused_issue = 0;
                 return task;
+            }
+
+            Message::ConfirmDeleteSavedView(view_id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a view",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteSavedViewConfirm(view_id);
+                }
+            }
+
+            Message::DeleteSavedViewConfirmed => {
+                let Modal::DeleteSavedViewConfirm(view_id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                let team_id = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == view_id)
+                    .map(|v| v.team_id.clone());
+                match crate::db::saved_views::delete_local(&self.db(), &view_id) {
+                    Ok(Some(payload)) => {
+                        self.enqueue_sync("saved_view", &view_id, "delete", Some(payload.as_str()))
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[saved_views] delete failed: {e}"),
+                }
+                let was_open = self.open_view.as_ref().is_some_and(|v| v.view_id == view_id);
+                self.reload_data();
+                if was_open {
+                    if let Some(team_id) = team_id {
+                        return self.update_inner(Message::SelectTeamView(team_id, View::Board));
+                    }
+                    self.open_view = None;
+                }
             }
 
             Message::SelectTeamView(team_id, view) => {
@@ -4238,6 +4284,21 @@ impl App {
                     .unwrap_or("this project");
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
+            }
+            Modal::DeleteSavedViewConfirm(view_id) => {
+                let name = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == *view_id)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_default();
+                let body = format!("Delete the view \"{name}\"? Issues are not affected.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete View?", body, Message::DeleteSavedViewConfirmed)
+                ]
+                .into()
             }
             Modal::DeleteLabelConfirm(label_id) => {
                 let conn = self.db();

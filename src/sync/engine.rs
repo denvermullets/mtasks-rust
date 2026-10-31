@@ -391,6 +391,7 @@ async fn process(
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
         ("notification", "read_all") => notification_read_all(client, entry.payload.as_deref()).await,
         ("home_page", "update") => home_page_set(client, entry.payload.as_deref()).await,
+        ("saved_view", "delete") => saved_view_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -1844,6 +1845,26 @@ async fn home_page_set(client: &ApiClient, payload: Option<&str>) -> Outcome {
     };
     match crate::api::users::set_home_page(client, &kind, id).await {
         Ok(()) => Outcome::Success,
+        Err(e) => classify(&e),
+    }
+}
+
+/// `DELETE /saved_views/:id`. A 404 means it is already gone: done.
+async fn saved_view_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let Some(remote_id) = saved_view_delete_id(payload) else {
+        return Outcome::DropAndLog("saved_view delete: bad payload".into());
+    };
+    saved_view_delete_outcome(crate::api::saved_views::delete(client, remote_id).await)
+}
+
+fn saved_view_delete_id(payload: Option<&str>) -> Option<i64> {
+    let v: serde_json::Value = serde_json::from_str(payload?).ok()?;
+    v.get("remote_id")?.as_i64()
+}
+
+fn saved_view_delete_outcome(result: Result<(), ApiError>) -> Outcome {
+    match result {
+        Ok(()) | Err(ApiError::NotFound(_)) => Outcome::Success,
         Err(e) => classify(&e),
     }
 }
@@ -4063,6 +4084,27 @@ mod tests {
                 Prep::Done(Outcome::DropAndLog(_))
             ));
         }
+    }
+
+    #[test]
+    fn saved_view_delete_reads_the_remote_id_from_the_payload() {
+        assert_eq!(saved_view_delete_id(Some(r#"{"remote_id":5}"#)), Some(5));
+        for bad in [None, Some("nope"), Some("{}")] {
+            assert_eq!(saved_view_delete_id(bad), None);
+        }
+    }
+
+    #[test]
+    fn saved_view_delete_treats_success_and_404_as_done() {
+        assert!(matches!(saved_view_delete_outcome(Ok(())), Outcome::Success));
+        assert!(matches!(
+            saved_view_delete_outcome(Err(ApiError::NotFound("gone".into()))),
+            Outcome::Success
+        ));
+        assert!(matches!(
+            saved_view_delete_outcome(Err(ApiError::MissingToken)),
+            Outcome::LeavePending(_)
+        ));
     }
 
     #[test]

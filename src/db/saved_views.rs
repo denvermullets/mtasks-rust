@@ -170,6 +170,27 @@ pub fn grouped_by_team(
     Ok(map)
 }
 
+/// Remove a view locally and retire its pending queue entries (a never-pushed
+/// create is simply dropped). Returns the `saved_view` delete payload
+/// (`{"remote_id": n}`) when the view exists on the server, i.e. when a delete
+/// must be queued; `None` otherwise.
+pub fn delete_local(conn: &Connection, view_id: &str) -> Result<Option<String>> {
+    let remote_id: Option<Option<i64>> = conn
+        .query_row("SELECT remote_id FROM saved_views WHERE id = ?1", params![view_id], |r| r.get(0))
+        .optional()?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM saved_views WHERE id = ?1", params![view_id])?;
+    tx.execute(
+        "UPDATE sync_queue SET synced_at = ?3
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
+        params![ENTITY_TYPE, view_id, crate::db::now_iso()],
+    )?;
+    tx.commit()?;
+    Ok(remote_id
+        .flatten()
+        .map(|id| serde_json::json!({ "remote_id": id }).to_string()))
+}
+
 /// Stored Saved-views cursor (last applied `server_time`), if any.
 pub fn cursor(conn: &Connection) -> Result<Option<String>> {
     get_pull_cursor(conn, SCOPE, RESOURCE)
@@ -333,6 +354,32 @@ mod tests {
             .map(|v| v.name)
             .collect();
         assert_eq!(names, ["B", "A", "A2"]);
+    }
+
+    #[test]
+    fn delete_local_removes_the_view_and_returns_a_delete_payload() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(5, 700, "A", json!({})), view(6, 700, "B", json!({}))], None).unwrap();
+        let id = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        let payload = delete_local(&conn, &id).unwrap();
+        assert_eq!(payload.as_deref(), Some(r#"{"remote_id":5}"#));
+        assert!(find_by_remote_id(&conn, 5).unwrap().is_none());
+        assert_eq!(list_for_team(&conn, "t1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_local_of_a_never_pushed_view_queues_nothing_and_drops_its_create() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO saved_views (id, remote_id, team_id, name, query, position, updated_at)
+             VALUES ('loc', NULL, 't1', 'New', '{}', 0, '2026-10-31T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        sync_queue::enqueue(&conn, ENTITY_TYPE, "loc", "create", None).unwrap();
+        assert_eq!(delete_local(&conn, "loc").unwrap(), None);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+        assert!(list_for_team(&conn, "t1").unwrap().is_empty());
     }
 
     fn tomb(kind: &str, id: i64) -> crate::api::deleted::TombstoneDto {
