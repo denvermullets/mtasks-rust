@@ -164,7 +164,7 @@ pub enum Lookup {
     Issue,
 }
 
-fn priority_label(p: i32) -> String {
+pub(super) fn priority_label(p: i32) -> String {
     match Priority::from_i32(p) {
         Priority::Urgent => "Urgent",
         Priority::High => "High",
