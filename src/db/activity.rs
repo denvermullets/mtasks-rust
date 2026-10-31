@@ -262,6 +262,7 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
         };
         let texts = match entry.entry_type.as_str() {
             "version" => version_lines(&entry),
+            "reference" => vec![reference_line(&entry)],
             _ => Vec::new(),
         };
         for (i, text) in texts.into_iter().enumerate() {
@@ -275,6 +276,18 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
         }
     }
     Ok(items)
+}
+
+/// "mentioned in MTK-2: Title"; the source issue may be gone (null).
+fn reference_line(entry: &StoredEntry) -> String {
+    let src = &entry.payload["source_issue"];
+    match src["identifier"].as_str() {
+        Some(ident) => match src["title"].as_str().filter(|t| !t.is_empty()) {
+            Some(title) => format!("mentioned in {ident}: {title}"),
+            None => format!("mentioned in {ident}"),
+        },
+        None => "mentioned in another issue".to_string(),
+    }
 }
 
 /// One line per change in a version entry. Changes this layer can't word yet
@@ -530,5 +543,46 @@ mod display_tests {
         let conn = mem();
         store(&conn, r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"","changes":[]}]"#);
         assert!(activity_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod jrst139_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn conn_with(body: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let entries: Vec<ActivityEntry> = serde_json::from_str(body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        conn
+    }
+
+    #[test]
+    fn reference_reads_mentioned_in_with_title_and_user() {
+        let conn = conn_with(r#"[{"type":"reference","id":1,"cursor":"reference:1","created_at":"2026-07-08T13:35:39Z",
+          "source_issue":{"id":2,"identifier":"MTK-2","title":"Add reset"},"source_type":"comment","user":{"id":2,"name":"ryan"}}]"#);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "mentioned in MTK-2: Add reset");
+        assert_eq!(items[0].key, "reference:1#0");
+        assert_eq!(items[0].actor, ActorSlot { remote_id: Some(2), name: Some("ryan".into()) });
+    }
+
+    #[test]
+    fn reference_with_missing_source_or_user_still_renders() {
+        let conn = conn_with(r#"[{"type":"reference","id":1,"cursor":"reference:1","created_at":"2026-07-08T13:35:39Z",
+          "source_issue":null,"source_type":"issue","user":null},
+          {"type":"reference","id":2,"cursor":"reference:2","created_at":"2026-07-08T13:36:00Z",
+          "source_issue":{"id":3,"identifier":"MTK-3","title":""},"source_type":"issue","user":null}]"#);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].text, "mentioned in another issue");
+        assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
+        assert_eq!(items[1].text, "mentioned in MTK-3");
     }
 }
