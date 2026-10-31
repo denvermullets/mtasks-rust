@@ -53,7 +53,7 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         );
     } else {
         for r in rows {
-            body = body.push(recurring_row(r)).push(rule());
+            body = body.push(recurring_row(r)).push(divider());
         }
     }
 
@@ -71,9 +71,9 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         column![]
             .width(Length::Fill)
             .push(toolbar)
-            .push(rule())
+            .push(divider())
             .push(header)
-            .push(rule())
+            .push(divider())
             .push(scrollable(body).height(Length::Fill)),
     )
     .width(Length::Fill)
@@ -85,7 +85,7 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
     .into()
 }
 
-fn rule<'a>() -> Element<'a, Message> {
+fn divider<'a>() -> Element<'a, Message> {
     container(horizontal_rule(1))
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::border())),
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(state_label(false), "Paused");
     }
 
-    fn row(next_run_on: Option<&str>, pending: bool) -> RecurringIssueRow {
+    fn row_with_next_run(next_run_on: Option<&str>, pending: bool) -> RecurringIssueRow {
         RecurringIssueRow {
             id: "r".into(),
             title: "T".into(),
@@ -292,10 +292,10 @@ mod tests {
 
     #[test]
     fn next_run_shows_pending_instead_of_a_date() {
-        assert_eq!(next_run_label(&row(Some("2026-11-06"), true)), "pending");
-        assert_eq!(next_run_label(&row(None, true)), "pending");
-        assert_eq!(next_run_label(&row(Some("2026-11-06"), false)), "2026-11-06 MT");
-        assert_eq!(next_run_label(&row(None, false)), "-");
+        assert_eq!(next_run_label(&row_with_next_run(Some("2026-11-06"), true)), "pending");
+        assert_eq!(next_run_label(&row_with_next_run(None, true)), "pending");
+        assert_eq!(next_run_label(&row_with_next_run(Some("2026-11-06"), false)), "2026-11-06 MT");
+        assert_eq!(next_run_label(&row_with_next_run(None, false)), "-");
     }
 
     #[test]
