@@ -42,6 +42,9 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
+    /// Ask to delete a Saved view (local id).
+    ConfirmDeleteSavedView(String),
+    DeleteSavedViewConfirmed,
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
 
@@ -357,6 +360,8 @@ pub enum Modal {
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
+    /// Confirm deleting a Saved view (local id) from the sidebar.
+    DeleteSavedViewConfirm(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
     /// Team picker for moving an issue (local UUID); see `team_picker`.
@@ -641,7 +646,28 @@ impl App {
                 .cloned()
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
+            saved_views: self.palette_saved_views(),
         }
+    }
+
+    /// Saved views of unarchived teams, for the palette.
+    fn palette_saved_views(&self) -> Vec<crate::palette_results::SearchableSavedView> {
+        self.teams
+            .iter()
+            .filter(|t| t.archived_at.is_none())
+            .flat_map(|t| {
+                self.saved_views
+                    .get(&t.id)
+                    .into_iter()
+                    .flatten()
+                    .map(|v| crate::palette_results::SearchableSavedView {
+                        id: v.id.clone(),
+                        team_id: v.team_id.clone(),
+                        team_name: t.name.clone(),
+                        name: v.name.clone(),
+                    })
+            })
+            .collect()
     }
 
     /// Before opening an issue or project from the palette: when it belongs to
@@ -1821,7 +1847,18 @@ impl App {
         }
 
         let teams = queries::all_teams(&conn).unwrap_or_default();
-        let selected_team_id = default_team_id(&teams);
+        let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
+        let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        // Open the stored Home page; anything unresolvable falls back to the
+        // first team's board.
+        let launch = crate::db::home_page::launch_target(home_page.as_ref(), &teams, &saved_views);
+        let (selected_team_id, launch_view) = match launch {
+            crate::db::home_page::LaunchTarget::Team(id) => (Some(id), None),
+            crate::db::home_page::LaunchTarget::View { view_id, team_id } => {
+                (Some(team_id), Some(view_id))
+            }
+            crate::db::home_page::LaunchTarget::Default => (default_team_id(&teams), None),
+        };
 
         let (lanes, issues, projects, members, labels, issue_labels) =
             if let Some(ref tid) = selected_team_id {
@@ -1842,7 +1879,7 @@ impl App {
         // Expand the boot-selected team so its sub-rows are visible on first paint.
         let expanded_teams = selected_team_id.iter().cloned().collect();
 
-        let app = Self {
+        let mut app = Self {
             teams,
             selected_team_id,
             view: View::Board,
@@ -1889,9 +1926,9 @@ impl App {
             sync_read_only: false,
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
-            saved_views: crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default(),
+            saved_views,
             open_view: None,
-            home_page: crate::db::home_page::get(&conn).unwrap_or_default(),
+            home_page,
             last_notif_poll: None,
             inbox: Default::default(),
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
@@ -1901,7 +1938,11 @@ impl App {
             sync_paused_auth: false,
         };
 
-        (app, Task::none())
+        let task = match launch_view {
+            Some(view_id) => app.update_inner(Message::OpenSavedView(view_id)),
+            None => Task::none(),
+        };
+        (app, task)
     }
 
     pub fn title(&self) -> String {
@@ -2143,6 +2184,47 @@ impl App {
                 self.focused_lane = 0;
                 self.focused_issue = 0;
                 return task;
+            }
+
+            Message::ConfirmDeleteSavedView(view_id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a view",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteSavedViewConfirm(view_id);
+                }
+            }
+
+            Message::DeleteSavedViewConfirmed => {
+                let Modal::DeleteSavedViewConfirm(view_id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                let team_id = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == view_id)
+                    .map(|v| v.team_id.clone());
+                match crate::db::saved_views::delete_local(&self.db(), &view_id) {
+                    Ok(Some(payload)) => {
+                        self.enqueue_sync("saved_view", &view_id, "delete", Some(payload.as_str()))
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[saved_views] delete failed: {e}"),
+                }
+                let was_open = self.open_view.as_ref().is_some_and(|v| v.view_id == view_id);
+                self.reload_data();
+                if was_open {
+                    if let Some(team_id) = team_id {
+                        return self.update_inner(Message::SelectTeamView(team_id, View::Board));
+                    }
+                    self.open_view = None;
+                }
             }
 
             Message::SelectTeamView(team_id, view) => {
@@ -3016,6 +3098,7 @@ impl App {
                     PaletteNav::Team(id) => {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
+                    PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
@@ -4248,6 +4331,21 @@ impl App {
                     .unwrap_or("this project");
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
+            }
+            Modal::DeleteSavedViewConfirm(view_id) => {
+                let name = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == *view_id)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_default();
+                let body = format!("Delete the view \"{name}\"? Issues are not affected.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete View?", body, Message::DeleteSavedViewConfirmed)
+                ]
+                .into()
             }
             Modal::DeleteLabelConfirm(label_id) => {
                 let conn = self.db();
