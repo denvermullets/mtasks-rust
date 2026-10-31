@@ -52,6 +52,8 @@ pub struct RecurringIssueDto {
 /// `{recurring_issue: {...}}` wrapper. Every field is optional and skipped when
 /// `None`, so a write sends only what it changed (Rails permits a partial
 /// update). Later write tickets (edit, create) fill more fields.
+/// `assignee_id`, `project_id` and `lane_id` are `Option<Option<_>>`: the outer
+/// `None` omits the field, `Some(None)` sends `null` to clear it.
 /// `starts_on` (`YYYY-MM-DD`) sits inside the wrapper with the others; it is
 /// sent only on schedule changes, never on a pause/resume, so the server keeps
 /// the stored `next_run_on`.
@@ -64,11 +66,11 @@ pub struct RecurringIssueParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee_id: Option<i64>,
+    pub assignee_id: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<i64>,
+    pub project_id: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lane_id: Option<i64>,
+    pub lane_id: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

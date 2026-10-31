@@ -46,6 +46,8 @@ pub enum Message {
     /// Pause (false) or resume (true) a recurring issue (local id); local
     /// write plus queued push.
     ToggleRecurringActive(String, bool),
+    /// Open the recurring issue form prefilled to edit one (local id; JRST-177).
+    EditRecurringIssue(String),
     /// Open the "New recurring issue" form (JRST-172) for the selected team.
     NewRecurringIssue,
     RecurringFormTitleChanged(String),
@@ -4401,6 +4403,24 @@ impl App {
                     self.modal = Modal::RecurringForm;
                 }
             }
+            Message::EditRecurringIssue(id) => {
+                if self.modal == Modal::None {
+                    let conn = self.db();
+                    if let Ok(Some(row)) = crate::db::recurring_issues::get(&conn, &id) {
+                        let labels =
+                            crate::db::recurring_issues::label_ids(&conn, &id).unwrap_or_default();
+                        self.recurring_form = Some(
+                            crate::views::recurring_issue_form::RecurringFormState::for_edit(
+                                &row,
+                                labels,
+                                chrono::Local::now().date_naive(),
+                            )
+                            .with_routing_options(&self.members, &self.projects, &self.lanes),
+                        );
+                        self.modal = Modal::RecurringForm;
+                    }
+                }
+            }
             Message::RecurringFormTitleChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.title = v;
@@ -4472,6 +4492,25 @@ impl App {
                 else {
                     return Task::none();
                 };
+                if let Some(edit_id) = form.editing.clone() {
+                    match crate::views::recurring_issue_form::validate_edit(form) {
+                        Err(errors) => form.errors = errors,
+                        Ok(edit) => {
+                            let conn = self.db();
+                            if crate::db::recurring_issues::update_content(&conn, &edit_id, &edit)
+                                .is_ok()
+                            {
+                                self.modal = Modal::None;
+                                self.recurring_form = None;
+                                self.pending_sync_count =
+                                    sync_queue::pending_count(&conn).unwrap_or(0);
+                                self.reload_recurring(&conn);
+                                self.reload_detail_origin(&conn);
+                            }
+                        }
+                    }
+                    return Task::none();
+                }
                 match crate::views::recurring_issue_form::validate(form) {
                     Err(errors) => form.errors = errors,
                     Ok(new) => {

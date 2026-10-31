@@ -1,4 +1,9 @@
-//! "New recurring issue" modal (JRST-172).
+//! "New recurring issue" / "Edit recurring issue" modal (JRST-172, JRST-177).
+//!
+//! The same state serves both: `editing: Some(local id)` is edit mode, which
+//! saves through [`validate_edit`] (content and routing only; the schedule is
+//! shown as text, not editable). JRST-178 makes the schedule fields live in
+//! edit mode and adds its own write that carries `starts_on`.
 //!
 //! Extension points for the follow-up form tickets:
 //! - State: add a field to [`RecurringFormState`] (and its default in `new`).
@@ -17,7 +22,7 @@ use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Priority, Project};
-use crate::db::recurring_issues::{NewRecurringIssue, FIRST_LANE};
+use crate::db::recurring_issues::{NewRecurringIssue, RecurringEdit, RecurringIssue, FIRST_LANE};
 use crate::theme as t;
 use crate::views::labels as labels_view;
 
@@ -140,18 +145,25 @@ pub const US_TIME_ZONES: [&str; 29] = [
 
 /// Time zone choice for the pick list; `None` leaves the zone unset so the
 /// server uses the creator's own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimeZoneChoice(pub Option<&'static str>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeZoneChoice(pub Option<String>);
 
 impl std::fmt::Display for TimeZoneChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0.unwrap_or("Default (my time zone)"))
+        f.write_str(self.0.as_deref().unwrap_or("Default (my time zone)"))
     }
 }
 
-fn time_zone_choices() -> Vec<TimeZoneChoice> {
-    std::iter::once(TimeZoneChoice(None))
-        .chain(US_TIME_ZONES.iter().map(|z| TimeZoneChoice(Some(z))))
+/// The zone pick list: "Default" (unless `with_default` is false), then the
+/// stored zone when it is outside [`US_TIME_ZONES`] (so it stays visible and
+/// selectable when editing), then the US zones.
+fn time_zone_choices(stored: Option<&str>, with_default: bool) -> Vec<TimeZoneChoice> {
+    let extra = stored.filter(|z| !US_TIME_ZONES.contains(z));
+    let default = with_default.then_some(TimeZoneChoice(None));
+    default
+        .into_iter()
+        .chain(extra.map(|z| TimeZoneChoice(Some(z.to_string()))))
+        .chain(US_TIME_ZONES.iter().map(|z| TimeZoneChoice(Some(z.to_string()))))
         .collect()
 }
 
@@ -182,6 +194,11 @@ pub struct RecurringFormState {
     pub label_ids: Vec<String>,
     /// Inline errors from the last failed Save; cleared by a successful one.
     pub errors: FormErrors,
+    /// `Some(local id)` when editing an existing recurring issue.
+    pub editing: Option<String>,
+    /// The zone stored on the row being edited (kept even when not in
+    /// [`US_TIME_ZONES`]; the server cannot unset it).
+    pub stored_time_zone: Option<String>,
 }
 
 impl RecurringFormState {
@@ -210,7 +227,42 @@ impl RecurringFormState {
             time_zone: None,
             label_ids: Vec::new(),
             errors: FormErrors::default(),
+            editing: None,
+            stored_time_zone: None,
         }
+    }
+
+    /// Edit form prefilled from a stored row and its local label ids. Call
+    /// `with_routing_options` next; the picks resolve against those lists (a
+    /// stored id that isn't offered is added so saving doesn't clear it).
+    pub fn for_edit(row: &RecurringIssue, label_ids: Vec<String>, today: NaiveDate) -> Self {
+        let mut f = Self::new(today);
+        f.editing = Some(row.id.clone());
+        f.title = row.title.clone();
+        f.description = text_editor::Content::with_text(row.description.as_deref().unwrap_or(""));
+        f.priority = row.priority;
+        f.frequency = match row.frequency.as_str() {
+            "weekly" => Frequency::Weekly,
+            "monthly" => Frequency::Monthly,
+            _ => Frequency::Daily,
+        };
+        f.interval = row.interval.to_string();
+        if let Some(w) = row.weekday {
+            f.weekday = w;
+        }
+        if let Some(d) = row.day_of_month {
+            f.day_of_month = d.to_string();
+        }
+        if let Some(d) = &row.next_run_on {
+            f.starts_on = d.clone();
+        }
+        f.time_zone = row.time_zone.clone();
+        f.stored_time_zone = row.time_zone.clone();
+        f.label_ids = label_ids;
+        f.assignee = Choice { id: row.assignee_id.clone(), label: String::new() };
+        f.project = Choice { id: row.project_id.clone(), label: String::new() };
+        f.lane = Choice { id: row.lane_id.clone(), label: String::new() };
+        f
     }
 
     /// Fill the pick lists from the selected team's members, projects and lanes.
@@ -226,6 +278,20 @@ impl RecurringFormState {
             .extend(projects.iter().map(|p| Choice::of(&p.id, &p.name)));
         self.lane_options
             .extend(lanes.iter().map(|l| Choice::of(&l.id, &l.name)));
+        // Resolve prefilled picks (edit mode) to the offered choices.
+        fn resolve(pick: &mut Choice, options: &mut Vec<Choice>) {
+            let Some(id) = pick.id.clone() else { return };
+            match options.iter().find(|c| c.id.as_deref() == Some(id.as_str())) {
+                Some(c) => *pick = c.clone(),
+                None => {
+                    *pick = Choice::of(&id, "(unavailable)");
+                    options.push(pick.clone());
+                }
+            }
+        }
+        resolve(&mut self.assignee, &mut self.assignee_options);
+        resolve(&mut self.project, &mut self.project_options);
+        resolve(&mut self.lane, &mut self.lane_options);
         self
     }
 
@@ -346,6 +412,40 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
     })
 }
 
+/// Check an edit: only the title (and the zone) can fail, since the schedule
+/// isn't editable here. A time zone outside [`US_TIME_ZONES`] is accepted when
+/// it is the zone already stored on the row.
+pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, FormErrors> {
+    let mut errors = FormErrors::default();
+    let title = form.title.trim();
+    if title.is_empty() {
+        errors.title = Some("Title can't be blank".into());
+    }
+    if let Some(z) = &form.time_zone {
+        if !US_TIME_ZONES.contains(&z.as_str()) && form.stored_time_zone.as_ref() != Some(z) {
+            errors.time_zone = Some("Time zone must be one of the listed zones".into());
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let description = form.description.text();
+    Ok(RecurringEdit {
+        title: title.to_string(),
+        description: if description.trim().is_empty() {
+            None
+        } else {
+            Some(description.trim_end().to_string())
+        },
+        priority: form.priority,
+        assignee_id: form.assignee.id.clone(),
+        project_id: form.project.id.clone(),
+        lane_id: form.lane.id.clone(),
+        time_zone: form.time_zone.clone(),
+        label_ids: form.label_ids.clone(),
+    })
+}
+
 fn error_line<'a>(e: &'a Option<String>) -> Option<Element<'a, Message>> {
     e.as_deref()
         .map(|m| text(m).size(12).color(t::danger()).into())
@@ -454,31 +554,50 @@ pub fn view<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a
                         .size(14),
                 ),
         )
-        .push_maybe(error_line(&form.errors.starts_on))
+        .push_maybe(error_line(&form.errors.starts_on));
+    // Editing: the schedule is read-only text until JRST-178 makes it editable.
+    let editing = form.editing.is_some();
+    if editing {
+        schedule = column![]
+            .spacing(10)
+            .push(
+                column![]
+                    .spacing(4)
+                    .push(text("Schedule").size(12).color(t::text_muted()))
+                    .push_maybe(
+                        form.summary().map(|s| text(s).size(13).color(t::text_secondary())),
+                    ),
+            );
+    }
+    schedule = schedule
         .push(
             column![]
                 .spacing(4)
                 .push(text("Time zone").size(12).color(t::text_muted()))
                 .push(pick_list(
-                    time_zone_choices(),
-                    Some(TimeZoneChoice(
-                        US_TIME_ZONES
-                            .iter()
-                            .copied()
-                            .find(|z| Some(*z) == form.time_zone.as_deref()),
-                    )),
-                    |c: TimeZoneChoice| {
-                        Message::RecurringFormTimeZoneChanged(c.0.map(String::from))
-                    },
+                    time_zone_choices(
+                        form.stored_time_zone.as_deref(),
+                        form.stored_time_zone.is_none(),
+                    ),
+                    Some(TimeZoneChoice(form.time_zone.clone())),
+                    |c: TimeZoneChoice| Message::RecurringFormTimeZoneChanged(c.0),
                 )),
         )
         .push_maybe(error_line(&form.errors.time_zone))
-        .push_maybe(form.summary().map(|s| text(s).size(13).color(t::text_secondary())));
+        .push_maybe(
+            form.summary()
+                .filter(|_| !editing)
+                .map(|s| text(s).size(13).color(t::text_secondary())),
+        );
 
     let form_content = column![]
         .spacing(14)
         .width(Length::Fixed(460.0))
-        .push(text("New recurring issue").size(18).color(t::text_primary()))
+        .push(
+            text(if editing { "Edit recurring issue" } else { "New recurring issue" })
+                .size(18)
+                .color(t::text_primary()),
+        )
         .push(
             text_input("Title", &form.title)
                 .on_input(Message::RecurringFormTitleChanged)
@@ -720,6 +839,73 @@ mod tests {
         f.toggle_label("b");
         f.toggle_label("a");
         assert_eq!(validate(&f).unwrap().label_ids, vec!["b".to_string()]);
+    }
+
+    fn stored_row() -> RecurringIssue {
+        RecurringIssue {
+            id: "r1".into(),
+            remote_id: Some(5),
+            team_id: "t1".into(),
+            title: "Water".into(),
+            description: Some("Ferns".into()),
+            priority: Priority::High,
+            frequency: "weekly".into(),
+            interval: 2,
+            weekday: Some(5),
+            day_of_month: None,
+            time_zone: Some("Tokyo".into()),
+            active: true,
+            next_run_on: Some("2026-11-06".into()),
+            last_run_at: None,
+            assignee_id: Some("m1".into()),
+            assignee_name: None,
+            project_id: Some("missing".into()),
+            lane_id: Some("l1".into()),
+            creator_remote_id: None,
+            creator_name: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_edit_form_is_prefilled_and_keeps_an_out_of_list_zone() {
+        let members = [Member {
+            id: "m1".into(),
+            remote_id: None,
+            team_id: "t1".into(),
+            name: "Ann".into(),
+            email: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }];
+        let f = RecurringFormState::for_edit(&stored_row(), vec!["lab1".into()], today())
+            .with_routing_options(&members, &[], &[]);
+        assert_eq!(f.editing.as_deref(), Some("r1"));
+        assert_eq!((f.title.as_str(), f.description.text().trim_end()), ("Water", "Ferns"));
+        assert_eq!(f.priority, Priority::High);
+        assert_eq!((f.frequency, f.interval.as_str(), f.weekday), (Frequency::Weekly, "2", 5));
+        assert_eq!(f.starts_on, "2026-11-06");
+        assert_eq!(f.assignee.label, "Ann");
+        // A stored id that isn't offered stays selected rather than clearing.
+        assert_eq!(f.project.id.as_deref(), Some("missing"));
+        assert!(f.project_options.contains(&f.project));
+        assert_eq!(f.label_ids, ["lab1"]);
+
+        // The out-of-list zone is shown (and offered) and accepted on save.
+        let choices = time_zone_choices(f.stored_time_zone.as_deref(), false);
+        assert_eq!(choices[0], TimeZoneChoice(Some("Tokyo".into())));
+        assert!(!choices.contains(&TimeZoneChoice(None)));
+        let edit = validate_edit(&f).unwrap();
+        assert_eq!(edit.time_zone.as_deref(), Some("Tokyo"));
+        assert_eq!(edit.title, "Water");
+
+        let mut other = f;
+        other.time_zone = Some("Paris".into());
+        assert!(validate_edit(&other).unwrap_err().time_zone.is_some());
+        other.time_zone = Some("Alaska".into());
+        other.title = " ".into();
+        assert!(validate_edit(&other).unwrap_err().title.is_some());
     }
 
     #[test]
