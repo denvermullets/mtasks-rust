@@ -5,7 +5,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
-use crate::db::events::{self, IssueEvent, TimelineItem};
+use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
@@ -103,7 +103,7 @@ pub fn view<'a>(
     project_name: Option<&'a str>,
     deps: &'a DependencyGroups,
     comments: &'a [Comment],
-    events: &'a [IssueEvent],
+    activity: &'a [ActivityItem],
     references: &'a [Reference],
     issues: &'a [Issue],
     parent: Option<&'a Issue>,
@@ -178,7 +178,7 @@ pub fn view<'a>(
         )
         .push(comments_section(
             comments,
-            events,
+            activity,
             detail,
             &ThreadCtx {
                 members,
@@ -814,7 +814,7 @@ fn referenced_in_section<'a>(
 /// left column. Own comments can be deleted.
 fn comments_section<'a>(
     comments: &'a [Comment],
-    events: &'a [IssueEvent],
+    activity: &'a [ActivityItem],
     detail: &'a IssueDetailState,
     ctx: &ThreadCtx<'a, '_>,
 ) -> Element<'a, Message> {
@@ -822,13 +822,13 @@ fn comments_section<'a>(
         .spacing(12)
         .push(text("Activity").size(13).color(t::text_secondary()));
 
-    let items = events::timeline(events, comments);
+    let items = activity::timeline(activity, comments);
     if items.is_empty() {
         col = col.push(text("No activity yet").size(12).color(t::text_muted()));
     }
     for item in items {
         match item {
-            TimelineItem::Event(event) => col = col.push(event_row(event, ctx.members)),
+            TimelineItem::Activity(item) => col = col.push(activity_row(item)),
             TimelineItem::Thread(thread) => {
                 col = push_thread(col, thread, ctx);
             }
@@ -907,22 +907,23 @@ pub fn new_comment_composer<'a>(
 }
 
 /// One change-history line: "actor description  ·  3d ago".
-fn event_row<'a>(event: &'a IssueEvent, members: &'a [Member]) -> Element<'a, Message> {
-    let actor = event
-        .actor_id
-        .as_ref()
-        .and_then(|aid| members.iter().find(|m| &m.id == aid))
-        .map(|m| m.name.as_str())
-        .or(event.actor_name.as_deref())
-        .unwrap_or_else(|| event.default_actor());
+/// A null actor shows the text alone; a Pending item is marked as unsynced.
+fn activity_row<'a>(item: &'a ActivityItem) -> Element<'a, Message> {
+    let pending = item.origin == ItemOrigin::Pending;
     row![]
         .spacing(6)
         .align_y(Alignment::Center)
         .push(text("•").size(11).color(t::text_muted()))
-        .push(text(actor).size(12).color(t::text_secondary()))
-        .push(text(event.description()).size(12).color(t::text_muted()))
+        .push_maybe(
+            item.actor
+                .name
+                .as_deref()
+                .map(|n| text(n).size(12).color(t::text_secondary())),
+        )
+        .push(text(item.text.as_str()).size(12).color(t::text_muted()))
+        .push_maybe(pending.then(|| text("(pending)").size(11).color(t::text_muted())))
         .push(
-            text(relative_time(&event.created_at))
+            text(relative_time(&item.at))
                 .size(11)
                 .color(t::text_muted()),
         )

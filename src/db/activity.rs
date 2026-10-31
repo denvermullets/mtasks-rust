@@ -319,6 +319,45 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
     Ok(items)
 }
 
+/// One slot of the issue-detail Activity list: a display line or a comment thread.
+pub enum TimelineItem<'a> {
+    Activity(&'a ActivityItem),
+    /// A top-level comment with its replies as `(depth, comment)` in display order.
+    Thread(Vec<(usize, &'a crate::db::models::Comment)>),
+}
+
+/// Interleave Activity lines with comment threads by time. The lines keep their
+/// own order (created stays on top); a thread goes after every line not later
+/// than its first comment, so a line wins a timestamp tie.
+pub fn timeline<'a>(
+    items: &'a [ActivityItem],
+    comments: &'a [crate::db::models::Comment],
+) -> Vec<TimelineItem<'a>> {
+    use crate::db::models::Comment;
+    let mut threads: Vec<Vec<(usize, &Comment)>> = Vec::new();
+    for (depth, c) in Comment::thread_order(comments) {
+        if depth == 0 {
+            threads.push(Vec::new());
+        }
+        match threads.last_mut() {
+            Some(t) => t.push((depth, c)),
+            None => threads.push(vec![(depth, c)]),
+        }
+    }
+    threads.sort_by(|a, b| a[0].1.created_at.cmp(&b[0].1.created_at));
+    let mut out = Vec::with_capacity(items.len() + threads.len());
+    let mut lines = items.iter().peekable();
+    for thread in threads {
+        let at = thread[0].1.created_at.as_str();
+        while let Some(item) = lines.next_if(|i| i.at.as_str() <= at) {
+            out.push(TimelineItem::Activity(item));
+        }
+        out.push(TimelineItem::Thread(thread));
+    }
+    out.extend(lines.map(TimelineItem::Activity));
+    out
+}
+
 /// Add the issue's Pending changes (local edits linked to a sync-queue entry),
 /// attributed to "You", each after the last item not later than itself. A
 /// local-only issue's created line is the derived `created_item`, never a
@@ -1444,5 +1483,56 @@ mod jrst144_tests {
         edit(&conn, 1);
         discard_pending_for_entity(&conn, "issue", "i1").unwrap();
         assert_eq!(pending_count(&conn), 0);
+    }
+}
+
+#[cfg(test)]
+mod jrst151_tests {
+    use super::*;
+    use crate::db::models::Comment;
+
+    fn item(k: &str, at: &str) -> ActivityItem {
+        ActivityItem {
+            key: k.into(),
+            at: at.into(),
+            actor: ActorSlot { remote_id: None, name: None },
+            text: k.into(),
+            origin: ItemOrigin::Server,
+        }
+    }
+
+    fn comment(id: &str, parent: Option<&str>, at: &str) -> Comment {
+        Comment {
+            id: id.into(),
+            remote_id: None,
+            issue_id: Some("i1".into()),
+            project_id: None,
+            author_id: None,
+            body: id.into(),
+            parent_id: parent.map(Into::into),
+            created_at: at.into(),
+            updated_at: at.into(),
+        }
+    }
+
+    #[test]
+    fn timeline_interleaves_threads_by_time_and_keeps_created_first() {
+        let items = [item("created", "2026-01-01"), item("a", "2026-01-03"), item("b", "2026-01-05")];
+        let comments = [
+            comment("c2", None, "2026-01-05"),
+            comment("c1", None, "2026-01-02"),
+            comment("r1", Some("c1"), "2026-01-06"),
+        ];
+        let order: Vec<String> = timeline(&items, &comments)
+            .iter()
+            .map(|t| match t {
+                TimelineItem::Activity(i) => i.key.clone(),
+                TimelineItem::Thread(t) => {
+                    t.iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>().join("+")
+                }
+            })
+            .collect();
+        assert_eq!(order, ["created", "c1+r1", "a", "b", "c2"]);
+        assert!(timeline(&[], &[]).is_empty());
     }
 }
