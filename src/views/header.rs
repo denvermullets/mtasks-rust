@@ -33,6 +33,15 @@ pub fn project_matches(project: &Project, needle: &str) -> bool {
     needle.is_empty() || project.name.to_lowercase().contains(needle)
 }
 
+/// The header's Revert action for a Modified view.
+pub fn revert_button<'a>() -> Element<'a, Message> {
+    button(text("Revert").size(13))
+        .on_press(Message::RevertSavedView)
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
@@ -45,6 +54,7 @@ pub fn view<'a>(
     board_controls: Option<usize>,
     new_action: Option<Message>,
     back: Option<Message>,
+    modified_view: bool,
 ) -> Element<'a, Message> {
     let mut trail = row![].spacing(8).align_y(Alignment::Center);
     if let Some(msg) = back {
@@ -133,6 +143,7 @@ pub fn view<'a>(
         .align_y(Alignment::Center)
         .push(trail)
         .push(iced::widget::horizontal_space())
+        .push_maybe(modified_view.then(revert_button))
         .push(search)
         .push(filter)
         .push(display)

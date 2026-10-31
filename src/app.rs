@@ -42,6 +42,8 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
+    /// Drop the open Saved view's unsaved changes (local only).
+    RevertSavedView,
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
     DeleteSavedViewConfirmed,
@@ -1070,6 +1072,18 @@ impl App {
         self.search_query.clear();
     }
     // --- end active board state ----------------------------------------
+
+    /// Whether the board shows an open Saved view that is Modified.
+    fn open_view_modified(&self) -> bool {
+        let mirror = crate::saved_view::Mirror {
+            lanes: &self.lanes,
+            members: &self.members,
+            labels: &self.labels,
+            projects: &self.projects,
+        };
+        self.view == View::Board
+            && self.open_view.as_ref().is_some_and(|v| v.is_modified(&mirror))
+    }
 
     fn breadcrumb(&self) -> Vec<String> {
         let mut crumbs = breadcrumb(
@@ -2184,6 +2198,16 @@ impl App {
                 self.focused_lane = 0;
                 self.focused_issue = 0;
                 return task;
+            }
+
+            Message::RevertSavedView => {
+                // Local only: nothing is written or queued.
+                if let Some(v) = &mut self.open_view {
+                    v.revert();
+                }
+                self.scroll_state.clear();
+                self.focused_lane = 0;
+                self.focused_issue = 0;
             }
 
             Message::ConfirmDeleteSavedView(view_id) => {
@@ -4050,6 +4074,7 @@ impl App {
                     (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
                         .then_some(Message::BackToInbox)
                 }),
+            self.open_view_modified(),
         );
 
         let columns = if matches!(self.view, View::Board | View::MyIssues) {
