@@ -94,11 +94,6 @@ pub fn font_for_key(key: &str) -> Font {
     }
 }
 
-/// Display name for a font key (unknown -> Inter).
-pub fn font_name(key: &str) -> &'static str {
-    lookup(key).name
-}
-
 /// A catalog entry for pick lists: displays as the font name, carries the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontChoice {
@@ -190,6 +185,5 @@ mod tests {
     #[test]
     fn unknown_key_resolves_to_inter() {
         assert_eq!(font_for_key("comic-sans"), Font::with_name("Inter"));
-        assert_eq!(font_name("nope"), "Inter");
     }
 }

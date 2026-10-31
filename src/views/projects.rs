@@ -238,8 +238,8 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
             button(text("Save").size(14).color(t::bg_primary()))
                 .on_press(Message::SaveProject)
                 .padding([8, 24])
-                .style(move |_theme: &Theme, _status| button::Style {
-                    background: Some(iced::Background::Color(t::accent())),
+                .style(move |_theme: &Theme, status| button::Style {
+                    background: Some(iced::Background::Color(t::accent_fill(status))),
                     text_color: t::bg_primary(),
                     border: Border {
                         radius: 4.0.into(),
@@ -384,8 +384,8 @@ pub fn list_view<'a>(
             button(text("+ New Project").size(13).color(t::bg_primary()))
                 .on_press(Message::CreateProject)
                 .padding([6, 14])
-                .style(move |_theme: &Theme, _status| button::Style {
-                    background: Some(iced::Background::Color(t::accent())),
+                .style(move |_theme: &Theme, status| button::Style {
+                    background: Some(iced::Background::Color(t::accent_fill(status))),
                     text_color: t::bg_primary(),
                     border: Border {
                         radius: 4.0.into(),

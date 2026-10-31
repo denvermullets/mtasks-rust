@@ -54,8 +54,8 @@ pub fn modal_view<'a>(team: &'a Team, members: &'a [Member]) -> Element<'a, Mess
                 TeamWebSection::Members,
             ))
             .padding([8, 16])
-            .style(move |_theme: &Theme, _status| button::Style {
-                background: Some(iced::Background::Color(t::accent())),
+            .style(move |_theme: &Theme, status| button::Style {
+                background: Some(iced::Background::Color(t::accent_fill(status))),
                 text_color: t::bg_primary(),
                 border: Border {
                     radius: 4.0.into(),

@@ -204,8 +204,8 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
             button(text("Add").size(13).color(t::bg_primary()))
                 .on_press(Message::CreateLabel)
                 .padding([8, 16])
-                .style(move |_theme: &Theme, _status| button::Style {
-                    background: Some(iced::Background::Color(t::accent())),
+                .style(move |_theme: &Theme, status| button::Style {
+                    background: Some(iced::Background::Color(t::accent_fill(status))),
                     text_color: t::bg_primary(),
                     border: Border {
                         radius: 4.0.into(),
@@ -252,8 +252,8 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                 button(text(done_label).size(14).color(t::bg_primary()))
                     .on_press(done_msg)
                     .padding([8, 24])
-                    .style(move |_theme: &Theme, _status| button::Style {
-                        background: Some(iced::Background::Color(t::accent())),
+                    .style(move |_theme: &Theme, status| button::Style {
+                        background: Some(iced::Background::Color(t::accent_fill(status))),
                         text_color: t::bg_primary(),
                         border: Border {
                             radius: 4.0.into(),

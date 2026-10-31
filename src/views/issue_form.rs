@@ -190,8 +190,8 @@ pub fn view<'a>(
                     button(text("Save").size(14).color(t::bg_primary()))
                         .on_press(Message::SaveIssue)
                         .padding([8, 24])
-                        .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(t::accent())),
+                        .style(move |_theme: &Theme, status| button::Style {
+                            background: Some(iced::Background::Color(t::accent_fill(status))),
                             text_color: t::bg_primary(),
                             border: Border {
                                 radius: 4.0.into(),

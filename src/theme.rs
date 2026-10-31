@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use iced::theme::Palette;
+use iced::widget::button;
 use iced::{Color, Theme};
 
 use crate::db::models::{Priority, ProjectStatus};
@@ -293,6 +294,14 @@ pub fn set_by_key(key: &str) {
     CURRENT.store(index_for_key(key), Ordering::Relaxed);
 }
 
+/// Background of an accent-filled button: `accent`, or `accent_hover` while hovered.
+pub fn accent_fill(status: button::Status) -> Color {
+    match status {
+        button::Status::Hovered => accent_hover(),
+        _ => accent(),
+    }
+}
+
 /// A catalog entry for pick lists: displays as the theme name, carries the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemeChoice {
@@ -566,6 +575,8 @@ mod tests {
         assert_eq!(project_status_color(ProjectStatus::Started), accent());
         assert_eq!(project_status_color(ProjectStatus::Cancelled), danger());
         assert_eq!(bg_modal(), bg_secondary());
+        assert_eq!(accent_fill(button::Status::Active), accent());
+        assert_eq!(accent_fill(button::Status::Hovered), accent_hover());
 
         let p = iced_theme().palette();
         assert_eq!(p.background, bg_primary());
