@@ -23,7 +23,6 @@ pub struct HomePage {
 }
 
 /// The stored Home page, if any.
-#[allow(dead_code)] // read by the launch resolver (JRST-111) and the sidebar
 pub fn get(conn: &Connection) -> Result<Option<HomePage>> {
     Ok(get_pull_cursor(conn, SCOPE, RESOURCE)?.and_then(|raw| {
         let (kind, id) = raw.split_once(':')?;
