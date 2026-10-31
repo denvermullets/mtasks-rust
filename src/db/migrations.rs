@@ -465,6 +465,30 @@ const MIGRATIONS: &[Migration] = &[
             DELETE FROM pull_cursors WHERE team_id = 'user' AND resource = 'home_page';
         ",
     },
+    Migration {
+        version: 24,
+        name: "issue_activity_entries",
+        up: "
+            -- Cached server Activity entries for an issue. `entry_cursor` is
+            -- '<type>:<id>': server ids collide across entry types, so never
+            -- key on the bare id. `payload` is the structured JSON; `description`
+            -- is the server's text fallback.
+            CREATE TABLE IF NOT EXISTS issue_activity_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                entry_cursor TEXT NOT NULL,
+                entry_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                actor_remote_id INTEGER,
+                actor_name TEXT,
+                payload TEXT NOT NULL DEFAULT '{}',
+                description TEXT NOT NULL DEFAULT '',
+                UNIQUE (issue_id, entry_cursor)
+            );
+            CREATE INDEX IF NOT EXISTS idx_issue_activity_entries_issue_created
+                ON issue_activity_entries (issue_id, created_at);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -602,6 +626,7 @@ mod tests {
             "issue_events",
             "notifications",
             "home_page",
+            "issue_activity_entries",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }
@@ -867,6 +892,41 @@ mod tests {
             );
             assert!(bad.is_err(), "owner {owners} should violate the CHECK");
         }
+    }
+
+    #[test]
+    fn issue_activity_entries_unique_and_cascade() {
+        let conn = open_mem();
+        run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", rusqlite::params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", rusqlite::params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", rusqlite::params![now]).unwrap();
+        let ins = |cursor: &str| {
+            conn.execute(
+                "INSERT INTO issue_activity_entries (issue_id, entry_cursor, entry_type, created_at) VALUES ('i1', ?1, 'comment', ?2)",
+                rusqlite::params![cursor, now],
+            )
+        };
+        ins("comment:5").unwrap();
+        ins("event:5").unwrap(); // same bare id, different type
+        assert!(ins("comment:5").is_err(), "duplicate cursor must violate UNIQUE");
+        conn.execute("DELETE FROM issues WHERE id='i1'", []).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM issue_activity_entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "rows cascade with the issue");
+    }
+
+    #[test]
+    fn issue_activity_entries_added_to_existing_db() {
+        let conn = open_mem();
+        conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);").unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 24) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        assert!(!table_exists(&conn, "issue_activity_entries"));
+        run(&conn).unwrap();
+        assert!(table_exists(&conn, "issue_activity_entries"));
     }
 
     #[test]
