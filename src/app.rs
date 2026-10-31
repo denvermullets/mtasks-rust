@@ -19,7 +19,8 @@ use crate::fonts;
 use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
-use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
+use crate::sync::notif_poll::{self, PollOutcome};
+use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Run, Scheduler};
 use crate::palette_results::{PaletteData, PaletteNav, PaletteState};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
@@ -235,6 +236,8 @@ pub enum Message {
     WindowFocused,
     WindowUnfocused,
     SyncCompleted(FullSyncReport),
+    /// A Notification poll finished.
+    NotifPollCompleted(PollOutcome),
 
     // Toasts
     /// Dismiss a toast by id (× button).
@@ -1672,7 +1675,7 @@ impl App {
             inaccessible_teams: queries::inaccessible_team_identifiers(&conn).unwrap_or_default(),
             sync_read_only: false,
             sync_in_progress: false,
-            scheduler: Scheduler::new(std::time::Instant::now()),
+            scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -1753,9 +1756,27 @@ impl App {
     fn drive_sync(&mut self, event: SchedEvent) -> Task<Message> {
         let decision = self.scheduler.handle(event, std::time::Instant::now());
         self.sync_next_delay = decision.next_delay;
-        match decision.run {
-            Some(kind) => self.start_sync(kind),
+        match decision.action() {
+            Some(Run::Data(kind)) => self.start_sync(kind),
+            Some(Run::Poll) => self.start_poll(),
             None => Task::none(),
+        }
+    }
+
+    /// Start a Notification poll the scheduler already admitted. Reports
+    /// `CycleFinished` through `NotifPollCompleted` (or at once, if no client).
+    fn start_poll(&mut self) -> Task<Message> {
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        match ApiClient::new(base_url, token) {
+            Ok(client) => {
+                self.sync_in_progress = true;
+                Task::perform(
+                    async move { notif_poll::poll(&client).await },
+                    Message::NotifPollCompleted,
+                )
+            }
+            Err(_) => self.drive_sync(SchedEvent::CycleFinished { success: false }),
         }
     }
 
@@ -1788,6 +1809,20 @@ impl App {
         }
         self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
         self.drive_sync(SchedEvent::CycleFinished { success: false })
+    }
+
+    /// The existing 401 path: pause sync and ask for a new token.
+    fn pause_for_auth(&mut self) {
+        self.sync_paused_auth = true;
+        let msg = "Token expired or revoked — please re-enter";
+        if self.settings_form.is_none() {
+            self.settings_form = Some(settings::SettingsFormState::from_config(&self.config));
+        }
+        if let Some(ref mut f) = self.settings_form {
+            f.status = Some(format!("Error: {msg}"));
+        }
+        self.modal = Modal::Settings;
+        self.push_toast(msg, ToastKind::Error, false);
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -2954,17 +2989,7 @@ impl App {
                 self.reload_data();
 
                 if auth_failed {
-                    self.sync_paused_auth = true;
-                    let msg = "Token expired or revoked — please re-enter";
-                    if self.settings_form.is_none() {
-                        self.settings_form =
-                            Some(settings::SettingsFormState::from_config(&self.config));
-                    }
-                    if let Some(ref mut f) = self.settings_form {
-                        f.status = Some(format!("Error: {msg}"));
-                    }
-                    self.modal = Modal::Settings;
-                    self.push_toast(msg, ToastKind::Error, false);
+                    self.pause_for_auth();
                 } else {
                     if clean {
                         self.sync_paused_auth = false;
@@ -2989,6 +3014,20 @@ impl App {
 
                 // Tell the scheduler how the cycle went (backoff / follow-up).
                 let finish = self.drive_sync(SchedEvent::CycleFinished { success: cycle_ok });
+                if self.sync_paused_auth {
+                    return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
+                }
+                return finish;
+            }
+
+            Message::NotifPollCompleted(outcome) => {
+                self.sync_in_progress = false;
+                if outcome.auth_failed() {
+                    self.pause_for_auth();
+                }
+                let finish = self.drive_sync(SchedEvent::CycleFinished {
+                    success: outcome.succeeded(),
+                });
                 if self.sync_paused_auth {
                     return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
                 }
