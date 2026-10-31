@@ -258,13 +258,26 @@ pub fn resolve(conn: &Connection, issue_id: &str) -> rusqlite::Result<Option<Tar
 }
 
 /// Store a fetched batch and its fetch state in one transaction.
+/// Settled Pending changes are pruned with it, treating the fetch as started now.
 pub fn commit(conn: &Connection, issue_id: &str, fetched: &Fetched) -> rusqlite::Result<()> {
-    store::store_batch(
+    commit_at(conn, issue_id, fetched, &crate::db::now_iso())
+}
+
+/// [`commit`] given the local time the fetch began (`db::now_iso()` format), so a
+/// push that landed while the request was in flight is not pruned.
+pub fn commit_at(
+    conn: &Connection,
+    issue_id: &str,
+    fetched: &Fetched,
+    fetch_started_at: &str,
+) -> rusqlite::Result<()> {
+    store::store_batch_at(
         conn,
         issue_id,
         &fetched.entries,
         Some(&fetched.cursor),
         fetched.fully_fetched,
+        fetch_started_at,
     )
 }
 
@@ -284,11 +297,12 @@ where
         Ok(None) => return FetchOutcome::Skipped,
         Err(e) => return FetchOutcome::Failed(e.to_string()),
     };
+    let started_at = crate::db::now_iso();
     let fetched = match execute(client, &target, &plan(&target.state), limit).await {
         Ok(f) => f,
         Err(e) => return FetchOutcome::Failed(e.to_string()),
     };
-    match open().and_then(|c| commit(&c, issue_id, &fetched)) {
+    match open().and_then(|c| commit_at(&c, issue_id, &fetched, &started_at)) {
         Ok(()) => FetchOutcome::Fetched {
             stored: fetched.entries.len(),
         },
