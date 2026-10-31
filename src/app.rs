@@ -19,7 +19,7 @@ use crate::fonts;
 use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
-use crate::sync::notif_poll::{self, PollOutcome};
+use crate::sync::notif_poll::{self, PollOutcome, PollReport};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Run, Scheduler};
 use crate::palette_results::{PaletteData, PaletteNav, PaletteState};
 use crate::theme as t;
@@ -565,6 +565,13 @@ pub struct App {
     /// Token has no write scope: pushes are paused, edits stay local.
     sync_read_only: bool,
     sync_in_progress: bool,
+    /// Unread Notification count (JRST-90 badge). Loaded at startup from the
+    /// mirror, refreshed by every completed poll.
+    notif_unread_count: i64,
+    /// Report of the most recent successful poll (JRST-95 prune, JRST-96
+    /// banners read `new_unread` + `backfill`).
+    #[allow(dead_code)] // consumed by JRST-96
+    last_notif_poll: Option<PollReport>,
     scheduler: Scheduler,
     /// Delay until the scheduler's next timed check; `None` = no timer armed.
     sync_next_delay: Option<std::time::Duration>,
@@ -1675,6 +1682,8 @@ impl App {
             inaccessible_teams: queries::inaccessible_team_identifiers(&conn).unwrap_or_default(),
             sync_read_only: false,
             sync_in_progress: false,
+            notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
+            last_notif_poll: None,
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
@@ -3025,8 +3034,13 @@ impl App {
                 if outcome.auth_failed() {
                     self.pause_for_auth();
                 }
+                let ok = outcome.succeeded();
+                if let PollOutcome::Polled(report) = outcome {
+                    self.notif_unread_count = report.unread_count;
+                    self.last_notif_poll = Some(report);
+                }
                 let finish = self.drive_sync(SchedEvent::CycleFinished {
-                    success: outcome.succeeded(),
+                    success: ok,
                 });
                 if self.sync_paused_auth {
                     return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
