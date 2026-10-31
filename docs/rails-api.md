@@ -310,9 +310,29 @@ Response object (index and create):
 
 `kind`: `blocks | relates | duplicates`. `direction` is relative to `:issue_id`. For `blocks`, `blocking_issue` is the source; for `blocked_by`, the target is `blocking_issue`; for `duplicates`, the source is the duplicate.
 
+### Recurring issues: `/api/v1/teams/:team_id/recurring_issues`
+
+Routes: `index`, `create`, `update`, `destroy` (no `show`). Member-level authorization; `lane_id`, `project_id`, `assignee_id` and `label_ids` must belong to the team (422 otherwise). Unknown id: 404 `{error: "Not Found", message: "Recurring issue not found"}`.
+
+`GET` returns a bare array ordered by `id`, no pagination. `updated_since` (ISO8601) is **strict** (`updated_at > since`, not `>=`, unlike the comments feed); a bad value gives 422. `X-Server-Time` is set. Row shape:
+
+```json
+{ "id": 1, "title": "...", "description": "...", "priority": "medium",
+  "frequency": "weekly", "interval": 1, "weekday": 3, "day_of_month": null,
+  "time_zone": "Mountain Time (US & Canada)", "active": true,
+  "next_run_on": "2026-11-05", "last_run_at": null, "schedule_summary": "Every week on Wednesday",
+  "assignee": { "id": 1, "name": "..." }, "project": { "id": 2, "name": "..." }, "lane": { "id": 3, "name": "..." },
+  "label_ids": [1, 2], "creator": { "id": 1, "name": "..." },
+  "created_at": "...", "updated_at": "..." }
+```
+
+Nullable: `assignee`, `project`, `lane`, `creator`, `weekday` (non-weekly), `day_of_month` (non-monthly), `last_run_at`. `frequency` is `daily|weekly|monthly`; `interval` 1..365; `weekday` 0..6 (weekly); `day_of_month` 1..31 (monthly). `time_zone` must be an ActiveSupport zone name such as `"Mountain Time (US & Canada)"`, not an IANA id like `America/Denver`.
+
+`POST` / `PATCH` body: `{ "recurring_issue": { title, description, priority, assignee_id, project_id, lane_id, frequency, interval, weekday, day_of_month, time_zone, active, label_ids: [], starts_on: "YYYY-MM-DD" } }`. `starts_on` is not stored; it feeds `schedule_from` to compute `next_run_on`. On create, `time_zone` defaults to the user's and a missing or invalid `starts_on` fails validation (422 `{error, errors}`). On update, **`starts_on` reschedules only when present**, so toggling `active` keeps the stored `next_run_on`. Create returns 201, update 200, both with the row. `DELETE` returns 204; issues already spawned remain (their `recurring_issue_id` is nullified). Deletes produce a `RecurringIssue` tombstone in the team `deleted` feed.
+
 ## Present but unused by the desktop
 
-`GET /api/v1/users/by_email`, `GET /api/v1/issues/by_identifier/:identifier`, `POST /api/v1/integrations/handshake`, issue and project `decisions` (Hourglass pins), `activity` feeds, attachments / direct uploads, notifications, dashboards, saved views, recurring issues, and `GET /api/v1/deleted` (user feed).
+`GET /api/v1/users/by_email`, `GET /api/v1/issues/by_identifier/:identifier`, `POST /api/v1/integrations/handshake`, issue and project `decisions` (Hourglass pins), `activity` feeds, attachments / direct uploads, notifications, dashboards, saved views, and `GET /api/v1/deleted` (user feed).
 
 ## Rust mapping
 
