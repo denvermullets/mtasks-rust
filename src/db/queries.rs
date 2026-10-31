@@ -243,6 +243,10 @@ fn purge_issue_rows(conn: &Connection, issue_id: &str) -> Result<()> {
         "DELETE FROM issue_events WHERE issue_id = ?1",
         params![issue_id],
     )?;
+    tx.execute(
+        "DELETE FROM issue_activity_state WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
     tx.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
     tx.commit()
 }
