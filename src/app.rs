@@ -46,6 +46,8 @@ pub enum Message {
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
     ToggleTeamMenu(String),
+    /// Make a team's board the user's Home page (local UUID).
+    SetTeamAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
     /// Open the read-only members panel for a team (local UUID).
@@ -2183,6 +2185,28 @@ impl App {
                 }
             }
 
+            Message::SetTeamAsHome(team_id) => {
+                self.team_menu_open = None;
+                let remote_id = self
+                    .teams
+                    .iter()
+                    .find(|t| t.id == team_id)
+                    .and_then(|t| t.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(rid) = remote_id {
+                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "team", rid) {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                } else {
+                    self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
+                }
+            }
+
             Message::ToggleShowArchivedTeams => {
                 self.show_archived_teams = !self.show_archived_teams;
             }
@@ -3794,6 +3818,12 @@ impl App {
             self.team_menu_open.as_deref(),
             self.show_archived_teams,
             self.notif_unread_count,
+            crate::db::home_page::get(&self.db())
+                .ok()
+                .flatten()
+                .filter(|h| h.kind == "team")
+                .map(|h| h.remote_id),
+            self.sync_read_only,
         );
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),

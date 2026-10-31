@@ -184,6 +184,15 @@ impl ApiClient {
         self.send_json(req).await
     }
 
+    pub async fn put<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        let req = self.http.put(self.url(path)).json(body);
+        self.send_json(req).await
+    }
+
     pub async fn patch<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,

@@ -57,6 +57,15 @@ pub async fn me(client: &ApiClient) -> Result<MeDto, ApiError> {
     client.get("api/v1/me").await
 }
 
+/// `PUT /api/v1/me/home_page {kind, id}`. The response is not needed; the
+/// next `/me` read reports the stored value.
+pub async fn set_home_page(client: &ApiClient, kind: &str, id: i64) -> Result<(), ApiError> {
+    let _: serde_json::Value = client
+        .put("api/v1/me/home_page", &serde_json::json!({ "kind": kind, "id": id }))
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
