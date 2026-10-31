@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, pick_list, row, text, text_input};
+use iced::widget::{button, checkbox, column, container, pick_list, row, text, text_input};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
@@ -12,6 +12,7 @@ pub struct SettingsFormState {
     pub api_token: String,
     pub theme: t::ThemeChoice,
     pub font: fonts::FontChoice,
+    pub native_notifications: bool,
     pub status: Option<String>,
     pub testing: bool,
 }
@@ -23,6 +24,7 @@ impl SettingsFormState {
             api_token: cfg.api_token.clone().unwrap_or_default(),
             theme: t::choice_for_key(&cfg.theme),
             font: fonts::choice_for_key(&cfg.font),
+            native_notifications: cfg.native_notifications,
             status: None,
             testing: false,
         }
@@ -102,6 +104,20 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                     text("Applies after restart")
                         .size(11)
                         .color(t::text_muted()),
+                ),
+        )
+        .push(
+            column![]
+                .spacing(4)
+                .push(text("Notifications").size(12).color(t::text_secondary()))
+                .push(
+                    checkbox(
+                        "Show native notifications when the window is unfocused",
+                        form.native_notifications,
+                    )
+                    .on_toggle(Message::SettingsNativeNotificationsToggled)
+                    .size(16)
+                    .text_size(14),
                 ),
         )
         .push(status_line)
