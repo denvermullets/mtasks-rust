@@ -17,3 +17,12 @@ toml = "0.8"
 thiserror = "1"
 csv = "1"
 rfd = "0.15"
+
+# Bundle metadata for `cargo bundle` (cargo-bundle). The identifier is fixed:
+# macOS keys notification permission and settings off it. Do not change it.
+[package.metadata.bundle]
+name = "JAIT"
+identifier = "com.jait.desktop"
+version = "0.1.0"
+short_description = "JAIT desktop companion"
+category = "public.app-category.productivity"
