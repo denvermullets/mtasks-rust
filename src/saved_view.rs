@@ -70,6 +70,10 @@ pub struct OpenView {
     pub state: BoardState,
     /// The stored query as decoded, kept for encode/revert later.
     pub raw: RawQuery,
+    /// The working copy as it was when opened (the saved version, with keys
+    /// the view doesn't set filled from the local state). Modified is
+    /// measured against this.
+    pub baseline: BoardState,
 }
 
 impl OpenView {
@@ -80,9 +84,23 @@ impl OpenView {
             view_id: sv.id.clone(),
             team_id: sv.team_id.clone(),
             name: sv.name.clone(),
+            baseline: d.state.clone(),
             state: d.state,
             raw: d.raw,
         }
+    }
+
+    /// The working copy as a Rails query: encoded over the original raw query.
+    pub fn encoded(&self, mirror: &Mirror) -> RawQuery {
+        encode(&self.state, &self.raw, mirror)
+    }
+
+    /// Whether the working copy differs from the saved version, compared over
+    /// the desktop-modelled keys only.
+    pub fn is_modified(&self, mirror: &Mirror) -> bool {
+        let now = self.encoded(mirror);
+        let saved = encode(&self.baseline, &self.raw, mirror);
+        MODELLED_KEYS.iter().any(|k| now.get(*k) != saved.get(*k))
     }
 
     /// Whether the view is still the thing on screen: the selected team is its
@@ -261,6 +279,235 @@ fn card_property(v: &str) -> Option<CardProperty> {
         "created_at" => Some(CardProperty::Created),
         "updated_at" => Some(CardProperty::Updated),
         _ => None,
+    }
+}
+
+/// The query keys the desktop models (everything else is passed through).
+pub const MODELLED_KEYS: [&str; 14] = [
+    "view_mode",
+    "group_by",
+    "sub_group_by",
+    "order_by",
+    "completed_filter",
+    "show_sub_issues",
+    "show_empty_groups",
+    "visible_properties",
+    "lane_ids",
+    "assignee_ids",
+    "label_ids",
+    "project_ids",
+    "priority",
+    "q",
+];
+
+/// Encode the working copy over `raw`: modelled keys are overwritten, every
+/// other key survives. Unknown property names and ids that couldn't be
+/// resolved when decoding are written back.
+pub fn encode(state: &BoardState, raw: &RawQuery, mirror: &Mirror) -> RawQuery {
+    let mut out = raw.clone();
+    let d = &state.display;
+    let raw_get = |k: &str| raw.get(k).map(String::as_str);
+
+    out.insert("view_mode".into(), enc_view_mode(d.view_mode).into());
+    out.insert("group_by".into(), enc_group_by(d.group_by).into());
+    out.insert("sub_group_by".into(), enc_sub_group(d.sub_group).into());
+    out.insert("order_by".into(), enc_order_by(d.order_by).into());
+
+    // Keep the stored spelling when it already means the same thing.
+    let cf = d.completed_filter();
+    let cf_str = match raw_get("completed_filter") {
+        Some(r) if completed_filter(r) == Some(cf) => r.to_string(),
+        _ => enc_completed(cf).to_string(),
+    };
+    out.insert("completed_filter".into(), cf_str);
+
+    for (key, val) in [
+        ("show_sub_issues", d.show_sub_issues),
+        ("show_empty_groups", d.show_empty_groups),
+    ] {
+        let s = match raw_get(key) {
+            Some(r) if boolean(r) == Some(val) => r.to_string(),
+            _ => val.to_string(),
+        };
+        out.insert(key.into(), s);
+    }
+
+    let mut props: Vec<String> = d
+        .properties
+        .iter()
+        .map(|p| enc_card_property(*p).to_string())
+        .collect();
+    if let Some(r) = raw_get("visible_properties") {
+        props.extend(
+            csv(r)
+                .into_iter()
+                .filter(|n| card_property(n).is_none())
+                .map(String::from),
+        );
+    }
+    out.insert("visible_properties".into(), props.join(","));
+
+    let f = &state.filters;
+    let mut put = |key: &str, parts: Vec<String>| {
+        if parts.is_empty() && !raw.contains_key(key) {
+            return;
+        }
+        out.insert(key.into(), parts.join(","));
+    };
+    put(
+        "lane_ids",
+        remote_ids(
+            &f.statuses,
+            raw_get("lane_ids"),
+            mirror.lanes.iter().map(|l| (l.remote_id, &l.id)),
+        ),
+    );
+    put(
+        "assignee_ids",
+        remote_ids(
+            &f.assignees,
+            raw_get("assignee_ids"),
+            mirror.members.iter().map(|m| (m.remote_id, &m.id)),
+        ),
+    );
+    put(
+        "label_ids",
+        remote_ids(
+            &f.labels,
+            raw_get("label_ids"),
+            mirror.labels.iter().map(|l| (l.remote_id, &l.id)),
+        ),
+    );
+
+    let mut projects = Vec::new();
+    if f.projects.iter().any(String::is_empty) {
+        projects.push("none".to_string());
+    }
+    let real: Vec<String> = f.projects.iter().filter(|p| !p.is_empty()).cloned().collect();
+    let raw_real = raw_get("project_ids").map(|v| {
+        csv(v)
+            .into_iter()
+            .filter(|p| *p != "none")
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+    projects.extend(remote_ids(
+        &real,
+        raw_real.as_deref(),
+        mirror.projects.iter().map(|p| (p.remote_id, &p.id)),
+    ));
+    put("project_ids", projects);
+
+    let mut pr: Vec<String> = f
+        .priorities
+        .iter()
+        .filter_map(|n| n.parse::<i32>().ok())
+        .map(|n| Priority::from_i32(n).as_rails_str().to_string())
+        .collect();
+    if let Some(r) = raw_get("priority") {
+        pr.extend(
+            csv(r)
+                .into_iter()
+                .filter(|n| Priority::from_rails_str(n).is_err())
+                .map(String::from),
+        );
+    }
+    put("priority", pr);
+
+    if !state.search.is_empty() {
+        out.insert("q".into(), state.search.clone());
+    } else if raw.contains_key("q") {
+        out.insert("q".into(), String::new());
+    }
+    out
+}
+
+/// Local ids -> remote ids (records without a remote id can't be encoded),
+/// then the raw ids that resolve to no mirrored record, so they survive.
+fn remote_ids<'a>(
+    local: &[String],
+    raw: Option<&str>,
+    records: impl Iterator<Item = (Option<i64>, &'a String)>,
+) -> Vec<String> {
+    let records: Vec<_> = records.collect();
+    let mut out: Vec<String> = local
+        .iter()
+        .filter_map(|id| records.iter().find(|(_, l)| *l == id))
+        .filter_map(|(r, _)| r.map(|r| r.to_string()))
+        .collect();
+    for part in raw.map(csv).unwrap_or_default() {
+        let resolves = part
+            .parse::<i64>()
+            .ok()
+            .is_some_and(|rid| records.iter().any(|(r, _)| *r == Some(rid)));
+        if !resolves {
+            out.push(part.to_string());
+        }
+    }
+    out
+}
+
+fn enc_view_mode(v: ViewMode) -> &'static str {
+    match v {
+        ViewMode::Board => "board",
+        ViewMode::List => "list",
+    }
+}
+
+fn enc_group_by(v: GroupBy) -> &'static str {
+    match v {
+        GroupBy::None => "none",
+        GroupBy::Status => "status",
+        GroupBy::Assignee => "assignee",
+        GroupBy::Project => "project",
+        GroupBy::Priority => "priority",
+        GroupBy::Label => "label",
+        GroupBy::Parent => "parent_issue",
+    }
+}
+
+fn enc_sub_group(v: SubGroup) -> &'static str {
+    match v {
+        SubGroup::None => "none",
+        SubGroup::Status => "status",
+        SubGroup::Priority => "priority",
+        SubGroup::Assignee => "assignee",
+        SubGroup::Project => "project",
+    }
+}
+
+fn enc_order_by(v: OrderBy) -> &'static str {
+    match v {
+        OrderBy::Manual => "manual",
+        OrderBy::Priority => "priority",
+        OrderBy::DueDate => "due_date",
+        OrderBy::Created => "created_at",
+        OrderBy::Updated => "updated_at",
+    }
+}
+
+fn enc_completed(v: CompletedFilter) -> &'static str {
+    match v {
+        CompletedFilter::Hide => "",
+        CompletedFilter::PastDay => "past_day",
+        CompletedFilter::PastWeek => "past_week",
+        CompletedFilter::PastMonth => "past_month",
+        CompletedFilter::All => "all_time",
+    }
+}
+
+fn enc_card_property(v: CardProperty) -> &'static str {
+    match v {
+        CardProperty::Id => "id",
+        CardProperty::Priority => "priority",
+        CardProperty::Labels => "labels",
+        CardProperty::Assignee => "assignee",
+        CardProperty::Project => "project",
+        CardProperty::DueDate => "due_date",
+        CardProperty::Status => "status",
+        CardProperty::Estimate => "estimate",
+        CardProperty::Created => "created_at",
+        CardProperty::Updated => "updated_at",
     }
 }
 
@@ -574,5 +821,106 @@ mod tests {
         assert!(!ov.stays_open(Some("t2"), true));
         assert!(!ov.stays_open(Some("t1"), false));
         assert!(!ov.stays_open(None, true));
+    }
+
+    fn open_with(fx: &Fx, pairs: &[(&str, &str)]) -> OpenView {
+        let query = serde_json::to_string(&q(pairs)).unwrap();
+        let sv = crate::db::saved_views::SavedView {
+            id: "v1".into(),
+            remote_id: None,
+            team_id: "t".into(),
+            name: "V".into(),
+            query,
+            position: 0,
+            updated_at: String::new(),
+        };
+        OpenView::open(&sv, &fx.mirror(), &BoardState::default())
+    }
+
+    #[test]
+    fn encode_round_trips_every_mapped_key() {
+        let fx = Fx::new();
+        let pairs = [
+            ("view_mode", "list"),
+            ("group_by", "parent_issue"),
+            ("sub_group_by", "priority"),
+            ("order_by", "due_date"),
+            ("completed_filter", "past_week"),
+            ("show_sub_issues", "false"),
+            ("show_empty_groups", "true"),
+            ("visible_properties", "id,labels,due_date"),
+            ("lane_ids", "10,11"),
+            ("assignee_ids", "21"),
+            ("label_ids", "30"),
+            ("project_ids", "none,40"),
+            ("priority", "urgent,no_priority"),
+            ("q", "bug"),
+        ];
+        let ov = open_with(&fx, &pairs);
+        assert_eq!(ov.encoded(&fx.mirror()), q(&pairs));
+        assert!(!ov.is_modified(&fx.mirror()));
+    }
+
+    #[test]
+    fn encode_writes_rails_names() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[]);
+        ov.state.filters.priorities = vec!["0".into(), "4".into()];
+        ov.state.filters.projects = vec![String::new()];
+        ov.state.display.group_by = GroupBy::Parent;
+        let e = ov.encoded(&fx.mirror());
+        assert_eq!(e["priority"], "urgent,no_priority");
+        assert_eq!(e["project_ids"], "none");
+        assert_eq!(e["group_by"], "parent_issue");
+    }
+
+    #[test]
+    fn encode_keeps_unknown_keys_properties_and_unresolved_ids() {
+        let fx = Fx::new();
+        let mut ov = open_with(
+            &fx,
+            &[
+                ("creator_ids", "4"),
+                ("show_dependencies", "true"),
+                ("visible_properties", "id,time_in_status,pull_requests_and_commits"),
+                ("lane_ids", "10,999"),
+                ("project_ids", "none,777"),
+                ("priority", "high,bogus"),
+            ],
+        );
+        ov.state.filters.statuses = vec!["l-b".into()];
+        ov.state.display.properties = vec![CardProperty::Labels];
+        let e = ov.encoded(&fx.mirror());
+        assert_eq!(e["creator_ids"], "4");
+        assert_eq!(e["show_dependencies"], "true");
+        assert_eq!(e["visible_properties"], "labels,time_in_status,pull_requests_and_commits");
+        assert_eq!(e["lane_ids"], "11,999");
+        assert_eq!(e["project_ids"], "none,777");
+        assert_eq!(e["priority"], "high,bogus");
+    }
+
+    #[test]
+    fn modified_follows_the_working_copy_and_clears_on_undo() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("order_by", "priority")]);
+        let m = fx.mirror();
+        assert!(!ov.is_modified(&m));
+        ov.state.display.order_by = OrderBy::Manual;
+        assert!(ov.is_modified(&m));
+        ov.state.display.order_by = OrderBy::Priority;
+        assert!(!ov.is_modified(&m));
+        ov.state.search = "x".into();
+        assert!(ov.is_modified(&m));
+        ov.state.search.clear();
+        ov.state.filters.assignees = vec!["m-a".into()];
+        assert!(ov.is_modified(&m));
+    }
+
+    #[test]
+    fn modified_ignores_keys_the_desktop_does_not_model() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("creator_ids", "4")]);
+        ov.raw.insert("creator_ids".into(), "5".into());
+        assert!(!ov.is_modified(&fx.mirror()));
     }
 }
