@@ -189,6 +189,9 @@ enum Outcome {
     DropAndLog(String),
     /// Transient failure — leave pending so the next drain retries.
     LeavePending(String),
+    /// Not pushable yet by design (no push implemented): keep the entry pending
+    /// without counting a failure or surfacing an error.
+    Deferred(String),
     /// Keep this entry pending AND skip the remaining pushes this drain.
     PausePushes(PushPause, String),
     /// Team-access 404: keep the entry pending, flag the team (by Rails id) as
@@ -382,6 +385,11 @@ async fn process(
         ("project", "create") => project_create(client, &entry.entity_id, entry_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
+        // JRST-173 replaces this with the real push. Until then a queued create
+        // stays pending (not dropped as unsupported) and raises no error.
+        ("recurring_issue", "create") => {
+            Outcome::Deferred("recurring issue create push not implemented yet".into())
+        }
         ("recurring_issue", "update") => {
             recurring_issue_update(client, &entry.entity_id, entry.payload.as_deref()).await
         }
@@ -459,7 +467,7 @@ fn describe(outcome: &Outcome) -> (&'static str, &str) {
     match outcome {
         Outcome::Success | Outcome::Created => ("synced", "ok"),
         Outcome::DropAndLog(r) => ("dropped", r),
-        Outcome::LeavePending(r) => ("pending", r),
+        Outcome::LeavePending(r) | Outcome::Deferred(r) => ("pending", r),
         Outcome::PausePushes(_, r) | Outcome::TeamAccessLost(_, r) => ("parked", r),
     }
 }
@@ -520,6 +528,7 @@ fn record(
             record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
         }
+        Outcome::Deferred(reason) => sync_log(&scope, label, &reason),
         Outcome::LeavePending(reason) => {
             sync_log(&scope, "pending", &reason);
             report.failed += 1;
@@ -6038,6 +6047,26 @@ mod tests {
             let outcome = process(&client, &ctx_with_scopes(&["write"]), &entry, 1).await;
             assert!(matches!(outcome, Outcome::DropAndLog(_)));
         });
+    }
+
+    #[test]
+    fn recurring_issue_create_is_deferred_not_dropped_and_not_a_failure() {
+        let client = ApiClient::new("http://localhost:1", "stub-token").unwrap();
+        let entry = SyncQueueEntry {
+            id: Some(1),
+            entity_type: "recurring_issue".into(),
+            entity_id: "x".into(),
+            action: "create".into(),
+            payload: Some(r#"{"starts_on":"2026-11-04"}"#.into()),
+            created_at: "0".into(),
+            synced_at: None,
+        };
+        let outcome = block_on(process(&client, &ctx_with_scopes(&["write"]), &entry, 1));
+        assert!(matches!(outcome, Outcome::Deferred(_)));
+        let mut report = SyncReport::default();
+        assert!(!record(&mut report, &entry, 1, outcome));
+        assert_eq!(report.failed, 0);
+        assert!(report.last_error.is_none());
     }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
