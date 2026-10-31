@@ -1736,16 +1736,12 @@ fn recurring_issue_create_prep(
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
     let refs = (|| -> Result<_, Outcome> {
-        let assignee_id = optional_remote_id(conn, "members", row.assignee_id.as_deref())?;
-        let project_id = optional_remote_id(conn, "projects", row.project_id.as_deref())?;
-        let lane_id = optional_remote_id(conn, "lanes", row.lane_id.as_deref())?;
-        let local_labels = db::label_ids(conn, &row.id)
-            .map_err(|e| Outcome::LeavePending(format!("db (labels): {e}")))?;
-        let mut label_ids = Vec::with_capacity(local_labels.len());
-        for local in &local_labels {
-            label_ids.push(require_remote_id(conn, "labels", local)?);
-        }
-        Ok((assignee_id, project_id, lane_id, label_ids))
+        Ok((
+            recurring_assignee_remote_id(conn, &row)?,
+            recurring_project_remote_id(conn, &row)?,
+            recurring_lane_remote_id(conn, &row)?,
+            recurring_label_remote_ids(conn, &row.id)?,
+        ))
     })();
     let (assignee_id, project_id, lane_id, label_ids) = match refs {
         Ok(r) => r,
@@ -1824,6 +1820,31 @@ fn commit_recurring_create(local_id: &str, entry_id: i64, dto: &RecurringIssueDt
         Ok(()) => Outcome::Created,
         Err(e) => Outcome::LeavePending(e),
     }
+}
+
+// Remote ids of what a recurring issue references. Each waits (leaves the
+// entry pending) while the referenced record has no remote id yet; `None`
+// means nothing is referenced. Shared by the create and update preps.
+
+fn recurring_assignee_remote_id(
+    conn: &Connection,
+    row: &crate::db::recurring_issues::RecurringIssue,
+) -> Result<Option<i64>, Outcome> {
+    optional_remote_id(conn, "members", row.assignee_id.as_deref())
+}
+
+fn recurring_project_remote_id(
+    conn: &Connection,
+    row: &crate::db::recurring_issues::RecurringIssue,
+) -> Result<Option<i64>, Outcome> {
+    optional_remote_id(conn, "projects", row.project_id.as_deref())
+}
+
+fn recurring_lane_remote_id(
+    conn: &Connection,
+    row: &crate::db::recurring_issues::RecurringIssue,
+) -> Result<Option<i64>, Outcome> {
+    optional_remote_id(conn, "lanes", row.lane_id.as_deref())
 }
 
 /// Remote ids of a recurring issue's labels; waits (leave pending) while any
@@ -1914,12 +1935,13 @@ fn recurring_issue_update_prep(
                 params.time_zone = row.time_zone.clone();
                 Ok(())
             }
-            "assignee_id" => optional_remote_id(conn, "members", row.assignee_id.as_deref())
-                .map(|v| params.assignee_id = Some(v)),
-            "project_id" => optional_remote_id(conn, "projects", row.project_id.as_deref())
-                .map(|v| params.project_id = Some(v)),
-            "lane_id" => optional_remote_id(conn, "lanes", row.lane_id.as_deref())
-                .map(|v| params.lane_id = Some(v)),
+            "assignee_id" => {
+                recurring_assignee_remote_id(conn, &row).map(|v| params.assignee_id = Some(v))
+            }
+            "project_id" => {
+                recurring_project_remote_id(conn, &row).map(|v| params.project_id = Some(v))
+            }
+            "lane_id" => recurring_lane_remote_id(conn, &row).map(|v| params.lane_id = Some(v)),
             "label_ids" => recurring_label_remote_ids(conn, &row.id)
                 .map(|v| params.label_ids = Some(v)),
             "frequency" => {
