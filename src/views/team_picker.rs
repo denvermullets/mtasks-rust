@@ -7,11 +7,12 @@ use crate::theme as t;
 
 /// Teams an issue in `source_team_id` can move to: every other live team.
 /// Archived teams are the ones Rails stopped listing for the token, so what
-/// remains is the user's other teams the token covers.
+/// remains is the user's other teams the token covers. Teams without a
+/// `remote_id` are skipped: a move to one would wait forever in prep.
 pub fn move_targets<'a>(teams: &'a [Team], source_team_id: &str) -> Vec<&'a Team> {
     teams
         .iter()
-        .filter(|t| t.id != source_team_id && t.archived_at.is_none())
+        .filter(|t| t.id != source_team_id && t.archived_at.is_none() && t.remote_id.is_some())
         .collect()
 }
 
@@ -92,6 +93,15 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn move_targets_exclude_teams_without_a_remote_id() {
+        let mut local = team("b", false);
+        local.remote_id = None;
+        let teams = [team("a", false), local, team("c", false)];
+        let ids: Vec<&str> = move_targets(&teams, "a").iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["c"]);
     }
 
     #[test]

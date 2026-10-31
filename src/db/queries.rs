@@ -538,7 +538,9 @@ pub fn move_issue_to_team(
         .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
 
     // Assignee: members are per-team rows, so keep the person by finding their
-    // row in the target team (same row, remote id, or email).
+    // row in the target team. `members.remote_id` is the per-team membership id
+    // (unique per row), so it never matches across teams; email is the identity
+    // that does.
     let new_assignee: Option<String> = match &old.assignee_id {
         Some(a) => tx
             .query_row(
