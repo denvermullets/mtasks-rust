@@ -286,6 +286,8 @@ pub struct RecurringIssueRow {
     pub id: String,
     pub title: String,
     pub active: bool,
+    /// e.g. "Every 2 weeks on Wednesday".
+    pub schedule: String,
     /// Current local name of the linked project; `None` with no project.
     pub project_name: Option<String>,
 }
@@ -303,6 +305,12 @@ fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> 
         id: r.id.clone(),
         title: r.title.clone(),
         active: r.active,
+        schedule: crate::schedule_summary::schedule_summary(
+            &r.frequency,
+            r.interval,
+            r.weekday,
+            r.day_of_month,
+        ),
         project_name,
     })
 }
@@ -481,6 +489,23 @@ mod tests {
         assert_eq!(r.lane_id, None);
         assert_eq!(r.assignee_id, None);
         assert_eq!(r.assignee_name.as_deref(), Some("Gone"));
+    }
+
+    #[test]
+    fn list_rows_carries_the_schedule_summary() {
+        let conn = setup();
+        let mut weekly = rec(1, "W", NOW);
+        weekly.frequency = "weekly".into();
+        weekly.interval = 2;
+        weekly.weekday = Some(3);
+        apply_pulled(&conn, "t1", &[weekly, rec(2, "D", "2026-01-02T00:00:00.000Z")], None)
+            .unwrap();
+        let schedules: Vec<String> = list_rows(&conn, "t1")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.schedule)
+            .collect();
+        assert_eq!(schedules, ["Every 2 weeks on Wednesday", "Every day"]);
     }
 
     #[test]
