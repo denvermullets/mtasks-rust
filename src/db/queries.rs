@@ -216,6 +216,13 @@ pub fn purge_tombstoned_issue(conn: &Connection, issue_id: &str) -> Result<()> {
 /// (a confirmed server delete, or a local delete the server has accepted).
 fn purge_issue_rows(conn: &Connection, issue_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    // The server cascades the delete to the issue's Notifications and never
+    // re-sends them, so drop the mirrored ones with the issue.
+    tx.execute(
+        "DELETE FROM notifications WHERE issue_remote_id IS NOT NULL
+           AND issue_remote_id = (SELECT remote_id FROM issues WHERE id = ?1)",
+        params![issue_id],
+    )?;
     tx.execute(
         "UPDATE issues SET parent_issue_id = NULL WHERE parent_issue_id = ?1",
         params![issue_id],
@@ -1904,6 +1911,23 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn server_issue_tombstone_removes_the_issues_notifications() {
+        let conn = setup();
+        conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO notifications (id, remote_id, action, message, issue_remote_id, created_at, updated_at)
+               VALUES ('a', 1, 'mentioned', 'm', 50, '{NOW}', '{NOW}'),
+                      ('b', 2, 'mentioned', 'm', 51, '{NOW}', '{NOW}');"
+        ))
+        .unwrap();
+        assert!(apply_server_issue_tombstone(&conn, "t1", 50).unwrap());
+        let left: Vec<String> = conn
+            .prepare("SELECT id FROM notifications").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(left, vec!["b".to_string()]);
     }
 
     #[test]

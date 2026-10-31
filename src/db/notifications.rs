@@ -265,6 +265,38 @@ pub fn unread_count(conn: &Connection) -> Result<i64> {
     }
 }
 
+/// Read rows older than this many days are dropped by [`prune`].
+pub const READ_RETENTION_DAYS: i64 = 30;
+
+/// Bound the mirror: drop read rows whose `read_at` is over 30 days before
+/// `now`, and rows whose issue carries the local delete tombstone. Unread rows
+/// are kept however old. Returns the number of rows removed.
+pub fn prune(conn: &Connection, now: &str) -> Result<usize> {
+    let cutoff = chrono::NaiveDateTime::parse_from_str(now.trim_end_matches('Z'), "%Y-%m-%dT%H:%M:%S%.3f")
+        .map(|t| {
+            (t - chrono::Duration::days(READ_RETENTION_DAYS))
+                .format(crate::db::TS_FORMAT)
+                .to_string()
+        })
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "DELETE FROM notifications
+         WHERE (read_at IS NOT NULL AND read_at < ?1)
+            OR issue_remote_id IN (SELECT remote_id FROM issues
+                                   WHERE deleted_at IS NOT NULL AND remote_id IS NOT NULL)",
+        params![cutoff],
+    )
+}
+
+/// Drop every Notification for a server issue id. Used when the issue is
+/// purged locally: the server cascades the delete and never re-sends them.
+pub fn delete_for_issue(conn: &Connection, issue_remote_id: i64) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM notifications WHERE issue_remote_id = ?1",
+        params![issue_remote_id],
+    )
+}
+
 /// Overwrite the badge number (clamped at 0), e.g. from a `read_all` response.
 pub fn set_unread_count(conn: &Connection, count: i64) -> Result<()> {
     set_pull_cursor(conn, SCOPE, UNREAD_RESOURCE, &count.max(0).to_string())
@@ -295,6 +327,49 @@ pub fn etag(conn: &Connection) -> Result<Option<String>> {
 
 pub fn set_etag(conn: &Connection, etag: &str) -> Result<()> {
     set_list_etag(conn, SCOPE, RESOURCE, etag)
+}
+
+/// Most per-item banners one poll may post; more collapses into a single one.
+pub const MAX_ITEM_BANNERS: usize = 3;
+
+/// A native banner to post.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Banner {
+    pub title: String,
+    pub body: String,
+}
+
+/// Which banners a poll should post. `new_unread` is `PollReport::new_unread`.
+/// Nothing when the window is focused, the poll was the backfill, banners are
+/// disabled, or there is nothing new; up to 3 items get one banner each; more
+/// collapse into one "N new notifications" banner.
+pub fn banners_to_fire(
+    new_unread: &[Notification],
+    window_focused: bool,
+    backfill: bool,
+    enabled: bool,
+) -> Vec<Banner> {
+    if window_focused || backfill || !enabled || new_unread.is_empty() {
+        return Vec::new();
+    }
+    if new_unread.len() > MAX_ITEM_BANNERS {
+        return vec![Banner {
+            title: "JAIT".into(),
+            body: format!("{} new notifications", new_unread.len()),
+        }];
+    }
+    new_unread
+        .iter()
+        .map(|n| Banner {
+            title: match (&n.actor_name, &n.issue_identifier) {
+                (Some(a), Some(i)) => format!("{a} \u{b7} {i}"),
+                (Some(a), None) => a.clone(),
+                (None, Some(i)) => i.clone(),
+                (None, None) => "JAIT".into(),
+            },
+            body: n.message.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -330,6 +405,56 @@ mod tests {
     }
 
     const NOW: &str = "2026-10-31T12:00:00.000Z";
+
+    fn mirrored(count: i64) -> Vec<Notification> {
+        let items = (1..=count).map(|i| n(i, "2026-10-31T10:00:00.000Z", None)).collect();
+        apply_poll(&mem(), &env(items, count, NOW), NOW).unwrap()
+    }
+
+    #[test]
+    fn banners_nothing_when_window_focused() {
+        assert!(banners_to_fire(&mirrored(2), true, false, true).is_empty());
+    }
+
+    #[test]
+    fn banners_nothing_on_backfill() {
+        assert!(banners_to_fire(&mirrored(2), false, true, true).is_empty());
+    }
+
+    #[test]
+    fn banners_nothing_when_disabled() {
+        assert!(banners_to_fire(&mirrored(2), false, false, false).is_empty());
+    }
+
+    #[test]
+    fn banners_nothing_for_empty_poll() {
+        assert!(banners_to_fire(&[], false, false, true).is_empty());
+    }
+
+    #[test]
+    fn banners_one_each_up_to_three() {
+        for count in 1..=3 {
+            let b = banners_to_fire(&mirrored(count), false, false, true);
+            assert_eq!(b.len(), count as usize);
+        }
+        let b = banners_to_fire(&mirrored(1), false, false, true);
+        assert_eq!(b[0].title, "Ann \u{b7} JRST-1");
+        assert_eq!(b[0].body, "msg 1");
+    }
+
+    #[test]
+    fn banners_collapse_above_three() {
+        let b = banners_to_fire(&mirrored(4), false, false, true);
+        assert_eq!(b, vec![Banner { title: "JAIT".into(), body: "4 new notifications".into() }]);
+    }
+
+    #[test]
+    fn banner_title_falls_back_without_actor_or_issue() {
+        let mut one = mirrored(1);
+        one[0].actor_name = None;
+        one[0].issue_identifier = None;
+        assert_eq!(banners_to_fire(&one, false, false, true)[0].title, "JAIT");
+    }
 
     #[test]
     fn reapplying_same_envelope_is_idempotent() {
@@ -489,6 +614,73 @@ mod tests {
         apply_poll(&conn, &env(vec![n(1, t, None), n(2, t, None)], 2, NOW), NOW).unwrap();
         let rows = inbox_list(&conn, Filter::All).unwrap();
         assert!(rows[0].id > rows[1].id);
+    }
+
+    fn count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0)).unwrap()
+    }
+
+    fn remote_ids(conn: &Connection) -> Vec<i64> {
+        inbox_list(conn, Filter::All).unwrap().into_iter().map(|x| x.remote_id).collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn prune_removes_read_rows_older_than_30_days() {
+        let conn = mem();
+        // NOW is 2026-10-31; 30 days earlier is 2026-10-01T12:00.
+        let items = vec![
+            n(1, "2026-09-01T00:00:00.000Z", Some("2026-09-02T00:00:00.000Z")),
+            n(2, "2026-09-01T00:00:00.000Z", Some("2026-10-30T00:00:00.000Z")),
+        ];
+        apply_poll(&conn, &env(items, 0, NOW), NOW).unwrap();
+        assert_eq!(prune(&conn, NOW).unwrap(), 1);
+        assert_eq!(remote_ids(&conn), vec![2]);
+    }
+
+    #[test]
+    fn prune_keeps_old_unread_rows() {
+        let conn = mem();
+        apply_poll(&conn, &env(vec![n(1, "2026-09-01T00:00:00.000Z", None)], 1, NOW), NOW).unwrap();
+        assert_eq!(prune(&conn, NOW).unwrap(), 0);
+        assert_eq!(count(&conn), 1);
+    }
+
+    #[test]
+    fn prune_removes_rows_of_tombstoned_issues() {
+        let conn = mem();
+        let items = vec![n(1, "2026-10-30T00:00:00.000Z", None), n(2, "2026-10-30T00:00:00.000Z", None)];
+        apply_poll(&conn, &env(items, 2, NOW), NOW).unwrap();
+        // n(1) points at issue remote id 11; tombstone the local issue.
+        conn.execute_batch(&format!(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t', 'T', 'T', '{NOW}', '{NOW}');
+             INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l', 'B', 0, 't', '{NOW}', '{NOW}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, remote_id, deleted_at, created_at, updated_at)
+               VALUES ('i', 'X', 0, 'l', 't', 11, '{NOW}', '{NOW}', '{NOW}');"
+        ))
+        .unwrap();
+        assert_eq!(prune(&conn, NOW).unwrap(), 1);
+        assert_eq!(remote_ids(&conn), vec![2]);
+    }
+
+    #[test]
+    fn delete_for_issue_removes_only_that_issues_rows() {
+        let conn = mem();
+        let items = vec![n(1, "2026-10-30T00:00:00.000Z", None), n(2, "2026-10-30T00:00:00.000Z", None)];
+        apply_poll(&conn, &env(items, 2, NOW), NOW).unwrap();
+        assert_eq!(delete_for_issue(&conn, 12).unwrap(), 1);
+        assert_eq!(remote_ids(&conn), vec![1]);
+    }
+
+    #[test]
+    fn prune_keeps_everything_else() {
+        let conn = mem();
+        let items = vec![
+            n(1, "2026-10-30T00:00:00.000Z", None),
+            n(2, "2026-10-20T00:00:00.000Z", Some("2026-10-25T00:00:00.000Z")),
+        ];
+        apply_poll(&conn, &env(items, 1, NOW), NOW).unwrap();
+        assert_eq!(prune(&conn, NOW).unwrap(), 0);
+        assert_eq!(count(&conn), 2);
     }
 
     #[test]

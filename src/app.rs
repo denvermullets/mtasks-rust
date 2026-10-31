@@ -3040,6 +3040,13 @@ impl App {
                 let ok = outcome.succeeded();
                 if let PollOutcome::Polled(report) = outcome {
                     self.notif_unread_count = report.unread_count;
+                    // JRST-99 wires the Settings toggle in place of `true`.
+                    crate::sync::banner::post(crate::db::notifications::banners_to_fire(
+                        &report.new_unread,
+                        self.scheduler.is_focused(),
+                        report.backfill,
+                        true,
+                    ));
                     self.last_notif_poll = Some(report);
                 }
                 let finish = self.drive_sync(SchedEvent::CycleFinished {
