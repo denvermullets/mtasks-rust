@@ -764,7 +764,7 @@ fn referenced_in_section<'a>(
 
 /// Activity timeline: change events interleaved with threaded comments
 /// (oldest first), plus the top-level composer, appended to the bottom of the
-/// left column. Own unsynced comments can be deleted locally.
+/// left column. Own comments can be deleted.
 fn comments_section<'a>(
     comments: &'a [Comment],
     events: &'a [IssueEvent],
@@ -937,13 +937,11 @@ fn comment_row<'a>(
         issues,
         members,
     ));
-    // Delete is offered on the user's own comments that haven't reached the
-    // server yet.
-    let can_delete = comment.remote_id.is_none()
-        && comment
-            .author_id
-            .as_ref()
-            .is_some_and(|aid| my_member_ids.contains(aid));
+    // Delete is offered on the user's own comments, synced or not.
+    let can_delete = comment
+        .author_id
+        .as_ref()
+        .is_some_and(|aid| my_member_ids.contains(aid));
     let mut actions = row![].spacing(10);
     if Comment::can_reply_at(depth) {
         actions = actions.push(

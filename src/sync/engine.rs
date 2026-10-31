@@ -383,6 +383,7 @@ async fn process(
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
         ("label", "update") => label_update(client, &entry.entity_id).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
+        ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
@@ -1444,6 +1445,63 @@ fn prep_comment_create(entity_id: &str) -> Prep<CommentCreatePrep> {
 
 /// Remote id of a reply's parent. A parent that hasn't synced yet leaves the
 /// reply pending (the queue is FIFO so the parent normally goes first).
+struct CommentDeletePrep {
+    team_remote_id: i64,
+    issue_remote_id: i64,
+    remote_id: i64,
+}
+
+/// Like the other deletes, relies entirely on the payload captured at enqueue
+/// time (`{team_remote_id, issue_remote_id, remote_id}`): the local row is gone.
+fn prep_comment_delete(payload: Option<&str>) -> Prep<CommentDeletePrep> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog(
+            "comment delete: no payload (legacy entry)".into(),
+        ));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => return Prep::Done(Outcome::DropAndLog(format!("comment delete: bad payload: {e}"))),
+    };
+    let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
+    match (field("team_remote_id"), field("issue_remote_id"), field("remote_id")) {
+        (Some(team_remote_id), Some(issue_remote_id), Some(remote_id)) => {
+            Prep::Ready(CommentDeletePrep {
+                team_remote_id,
+                issue_remote_id,
+                remote_id,
+            })
+        }
+        _ => Prep::Done(Outcome::DropAndLog(
+            "comment delete: incomplete payload".into(),
+        )),
+    }
+}
+
+async fn comment_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let prep = match prep_comment_delete(payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    let result =
+        comments::delete(client, prep.team_remote_id, prep.issue_remote_id, prep.remote_id).await;
+    comment_delete_outcome(result, prep.team_remote_id)
+}
+
+/// 204 and a resource 404 both mean the comment is gone. A 403 (not the token
+/// scope one) is dropped with the server's message so the user sees a toast;
+/// the next per-issue comment fetch upserts the comment back.
+fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> Outcome {
+    match result {
+        Ok(_) => Outcome::Success,
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(ApiError::Forbidden(m)) if !is_token_scope_message(&m) => {
+            Outcome::DropAndLog(format!("forbidden: {m}"))
+        }
+        Err(e) => classify_in_team(&e, team_remote_id),
+    }
+}
+
 fn resolve_comment_parent(
     conn: &rusqlite::Connection,
     comment: &crate::db::models::Comment,
@@ -2958,6 +3016,54 @@ mod tests {
         let (conn, reply) = reply_fixture(None);
         assert!(is_retry(
             &resolve_comment_parent(&conn, &reply).unwrap_err()
+        ));
+    }
+
+    #[test]
+    fn comment_delete_prep_proceeds_only_on_complete_payload() {
+        let full = r#"{"team_remote_id":7,"issue_remote_id":50,"remote_id":9}"#;
+        match prep_comment_delete(Some(full)) {
+            Prep::Ready(p) => assert_eq!((p.team_remote_id, p.issue_remote_id, p.remote_id), (7, 50, 9)),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+        for bad in [None, Some("not json"), Some(r#"{"team_remote_id":7,"remote_id":9}"#)] {
+            assert!(matches!(
+                prep_comment_delete(bad),
+                Prep::Done(Outcome::DropAndLog(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn comment_delete_204_and_resource_404_are_success() {
+        assert!(matches!(comment_delete_outcome(Ok(()), 7), Outcome::Success));
+        let gone = Err(ApiError::NotFound("Comment not found".into()));
+        assert!(matches!(comment_delete_outcome(gone, 7), Outcome::Success));
+    }
+
+    #[test]
+    fn comment_delete_403_drops_with_server_message() {
+        let msg = "Only the author or a team admin can delete this";
+        match comment_delete_outcome(Err(ApiError::Forbidden(msg.into())), 7) {
+            Outcome::DropAndLog(r) => {
+                assert_eq!(r, format!("forbidden: {msg}"));
+                assert_eq!(SyncErrorKind::from_push_reason(&r), Some(SyncErrorKind::Forbidden));
+            }
+            other => panic!("expected drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_delete_scope_403_and_team_404_keep_existing_handling() {
+        let scope = Err(ApiError::Forbidden("Token lacks required scope".into()));
+        assert!(matches!(
+            comment_delete_outcome(scope, 7),
+            Outcome::PausePushes(PushPause::Forbidden, _)
+        ));
+        let team = Err(ApiError::NotFound("Team not found or access denied".into()));
+        assert!(matches!(
+            comment_delete_outcome(team, 7),
+            Outcome::TeamAccessLost(7, _)
         ));
     }
 
