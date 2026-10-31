@@ -286,15 +286,30 @@ pub struct RecurringIssueRow {
     pub id: String,
     pub title: String,
     pub active: bool,
+    /// Local name of the lane spawned issues start in, or [`FIRST_LANE`] when
+    /// none is set (the server then uses the team's first lane).
+    pub lane: String,
 }
+
+/// Lane cell text for a recurring issue with no lane set.
+pub const FIRST_LANE: &str = "First lane";
 
 /// Build the display row for one mirrored recurring issue. Column tickets
 /// extend this (they may use `conn` to resolve names).
-fn row_from(_conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+    let lane = match &r.lane_id {
+        Some(id) => conn
+            .query_row("SELECT name FROM lanes WHERE id = ?1", params![id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?,
+        None => None,
+    };
     Ok(RecurringIssueRow {
         id: r.id.clone(),
         title: r.title.clone(),
         active: r.active,
+        lane: lane.unwrap_or_else(|| FIRST_LANE.to_string()),
     })
 }
 
@@ -493,6 +508,19 @@ mod tests {
         let got: Vec<(&str, bool)> = rows.iter().map(|r| (r.title.as_str(), r.active)).collect();
         assert_eq!(got, [("First", true), ("Second", false)]);
         assert!(list_rows(&conn, "nope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_rows_shows_the_lane_name_or_first_lane() {
+        let conn = setup();
+        let mut with = rec(5, "With", NOW);
+        with.lane = rref(4, "Todo");
+        apply_pulled(&conn, "t1", &[with, rec(6, "Without", "2026-02-01T00:00:00.000Z")], None)
+            .unwrap();
+        conn.execute("UPDATE lanes SET name = 'Renamed' WHERE id = 'l1'", []).unwrap();
+        let rows = list_rows(&conn, "t1").unwrap();
+        let got: Vec<(&str, &str)> = rows.iter().map(|r| (r.title.as_str(), r.lane.as_str())).collect();
+        assert_eq!(got, [("With", "Renamed"), ("Without", "First lane")]);
     }
 
     #[test]
