@@ -256,12 +256,11 @@ pub struct ActivityItem {
 pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<ActivityItem>> {
     let mut items = Vec::new();
     for entry in entries_for_issue(conn, issue_id)? {
-        let actor = ActorSlot {
-            remote_id: entry.actor_remote_id,
-            name: entry.actor_name.clone(),
-        };
+        let actor = resolve_actor(conn, entry.actor_remote_id, entry.actor_name.as_deref())?;
         let texts = match entry.entry_type.as_str() {
             "version" => version_lines(&entry),
+            "reference" => vec![reference_line(&entry)],
+            "dependency" => dependency_line(&entry).into_iter().collect(),
             _ => Vec::new(),
         };
         for (i, text) in texts.into_iter().enumerate() {
@@ -327,6 +326,31 @@ fn merge_pending(conn: &Connection, issue_id: &str, items: &mut Vec<ActivityItem
     Ok(())
 }
 
+/// "mentioned in MTK-2: Title"; the source issue may be gone (null).
+fn reference_line(entry: &StoredEntry) -> String {
+    let src = &entry.payload["source_issue"];
+    match src["identifier"].as_str() {
+        Some(ident) => match src["title"].as_str().filter(|t| !t.is_empty()) {
+            Some(title) => format!("mentioned in {ident}: {title}"),
+            None => format!("mentioned in {ident}"),
+        },
+        None => "mentioned in another issue".to_string(),
+    }
+}
+
+/// Resolve an entry's actor: the local member with that remote id wins, then the
+/// name the server sent. No actor at all gives no name (never "Someone").
+fn resolve_actor(conn: &Connection, remote_id: Option<i64>, server_name: Option<&str>) -> Result<ActorSlot> {
+    let local = match remote_id {
+        Some(id) => crate::db::queries::find_member_by_remote_id(conn, id)?.map(|m| m.name),
+        None => None,
+    };
+    Ok(ActorSlot {
+        remote_id,
+        name: local.or_else(|| server_name.map(str::to_string)),
+    })
+}
+
 /// One line per change in a version entry. Changes this layer can't word yet
 /// produce no line.
 fn version_lines(entry: &StoredEntry) -> Vec<String> {
@@ -334,6 +358,26 @@ fn version_lines(entry: &StoredEntry) -> Vec<String> {
         return Vec::new();
     };
     changes.iter().filter_map(plain_change_line).collect()
+}
+
+/// One line for a dependency entry, worded from this issue's side using
+/// `direction` and `event` (the server description is worded from the blocking
+/// side). JRST-138 adds the relates / duplicates / duplicated_by arms.
+fn dependency_line(entry: &StoredEntry) -> Option<String> {
+    let kind = match entry.payload["direction"].as_str()? {
+        "blocking" => EventKind::Blocking,
+        "blocked_by" => EventKind::BlockedBy,
+        _ => return None,
+    };
+    let other = entry.payload["other_issue"]["identifier"]
+        .as_str()
+        .map(str::to_string);
+    let (old, new) = match entry.payload["event"].as_str()? {
+        "create" => (None, other),
+        "destroy" => (other, None),
+        _ => return None,
+    };
+    Some(events::describe(kind, old.as_deref(), new.as_deref()))
 }
 
 /// Wording for a plain (non-reference) field, reusing `events::describe`.
@@ -575,11 +619,125 @@ mod display_tests {
         assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
     }
 
+    fn one_change(actor: &str) -> String {
+        format!(r#"[{{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":{actor},"event":"update","description":"","changes":[{{"field":"title","from":"a","to":"b"}}]}}]"#)
+    }
+
+    #[test]
+    fn actor_prefers_mirrored_member_name() {
+        let conn = mem();
+        conn.execute("INSERT INTO members (id, remote_id, team_id, name, email, created_at, updated_at) VALUES ('m1',2,'t1','Ryan V','r@x.com','n','n')", []).unwrap();
+        store(&conn, &one_change(r#"{"id":2,"name":"ryan"}"#));
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].actor, ActorSlot { remote_id: Some(2), name: Some("Ryan V".into()) });
+    }
+
+    #[test]
+    fn actor_not_mirrored_uses_server_name() {
+        let conn = mem();
+        store(&conn, &one_change(r#"{"id":9,"name":"ann"}"#));
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].actor, ActorSlot { remote_id: Some(9), name: Some("ann".into()) });
+    }
+
+    #[test]
+    fn null_actor_has_no_name() {
+        let conn = mem();
+        store(&conn, &one_change("null"));
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
+    }
+
     #[test]
     fn empty_changes_yield_no_lines() {
         let conn = mem();
         store(&conn, r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"","changes":[]}]"#);
         assert!(activity_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod jrst139_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn conn_with(body: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let entries: Vec<ActivityEntry> = serde_json::from_str(body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        conn
+    }
+
+    #[test]
+    fn reference_reads_mentioned_in_with_title_and_user() {
+        let conn = conn_with(r#"[{"type":"reference","id":1,"cursor":"reference:1","created_at":"2026-07-08T13:35:39Z",
+          "source_issue":{"id":2,"identifier":"MTK-2","title":"Add reset"},"source_type":"comment","user":{"id":2,"name":"ryan"}}]"#);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "mentioned in MTK-2: Add reset");
+        assert_eq!(items[0].key, "reference:1#0");
+        assert_eq!(items[0].actor, ActorSlot { remote_id: Some(2), name: Some("ryan".into()) });
+    }
+
+    #[test]
+    fn reference_with_missing_source_or_user_still_renders() {
+        let conn = conn_with(r#"[{"type":"reference","id":1,"cursor":"reference:1","created_at":"2026-07-08T13:35:39Z",
+          "source_issue":null,"source_type":"issue","user":null},
+          {"type":"reference","id":2,"cursor":"reference:2","created_at":"2026-07-08T13:36:00Z",
+          "source_issue":{"id":3,"identifier":"MTK-3","title":""},"source_type":"issue","user":null}]"#);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].text, "mentioned in another issue");
+        assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
+        assert_eq!(items[1].text, "mentioned in MTK-3");
+    }
+}
+
+#[cfg(test)]
+mod jrst137_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn lines(direction: &str, event: &str, other: &str) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let body = format!(
+            r#"[{{"type":"dependency","id":1,"cursor":"dependency:1","created_at":"2026-07-06T00:00:00Z",
+            "event":"{event}","kind":"blocks","direction":"{direction}",{other},
+            "actor":{{"id":2,"name":"ryan"}},"description":"added dependency: <strong>MTK-9</strong> blocking <strong>MTK-3</strong>"}}]"#
+        );
+        let entries: Vec<ActivityEntry> = serde_json::from_str(&body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        activity_for_issue(&conn, "i1").unwrap().into_iter().map(|i| i.text).collect()
+    }
+
+    const OTHER: &str = r#""other_issue":{"id":2,"identifier":"MTK-2","title":"X"}"#;
+
+    #[test]
+    fn blocking_and_blocked_by_word_from_this_issues_side() {
+        assert_eq!(lines("blocking", "create", OTHER), ["now blocks MTK-2"]);
+        assert_eq!(lines("blocking", "destroy", OTHER), ["no longer blocks MTK-2"]);
+        assert_eq!(lines("blocked_by", "create", OTHER), ["now blocked by MTK-2"]);
+        assert_eq!(lines("blocked_by", "destroy", OTHER), ["no longer blocked by MTK-2"]);
+    }
+
+    #[test]
+    fn unsupported_direction_or_event_yields_no_line() {
+        assert!(lines("relates", "create", OTHER).is_empty());
+        assert!(lines("blocking", "weird", OTHER).is_empty());
+    }
+
+    #[test]
+    fn missing_other_issue_uses_generic_wording() {
+        assert_eq!(lines("blocking", "create", r#""other_issue":null"#), ["changed blocking issues"]);
     }
 }
 
