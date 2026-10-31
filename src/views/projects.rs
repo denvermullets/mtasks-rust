@@ -432,9 +432,9 @@ pub fn list_view<'a>(
                                     .size(13)
                                     .color(t::accent()),
                             )
-                            .on_press(Message::CreateProject)
-                            .padding(0)
-                            .style(button::text),
+                                .on_press(Message::CreateProject)
+                                .padding(0)
+                                .style(button::text),
                         ),
                 )
                 .center_x(Length::Fill)

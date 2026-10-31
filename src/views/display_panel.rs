@@ -10,8 +10,8 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{
-    merged_status_options, CardProperty, CompletedFilter, DisplayOptions, FilterField, Filters,
-    GroupBy, OrderBy, SubGroup, ViewMode, PRIORITY_TITLES,
+    merged_status_options, CardProperty, CompletedFilter, DisplayOptions, FilterField, Filters, GroupBy, OrderBy,
+    SubGroup, ViewMode, PRIORITY_TITLES,
 };
 use crate::theme as t;
 use crate::views::header;
@@ -74,26 +74,28 @@ fn chips<'a, T: Copy + PartialEq + 'a>(
             if !off {
                 b = b.on_press(msg(*value));
             }
-            r = r.push(b.style(move |_theme: &Theme, _status| button::Style {
-                background: Some(iced::Background::Color(if active {
-                    t::bg_card_focused()
-                } else {
-                    t::bg_card()
-                })),
-                text_color: if off {
-                    t::text_muted()
-                } else if active {
-                    t::accent()
-                } else {
-                    t::text_secondary()
-                },
-                border: Border {
-                    color: if active { t::accent() } else { t::border() },
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            }));
+            r = r.push(
+                b.style(move |_theme: &Theme, _status| button::Style {
+                        background: Some(iced::Background::Color(if active {
+                            t::bg_card_focused()
+                        } else {
+                            t::bg_card()
+                        })),
+                        text_color: if off {
+                            t::text_muted()
+                        } else if active {
+                            t::accent()
+                        } else {
+                            t::text_secondary()
+                        },
+                        border: Border {
+                            color: if active { t::accent() } else { t::border() },
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+            );
         }
         col = col.push(r);
     }
@@ -295,7 +297,8 @@ pub fn filter_view<'a>(
             FilterField::Status,
             filters,
             statuses,
-        ));
+        ))
+        ;
     let groups = if data.scoped_to_project {
         groups
     } else {

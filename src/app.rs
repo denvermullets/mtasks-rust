@@ -8,11 +8,11 @@ use iced::{event, Element, Length, Subscription, Task, Theme};
 use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
 use crate::config::{self, Config};
 use crate::csv_io;
-use crate::db::events::{self, IssueEvent};
 use crate::db::models::{
     Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
+use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
 use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup, ViewMode};
 use crate::keys;
@@ -22,9 +22,10 @@ use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
-    board, csv_import, display_panel, header, issue_detail, issue_form, issue_list, issue_picker,
-    labels as labels_view, placeholder, project_detail, projects as projects_view,
-    roadmap as roadmap_view, settings, status_bar, team_list, team_members, toast,
+    board, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
+    issue_picker, labels as labels_view, placeholder,
+    project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
+    team_list, team_members, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -531,10 +532,12 @@ impl App {
         // Filters are global but hold per-team ids; drop the ones this data
         // doesn't contain (My Issues loads every team, so its ids all stay).
         if self.selected_team_id.is_some()
-            && self
-                .config
-                .filters
-                .prune(&self.members, &self.labels, &self.lanes, &self.projects)
+            && self.config.filters.prune(
+                &self.members,
+                &self.labels,
+                &self.lanes,
+                &self.projects,
+            )
         {
             if let Err(e) = config::save(&self.config) {
                 self.config_error = Some(e);
@@ -593,12 +596,7 @@ impl App {
             self.detail_blocked_by =
                 queries::blocked_by_links_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
-            self.detail_events = events::events_for_issue_resolved(
-                conn,
-                issue_id,
-                self.config.current_user_remote_id,
-            )
-            .unwrap_or_default();
+            self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
         } else {
             self.detail_references.clear();
@@ -1016,7 +1014,8 @@ impl App {
         let Some(issue_remote_id) = issue.remote_id else {
             return Task::none();
         };
-        let Ok(Some(team_remote_id)) = queries::remote_id_for(conn, "teams", &issue.team_id) else {
+        let Ok(Some(team_remote_id)) = queries::remote_id_for(conn, "teams", &issue.team_id)
+        else {
             return Task::none();
         };
         let base_url = self.config.api_base_url.trim().to_string();
@@ -1195,9 +1194,10 @@ impl App {
                 .flatten()
                 .and_then(|blocking| {
                     let issue_remote_id = blocking.remote_id?;
-                    let team_remote_id = queries::remote_id_for(&conn, "teams", &blocking.team_id)
-                        .ok()
-                        .flatten()?;
+                    let team_remote_id =
+                        queries::remote_id_for(&conn, "teams", &blocking.team_id)
+                            .ok()
+                            .flatten()?;
                     Some(
                         serde_json::json!({
                             "team_remote_id": team_remote_id,
@@ -2163,11 +2163,7 @@ impl App {
             Message::SetGroupBy(g) => {
                 self.config.display.group_by = g;
                 // A sub-group repeating the new group-by axis is meaningless.
-                if self
-                    .config
-                    .display
-                    .sub_group_conflicts(self.config.display.sub_group)
-                {
+                if self.config.display.sub_group_conflicts(self.config.display.sub_group) {
                     self.config.display.sub_group = SubGroup::None;
                 }
                 self.focused_lane = 0;
@@ -2548,9 +2544,7 @@ impl App {
                 if !auth_failed {
                     for f in report.failures() {
                         match &f.kind {
-                            SyncErrorKind::Auth
-                            | SyncErrorKind::Network
-                            | SyncErrorKind::TeamAccess => {}
+                            SyncErrorKind::Auth | SyncErrorKind::Network | SyncErrorKind::TeamAccess => {}
                             SyncErrorKind::Validation(errs) if f.entity_type == "issue" => {
                                 validation_issue = Some((f.entity_id.clone(), errs.clone()));
                             }

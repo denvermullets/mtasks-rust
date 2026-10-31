@@ -5,11 +5,11 @@ use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::{Message, View};
 use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
-use crate::display::{CardProperty, DisplayOptions};
 use crate::theme as t;
+use crate::display::{CardProperty, DisplayOptions};
+use crate::views::util;
 use crate::views::progress_chart;
 use crate::views::projects::MemberOption;
-use crate::views::util;
 
 /// Buffered edit state for the full-page project detail view. Name, description,
 /// and the two dates live here and are committed (on Enter or on nav-away) via
@@ -97,17 +97,17 @@ pub fn view<'a>(
                         .map_or(t::text_muted(), t::project_status_color),
                 ),
             )
-            .center_x(Length::Fixed(28.0))
-            .center_y(Length::Fixed(28.0))
-            .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::bg_card())),
-                border: Border {
-                    color: t::border(),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            }),
+                .center_x(Length::Fixed(28.0))
+                .center_y(Length::Fixed(28.0))
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(t::bg_card())),
+                    border: Border {
+                        color: t::border(),
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                }),
         )
         .push(
             text_input("Project name", &detail.name)

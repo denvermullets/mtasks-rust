@@ -183,9 +183,7 @@ pub fn view<'a>(
                 .is_none()
                 .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
         )
-        .push(comments_section(
-            comments, events, members, detail, team, teams, issues,
-        ));
+        .push(comments_section(comments, events, members, detail, team, teams, issues));
 
     // ---- Right sidebar: properties ----
     let lane_options: Vec<LaneOption> = lanes
@@ -340,11 +338,7 @@ pub fn view<'a>(
     row![]
         .width(Length::Fill)
         .height(Length::Fill)
-        .push(
-            container(scrollable(left))
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
+        .push(container(scrollable(left)).width(Length::Fill).height(Length::Fill))
         .push(divider)
         .push(sidebar_panel)
         .into()

@@ -120,9 +120,7 @@ pub fn view<'a>(
             .collect();
         // due_date ASC, NULLS LAST (mirrors Project.in_commitment).
         in_lane.sort_by(|a, b| cmp_due_nulls_last(&a.due_date, &b.due_date));
-        lanes = lanes.push(lane_block(
-            commitment, label, subtitle, dot, &in_lane, identifier,
-        ));
+        lanes = lanes.push(lane_block(commitment, label, subtitle, dot, &in_lane, identifier));
     }
 
     let body = column![]
@@ -165,8 +163,10 @@ fn lane_block<'a>(
         )
         .push(text(subtitle).size(11).color(t::text_muted()));
 
-    let mut cells: Vec<Element<'a, Message>> =
-        projects.iter().map(|p| card(p, identifier)).collect();
+    let mut cells: Vec<Element<'a, Message>> = projects
+        .iter()
+        .map(|p| card(p, identifier))
+        .collect();
     cells.push(add_to_lane_cell(commitment));
 
     let block = row![]
@@ -316,9 +316,13 @@ fn progress_bar<'a>(project: &Project) -> Element<'a, Message> {
 /// The trailing dashed "Add project" cell rendered at the end of each lane grid.
 fn add_to_lane_cell<'a>(commitment: RoadmapCommitment) -> Element<'a, Message> {
     button(
-        container(text("+ Add project").size(12).color(t::text_secondary()))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
+        container(
+            text("+ Add project")
+                .size(12)
+                .color(t::text_secondary()),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill),
     )
     .on_press(Message::OpenRoadmapAdd(commitment))
     .width(Length::Fill)
@@ -413,7 +417,10 @@ fn grid<'a>(cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
     }
     if count > 0 {
         for _ in count..PER_ROW {
-            current = current.push(container(text("")).width(Length::FillPortion(1)));
+            current = current.push(
+                container(text(""))
+                    .width(Length::FillPortion(1)),
+            );
         }
         col = col.push(current);
     }
@@ -554,12 +561,14 @@ pub fn add_modal_view<'a>(
         .push(divider())
         .push(list)
         .push(
-            row![].push(iced::widget::horizontal_space()).push(
-                button(text("Close").size(14))
-                    .on_press(Message::CloseModal)
-                    .padding([8, 20])
-                    .style(button::secondary),
-            ),
+            row![]
+                .push(iced::widget::horizontal_space())
+                .push(
+                    button(text("Close").size(14))
+                        .on_press(Message::CloseModal)
+                        .padding([8, 20])
+                        .style(button::secondary),
+                ),
         );
 
     let modal = container(content)

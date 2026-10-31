@@ -58,8 +58,7 @@ pub fn view<'a>(
     let last = crumbs.len().saturating_sub(1);
     for (i, crumb) in crumbs.into_iter().enumerate() {
         if i > 0 {
-            trail = trail.push(text("\u{203A}").size(14).color(t::text_muted()));
-            // ›
+            trail = trail.push(text("\u{203A}").size(14).color(t::text_muted())); // ›
         }
         let color = if i == last {
             t::text_primary()
