@@ -1155,3 +1155,79 @@ mod jrst143_tests {
         assert!(n >= 1);
     }
 }
+
+
+#[cfg(test)]
+mod jrst142_tests {
+    use super::*;
+    use crate::db::models::IssueDependency;
+    use crate::db::{migrations, queries};
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        for id in ["a", "b"] {
+            conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES (?1,?1,4,'l1','t1',?2,?2)", params![id, now]).unwrap();
+        }
+        conn
+    }
+
+    fn dep(remote_id: Option<i64>) -> IssueDependency {
+        IssueDependency {
+            id: "d1".into(),
+            remote_id,
+            blocking_issue_id: "a".into(),
+            blocked_issue_id: "b".into(),
+            kind: "blocks".into(),
+            direction: "blocking".into(),
+            created_at: "2026-01-02T00:00:00.000Z".into(),
+            updated_at: "2026-01-02T00:00:00.000Z".into(),
+        }
+    }
+
+    fn pending(conn: &Connection, id: &str) -> usize {
+        activity_for_issue(conn, id).unwrap().iter().filter(|i| i.origin == ItemOrigin::Pending).count()
+    }
+
+    #[test]
+    fn add_is_pending_on_both_issues() {
+        let conn = mem();
+        let q = queries::insert_issue_dependency_queued(&conn, &dep(None)).unwrap();
+        assert_eq!((pending(&conn, "a"), pending(&conn, "b")), (1, 1));
+        let linked: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_events WHERE sync_queue_id = ?1", [q], |r| r.get(0))
+            .unwrap();
+        assert_eq!(linked, 2);
+    }
+
+    #[test]
+    fn remove_of_synced_edge_is_pending_on_both_issues() {
+        let conn = mem();
+        queries::insert_issue_dependency(&conn, &dep(Some(9))).unwrap();
+        conn.execute("UPDATE teams SET remote_id = 1", []).unwrap();
+        conn.execute("UPDATE issues SET remote_id = 5 WHERE id = 'a'", []).unwrap();
+        let q = queries::delete_issue_dependency_queued(&conn, "d1").unwrap();
+        assert!(q.is_some());
+        assert_eq!((pending(&conn, "a"), pending(&conn, "b")), (1, 1));
+    }
+
+    #[test]
+    fn unqueued_remove_is_not_pending() {
+        let conn = mem();
+        queries::insert_issue_dependency(&conn, &dep(None)).unwrap();
+        assert_eq!(queries::delete_issue_dependency_queued(&conn, "d1").unwrap(), None);
+        assert_eq!((pending(&conn, "a"), pending(&conn, "b")), (0, 0));
+    }
+
+    #[test]
+    fn failed_add_leaves_nothing_linked() {
+        let conn = mem();
+        queries::insert_issue_dependency_queued(&conn, &dep(None)).unwrap();
+        assert!(queries::insert_issue_dependency_queued(&conn, &dep(None)).is_err());
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+    }
+}
