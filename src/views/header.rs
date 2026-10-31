@@ -33,6 +33,16 @@ pub fn project_matches(project: &Project, needle: &str) -> bool {
     needle.is_empty() || project.name.to_lowercase().contains(needle)
 }
 
+/// "Update view" for a Modified Saved view: saves the working copy as the
+/// view's definition. Disabled (no press) with a read-only token.
+pub fn update_view_button<'a>(read_only: bool) -> Element<'a, Message> {
+    button(text("Update view").size(13))
+        .on_press_maybe((!read_only).then_some(Message::UpdateSavedView))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
@@ -45,6 +55,7 @@ pub fn view<'a>(
     board_controls: Option<usize>,
     new_action: Option<Message>,
     back: Option<Message>,
+    view_actions: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut trail = row![].spacing(8).align_y(Alignment::Center);
     if let Some(msg) = back {
@@ -133,6 +144,7 @@ pub fn view<'a>(
         .align_y(Alignment::Center)
         .push(trail)
         .push(iced::widget::horizontal_space())
+        .push_maybe(view_actions)
         .push(search)
         .push(filter)
         .push(display)
