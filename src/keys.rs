@@ -37,6 +37,7 @@ pub fn handle_key_press(
             "l" if on_board && modifiers.is_empty() => Some(Message::FocusNextLane),
             "m" if on_board && modifiers.is_empty() => Some(Message::MoveIssueNextLane),
             "M" | "m" if on_board && modifiers.shift() => Some(Message::MoveIssuePrevLane),
+            "t" if on_board && modifiers.is_empty() => Some(Message::MoveFocusedIssueToTeam),
             "1" if on_board && modifiers.is_empty() => Some(Message::SetFocusedPriority(0)),
             "2" if on_board && modifiers.is_empty() => Some(Message::SetFocusedPriority(1)),
             "3" if on_board && modifiers.is_empty() => Some(Message::SetFocusedPriority(2)),
@@ -53,5 +54,33 @@ pub fn handle_key_press(
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(c: &str, modal_open: bool, on_board: bool) -> Option<Message> {
+        handle_key_press(
+            Key::Character(c.into()),
+            Modifiers::empty(),
+            modal_open,
+            on_board,
+        )
+    }
+
+    #[test]
+    fn t_opens_move_team_on_board_only() {
+        assert!(matches!(
+            press("t", false, true),
+            Some(Message::MoveFocusedIssueToTeam)
+        ));
+        assert!(press("t", false, false).is_none());
+    }
+
+    #[test]
+    fn t_ignored_while_modal_open() {
+        assert!(press("t", true, true).is_none());
     }
 }
