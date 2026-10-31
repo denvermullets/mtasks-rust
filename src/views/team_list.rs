@@ -210,8 +210,16 @@ pub fn view<'a>(
                         background: None,
                         ..Default::default()
                     });
+                let rename_btn = button(text("\u{270E}").size(11).color(t::text_muted()))
+                    .on_press_maybe((!read_only).then(|| Message::OpenRenameSavedView(sv.id.clone())))
+                    .padding([6, 4])
+                    .style(|_theme: &Theme, _status| button::Style {
+                        background: None,
+                        ..Default::default()
+                    });
                 col = col.push(
-                    row![open_btn, home_btn, delete_btn].align_y(iced::Alignment::Center),
+                    row![open_btn, home_btn, rename_btn, delete_btn]
+                        .align_y(iced::Alignment::Center),
                 );
             }
         }

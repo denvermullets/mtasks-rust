@@ -392,7 +392,9 @@ async fn process(
         ("notification", "read_all") => notification_read_all(client, entry.payload.as_deref()).await,
         ("home_page", "update") => home_page_set(client, entry.payload.as_deref()).await,
         ("saved_view", "create") => saved_view_create(client, &entry.entity_id, entry_id).await,
-        ("saved_view", "update") => saved_view_update(client, &entry.entity_id).await,
+        ("saved_view", "update") => {
+            saved_view_update(client, &entry.entity_id, entry.payload.as_deref()).await
+        }
         ("saved_view", "delete") => saved_view_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
@@ -1960,11 +1962,24 @@ struct SavedViewUpdatePrep {
     remote_id: i64,
     stored: String,
     query: serde_json::Value,
+    /// Set for a rename entry: the stored name, sent alone (no query).
+    name_only: Option<String>,
+}
+
+/// Payload of a rename entry; a plain update entry has none.
+pub const SAVED_VIEW_RENAME_PAYLOAD: &str = r#"{"only":"name"}"#;
+
+fn is_rename_payload(payload: Option<&str>) -> bool {
+    payload.is_some_and(|p| p == SAVED_VIEW_RENAME_PAYLOAD)
 }
 
 /// Re-reads the row so the newest definition goes out, however many updates
 /// were queued. Unknown keys and unresolvable ids ride along untouched.
-fn saved_view_update_prep(conn: &Connection, entity_id: &str) -> Prep<SavedViewUpdatePrep> {
+fn saved_view_update_prep(
+    conn: &Connection,
+    entity_id: &str,
+    payload: Option<&str>,
+) -> Prep<SavedViewUpdatePrep> {
     let view = match crate::db::saved_views::get(conn, entity_id) {
         Ok(Some(v)) => v,
         Ok(None) => {
@@ -1987,20 +2002,27 @@ fn saved_view_update_prep(conn: &Connection, entity_id: &str) -> Prep<SavedViewU
         remote_id,
         stored: view.query,
         query,
+        name_only: is_rename_payload(payload).then_some(view.name),
     })
 }
 
 /// `PATCH /saved_views/:id`. On success the server's returned query replaces
 /// the local one, unless the row changed again meanwhile. A 404 means the view
 /// is gone on the server: done (the tombstone feed removes the row).
-async fn saved_view_update(client: &ApiClient, entity_id: &str) -> Outcome {
+async fn saved_view_update(client: &ApiClient, entity_id: &str, payload: Option<&str>) -> Outcome {
     let prep = match open() {
-        Ok(conn) => match saved_view_update_prep(&conn, entity_id) {
+        Ok(conn) => match saved_view_update_prep(&conn, entity_id, payload) {
             Prep::Ready(p) => p,
             Prep::Done(o) => return o,
         },
         Err(e) => return Outcome::LeavePending(e),
     };
+    if let Some(name) = &prep.name_only {
+        return match crate::api::saved_views::update_name(client, prep.remote_id, name).await {
+            Ok(_) | Err(ApiError::NotFound(_)) => Outcome::Success,
+            Err(e) => classify(&e),
+        };
+    }
     match crate::api::saved_views::update_query(client, prep.remote_id, &prep.query).await {
         Ok(dto) => {
             if let Ok(conn) = open() {
@@ -4392,7 +4414,7 @@ mod tests {
     fn saved_view_update_pushes_the_stored_query_as_an_object() {
         let q = r#"{"lane_ids":"1,999","future_key":"x","view_mode":"list"}"#;
         let conn = saved_view_db(Some(5), q);
-        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1") else {
+        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", None) else {
             panic!("expected ready");
         };
         assert_eq!(p.remote_id, 5);
@@ -4404,14 +4426,29 @@ mod tests {
     }
 
     #[test]
+    fn saved_view_rename_entry_pushes_the_name_alone() {
+        let conn = saved_view_db(Some(5), r#"{"view_mode":"list"}"#);
+        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1", Some(SAVED_VIEW_RENAME_PAYLOAD))
+        else {
+            panic!("expected ready");
+        };
+        assert_eq!(p.name_only.as_deref(), Some("V"));
+        let Prep::Ready(plain) = saved_view_update_prep(&conn, "sv1", None) else {
+            panic!("expected ready");
+        };
+        assert_eq!(plain.name_only, None);
+        assert!(!is_rename_payload(Some("{}")));
+    }
+
+    #[test]
     fn saved_view_update_waits_for_an_unpushed_create_and_drops_a_missing_row() {
         let conn = saved_view_db(None, "{}");
         assert!(matches!(
-            saved_view_update_prep(&conn, "sv1"),
+            saved_view_update_prep(&conn, "sv1", None),
             Prep::Done(Outcome::LeavePending(_))
         ));
         assert!(matches!(
-            saved_view_update_prep(&conn, "nope"),
+            saved_view_update_prep(&conn, "nope", None),
             Prep::Done(Outcome::DropAndLog(_))
         ));
     }
