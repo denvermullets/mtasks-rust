@@ -96,6 +96,11 @@ fn item_path(team_id: i64, id: i64) -> String {
     format!("api/v1/teams/{team_id}/recurring_issues/{id}")
 }
 
+/// `DELETE .../recurring_issues/:id` (204 on success).
+pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), ApiError> {
+    client.delete(&item_path(team_id, id)).await
+}
+
 /// `PATCH .../recurring_issues/:id`; returns the server's updated row.
 pub async fn update(
     client: &ApiClient,

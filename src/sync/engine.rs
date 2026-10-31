@@ -393,6 +393,9 @@ async fn process(
         ("recurring_issue", "update") => {
             recurring_issue_update(client, &entry.entity_id, entry.payload.as_deref()).await
         }
+        ("recurring_issue", "delete") => {
+            recurring_issue_delete(client, entry.payload.as_deref()).await
+        }
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
         ("label", "update") => label_update(client, &entry.entity_id).await,
         ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
@@ -1725,6 +1728,37 @@ async fn recurring_issue_update(
         // handled by `classify_in_team`.
         Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
         Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
+/// The local row is gone by drain time, so the payload captured at enqueue time
+/// (`{team_remote_id, remote_id}`) is all a recurring issue delete has.
+fn prep_recurring_issue_delete(payload: Option<&str>) -> Prep<(i64, i64)> {
+    let parsed = payload.and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
+    let ids = parsed.as_ref().and_then(|v| {
+        Some((
+            v.get("team_remote_id")?.as_i64()?,
+            v.get("remote_id")?.as_i64()?,
+        ))
+    });
+    match ids {
+        Some(ids) => Prep::Ready(ids),
+        None => Prep::Done(Outcome::DropAndLog(
+            "recurring issue delete: missing or bad payload".into(),
+        )),
+    }
+}
+
+async fn recurring_issue_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let (team_remote_id, remote_id) = match prep_recurring_issue_delete(payload) {
+        Prep::Ready(ids) => ids,
+        Prep::Done(o) => return o,
+    };
+    // 204 and a "not found" 404 both mean it is gone; a team-access 404 is not.
+    match recurring_issues::delete(client, team_remote_id, remote_id).await {
+        Ok(()) => Outcome::Success,
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(e) => classify_in_team(&e, team_remote_id),
     }
 }
 
@@ -4580,6 +4614,20 @@ mod tests {
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
             Prep::Ready(p) => assert_eq!(p.params.starts_on.as_deref(), Some("2026-11-05")),
             _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn recurring_issue_delete_prep_reads_only_the_payload() {
+        match prep_recurring_issue_delete(Some(r#"{"team_remote_id":700,"remote_id":11}"#)) {
+            Prep::Ready(ids) => assert_eq!(ids, (700, 11)),
+            _ => panic!("expected Ready"),
+        }
+        for bad in [None, Some("not json"), Some(r#"{"remote_id":11}"#)] {
+            assert!(matches!(
+                prep_recurring_issue_delete(bad),
+                Prep::Done(Outcome::DropAndLog(_))
+            ));
         }
     }
 
