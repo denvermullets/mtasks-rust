@@ -491,6 +491,24 @@ fn priority_name_label(name: &str) -> String {
     }
 }
 
+/// Remove the Pending changes of a queue entry that is being discarded without
+/// a successful push (dropped or rejected). Call in the same transaction that
+/// retires the entry. Does not touch successfully synced entries (JRST-143).
+pub fn discard_pending_for_entry(conn: &Connection, entry_id: i64) -> Result<usize> {
+    conn.execute("DELETE FROM issue_events WHERE sync_queue_id = ?1", params![entry_id])
+}
+
+/// Remove the Pending changes of every still-unsynced queue entry for an
+/// entity that is being retired without a push (e.g. a server tombstone).
+pub fn discard_pending_for_entity(conn: &Connection, entity_type: &str, entity_id: &str) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM issue_events WHERE sync_queue_id IN
+           (SELECT id FROM sync_queue
+            WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL)",
+        params![entity_type, entity_id],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,5 +1037,59 @@ mod jrst141_tests {
             ("created the issue".to_string(), ItemOrigin::Server),
             ("changed priority from None to High".to_string(), ItemOrigin::Pending),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod jrst144_tests {
+    use super::*;
+    use crate::db::{migrations, queries, sync_queue};
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        conn
+    }
+
+    fn edit(conn: &Connection, priority: i32) -> i64 {
+        let mut issue = queries::get_issue(conn, "i1").unwrap().unwrap();
+        issue.priority = priority;
+        queries::update_issue_queued(conn, &issue).unwrap()
+    }
+
+    fn pending_count(conn: &Connection) -> usize {
+        activity_for_issue(conn, "i1").unwrap().iter().filter(|i| i.origin == ItemOrigin::Pending).count()
+    }
+
+    #[test]
+    fn dropped_entry_removes_only_its_pending_change() {
+        let conn = mem();
+        let a = edit(&conn, 1);
+        let _b = edit(&conn, 2);
+        assert_eq!(pending_count(&conn), 2);
+        sync_queue::discard(&conn, a).unwrap();
+        assert_eq!(pending_count(&conn), 1);
+        let synced: Option<String> = conn.query_row("SELECT synced_at FROM sync_queue WHERE id=?1", params![a], |r| r.get(0)).unwrap();
+        assert!(synced.is_some());
+    }
+
+    #[test]
+    fn successful_sync_keeps_its_pending_change() {
+        let conn = mem();
+        let a = edit(&conn, 1);
+        sync_queue::mark_synced(&conn, a).unwrap();
+        assert_eq!(pending_count(&conn), 1);
+    }
+
+    #[test]
+    fn retiring_an_entity_discards_its_unsynced_pending_changes() {
+        let conn = mem();
+        edit(&conn, 1);
+        discard_pending_for_entity(&conn, "issue", "i1").unwrap();
+        assert_eq!(pending_count(&conn), 0);
     }
 }

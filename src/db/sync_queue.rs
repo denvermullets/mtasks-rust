@@ -95,6 +95,15 @@ pub fn begin_attempt(conn: &Connection, entry_id: i64) -> Result<Option<String>>
     Ok(previous)
 }
 
+/// Retire an entry that will never be pushed (dropped or rejected): marks it
+/// done and removes its Pending changes, atomically.
+pub fn discard(conn: &Connection, entry_id: i64) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    crate::db::activity::discard_pending_for_entry(&tx, entry_id)?;
+    mark_synced(&tx, entry_id)?;
+    tx.commit()
+}
+
 pub fn mark_synced(conn: &Connection, entry_id: i64) -> Result<()> {
     let now = crate::db::now_iso();
     conn.execute(
