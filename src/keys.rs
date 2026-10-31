@@ -6,11 +6,18 @@ pub fn handle_key_press(
     key: Key,
     modifiers: Modifiers,
     modal_open: bool,
+    palette_open: bool,
     on_board: bool,
 ) -> Option<Message> {
     if modal_open {
         return match key {
             Key::Named(keyboard::key::Named::Escape) => Some(Message::CloseModal),
+            Key::Named(keyboard::key::Named::ArrowDown) if palette_open => {
+                Some(Message::PaletteMove(1))
+            }
+            Key::Named(keyboard::key::Named::ArrowUp) if palette_open => {
+                Some(Message::PaletteMove(-1))
+            }
             _ => None,
         };
     }
@@ -67,6 +74,7 @@ mod tests {
             Key::Character(c.into()),
             Modifiers::empty(),
             modal_open,
+            false,
             on_board,
         )
     }
@@ -90,6 +98,7 @@ mod tests {
             Key::Character(c.into()),
             Modifiers::COMMAND,
             modal_open,
+            false,
             on_board,
         )
     }
@@ -124,5 +133,35 @@ mod tests {
             press("k", false, true),
             Some(Message::FocusPrevIssue)
         ));
+    }
+
+    fn arrow(named: keyboard::key::Named, palette_open: bool, modal_open: bool) -> Option<Message> {
+        handle_key_press(
+            Key::Named(named),
+            Modifiers::empty(),
+            modal_open,
+            palette_open,
+            true,
+        )
+    }
+
+    #[test]
+    fn arrows_move_the_palette_highlight_while_it_is_open() {
+        use keyboard::key::Named;
+        assert!(matches!(
+            arrow(Named::ArrowDown, true, true),
+            Some(Message::PaletteMove(1))
+        ));
+        assert!(matches!(
+            arrow(Named::ArrowUp, true, true),
+            Some(Message::PaletteMove(-1))
+        ));
+    }
+
+    #[test]
+    fn arrows_are_ignored_in_other_modals() {
+        use keyboard::key::Named;
+        assert!(arrow(Named::ArrowDown, false, true).is_none());
+        assert!(arrow(Named::ArrowUp, false, true).is_none());
     }
 }
