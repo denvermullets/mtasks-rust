@@ -9,6 +9,8 @@
 use rusqlite::{params, Connection, Result};
 use serde_json::{json, Value};
 
+use super::events::{self, EventKind};
+use super::models::Priority;
 use crate::api::activity::{
     ActivityActor, ActivityEntry, ActivityRef, ChangeValue, DependencyDirection, DependencyEvent,
     DependencyKind, FieldChange,
@@ -173,6 +175,108 @@ fn value_json(v: &Option<ChangeValue>) -> Value {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Display-ready Activity
+// ---------------------------------------------------------------------------
+
+/// Where a display item came from. `Pending` is reserved for unsynced local
+/// edits (JRST-141); server-cached entries are always `Server`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemOrigin {
+    Server,
+    Pending,
+}
+
+/// Who did it, as the server reported it. The resolver (JRST-136) maps
+/// `remote_id` to a local member; until then `name` is the server's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorSlot {
+    pub remote_id: Option<i64>,
+    pub name: Option<String>,
+}
+
+/// One rendered line of Activity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityItem {
+    /// Stable per line: `<entry cursor>#<line index>`.
+    pub key: String,
+    /// The server's `created_at` for the entry.
+    pub at: String,
+    pub actor: ActorSlot,
+    /// Plain text, no HTML.
+    pub text: String,
+    pub origin: ItemOrigin,
+}
+
+/// Display-ready Activity for an issue, oldest first. Each version change,
+/// dependency event or reference becomes its own line.
+pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<ActivityItem>> {
+    let mut items = Vec::new();
+    for entry in entries_for_issue(conn, issue_id)? {
+        let actor = ActorSlot {
+            remote_id: entry.actor_remote_id,
+            name: entry.actor_name.clone(),
+        };
+        let texts = match entry.entry_type.as_str() {
+            "version" => version_lines(&entry),
+            _ => Vec::new(),
+        };
+        for (i, text) in texts.into_iter().enumerate() {
+            items.push(ActivityItem {
+                key: format!("{}#{i}", entry.cursor),
+                at: entry.created_at.clone(),
+                actor: actor.clone(),
+                text,
+                origin: ItemOrigin::Server,
+            });
+        }
+    }
+    Ok(items)
+}
+
+/// One line per change in a version entry. Changes this layer can't word yet
+/// produce no line.
+fn version_lines(entry: &StoredEntry) -> Vec<String> {
+    let Some(changes) = entry.payload["changes"].as_array() else {
+        return Vec::new();
+    };
+    changes.iter().filter_map(plain_change_line).collect()
+}
+
+/// Wording for a plain (non-reference) field, reusing `events::describe`.
+fn plain_change_line(change: &Value) -> Option<String> {
+    let field = change["field"].as_str()?;
+    let kind = match field {
+        "priority" => EventKind::Priority,
+        "title" => EventKind::Title,
+        "description" => EventKind::Description,
+        "estimate" => EventKind::Estimate,
+        "due_date" => EventKind::DueDate,
+        _ => return None,
+    };
+    let value = |v: &Value| -> Option<String> {
+        match v {
+            Value::Null => None,
+            Value::String(s) if kind == EventKind::Priority => Some(priority_name_label(s)),
+            Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        }
+    };
+    Some(events::describe(
+        kind,
+        value(&change["from"]).as_deref(),
+        value(&change["to"]).as_deref(),
+    ))
+}
+
+/// Server priority name (`"no_priority"`, `"high"`, ...) as the desktop label.
+fn priority_name_label(name: &str) -> String {
+    match Priority::from_rails_str(name) {
+        Ok(p) => events::priority_label(p.to_i32()),
+        Err(_) => name.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +376,74 @@ mod tests {
         store_batch(&conn, "i1", &feed(BATCH)).unwrap();
         conn.execute("DELETE FROM issues WHERE id = 'i1'", []).unwrap();
         assert!(entries_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        conn
+    }
+
+    fn store(conn: &Connection, body: &str) {
+        let entries: Vec<ActivityEntry> = serde_json::from_str(body).unwrap();
+        store_batch(conn, "i1", &entries).unwrap();
+    }
+
+    #[test]
+    fn each_plain_change_is_one_line_with_desktop_wording() {
+        let conn = mem();
+        store(&conn, r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:40:47Z",
+          "actor":{"id":2,"name":"ryan"},"event":"update","description":"x",
+          "changes":[{"field":"priority","from":"low","to":"high"},
+                     {"field":"title","from":"a","to":"b"},
+                     {"field":"description","from":"<p>a</p>","to":"<p>b</p>"},
+                     {"field":"estimate","from":null,"to":3},
+                     {"field":"due_date","from":"2026-01-01","to":null},
+                     {"field":"priority","from":"high","to":"no_priority"}]}]"#);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, [
+            "changed priority from Low to High",
+            "changed the title",
+            "updated the description",
+            "changed estimate from none to 3",
+            "changed due date from 2026-01-01 to none",
+            "changed priority from High to None",
+        ]);
+        assert_eq!(items[0].at, "2026-07-06T00:40:47Z");
+        assert_eq!(items[0].actor.name.as_deref(), Some("ryan"));
+        assert_eq!(items[0].key, "version:1#0");
+        assert_eq!(items[0].origin, ItemOrigin::Server);
+    }
+
+    #[test]
+    fn lines_are_ordered_by_server_created_at() {
+        let conn = mem();
+        store(&conn, r#"[
+          {"type":"version","id":2,"cursor":"version:2","created_at":"2026-07-07T00:00:00Z","actor":null,"event":"update","description":"",
+           "changes":[{"field":"title","from":"a","to":"b"}]},
+          {"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"",
+           "changes":[{"field":"priority","from":"low","to":"urgent"}]}]"#);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].text, "changed priority from Low to Urgent");
+        assert_eq!(items[1].text, "changed the title");
+        assert_eq!(items[0].actor, ActorSlot { remote_id: None, name: None });
+    }
+
+    #[test]
+    fn empty_changes_yield_no_lines() {
+        let conn = mem();
+        store(&conn, r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"","changes":[]}]"#);
+        assert!(activity_for_issue(&conn, "i1").unwrap().is_empty());
     }
 }
