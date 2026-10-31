@@ -2214,6 +2214,12 @@ impl SyncEngine {
         let current_user = Some((me.id, me.name.clone()));
         let can_write = Some(me.token.has_write_scope());
 
+        // The Home page rides on the same `/me` call; a failure here must not
+        // block the rest of the pull.
+        if let Err(e) = open().and_then(|c| store_home_page(&c, me).map_err(|e| e.to_string())) {
+            sync_log("phase=pull", "home_page", &e);
+        }
+
         // Phase 2: refresh teams (and discover any new ones the token can see).
         match pull_teams(client).await {
             Ok(orphan) => {
@@ -2326,6 +2332,11 @@ impl SyncEngine {
             can_write,
         }
     }
+}
+
+/// Persist the Home page `/me` reported (null clears it).
+fn store_home_page(conn: &Connection, me: &MeDto) -> rusqlite::Result<()> {
+    crate::db::home_page::apply_me(conn, me.home_page.as_ref())
 }
 
 struct PullTarget {

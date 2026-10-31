@@ -25,7 +25,7 @@ pub use error::ApiError;
 pub use issues::IssueParams;
 pub use labels::LabelParams;
 pub use projects::ProjectParams;
-pub use users::{MeDto, MeTokenDto};
+pub use users::{HomePageDto, MeDto, MeTokenDto};
 
 /// Percent-encode a query value (timestamps carry `:` and possibly `+`).
 pub(crate) fn encode_query_value(v: &str) -> String {
