@@ -390,6 +390,7 @@ async fn process(
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
         ("notification", "read_all") => notification_read_all(client, entry.payload.as_deref()).await,
+        ("home_page", "update") => home_page_set(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -1835,6 +1836,18 @@ fn notification_read_outcome(result: Result<(), ApiError>) -> Outcome {
     }
 }
 
+/// `PUT /me/home_page`. A 422 drops the entry (logged by the drain); the next
+/// `/me` read restores the server value.
+async fn home_page_set(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let Some((kind, id)) = crate::db::home_page::parse_payload(payload) else {
+        return Outcome::DropAndLog("home_page set: bad payload".into());
+    };
+    match crate::api::users::set_home_page(client, &kind, id).await {
+        Ok(()) => Outcome::Success,
+        Err(e) => classify(&e),
+    }
+}
+
 fn resolve_comment_parent(
     conn: &rusqlite::Connection,
     comment: &crate::db::models::Comment,
@@ -2250,6 +2263,16 @@ impl SyncEngine {
             }
         }
 
+        // Phase 2c: Saved views deleted on the server (user-level feed).
+        match pull_saved_view_tombstones_step(client).await {
+            Ok(()) => report.processed += 1,
+            Err(msg) => {
+                report.failed += 1;
+                note_pull_failure(&mut report, &msg);
+                report.last_error = Some(msg);
+            }
+        }
+
         // Phase 3: figure out which teams to deeply sync.
         let targets = match collect_pull_targets(me.token.scoped_team_ids().as_deref()) {
             Ok(t) => t,
@@ -2655,6 +2678,29 @@ async fn pull_saved_views_step(client: &ApiClient) -> Result<(), String> {
             applied.skipped_unmirrored,
             applied.skipped_pending
         ),
+    );
+    Ok(())
+}
+
+/// Pull the user-level tombstone feed and remove Saved views deleted on the
+/// server. Own cursor; advances to `X-Server-Time` once the page is applied.
+async fn pull_saved_view_tombstones_step(client: &ApiClient) -> Result<(), String> {
+    let since = {
+        let conn = open()?;
+        crate::db::saved_views::deleted_cursor(&conn)
+            .map_err(|e| format!("db (pull cursor): {e}"))?
+            .and_then(|c| cursor::since_with_overlap(&c))
+    };
+    let page = deleted::list_user(client, since.as_deref())
+        .await
+        .map_err(|e| format!("deleted (user): {e}"))?;
+    let conn = open()?;
+    let removed = crate::db::saved_views::apply_tombstones(&conn, &page.rows, page.server_time.as_deref())
+        .map_err(|e| format!("db (saved view tombstones): {e}"))?;
+    sync_log(
+        "phase=pull_deleted_user",
+        "ok",
+        &format!("mode={} rows={} removed={removed}", pull_mode(&since), page.rows.len()),
     );
     Ok(())
 }
@@ -3838,6 +3884,28 @@ mod tests {
             Outcome::DropAndLog(m) => assert!(m.contains("title can't be blank")),
             other => panic!("expected drop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn home_page_422_is_dropped_and_logged_then_me_restores() {
+        use crate::db::home_page;
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        home_page::set_local(&conn, "team", 3).unwrap();
+        let entry = sync_queue::pending_entries(&conn).unwrap().remove(0);
+        // The drain's view of the entry: payload parses, a 422 classifies as a drop.
+        assert_eq!(home_page::parse_payload(entry.payload.as_deref()), Some(("team".into(), 3)));
+        let e = ApiError::Validation { errors: vec!["not found".into()] };
+        assert!(matches!(classify(&e), Outcome::DropAndLog(_)));
+        sync_queue::mark_synced(&conn, entry.id.unwrap()).unwrap();
+        home_page::apply_me(&conn, Some(&crate::api::HomePageDto { kind: "team".into(), id: 1 })).unwrap();
+        assert_eq!(home_page::get(&conn).unwrap().unwrap().remote_id, 1);
+    }
+
+    #[test]
+    fn a_5xx_leaves_the_home_page_write_pending() {
+        let e = ApiError::Server { status: 500, message: "x".into() };
+        assert!(matches!(classify(&e), Outcome::LeavePending(_)));
     }
 
     #[test]
