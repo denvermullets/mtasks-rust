@@ -66,6 +66,44 @@ pub fn apply_me(conn: &Connection, reported: Option<&HomePageDto>) -> Result<()>
     }
 }
 
+/// Where launch should land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchTarget {
+    /// A team's Issues board (local team id).
+    Team(String),
+    /// A Saved view, opened on its team (local ids).
+    View { view_id: String, team_id: String },
+    /// No usable Home page: the first non-archived team's board.
+    Default,
+}
+
+/// Resolve the stored Home page against the local mirror. Dashboards, unknown
+/// kinds and targets that are not mirrored (deleted, not synced yet, or a
+/// view whose team is missing) resolve to `Default`.
+pub fn launch_target(
+    home: Option<&HomePage>,
+    teams: &[crate::db::models::Team],
+    views: &std::collections::HashMap<String, Vec<crate::db::saved_views::SavedView>>,
+) -> LaunchTarget {
+    let Some(h) = home else { return LaunchTarget::Default };
+    match h.kind.as_str() {
+        "team" => teams
+            .iter()
+            .find(|t| t.remote_id == Some(h.remote_id))
+            .map_or(LaunchTarget::Default, |t| LaunchTarget::Team(t.id.clone())),
+        "view" => views
+            .values()
+            .flatten()
+            .find(|v| v.remote_id == Some(h.remote_id))
+            .filter(|v| teams.iter().any(|t| t.id == v.team_id))
+            .map_or(LaunchTarget::Default, |v| LaunchTarget::View {
+                view_id: v.id.clone(),
+                team_id: v.team_id.clone(),
+            }),
+        _ => LaunchTarget::Default,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +210,69 @@ mod tests {
         queue_home_write(&conn, true);
         apply_me(&conn, Some(&dto("view", 2))).unwrap();
         assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "view".into(), remote_id: 2 }));
+    }
+
+    fn team(id: &str, remote: Option<i64>, archived: bool) -> crate::db::models::Team {
+        crate::db::models::Team {
+            id: id.into(),
+            name: id.into(),
+            identifier: id.into(),
+            remote_id: remote,
+            archived_at: archived.then(|| "2026-01-01T00:00:00.000Z".to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn sv(id: &str, team: &str, remote: Option<i64>) -> crate::db::saved_views::SavedView {
+        crate::db::saved_views::SavedView {
+            id: id.into(),
+            remote_id: remote,
+            team_id: team.into(),
+            name: id.into(),
+            query: "{}".into(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    fn home(kind: &str, id: i64) -> Option<HomePage> {
+        Some(HomePage { kind: kind.into(), remote_id: id })
+    }
+
+    fn fixture() -> (Vec<crate::db::models::Team>, std::collections::HashMap<String, Vec<crate::db::saved_views::SavedView>>) {
+        let teams = vec![team("a", Some(1), false), team("b", Some(2), false)];
+        let views = std::collections::HashMap::from([("b".to_string(), vec![sv("v1", "b", Some(50))])]);
+        (teams, views)
+    }
+
+    #[test]
+    fn team_home_launches_that_team() {
+        let (t, v) = fixture();
+        assert_eq!(launch_target(home("team", 2).as_ref(), &t, &v), LaunchTarget::Team("b".into()));
+    }
+
+    #[test]
+    fn view_home_launches_that_view() {
+        let (t, v) = fixture();
+        assert_eq!(
+            launch_target(home("view", 50).as_ref(), &t, &v),
+            LaunchTarget::View { view_id: "v1".into(), team_id: "b".into() }
+        );
+    }
+
+    #[test]
+    fn no_home_dashboard_and_missing_targets_fall_back() {
+        let (t, v) = fixture();
+        for h in [None, home("dashboard", 9), home("team", 99), home("view", 99), home("bogus", 1)] {
+            assert_eq!(launch_target(h.as_ref(), &t, &v), LaunchTarget::Default);
+        }
+    }
+
+    #[test]
+    fn a_view_whose_team_is_not_mirrored_falls_back() {
+        let (t, _) = fixture();
+        let views = std::collections::HashMap::from([("gone".to_string(), vec![sv("v2", "gone", Some(60))])]);
+        assert_eq!(launch_target(home("view", 60).as_ref(), &t, &views), LaunchTarget::Default);
     }
 }
