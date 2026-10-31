@@ -28,7 +28,7 @@ use crate::api::{
     LabelParams, MeDto, ProjectParams, RecurringIssueParams,
 };
 use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
-use crate::db::{connection, queries, recurring_issues, sync_queue};
+use crate::db::{connection, queries, sync_queue};
 use crate::sync::cursor;
 
 #[derive(Debug, Default, Clone)]
@@ -3591,7 +3591,7 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
             queries::upsert_issue(conn, &issue).map_err(|e| format!("db (upsert): {e}"))?;
             // Recurring issues are pulled before issues, so the origin
             // resolves locally; an unresolved id keeps the stored value.
-            recurring_issues::set_issue_origin(conn, &issue.id, recurring_remote_id)
+            crate::db::recurring_issues::set_issue_origin(conn, &issue.id, recurring_remote_id)
                 .map_err(|e| format!("db (recurring origin): {e}"))?;
             // Reflect the remote label set into the issue_labels join. Labels
             // are pulled before issues, so their local rows already exist; any
@@ -5853,7 +5853,7 @@ mod tests {
     fn pulled_issue_records_the_recurring_issue_that_spawned_it() {
         let conn = setup_dependency_db();
         conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
-        recurring_issues::apply_pulled(
+        crate::db::recurring_issues::apply_pulled(
             &conn,
             "t1",
             &[serde_json::from_value(serde_json::json!({
@@ -5872,13 +5872,13 @@ mod tests {
         dto.recurring_issue_id = Some(5);
         assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
         let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
-        let origin = recurring_issues::origin_of_issue(&conn, &i.id).unwrap().unwrap();
+        let origin = crate::db::recurring_issues::origin_of_issue(&conn, &i.id).unwrap().unwrap();
         assert_eq!(origin.title, "Weekly");
 
         // Server detached it: cleared.
         let back = detail_dto(2, "two", "2026-06-01T00:00:00.000Z");
         assert_eq!(apply_pulled_issues(&conn, "t1", vec![back]), 0);
-        assert_eq!(recurring_issues::origin_id(&conn, &i.id).unwrap(), None);
+        assert_eq!(crate::db::recurring_issues::origin_id(&conn, &i.id).unwrap(), None);
     }
 
     #[test]
