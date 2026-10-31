@@ -4536,6 +4536,7 @@ impl App {
                     let _ = crate::db::recurring_issues::delete_local(&conn, id);
                     self.modal = Modal::None;
                     self.reload_recurring(&conn);
+                    self.reload_detail_origin(&conn);
                 }
             }
 
