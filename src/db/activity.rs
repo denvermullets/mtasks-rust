@@ -111,7 +111,7 @@ pub fn store_batch_at(
     tx.commit()
 }
 
-/// Remove the issue's settled Pending changes: local `issue_events` rows linked
+/// Remove the issue's settled Pending changes: Pending-change `issue_events` rows linked
 /// to a sync-queue entry that has synced AND whose `synced_at` is not later
 /// than `fetch_started_at`, i.e. the server had already applied the change
 /// when the fetch began, so the fetched Activity carries it.
@@ -1191,7 +1191,7 @@ mod jrst141_tests {
     }
 
     #[test]
-    fn unqueued_local_events_are_not_pending() {
+    fn unqueued_edits_are_not_pending() {
         let conn = mem();
         let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
         issue.priority = 1;
@@ -1334,7 +1334,7 @@ mod jrst143_tests {
     }
 
     #[test]
-    fn unqueued_local_events_are_untouched() {
+    fn unqueued_edits_are_untouched() {
         let conn = mem();
         let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
         issue.priority = 1;

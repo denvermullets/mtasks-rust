@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_keeps_only_queued_local_events_linked_to_their_own_entry() {
+    fn upgrade_keeps_only_queued_pending_changes_linked_to_their_own_entry() {
         let conn = open_mem();
         conn.execute_batch(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",

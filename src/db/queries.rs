@@ -153,7 +153,7 @@ fn now_ts() -> String {
     crate::db::now_iso()
 }
 
-/// Record local activity events for a write that turned `old` into the
+/// Record Pending changes for a write that turned `old` into the
 /// current row. No-op when the issue didn't exist beforehand.
 fn record_local_diff(conn: &Connection, old: Option<Issue>, issue_id: &str) -> Result<()> {
     if let (Some(old), Some(new)) = (old, get_issue(conn, issue_id)?) {
@@ -1226,20 +1226,12 @@ pub fn edit_issue_queued(
     edit: impl FnOnce(&Connection) -> Result<()>,
 ) -> Result<i64> {
     let tx = conn.unchecked_transaction()?;
-    let events_before: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(id), 0) FROM issue_events",
-        [],
-        |r| r.get(0),
-    )?;
+    let events_before = max_event_id(&tx)?;
     edit(&tx)?;
     let id = super::sync_queue::enqueue_returning_id(&tx, "issue", issue_id, action, payload)?;
-    // The edit's local Activity rows are its Pending changes: link them to the
+    // The edit's new Activity rows are its Pending changes: link them to the
     // queue entry that will push them.
-    tx.execute(
-        "UPDATE issue_events SET sync_queue_id = ?1
-         WHERE id > ?2 AND issue_id = ?3 AND source = 'local' AND sync_queue_id IS NULL",
-        params![id, events_before, issue_id],
-    )?;
+    link_new_pending_changes(&tx, events_before, id, Some(issue_id))?;
     tx.commit()?;
     Ok(id)
 }
@@ -1248,14 +1240,21 @@ fn max_event_id(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM issue_events", [], |r| r.get(0))?)
 }
 
-/// Link every unlinked local event written after `events_before` (a dependency
-/// change writes one on each of its two issues) to the queue entry that will
-/// push it, making them Pending changes.
-fn link_new_local_events(conn: &Connection, events_before: i64, queue_id: i64) -> Result<()> {
+/// Link every unlinked locally-written Activity row after `events_before` to
+/// the queue entry that will push it, making them Pending changes. `issue_id`
+/// limits it to one issue; `None` takes all (a dependency change writes one
+/// row on each of its two issues).
+fn link_new_pending_changes(
+    conn: &Connection,
+    events_before: i64,
+    queue_id: i64,
+    issue_id: Option<&str>,
+) -> Result<()> {
     conn.execute(
         "UPDATE issue_events SET sync_queue_id = ?1
-         WHERE id > ?2 AND source = 'local' AND sync_queue_id IS NULL",
-        params![queue_id, events_before],
+         WHERE id > ?2 AND (?3 IS NULL OR issue_id = ?3)
+           AND source = 'local' AND sync_queue_id IS NULL",
+        params![queue_id, events_before, issue_id],
     )?;
     Ok(())
 }
@@ -1276,7 +1275,7 @@ pub fn insert_issue_dependency_queued(conn: &Connection, dep: &IssueDependency) 
     let events_before = max_event_id(&tx)?;
     insert_issue_dependency(&tx, dep)?;
     let id = super::sync_queue::enqueue_returning_id(&tx, "dependency", &dep.id, "create", None)?;
-    link_new_local_events(&tx, events_before, id)?;
+    link_new_pending_changes(&tx, events_before, id, None)?;
     tx.commit()?;
     Ok(id)
 }
@@ -1322,7 +1321,7 @@ pub fn delete_issue_dependency_queued(conn: &Connection, dep_id: &str) -> Result
     let events_before = max_event_id(&tx)?;
     delete_issue_dependency(&tx, dep_id)?;
     if let Some(qid) = queued {
-        link_new_local_events(&tx, events_before, qid)?;
+        link_new_pending_changes(&tx, events_before, qid, None)?;
     }
     tx.commit()?;
     Ok(queued)
