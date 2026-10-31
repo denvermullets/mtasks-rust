@@ -307,8 +307,8 @@ pub enum Message {
     // Inbox
     /// Move the Inbox selection by a signed step (j/k).
     InboxMove(isize),
-    /// Select the Inbox row at this index (click).
-    InboxSelect(usize),
+    /// Select the Inbox row at this index and open its issue (click).
+    InboxOpenAt(usize),
     /// Mark the selected Inbox Notification read (`r`).
     InboxMarkRead,
     /// Open the selected Notification's issue and mark it read (Enter).
@@ -2070,9 +2070,10 @@ impl App {
                     self.reload_inbox();
                 }
             }
-            Message::InboxSelect(i) => {
+            Message::InboxOpenAt(i) => {
                 if i < self.inbox.items.len() {
                     self.inbox.selected = i;
+                    return self.update(Message::InboxOpen);
                 }
             }
 
