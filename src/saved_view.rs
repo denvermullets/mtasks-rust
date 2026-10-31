@@ -210,8 +210,17 @@ fn csv(v: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Translate comma-separated remote ids to local ids, dropping any that don't
-/// resolve (including non-numeric ones).
+/// Prefix of a placeholder standing for a record created offline (no remote
+/// id yet): `local:<local id>`. Resolved to the remote id at push.
+pub const LOCAL_PLACEHOLDER: &str = "local:";
+
+/// The local id a placeholder names, if `part` is one.
+pub fn placeholder_local_id(part: &str) -> Option<&str> {
+    part.strip_prefix(LOCAL_PLACEHOLDER).filter(|id| !id.is_empty())
+}
+
+/// Translate comma-separated remote ids (or local-id placeholders) to local
+/// ids, dropping any that don't resolve (including non-numeric ones).
 fn local_ids<'a>(
     v: &str,
     records: impl Iterator<Item = (Option<i64>, &'a String)>,
@@ -219,8 +228,14 @@ fn local_ids<'a>(
     let records: Vec<_> = records.collect();
     csv(v)
         .into_iter()
-        .filter_map(|p| p.parse::<i64>().ok())
-        .filter_map(|rid| records.iter().find(|(r, _)| *r == Some(rid)))
+        .filter_map(|p| {
+            if let Some(local) = placeholder_local_id(p) {
+                records.iter().find(|(_, id)| id.as_str() == local)
+            } else {
+                let rid = p.parse::<i64>().ok()?;
+                records.iter().find(|(r, _)| *r == Some(rid))
+            }
+        })
         .map(|(_, id)| (*id).clone())
         .collect()
 }
@@ -498,8 +513,8 @@ pub fn new_view_query(state: &BoardState, mirror: &Mirror) -> RawQuery {
     encode(state, &RawQuery::new(), mirror)
 }
 
-/// Local ids -> remote ids (records without a remote id can't be encoded),
-/// then the raw ids that resolve to no mirrored record, so they survive.
+/// Local ids -> remote ids (records without a remote id become a local-id
+/// placeholder, resolved at push), then the raw ids that resolve to no mirrored record, so they survive.
 fn remote_ids<'a>(
     local: &[String],
     raw: Option<&str>,
@@ -509,13 +524,19 @@ fn remote_ids<'a>(
     let mut out: Vec<String> = local
         .iter()
         .filter_map(|id| records.iter().find(|(_, l)| *l == id))
-        .filter_map(|(r, _)| r.map(|r| r.to_string()))
+        .map(|(r, l)| match r {
+            Some(r) => r.to_string(),
+            None => format!("{LOCAL_PLACEHOLDER}{l}"),
+        })
         .collect();
     for part in raw.map(csv).unwrap_or_default() {
-        let resolves = part
-            .parse::<i64>()
-            .ok()
-            .is_some_and(|rid| records.iter().any(|(r, _)| *r == Some(rid)));
+        let resolves = match placeholder_local_id(part) {
+            Some(local) => records.iter().any(|(_, l)| l.as_str() == local),
+            None => part
+                .parse::<i64>()
+                .ok()
+                .is_some_and(|rid| records.iter().any(|(r, _)| *r == Some(rid))),
+        };
         if !resolves {
             out.push(part.to_string());
         }
@@ -973,6 +994,34 @@ mod tests {
         assert_eq!(e["lane_ids"], "11,999");
         assert_eq!(e["project_ids"], "none,777");
         assert_eq!(e["priority"], "high,bogus");
+    }
+
+    #[test]
+    fn encode_writes_offline_records_as_placeholders_and_decode_resolves_them() {
+        let fx = Fx::new();
+        let mut ov = open_with(&fx, &[("label_ids", "30")]);
+        ov.state.filters.labels = vec!["lb-a".into(), "lb-new".into()];
+        let e = ov.encoded(&fx.mirror());
+        assert_eq!(e["label_ids"], "30,local:lb-new");
+        let d = fx.decode(&e);
+        assert_eq!(d.state.filters.labels, vec!["lb-a", "lb-new"]);
+        // Re-encoding a stored placeholder neither duplicates nor drops it.
+        let mut ov2 = open_with(&fx, &[("label_ids", "local:lb-new")]);
+        assert_eq!(ov2.state.filters.labels, vec!["lb-new"]);
+        assert_eq!(ov2.encoded(&fx.mirror())["label_ids"], "local:lb-new");
+        ov2.state.filters.labels.clear();
+        assert_eq!(ov2.encoded(&fx.mirror())["label_ids"], "");
+    }
+
+    #[test]
+    fn encode_writes_offline_projects_as_placeholders() {
+        let mut fx = Fx::new();
+        fx.projects.push(project("p-new", None));
+        let mut ov = open_with(&fx, &[]);
+        ov.state.filters.projects = vec![String::new(), "p-a".into(), "p-new".into()];
+        assert_eq!(ov.encoded(&fx.mirror())["project_ids"], "none,40,local:p-new");
+        let d = fx.decode(&ov.encoded(&fx.mirror()));
+        assert_eq!(d.state.filters.projects, vec![String::new(), "p-a".into(), "p-new".into()]);
     }
 
     #[test]

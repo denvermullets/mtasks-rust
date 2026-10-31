@@ -1851,6 +1851,48 @@ async fn home_page_set(client: &ApiClient, payload: Option<&str>) -> Outcome {
     }
 }
 
+/// Resolve `local:<id>` placeholders in a saved view query's `label_ids` and
+/// `project_ids` to remote ids. The record's own create is earlier in the FIFO
+/// queue, so it has normally pushed; one that still has no remote id (or is
+/// gone) is left out, and its description is returned for logging.
+fn resolve_query_placeholders(
+    conn: &Connection,
+    query: serde_json::Value,
+) -> (serde_json::Value, Vec<String>) {
+    let mut query = query;
+    let mut dropped = Vec::new();
+    let Some(map) = query.as_object_mut() else {
+        return (query, dropped);
+    };
+    for (key, table) in [("label_ids", "labels"), ("project_ids", "projects")] {
+        let Some(serde_json::Value::String(text)) = map.get(key) else {
+            continue;
+        };
+        if !text.contains(crate::saved_view::LOCAL_PLACEHOLDER) {
+            continue;
+        }
+        let mut kept = Vec::new();
+        for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let Some(local) = crate::saved_view::placeholder_local_id(part) else {
+                kept.push(part.to_string());
+                continue;
+            };
+            match queries::remote_id_for(conn, table, local) {
+                Ok(Some(rid)) => kept.push(rid.to_string()),
+                _ => dropped.push(format!("{key} {part}")),
+            }
+        }
+        map.insert(key.to_string(), serde_json::Value::String(kept.join(",")));
+    }
+    (query, dropped)
+}
+
+fn log_dropped_placeholders(entity_id: &str, dropped: &[String]) {
+    for d in dropped {
+        eprintln!("saved_view {entity_id}: left unresolved placeholder out of push ({d})");
+    }
+}
+
 struct SavedViewCreatePrep {
     team_remote_id: i64,
     local_id: String,
@@ -1894,11 +1936,14 @@ fn saved_view_create_prep(conn: &Connection, entity_id: &str) -> Prep<SavedViewC
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
+    let query = serde_json::from_str(&query).unwrap_or_else(|_| serde_json::json!({}));
+    let (query, dropped) = resolve_query_placeholders(conn, query);
+    log_dropped_placeholders(&local_id, &dropped);
     Prep::Ready(SavedViewCreatePrep {
         team_remote_id,
         local_id,
         name,
-        query: serde_json::from_str(&query).unwrap_or_else(|_| serde_json::json!({})),
+        query,
     })
 }
 
@@ -1973,6 +2018,8 @@ fn saved_view_update_prep(conn: &Connection, entity_id: &str) -> Prep<SavedViewU
         Ok(q) if q.is_object() => q,
         _ => serde_json::json!({}),
     };
+    let (query, dropped) = resolve_query_placeholders(conn, query);
+    log_dropped_placeholders(entity_id, &dropped);
     Prep::Ready(SavedViewUpdatePrep {
         remote_id,
         stored: view.query,
@@ -4373,6 +4420,54 @@ mod tests {
             serde_json::json!({"lane_ids":"1,999","future_key":"x","view_mode":"list"})
         );
         assert_eq!(p.stored, q);
+    }
+
+    #[test]
+    fn saved_view_update_resolves_placeholders_to_remote_ids_and_drops_unresolvable() {
+        let q = r#"{"label_ids":"30,local:lab1,local:lab2,local:ghost","project_ids":"none,local:p1,local:p2","x":"1"}"#;
+        let conn = saved_view_db(Some(5), q);
+        let now = "2026-01-01T00:00:00.000Z";
+        for (id, rid) in [("lab1", Some(77)), ("lab2", None)] {
+            conn.execute(
+                "INSERT INTO labels (id, remote_id, team_id, name, color, created_at, updated_at)
+                 VALUES (?1, ?2, 't1', ?1, '#ef4444', ?3, ?3)",
+                rusqlite::params![id, rid, now],
+            )
+            .unwrap();
+        }
+        for (id, rid) in [("p1", Some(88)), ("p2", None)] {
+            conn.execute(
+                "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+                 VALUES (?1, ?2, 't1', ?1, ?3, ?3)",
+                rusqlite::params![id, rid, now],
+            )
+            .unwrap();
+        }
+        let Prep::Ready(p) = saved_view_update_prep(&conn, "sv1") else {
+            panic!("expected ready");
+        };
+        assert_eq!(p.query["label_ids"], "30,77");
+        assert_eq!(p.query["project_ids"], "none,88");
+        assert_eq!(p.query["x"], "1");
+        // The stored query keeps the placeholders.
+        assert_eq!(p.stored, q);
+    }
+
+    #[test]
+    fn saved_view_create_resolves_placeholders_and_drops_unresolvable() {
+        let (conn, id) = saved_view_conn();
+        insert_test_label(&conn, "lab1", Some(77));
+        insert_test_label(&conn, "lab2", None);
+        crate::db::saved_views::update_query_local(
+            &conn,
+            &id,
+            &[("label_ids".to_string(), "local:lab1,local:lab2".to_string())].into(),
+        )
+        .unwrap();
+        let Prep::Ready(p) = saved_view_create_prep(&conn, &id) else {
+            panic!("expected Ready");
+        };
+        assert_eq!(p.query["label_ids"], "77");
     }
 
     #[test]
