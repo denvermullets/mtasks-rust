@@ -48,6 +48,66 @@ pub struct RecurringIssueDto {
     pub updated_at: String,
 }
 
+/// Request fields for `recurring_issue` writes, sent under the
+/// `{recurring_issue: {...}}` wrapper. Every field is optional and skipped when
+/// `None`, so a write sends only what it changed (Rails permits a partial
+/// update). Later write tickets (edit, create) fill more fields.
+/// `starts_on` (`YYYY-MM-DD`) sits inside the wrapper with the others; it is
+/// sent only on schedule changes, never on a pause/resume, so the server keeps
+/// the stored `next_run_on`.
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct RecurringIssueParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weekday: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub day_of_month: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_ids: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starts_on: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RecurringIssueWrap<'a> {
+    recurring_issue: &'a RecurringIssueParams,
+}
+
+fn item_path(team_id: i64, id: i64) -> String {
+    format!("api/v1/teams/{team_id}/recurring_issues/{id}")
+}
+
+/// `PATCH .../recurring_issues/:id`; returns the server's updated row.
+pub async fn update(
+    client: &ApiClient,
+    team_id: i64,
+    id: i64,
+    params: &RecurringIssueParams,
+) -> Result<RecurringIssueDto, ApiError> {
+    client
+        .patch(&item_path(team_id, id), &RecurringIssueWrap { recurring_issue: params })
+        .await
+}
+
 fn list_path(team_id: i64, updated_since: Option<&str>) -> String {
     format!(
         "api/v1/teams/{team_id}/recurring_issues{}",
@@ -76,6 +136,14 @@ mod tests {
             list_path(7, Some("2026-01-01T00:00:00Z")),
             "api/v1/teams/7/recurring_issues?updated_since=2026-01-01T00%3A00%3A00Z"
         );
+    }
+
+    #[test]
+    fn update_body_wraps_and_skips_unset_fields_including_starts_on() {
+        let params = RecurringIssueParams { active: Some(false), ..Default::default() };
+        let body = serde_json::to_value(RecurringIssueWrap { recurring_issue: &params }).unwrap();
+        assert_eq!(body, serde_json::json!({ "recurring_issue": { "active": false } }));
+        assert_eq!(item_path(7, 5), "api/v1/teams/7/recurring_issues/5");
     }
 
     #[test]

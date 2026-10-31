@@ -23,8 +23,9 @@ use rusqlite::Connection;
 use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::{
-    comments, dependencies, issues, labels, lanes, members, projects, teams, users, ApiClient,
-    ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams, LabelParams, MeDto, ProjectParams,
+    comments, dependencies, issues, labels, lanes, members, projects, recurring_issues, teams,
+    users, ApiClient, ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams,
+    LabelParams, MeDto, ProjectParams, RecurringIssueParams,
 };
 use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
 use crate::db::{connection, queries, sync_queue};
@@ -381,6 +382,9 @@ async fn process(
         ("project", "create") => project_create(client, &entry.entity_id, entry_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
+        ("recurring_issue", "update") => {
+            recurring_issue_update(client, &entry.entity_id, entry.payload.as_deref()).await
+        }
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
         ("label", "update") => label_update(client, &entry.entity_id).await,
         ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
@@ -1620,6 +1624,101 @@ async fn label_update(client: &ApiClient, entity_id: &str) -> Outcome {
     }
 }
 
+struct RecurringIssueUpdatePrep {
+    team_remote_id: i64,
+    remote_id: i64,
+    local_id: String,
+    params: RecurringIssueParams,
+}
+
+fn prep_recurring_issue_update(
+    entity_id: &str,
+    payload: Option<&str>,
+) -> Prep<RecurringIssueUpdatePrep> {
+    match open() {
+        Ok(conn) => recurring_issue_update_prep(&conn, entity_id, payload),
+        Err(e) => Prep::Done(Outcome::LeavePending(e)),
+    }
+}
+
+/// Re-reads the recurring issue row so the newest values go out, however many
+/// edits were queued. The payload's `changed` list picks which fields are sent
+/// (unknown names are ignored), and `starts_on` goes out only if the payload
+/// carries one (schedule changes), so a pause/resume leaves the server's
+/// `next_run_on` alone. Edit tickets add their fields to the match below.
+fn recurring_issue_update_prep(
+    conn: &Connection,
+    entity_id: &str,
+    payload: Option<&str>,
+) -> Prep<RecurringIssueUpdatePrep> {
+    use crate::db::recurring_issues as db;
+    let row = match db::get(conn, entity_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "recurring issue {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let Some(remote_id) = row.remote_id else {
+        return Prep::Done(Outcome::LeavePending(
+            "recurring issue create not yet drained".into(),
+        ));
+    };
+    let team_remote_id = match queries::remote_id_for(conn, "teams", &row.team_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let (changed, starts_on) = db::parse_update_payload(payload);
+    let mut params = RecurringIssueParams {
+        starts_on,
+        ..Default::default()
+    };
+    for field in &changed {
+        if field == "active" {
+            params.active = Some(row.active);
+        }
+    }
+    Prep::Ready(RecurringIssueUpdatePrep {
+        team_remote_id,
+        remote_id,
+        local_id: row.id,
+        params,
+    })
+}
+
+async fn recurring_issue_update(
+    client: &ApiClient,
+    entity_id: &str,
+    payload: Option<&str>,
+) -> Outcome {
+    let prep = match prep_recurring_issue_update(entity_id, payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    match recurring_issues::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await
+    {
+        Ok(dto) => {
+            let applied = open().and_then(|conn| {
+                crate::db::recurring_issues::apply_response(&conn, &prep.local_id, &dto)
+                    .map_err(|e| format!("apply recurring issue: {e}"))
+            });
+            match applied {
+                Ok(()) => Outcome::Success,
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
+        // A 422 is dropped by `classify`; the next pull restores the server
+        // row. "Recurring issue not found" means it is already gone (the next
+        // pull's tombstone removes the local row); a team-access 404 is
+        // handled by `classify_in_team`.
+        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
 /// The local row is gone by drain time, so the payload captured at enqueue time
 /// (`{team_remote_id, remote_id}`) is all a label delete has.
 fn prep_label_delete(payload: Option<&str>) -> Prep<(i64, i64)> {
@@ -2373,6 +2472,9 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
         ("issue", _) => team_remote(&queries::get_issue(conn, id).ok()??.team_id),
         ("project", _) => team_remote(&queries::get_project(conn, id).ok()??.team_id),
         ("label", _) => team_remote(&queries::get_label(conn, id).ok()??.team_id),
+        ("recurring_issue", _) => {
+            team_remote(&crate::db::recurring_issues::get(conn, id).ok()??.team_id)
+        }
         ("saved_view", "create") => {
             let team_id: String = conn
                 .query_row("SELECT team_id FROM saved_views WHERE id = ?1", [id], |r| r.get(0))
@@ -4408,6 +4510,63 @@ mod tests {
             label_update_prep(&conn, "nope"),
             Prep::Done(Outcome::DropAndLog(_))
         ));
+    }
+
+    fn insert_test_recurring(conn: &Connection, remote_id: Option<i64>) {
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO recurring_issues (id, remote_id, team_id, title, priority, frequency,
+                interval, active, created_at, updated_at)
+             VALUES ('r1', ?1, 't1', 'R', 0, 'daily', 1, 1, ?2, ?2)",
+            rusqlite::params![remote_id, now],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn recurring_issue_update_prep_rereads_row_and_waits_for_remote_ids() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, None);
+        let payload = crate::db::recurring_issues::update_payload(&["active"], None);
+        assert!(matches!(
+            recurring_issue_update_prep(&conn, "r1", Some(&payload)),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        conn.execute("UPDATE recurring_issues SET remote_id = 5 WHERE id = 'r1'", [])
+            .unwrap();
+        conn.execute("UPDATE teams SET remote_id = NULL WHERE id = 't1'", []).unwrap();
+        assert!(matches!(
+            recurring_issue_update_prep(&conn, "r1", Some(&payload)),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        conn.execute("UPDATE teams SET remote_id = 700 WHERE id = 't1'", []).unwrap();
+        // The toggle is read at push time: flip it after queueing.
+        crate::db::recurring_issues::set_active(&conn, "r1", false).unwrap();
+        match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
+            Prep::Ready(p) => {
+                assert_eq!((p.team_remote_id, p.remote_id), (700, 5));
+                assert_eq!(p.params.active, Some(false));
+                assert_eq!(p.params.starts_on, None);
+                let body = serde_json::to_value(&p.params).unwrap();
+                assert_eq!(body, serde_json::json!({ "active": false }));
+            }
+            _ => panic!("expected Ready"),
+        }
+        assert!(matches!(
+            recurring_issue_update_prep(&conn, "nope", Some(&payload)),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
+    }
+
+    #[test]
+    fn recurring_issue_update_prep_sends_starts_on_only_when_the_payload_has_one() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, Some(5));
+        let payload = crate::db::recurring_issues::update_payload(&["active"], Some("2026-11-05"));
+        match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
+            Prep::Ready(p) => assert_eq!(p.params.starts_on.as_deref(), Some("2026-11-05")),
+            _ => panic!("expected Ready"),
+        }
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub use error::ApiError;
 pub use issues::IssueParams;
 pub use labels::LabelParams;
 pub use projects::ProjectParams;
+pub use recurring_issues::RecurringIssueParams;
 pub use users::{HomePageDto, MeDto, MeTokenDto};
 
 /// Percent-encode a query value (timestamps carry `:` and possibly `+`).

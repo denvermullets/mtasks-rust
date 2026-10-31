@@ -5,7 +5,7 @@
 //! a `header_cell` in `view` and a cell in `recurring_row`; add a row action in
 //! `recurring_row` (a `mouse_area` / button on the row) with its own `Message`.
 
-use iced::widget::{column, container, horizontal_rule, row, scrollable, text};
+use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
@@ -13,6 +13,7 @@ use crate::db::recurring_issues::RecurringIssueRow;
 use crate::theme as t;
 
 const COL_STATE: f32 = 110.0;
+const COL_ACTION: f32 = 70.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
 /// empty state when the team has none.
@@ -22,7 +23,8 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .padding([8, 16])
         .align_y(Alignment::Center)
         .push(header_cell("Title", Length::Fill))
-        .push(header_cell("State", Length::Fixed(COL_STATE)));
+        .push(header_cell("State", Length::Fixed(COL_STATE)))
+        .push(header_cell("", Length::Fixed(COL_ACTION)));
 
     let mut body = column![].width(Length::Fill);
     if rows.is_empty() {
@@ -81,6 +83,27 @@ pub fn state_label(active: bool) -> &'static str {
     }
 }
 
+/// Label of the row's pause/resume button: the action it performs.
+pub fn toggle_label(active: bool) -> &'static str {
+    if active {
+        "Pause"
+    } else {
+        "Resume"
+    }
+}
+
+/// Row action: pause an active recurring issue or resume a paused one.
+fn toggle_action<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
+    container(
+        button(text(toggle_label(r.active)).size(12))
+            .on_press(Message::ToggleRecurringActive(r.id.clone(), !r.active))
+            .padding([3, 8])
+            .style(button::secondary),
+    )
+    .width(Length::Fixed(COL_ACTION))
+    .into()
+}
+
 fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     let title = container(
         text(&r.title)
@@ -114,7 +137,8 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .padding([10, 16])
             .align_y(Alignment::Center)
             .push(title)
-            .push(state),
+            .push(state)
+            .push(toggle_action(r)),
     )
     .width(Length::Fill)
     .into()
@@ -128,5 +152,11 @@ mod tests {
     fn state_label_reads_active_or_paused() {
         assert_eq!(state_label(true), "Active");
         assert_eq!(state_label(false), "Paused");
+    }
+
+    #[test]
+    fn toggle_label_names_the_action() {
+        assert_eq!(toggle_label(true), "Pause");
+        assert_eq!(toggle_label(false), "Resume");
     }
 }
