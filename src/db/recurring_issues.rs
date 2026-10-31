@@ -498,8 +498,10 @@ mod tests {
         weekly.frequency = "weekly".into();
         weekly.interval = 2;
         weekly.weekday = Some(3);
-        apply_pulled(&conn, "t1", &[weekly, rec(2, "D", "2026-01-02T00:00:00.000Z")], None)
-            .unwrap();
+        weekly.created_at = "2026-01-01T00:00:00.000Z".into();
+        let mut daily = rec(2, "D", "2026-01-02T00:00:00.000Z");
+        daily.created_at = "2026-01-02T00:00:00.000Z".into();
+        apply_pulled(&conn, "t1", &[weekly, daily], None).unwrap();
         let schedules: Vec<String> = list_rows(&conn, "t1")
             .unwrap()
             .into_iter()
