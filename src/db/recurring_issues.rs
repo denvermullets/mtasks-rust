@@ -328,15 +328,24 @@ pub struct RecurringIssueRow {
     pub id: String,
     pub title: String,
     pub active: bool,
+    /// Current local name of the linked project; `None` with no project.
+    pub project_name: Option<String>,
 }
 
 /// Build the display row for one mirrored recurring issue. Column tickets
 /// extend this (they may use `conn` to resolve names).
-fn row_from(_conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+    let project_name = match &r.project_id {
+        Some(pid) => conn
+            .query_row("SELECT name FROM projects WHERE id = ?1", params![pid], |x| x.get(0))
+            .optional()?,
+        None => None,
+    };
     Ok(RecurringIssueRow {
         id: r.id.clone(),
         title: r.title.clone(),
         active: r.active,
+        project_name,
     })
 }
 
@@ -573,6 +582,24 @@ mod tests {
         let got: Vec<(&str, bool)> = rows.iter().map(|r| (r.title.as_str(), r.active)).collect();
         assert_eq!(got, [("First", true), ("Second", false)]);
         assert!(list_rows(&conn, "nope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_rows_shows_the_projects_current_name_and_clears_when_deleted() {
+        let conn = setup();
+        let mut row = rec(5, "R", NOW);
+        row.project = rref(9, "P");
+        apply_pulled(&conn, "t1", &[row, rec(6, "None", "2026-02-01T00:00:00.000Z")], None).unwrap();
+        let names = |c: &Connection| -> Vec<Option<String>> {
+            list_rows(c, "t1").unwrap().into_iter().map(|r| r.project_name).collect()
+        };
+        assert_eq!(names(&conn), [Some("P".to_string()), None]);
+
+        conn.execute("UPDATE projects SET name = 'Renamed' WHERE id = 'p1'", []).unwrap();
+        assert_eq!(names(&conn), [Some("Renamed".to_string()), None]);
+
+        conn.execute("DELETE FROM projects WHERE id = 'p1'", []).unwrap();
+        assert_eq!(names(&conn), [None, None]);
     }
 
     #[test]
