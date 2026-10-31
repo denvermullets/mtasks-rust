@@ -57,6 +57,9 @@ pub enum Message {
     RecurringFormWeekdayChanged(i64),
     RecurringFormDayOfMonthChanged(String),
     RecurringFormStartsOnChanged(String),
+    RecurringFormAssigneeChanged(crate::views::recurring_issue_form::Choice),
+    RecurringFormProjectChanged(crate::views::recurring_issue_form::Choice),
+    RecurringFormLaneChanged(crate::views::recurring_issue_form::Choice),
     /// Validate and save the form: local row plus queued create.
     SaveRecurringIssue,
     /// Ask to delete a recurring issue (local id); opens the confirm modal.
@@ -4389,7 +4392,8 @@ impl App {
                     self.recurring_form = Some(
                         crate::views::recurring_issue_form::RecurringFormState::new(
                             chrono::Local::now().date_naive(),
-                        ),
+                        )
+                        .with_routing_options(&self.members, &self.projects, &self.lanes),
                     );
                     self.modal = Modal::RecurringForm;
                 }
@@ -4432,6 +4436,21 @@ impl App {
             Message::RecurringFormStartsOnChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.starts_on = v;
+                }
+            }
+            Message::RecurringFormAssigneeChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.assignee = v;
+                }
+            }
+            Message::RecurringFormProjectChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.project = v;
+                }
+            }
+            Message::RecurringFormLaneChanged(v) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.lane = v;
                 }
             }
             Message::SaveRecurringIssue => {

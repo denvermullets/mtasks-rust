@@ -565,6 +565,11 @@ pub struct NewRecurringIssue {
     pub day_of_month: Option<i64>,
     /// First run date, `YYYY-MM-DD`.
     pub starts_on: String,
+    /// Local member, project and lane ids; `None` = unassigned / no project /
+    /// the team's first lane.
+    pub assignee_id: Option<String>,
+    pub project_id: Option<String>,
+    pub lane_id: Option<String>,
 }
 
 /// Payload of a `recurring_issue` / `create` queue entry: `{"starts_on":...}`.
@@ -589,8 +594,9 @@ pub fn create(conn: &Connection, local_team_id: &str, new: &NewRecurringIssue) -
         let now = crate::db::now_iso();
         c.execute(
             "INSERT INTO recurring_issues (id, team_id, title, description, priority, frequency,
-                interval, weekday, day_of_month, time_zone, active, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, 1, ?10, ?10)",
+                interval, weekday, day_of_month, time_zone, active, created_at, updated_at,
+                assignee_id, project_id, lane_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, 1, ?10, ?10, ?11, ?12, ?13)",
             params![
                 id,
                 local_team_id,
@@ -601,7 +607,10 @@ pub fn create(conn: &Connection, local_team_id: &str, new: &NewRecurringIssue) -
                 new.interval,
                 new.weekday,
                 new.day_of_month,
-                now
+                now,
+                new.assignee_id,
+                new.project_id,
+                new.lane_id
             ],
         )?;
         Ok(())
@@ -931,7 +940,31 @@ mod tests {
             weekday: Some(3),
             day_of_month: None,
             starts_on: "2026-11-04".into(),
+            assignee_id: None,
+            project_id: None,
+            lane_id: None,
         }
+    }
+
+    #[test]
+    fn create_stores_the_routing_and_the_row_shows_it() {
+        let conn = setup();
+        let mut new = new_weekly();
+        new.lane_id = Some("l1".into());
+        new.project_id = Some("p1".into());
+        new.assignee_id = Some("m1".into());
+        let id = create(&conn, "t1", &new).unwrap();
+        let r = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(r.lane_id.as_deref(), Some("l1"));
+        assert_eq!(r.project_id.as_deref(), Some("p1"));
+        assert_eq!(r.assignee_id.as_deref(), Some("m1"));
+        let row = list_rows(&conn, "t1").unwrap().remove(0);
+        assert!(row.assignee.is_some() && row.project_name.is_some());
+        assert_ne!(row.lane, FIRST_LANE);
+
+        let id2 = create(&conn, "t1", &new_weekly()).unwrap();
+        let r2 = get(&conn, &id2).unwrap().unwrap();
+        assert_eq!((r2.lane_id, r2.project_id, r2.assignee_id), (None, None, None));
     }
 
     #[test]

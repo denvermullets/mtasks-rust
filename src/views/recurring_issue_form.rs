@@ -17,7 +17,8 @@ use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::Priority;
-use crate::db::recurring_issues::NewRecurringIssue;
+use crate::db::models::{Lane, Member, Project};
+use crate::db::recurring_issues::{NewRecurringIssue, FIRST_LANE};
 use crate::theme as t;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,30 @@ impl std::fmt::Display for WeekdayOption {
     }
 }
 
+/// One entry of an assignee / project / lane pick list. `id: None` is the
+/// empty choice (its label is "Unassigned", "No project" or [`FIRST_LANE`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub id: Option<String>,
+    pub label: String,
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+impl Choice {
+    fn empty(label: &str) -> Self {
+        Self { id: None, label: label.to_string() }
+    }
+
+    fn of(id: &str, label: &str) -> Self {
+        Self { id: Some(id.to_string()), label: label.to_string() }
+    }
+}
+
 const PRIORITIES: [Priority; 5] = [
     Priority::Urgent,
     Priority::High,
@@ -92,6 +117,13 @@ pub struct RecurringFormState {
     pub day_of_month: String,
     /// Raw `YYYY-MM-DD` text.
     pub starts_on: String,
+    /// Pick lists (first entry is the empty choice) and the current picks.
+    pub assignee_options: Vec<Choice>,
+    pub project_options: Vec<Choice>,
+    pub lane_options: Vec<Choice>,
+    pub assignee: Choice,
+    pub project: Choice,
+    pub lane: Choice,
     /// Inline errors from the last failed Save; cleared by a successful one.
     pub errors: FormErrors,
 }
@@ -99,7 +131,18 @@ pub struct RecurringFormState {
 impl RecurringFormState {
     /// Blank form: daily every 1, weekday/day/starts-on defaulting to `today`.
     pub fn new(today: NaiveDate) -> Self {
+        let (assignee, project, lane) = (
+            Choice::empty("Unassigned"),
+            Choice::empty("No project"),
+            Choice::empty(FIRST_LANE),
+        );
         Self {
+            assignee_options: vec![assignee.clone()],
+            project_options: vec![project.clone()],
+            lane_options: vec![lane.clone()],
+            assignee,
+            project,
+            lane,
             title: String::new(),
             description: text_editor::Content::new(),
             priority: Priority::None,
@@ -110,6 +153,22 @@ impl RecurringFormState {
             starts_on: today.format("%Y-%m-%d").to_string(),
             errors: FormErrors::default(),
         }
+    }
+
+    /// Fill the pick lists from the selected team's members, projects and lanes.
+    pub fn with_routing_options(
+        mut self,
+        members: &[Member],
+        projects: &[Project],
+        lanes: &[Lane],
+    ) -> Self {
+        self.assignee_options
+            .extend(members.iter().map(|m| Choice::of(&m.id, &m.name)));
+        self.project_options
+            .extend(projects.iter().map(|p| Choice::of(&p.id, &p.name)));
+        self.lane_options
+            .extend(lanes.iter().map(|l| Choice::of(&l.id, &l.name)));
+        self
     }
 
     /// Live schedule wording; `None` while the interval isn't a number or the
@@ -205,12 +264,28 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
         weekday,
         day_of_month,
         starts_on: starts_on.to_string(),
+        assignee_id: form.assignee.id.clone(),
+        project_id: form.project.id.clone(),
+        lane_id: form.lane.id.clone(),
     })
 }
 
 fn error_line<'a>(e: &'a Option<String>) -> Option<Element<'a, Message>> {
     e.as_deref()
         .map(|m| text(m).size(12).color(t::danger()).into())
+}
+
+fn choice_pick<'a>(
+    label: &'a str,
+    options: &'a [Choice],
+    selected: &'a Choice,
+    on_pick: fn(Choice) -> Message,
+) -> Element<'a, Message> {
+    column![]
+        .spacing(4)
+        .push(text(label).size(12).color(t::text_muted()))
+        .push(pick_list(options, Some(selected.clone()), on_pick).width(Length::Fill))
+        .into()
 }
 
 pub fn view<'a>(form: &'a RecurringFormState) -> Element<'a, Message> {
@@ -318,6 +393,24 @@ pub fn view<'a>(form: &'a RecurringFormState) -> Element<'a, Message> {
                 )),
         )
         .push(schedule)
+        .push(choice_pick(
+            "Assignee",
+            &form.assignee_options,
+            &form.assignee,
+            Message::RecurringFormAssigneeChanged,
+        ))
+        .push(choice_pick(
+            "Project",
+            &form.project_options,
+            &form.project,
+            Message::RecurringFormProjectChanged,
+        ))
+        .push(choice_pick(
+            "Lane",
+            &form.lane_options,
+            &form.lane,
+            Message::RecurringFormLaneChanged,
+        ))
         .push(
             row![]
                 .spacing(8)
@@ -392,6 +485,22 @@ mod tests {
         assert_eq!(f.starts_on, "2026-11-04");
         assert_eq!(f.interval, "1");
         assert_eq!(f.frequency, Frequency::Daily);
+    }
+
+    #[test]
+    fn routing_choices_default_empty_and_flow_into_the_write() {
+        let mut f = valid();
+        let n = validate(&f).unwrap();
+        assert_eq!((n.assignee_id, n.project_id, n.lane_id), (None, None, None));
+        assert_eq!(f.lane.label, FIRST_LANE);
+
+        f.assignee = Choice::of("m1", "Ann");
+        f.project = Choice::of("p1", "P");
+        f.lane = Choice::of("l1", "Todo");
+        let n = validate(&f).unwrap();
+        assert_eq!(n.assignee_id.as_deref(), Some("m1"));
+        assert_eq!(n.project_id.as_deref(), Some("p1"));
+        assert_eq!(n.lane_id.as_deref(), Some("l1"));
     }
 
     #[test]
