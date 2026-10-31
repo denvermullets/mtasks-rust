@@ -1886,6 +1886,7 @@ fn recurring_issue_update_prep(
     payload: Option<&str>,
 ) -> Prep<RecurringIssueUpdatePrep> {
     use crate::db::recurring_issues as db;
+    use db::ChangedField as F;
     let row = match db::get(conn, entity_id) {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -1905,62 +1906,61 @@ fn recurring_issue_update_prep(
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
-    let (changed, starts_on) = db::parse_update_payload(payload);
+    let db::UpdatePayload { changed, starts_on } = db::parse_update_payload(payload);
     let mut params = RecurringIssueParams {
         starts_on,
         ..Default::default()
     };
     // Referenced assignee, project, lane and labels must have remote ids first.
     // A cleared reference is sent as an explicit null.
-    for field in &changed {
-        let r = match field.as_str() {
-            "active" => {
+    for field in changed {
+        let r = match field {
+            F::Active => {
                 params.active = Some(row.active);
                 Ok(())
             }
-            "title" => {
+            F::Title => {
                 params.title = Some(row.title.clone());
                 Ok(())
             }
-            "description" => {
+            F::Description => {
                 // Rails treats "" as blank, which is how a cleared description goes out.
                 params.description = Some(row.description.clone().unwrap_or_default());
                 Ok(())
             }
-            "priority" => {
+            F::Priority => {
                 params.priority = Some(row.priority.as_rails_str().to_string());
                 Ok(())
             }
-            "time_zone" => {
+            F::TimeZone => {
                 params.time_zone = row.time_zone.clone();
                 Ok(())
             }
-            "assignee_id" => {
+            F::AssigneeId => {
                 recurring_assignee_remote_id(conn, &row).map(|v| params.assignee_id = Some(v))
             }
-            "project_id" => {
+            F::ProjectId => {
                 recurring_project_remote_id(conn, &row).map(|v| params.project_id = Some(v))
             }
-            "lane_id" => recurring_lane_remote_id(conn, &row).map(|v| params.lane_id = Some(v)),
-            "label_ids" => recurring_label_remote_ids(conn, &row.id)
+            F::LaneId => recurring_lane_remote_id(conn, &row).map(|v| params.lane_id = Some(v)),
+            F::LabelIds => recurring_label_remote_ids(conn, &row.id)
                 .map(|v| params.label_ids = Some(v)),
-            "frequency" => {
+            F::Frequency => {
                 params.frequency = Some(row.frequency.clone());
                 Ok(())
             }
-            "interval" => {
+            F::Interval => {
                 params.interval = Some(row.interval);
                 Ok(())
             }
-            "weekday" => {
+            F::Weekday => {
                 params.weekday = row.weekday;
                 Ok(())
             }
-            "day_of_month" => {
+            F::DayOfMonth => {
                 params.day_of_month = row.day_of_month;
                 Ok(())
             }
-            _ => Ok(()),
         };
         if let Err(o) = r {
             return Prep::Done(o);
@@ -4085,6 +4085,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::db::recurring_issues::ChangedField as F;
 
     fn failure(kind: SyncErrorKind) -> SyncFailure {
         SyncFailure {
@@ -4848,7 +4849,7 @@ mod tests {
     fn recurring_issue_update_prep_rereads_row_and_waits_for_remote_ids() {
         let conn = setup_labels_db();
         insert_test_recurring(&conn, None);
-        let payload = crate::db::recurring_issues::update_payload(&["active"], None);
+        let payload = crate::db::recurring_issues::update_payload(&[crate::db::recurring_issues::ChangedField::Active], None);
         assert!(matches!(
             recurring_issue_update_prep(&conn, "r1", Some(&payload)),
             Prep::Done(Outcome::LeavePending(_))
@@ -4883,7 +4884,7 @@ mod tests {
     fn recurring_issue_update_prep_sends_starts_on_only_when_the_payload_has_one() {
         let conn = setup_labels_db();
         insert_test_recurring(&conn, Some(5));
-        let payload = crate::db::recurring_issues::update_payload(&["active"], Some("2026-11-05"));
+        let payload = crate::db::recurring_issues::update_payload(&[crate::db::recurring_issues::ChangedField::Active], Some("2026-11-05"));
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
             Prep::Ready(p) => assert_eq!(p.params.starts_on.as_deref(), Some("2026-11-05")),
             _ => panic!("expected Ready"),
@@ -4901,7 +4902,7 @@ mod tests {
         )
         .unwrap();
         let payload = crate::db::recurring_issues::update_payload(
-            &["frequency", "interval", "weekday"],
+            &[F::Frequency, F::Interval, F::Weekday],
             Some("2026-11-10"),
         );
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
@@ -4927,7 +4928,7 @@ mod tests {
         )
         .unwrap();
         let payload = crate::db::recurring_issues::update_payload(
-            &["title", "priority", "description", "time_zone"],
+            &[F::Title, F::Priority, F::Description, F::TimeZone],
             None,
         );
         match recurring_issue_update_prep(&conn, "r1", Some(&payload)) {
@@ -4952,7 +4953,7 @@ mod tests {
         let now = "2026-01-01T00:00:00.000Z";
         conn.execute("UPDATE recurring_issues SET lane_id = 'l1' WHERE id = 'r1'", []).unwrap();
         let payload = crate::db::recurring_issues::update_payload(
-            &["lane_id", "assignee_id", "project_id", "label_ids"],
+            &[F::LaneId, F::AssigneeId, F::ProjectId, F::LabelIds],
             None,
         );
         let waits = |c: &Connection| {
