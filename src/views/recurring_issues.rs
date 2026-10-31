@@ -14,6 +14,7 @@ use crate::theme as t;
 
 const COL_SCHEDULE: f32 = 200.0;
 const COL_STATE: f32 = 110.0;
+const COL_ASSIGNEE: f32 = 140.0;
 const COL_PROJECT: f32 = 140.0;
 const COL_LANE: f32 = 130.0;
 
@@ -27,6 +28,7 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .push(header_cell("Title", Length::Fill))
         .push(header_cell("Schedule", Length::Fixed(COL_SCHEDULE)))
         .push(header_cell("State", Length::Fixed(COL_STATE)))
+        .push(header_cell("Assignee", Length::Fixed(COL_ASSIGNEE)))
         .push(header_cell("Project", Length::Fixed(COL_PROJECT)))
         .push(header_cell("Lane", Length::Fixed(COL_LANE)));
 
@@ -122,6 +124,14 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     )
     .width(Length::Fixed(COL_STATE));
 
+    let assignee = container(
+        text(r.assignee.as_deref().unwrap_or(""))
+            .size(12)
+            .color(t::text_secondary())
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fixed(COL_ASSIGNEE));
+
     let project = container(
         text(r.project_name.as_deref().unwrap_or(""))
             .size(12)
@@ -146,6 +156,7 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .push(title)
             .push(schedule)
             .push(state)
+            .push(assignee)
             .push(project)
             .push(lane),
     )
