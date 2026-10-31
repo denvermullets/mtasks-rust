@@ -96,6 +96,19 @@ fn item_path(team_id: i64, id: i64) -> String {
     format!("api/v1/teams/{team_id}/recurring_issues/{id}")
 }
 
+/// `POST .../recurring_issues`; returns the created row with the server's
+/// `next_run_on` and resolved `time_zone`.
+pub async fn create(
+    client: &ApiClient,
+    team_id: i64,
+    params: &RecurringIssueParams,
+) -> Result<RecurringIssueDto, ApiError> {
+    let path = format!("api/v1/teams/{team_id}/recurring_issues");
+    client
+        .post(&path, &RecurringIssueWrap { recurring_issue: params })
+        .await
+}
+
 /// `DELETE .../recurring_issues/:id` (204 on success).
 pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), ApiError> {
     client.delete(&item_path(team_id, id)).await

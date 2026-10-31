@@ -189,9 +189,6 @@ enum Outcome {
     DropAndLog(String),
     /// Transient failure — leave pending so the next drain retries.
     LeavePending(String),
-    /// Not pushable yet by design (no push implemented): keep the entry pending
-    /// without counting a failure or surfacing an error.
-    Deferred(String),
     /// Keep this entry pending AND skip the remaining pushes this drain.
     PausePushes(PushPause, String),
     /// Team-access 404: keep the entry pending, flag the team (by Rails id) as
@@ -385,10 +382,9 @@ async fn process(
         ("project", "create") => project_create(client, &entry.entity_id, entry_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
-        // JRST-173 replaces this with the real push. Until then a queued create
-        // stays pending (not dropped as unsupported) and raises no error.
         ("recurring_issue", "create") => {
-            Outcome::Deferred("recurring issue create push not implemented yet".into())
+            recurring_issue_create(client, &entry.entity_id, entry.payload.as_deref(), entry_id)
+                .await
         }
         ("recurring_issue", "update") => {
             recurring_issue_update(client, &entry.entity_id, entry.payload.as_deref()).await
@@ -470,7 +466,7 @@ fn describe(outcome: &Outcome) -> (&'static str, &str) {
     match outcome {
         Outcome::Success | Outcome::Created => ("synced", "ok"),
         Outcome::DropAndLog(r) => ("dropped", r),
-        Outcome::LeavePending(r) | Outcome::Deferred(r) => ("pending", r),
+        Outcome::LeavePending(r) => ("pending", r),
         Outcome::PausePushes(_, r) | Outcome::TeamAccessLost(_, r) => ("parked", r),
     }
 }
@@ -531,7 +527,6 @@ fn record(
             record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
         }
-        Outcome::Deferred(reason) => sync_log(&scope, label, &reason),
         Outcome::LeavePending(reason) => {
             sync_log(&scope, "pending", &reason);
             report.failed += 1;
@@ -1632,6 +1627,118 @@ async fn label_update(client: &ApiClient, entity_id: &str) -> Outcome {
     // restores the server value.
     match labels::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
         Ok(_) => Outcome::Success,
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
+/// What a recurring issue create sends. `time_zone` is absent when the row's
+/// zone is null (the server then uses the creator's preference) and `label_ids`
+/// when no label is attached.
+struct RecurringIssueCreatePrep {
+    team_remote_id: i64,
+    local_id: String,
+    params: RecurringIssueParams,
+}
+
+fn prep_recurring_issue_create(
+    entity_id: &str,
+    payload: Option<&str>,
+) -> Prep<RecurringIssueCreatePrep> {
+    match open() {
+        Ok(conn) => recurring_issue_create_prep(&conn, entity_id, payload),
+        Err(e) => Prep::Done(Outcome::LeavePending(e)),
+    }
+}
+
+/// Re-reads the recurring issue row so the newest values go out, and waits
+/// (leaves the entry pending) while the team, or any assignee, project, lane or
+/// label the row references, has no remote id yet. `starts_on` comes from the
+/// queued payload.
+fn recurring_issue_create_prep(
+    conn: &Connection,
+    entity_id: &str,
+    payload: Option<&str>,
+) -> Prep<RecurringIssueCreatePrep> {
+    use crate::db::recurring_issues as db;
+    let row = match db::get(conn, entity_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "recurring issue {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    if row.remote_id.is_some() {
+        // Idempotency: Rails already has this row.
+        return Prep::Done(Outcome::Success);
+    }
+    let team_remote_id = match queries::remote_id_for(conn, "teams", &row.team_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let refs = (|| -> Result<_, Outcome> {
+        let assignee_id = optional_remote_id(conn, "members", row.assignee_id.as_deref())?;
+        let project_id = optional_remote_id(conn, "projects", row.project_id.as_deref())?;
+        let lane_id = optional_remote_id(conn, "lanes", row.lane_id.as_deref())?;
+        let local_labels = db::label_ids(conn, &row.id)
+            .map_err(|e| Outcome::LeavePending(format!("db (labels): {e}")))?;
+        let mut label_ids = Vec::with_capacity(local_labels.len());
+        for local in &local_labels {
+            label_ids.push(require_remote_id(conn, "labels", local)?);
+        }
+        Ok((assignee_id, project_id, lane_id, label_ids))
+    })();
+    let (assignee_id, project_id, lane_id, label_ids) = match refs {
+        Ok(r) => r,
+        Err(o) => return Prep::Done(o),
+    };
+    let params = RecurringIssueParams {
+        title: Some(row.title),
+        description: row.description,
+        priority: Some(row.priority.as_rails_str().to_string()),
+        assignee_id,
+        project_id,
+        lane_id,
+        frequency: Some(row.frequency),
+        interval: Some(row.interval),
+        weekday: row.weekday,
+        day_of_month: row.day_of_month,
+        time_zone: row.time_zone,
+        label_ids: (!label_ids.is_empty()).then_some(label_ids),
+        starts_on: db::payload_starts_on(payload),
+        ..Default::default()
+    };
+    Prep::Ready(RecurringIssueCreatePrep {
+        team_remote_id,
+        local_id: row.id,
+        params,
+    })
+}
+
+async fn recurring_issue_create(
+    client: &ApiClient,
+    entity_id: &str,
+    payload: Option<&str>,
+    entry_id: i64,
+) -> Outcome {
+    let prep = match prep_recurring_issue_create(entity_id, payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    // A 422 is dropped by `classify`; the row stays visible without a remote id.
+    match recurring_issues::create(client, prep.team_remote_id, &prep.params).await {
+        Ok(dto) => {
+            let committed = open().and_then(|mut conn| {
+                crate::db::recurring_issues::commit_created(&mut conn, &prep.local_id, entry_id, &dto)
+                    .map_err(|e| format!("commit recurring issue create: {e}"))
+            });
+            match committed {
+                Ok(()) => Outcome::Created,
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
@@ -4618,6 +4725,119 @@ mod tests {
     }
 
     #[test]
+    fn recurring_issue_create_prep_rereads_row_and_includes_starts_on() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, None);
+        conn.execute("UPDATE recurring_issues SET title = 'Edited' WHERE id = 'r1'", [])
+            .unwrap();
+        let payload = crate::db::recurring_issues::create_payload("2026-11-04");
+        match recurring_issue_create_prep(&conn, "r1", Some(&payload)) {
+            Prep::Ready(p) => {
+                assert_eq!(p.team_remote_id, 700);
+                assert_eq!(p.local_id, "r1");
+                let body = serde_json::to_value(&p.params).unwrap();
+                assert_eq!(
+                    body,
+                    serde_json::json!({
+                        "title": "Edited", "priority": "urgent", "frequency": "daily",
+                        "interval": 1, "starts_on": "2026-11-04"
+                    })
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
+        assert!(matches!(
+            recurring_issue_create_prep(&conn, "nope", Some(&payload)),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
+    }
+
+    #[test]
+    fn recurring_issue_create_prep_sends_time_zone_only_when_the_row_has_one() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, None);
+        let body = |conn: &Connection| match recurring_issue_create_prep(conn, "r1", None) {
+            Prep::Ready(p) => serde_json::to_value(&p.params).unwrap(),
+            _ => panic!("expected Ready"),
+        };
+        assert!(body(&conn).get("time_zone").is_none());
+        conn.execute("UPDATE recurring_issues SET time_zone = 'UTC' WHERE id = 'r1'", [])
+            .unwrap();
+        assert_eq!(body(&conn)["time_zone"], "UTC");
+    }
+
+    #[test]
+    fn recurring_issue_create_prep_waits_for_team_and_referenced_remote_ids() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, None);
+        let waits = |conn: &Connection| {
+            matches!(
+                recurring_issue_create_prep(conn, "r1", None),
+                Prep::Done(Outcome::LeavePending(_))
+            )
+        };
+        conn.execute("UPDATE teams SET remote_id = NULL WHERE id = 't1'", []).unwrap();
+        assert!(waits(&conn));
+        conn.execute("UPDATE teams SET remote_id = 700 WHERE id = 't1'", []).unwrap();
+
+        // Lane, project, assignee and label without remote ids each block.
+        conn.execute("UPDATE recurring_issues SET lane_id = 'l1' WHERE id = 'r1'", []).unwrap();
+        assert!(waits(&conn));
+        conn.execute("UPDATE lanes SET remote_id = 11 WHERE id = 'l1'", []).unwrap();
+        assert!(!waits(&conn));
+
+        conn.execute(
+            "INSERT INTO projects (id, team_id, name, created_at, updated_at)
+             VALUES ('p1', 't1', 'P', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE recurring_issues SET project_id = 'p1' WHERE id = 'r1'", []).unwrap();
+        assert!(waits(&conn));
+        conn.execute("UPDATE projects SET remote_id = 12 WHERE id = 'p1'", []).unwrap();
+        assert!(!waits(&conn));
+
+        conn.execute(
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at)
+             VALUES ('m1', 't1', 'Ann', 'a@x.io', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE recurring_issues SET assignee_id = 'm1' WHERE id = 'r1'", []).unwrap();
+        assert!(waits(&conn));
+        conn.execute("UPDATE members SET remote_id = 13 WHERE id = 'm1'", []).unwrap();
+        assert!(!waits(&conn));
+
+        insert_test_label(&conn, "lb1", None);
+        conn.execute(
+            "INSERT INTO recurring_issue_labels (recurring_issue_id, label_id) VALUES ('r1', 'lb1')",
+            [],
+        )
+        .unwrap();
+        assert!(waits(&conn));
+        conn.execute("UPDATE labels SET remote_id = 14 WHERE id = 'lb1'", []).unwrap();
+        match recurring_issue_create_prep(&conn, "r1", None) {
+            Prep::Ready(p) => {
+                assert_eq!(p.params.lane_id, Some(11));
+                assert_eq!(p.params.project_id, Some(12));
+                assert_eq!(p.params.assignee_id, Some(13));
+                assert_eq!(p.params.label_ids, Some(vec![14]));
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn recurring_issue_create_prep_is_a_no_op_once_the_row_has_a_remote_id() {
+        let conn = setup_labels_db();
+        insert_test_recurring(&conn, Some(5));
+        assert!(matches!(
+            recurring_issue_create_prep(&conn, "r1", None),
+            Prep::Done(Outcome::Success)
+        ));
+    }
+
+    #[test]
     fn recurring_issue_delete_prep_reads_only_the_payload() {
         match prep_recurring_issue_delete(Some(r#"{"team_remote_id":700,"remote_id":11}"#)) {
             Prep::Ready(ids) => assert_eq!(ids, (700, 11)),
@@ -6095,26 +6315,6 @@ mod tests {
             let outcome = process(&client, &ctx_with_scopes(&["write"]), &entry, 1).await;
             assert!(matches!(outcome, Outcome::DropAndLog(_)));
         });
-    }
-
-    #[test]
-    fn recurring_issue_create_is_deferred_not_dropped_and_not_a_failure() {
-        let client = ApiClient::new("http://localhost:1", "stub-token").unwrap();
-        let entry = SyncQueueEntry {
-            id: Some(1),
-            entity_type: "recurring_issue".into(),
-            entity_id: "x".into(),
-            action: "create".into(),
-            payload: Some(r#"{"starts_on":"2026-11-04"}"#.into()),
-            created_at: "0".into(),
-            synced_at: None,
-        };
-        let outcome = block_on(process(&client, &ctx_with_scopes(&["write"]), &entry, 1));
-        assert!(matches!(outcome, Outcome::Deferred(_)));
-        let mut report = SyncReport::default();
-        assert!(!record(&mut report, &entry, 1, outcome));
-        assert_eq!(report.failed, 0);
-        assert!(report.last_error.is_none());
     }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
