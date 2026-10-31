@@ -367,22 +367,12 @@ impl DepDirection {
         }
     }
 
-    /// Duplicates links can't be created yet.
-    pub fn enabled(self) -> bool {
-        !matches!(self, DepDirection::Duplicates | DepDirection::DuplicatedBy)
-    }
-
-    /// The next (or previous) enabled kind, wrapping around.
+    /// The next (or previous) kind, wrapping around.
     pub fn cycle(self, forward: bool) -> DepDirection {
         let n = Self::ALL.len();
         let start = Self::ALL.iter().position(|d| *d == self).unwrap_or(0);
-        (1..=n)
-            .map(|step| {
-                let i = if forward { start + step } else { start + n - step };
-                Self::ALL[i % n]
-            })
-            .find(|d| d.enabled())
-            .unwrap_or(self)
+        let i = if forward { start + 1 } else { start + n - 1 };
+        Self::ALL[i % n]
     }
 
     /// The stored edge for linking `current` to `target` in this kind. The link's
@@ -2025,9 +2015,7 @@ impl App {
             }
             Message::SetDependencyKind(kind) => {
                 if let Some(ref mut picker) = self.issue_picker {
-                    if kind.enabled() {
-                        picker.direction = kind;
-                    }
+                    picker.direction = kind;
                 }
             }
             Message::DependencyPickerSearchChanged(query) => {
@@ -3858,10 +3846,10 @@ mod tests {
     }
 
     #[test]
-    fn dep_direction_cycles_only_through_enabled_kinds() {
-        assert_eq!(DepDirection::Blocking.cycle(true), DepDirection::BlockedBy);
-        assert_eq!(DepDirection::BlockedBy.cycle(true), DepDirection::Relates);
-        assert_eq!(DepDirection::Relates.cycle(true), DepDirection::Blocking);
-        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::Relates);
+    fn dep_direction_cycles_through_every_kind() {
+        assert_eq!(DepDirection::Relates.cycle(true), DepDirection::Duplicates);
+        assert_eq!(DepDirection::Duplicates.cycle(true), DepDirection::DuplicatedBy);
+        assert_eq!(DepDirection::DuplicatedBy.cycle(true), DepDirection::Blocking);
+        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::DuplicatedBy);
     }
 }
