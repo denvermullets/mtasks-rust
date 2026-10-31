@@ -30,7 +30,7 @@ pub fn enqueue(
 
 pub fn pending_entries(conn: &Connection) -> Result<Vec<SyncQueueEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, entity_type, entity_id, action, payload, created_at, synced_at FROM sync_queue WHERE synced_at IS NULL ORDER BY created_at",
+        "SELECT id, entity_type, entity_id, action, payload, created_at, synced_at FROM sync_queue WHERE synced_at IS NULL ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(SyncQueueEntry {
