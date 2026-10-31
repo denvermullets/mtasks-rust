@@ -14,6 +14,15 @@ pub async fn list_page(
     client.get_list_page(&list_path(updated_since)).await
 }
 
+/// `DELETE /api/v1/saved_views/:id` (204).
+pub async fn delete(client: &ApiClient, id: i64) -> Result<(), ApiError> {
+    client.delete(&delete_path(id)).await
+}
+
+fn delete_path(id: i64) -> String {
+    format!("api/v1/saved_views/{id}")
+}
+
 fn list_path(updated_since: Option<&str>) -> String {
     format!("api/v1/saved_views{}", updated_since_query(updated_since))
 }
@@ -21,6 +30,11 @@ fn list_path(updated_since: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_path_names_the_view() {
+        assert_eq!(delete_path(5), "api/v1/saved_views/5");
+    }
 
     #[test]
     fn list_path_is_cross_team_with_optional_cursor() {

@@ -176,21 +176,30 @@ pub fn view<'a>(
             }
             for sv in saved_views.get(&team.id).into_iter().flatten() {
                 let active = open_view_id == Some(sv.id.as_str());
+                let open_btn = button(
+                    row![text(&sv.name).size(13).color(if active {
+                        t::text_primary()
+                    } else {
+                        t::text_secondary()
+                    })]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center)
+                    .push_maybe(is_home_view(home, sv).then(home_marker)),
+                )
+                .on_press(Message::OpenSavedView(sv.id.clone()))
+                .padding([6, 28])
+                .width(Length::Fill)
+                .style(move |_theme: &Theme, _status| selected_row_style(active));
+                // Delete needs a writable token; disabled (muted) otherwise.
+                let delete_btn = button(text("\u{2715}").size(11).color(t::text_muted()))
+                    .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteSavedView(sv.id.clone())))
+                    .padding([6, 8])
+                    .style(|_theme: &Theme, _status| button::Style {
+                        background: None,
+                        ..Default::default()
+                    });
                 col = col.push(
-                    button(
-                        row![text(&sv.name).size(13).color(if active {
-                            t::text_primary()
-                        } else {
-                            t::text_secondary()
-                        })]
-                        .spacing(6)
-                        .align_y(iced::Alignment::Center)
-                        .push_maybe(is_home_view(home, sv).then(home_marker)),
-                    )
-                    .on_press(Message::OpenSavedView(sv.id.clone()))
-                    .padding([6, 28])
-                    .width(Length::Fill)
-                    .style(move |_theme: &Theme, _status| selected_row_style(active)),
+                    row![open_btn, delete_btn].align_y(iced::Alignment::Center),
                 );
             }
         }
