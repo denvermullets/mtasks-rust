@@ -1626,9 +1626,7 @@ impl App {
             mutate(&mut issue);
             issue.updated_at = crate::db::now_iso();
             let conn = self.db();
-            let _ = queries::update_issue(&conn, &issue);
-            let payload = serde_json::to_string(&issue).ok();
-            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
+            let _ = queries::update_issue_queued(&conn, &issue);
             self.reload_data();
         }
     }
@@ -1671,9 +1669,8 @@ impl App {
             created_at: now.clone(),
             updated_at: now,
         };
-        match queries::insert_issue_dependency(&conn, &dep) {
-            Ok(()) => {
-                self.enqueue_sync("dependency", &dep.id, "create", None);
+        match queries::insert_issue_dependency_queued(&conn, &dep) {
+            Ok(_) => {
                 self.reload_data();
             }
             Err(_) => {
@@ -1728,35 +1725,7 @@ impl App {
     /// enqueued — there is nothing on the server to remove.
     fn remove_dependency(&mut self, dep_id: &str) {
         let conn = self.db();
-        let dep = match queries::get_issue_dependency(&conn, dep_id) {
-            Ok(Some(d)) => d,
-            _ => return,
-        };
-        if let Some(remote_id) = dep.remote_id {
-            // The Rails edge lives under the BLOCKING issue's endpoint.
-            let payload = queries::get_issue(&conn, &dep.blocking_issue_id)
-                .ok()
-                .flatten()
-                .and_then(|blocking| {
-                    let issue_remote_id = blocking.remote_id?;
-                    let team_remote_id =
-                        queries::remote_id_for(&conn, "teams", &blocking.team_id)
-                            .ok()
-                            .flatten()?;
-                    Some(
-                        serde_json::json!({
-                            "team_remote_id": team_remote_id,
-                            "issue_remote_id": issue_remote_id,
-                            "remote_id": remote_id,
-                        })
-                        .to_string(),
-                    )
-                });
-            if let Some(p) = &payload {
-                self.enqueue_sync("dependency", dep_id, "delete", Some(p.as_str()));
-            }
-        }
-        let _ = queries::delete_issue_dependency(&conn, dep_id);
+        let _ = queries::delete_issue_dependency_queued(&conn, dep_id);
         self.reload_data();
     }
 
@@ -1810,9 +1779,7 @@ impl App {
             issue.due_date = due_date;
             issue.updated_at = crate::db::now_iso();
             let conn = self.db();
-            let _ = queries::update_issue(&conn, &issue);
-            let payload = serde_json::to_string(&issue).ok();
-            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
+            let _ = queries::update_issue_queued(&conn, &issue);
             self.reload_data();
         }
     }
@@ -2838,15 +2805,21 @@ impl App {
                             issue.priority = form.priority.to_i32();
                             issue.lane_id = form.lane_id.clone();
                             issue.updated_at = now;
-                            let _ = queries::update_issue(&conn, &issue);
-                            let _ = queries::set_issue_labels(
+                            let payload = serde_json::to_string(&issue).ok();
+                            let _ = queries::edit_issue_queued(
                                 &conn,
                                 &issue.id,
-                                &form.selected_label_ids,
+                                "update",
+                                payload.as_deref(),
+                                |c| {
+                                    queries::update_issue(c, &issue)?;
+                                    queries::set_issue_labels(
+                                        c,
+                                        &issue.id,
+                                        &form.selected_label_ids,
+                                    )
+                                },
                             );
-
-                            let payload = serde_json::to_string(&issue).ok();
-                            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
                         }
                     } else {
                         // Create new
@@ -3146,8 +3119,9 @@ impl App {
                     if current_lane_idx + 1 < self.lanes.len() {
                         let target = &self.lanes[current_lane_idx + 1];
                         let conn = self.db();
-                        let _ = queries::move_issue_to_lane(&conn, &issue.id, &target.id);
-                        self.enqueue_sync("issue", &issue.id, "update", None);
+                        let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
+                            queries::move_issue_to_lane(c, &issue.id, &target.id)
+                        });
                         self.focused_lane = current_lane_idx + 1;
                         self.reload_data();
                     }
@@ -3173,8 +3147,9 @@ impl App {
                     if current_lane_idx > 0 {
                         let target = &self.lanes[current_lane_idx - 1];
                         let conn = self.db();
-                        let _ = queries::move_issue_to_lane(&conn, &issue.id, &target.id);
-                        self.enqueue_sync("issue", &issue.id, "update", None);
+                        let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
+                            queries::move_issue_to_lane(c, &issue.id, &target.id)
+                        });
                         self.focused_lane = current_lane_idx - 1;
                         self.reload_data();
                     }
@@ -3184,8 +3159,9 @@ impl App {
             Message::SetFocusedPriority(p) => {
                 if let Some(issue) = self.focused_issue().cloned() {
                     let conn = self.db();
-                    let _ = queries::set_issue_priority(&conn, &issue.id, p);
-                    self.enqueue_sync("issue", &issue.id, "update", None);
+                    let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
+                        queries::set_issue_priority(c, &issue.id, p)
+                    });
                     self.reload_data();
                 }
             }
@@ -4305,9 +4281,9 @@ impl App {
                 if let Some(ref form) = self.label_form {
                     if let Some(ref issue_id) = form.issue_id {
                         let conn = self.db();
-                        let _ =
-                            queries::set_issue_labels(&conn, issue_id, &form.selected_label_ids);
-                        self.enqueue_sync("issue", issue_id, "update", None);
+                        let _ = queries::edit_issue_queued(&conn, issue_id, "update", None, |c| {
+                            queries::set_issue_labels(c, issue_id, &form.selected_label_ids)
+                        });
                     }
                 }
                 self.modal = Modal::None;

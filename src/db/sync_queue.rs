@@ -19,13 +19,24 @@ pub fn enqueue(
     action: &str,
     payload: Option<&str>,
 ) -> Result<()> {
+    enqueue_returning_id(conn, entity_type, entity_id, action, payload).map(|_| ())
+}
+
+/// Like [`enqueue`], but returns the new queue entry's id.
+pub fn enqueue_returning_id(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    payload: Option<&str>,
+) -> Result<i64> {
     let now = crate::db::now_iso();
     conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, action, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![entity_type, entity_id, action, payload, now],
     )?;
     LOCAL_WRITE.store(true, Ordering::SeqCst);
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 pub fn pending_entries(conn: &Connection) -> Result<Vec<SyncQueueEntry>> {

@@ -489,6 +489,28 @@ const MIGRATIONS: &[Migration] = &[
                 ON issue_activity_entries (issue_id, created_at);
         ",
     },
+    Migration {
+        version: 25,
+        name: "issue_activity_state",
+        up: "
+            -- Per-issue Activity fetch state: the cursor (X-Server-Time of the
+            -- last successful fetch) and whether the full history is fetched.
+            CREATE TABLE IF NOT EXISTS issue_activity_state (
+                issue_id TEXT PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
+                cursor TEXT,
+                fully_fetched INTEGER NOT NULL DEFAULT 0
+            );
+        ",
+    },
+    Migration {
+        version: 26,
+        name: "issue_events_sync_queue_link",
+        up: "
+            -- Link a local Activity row (a Pending change) to the sync_queue
+            -- entry that will push it. NULL for existing rows.
+            ALTER TABLE issue_events ADD COLUMN sync_queue_id INTEGER;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -627,6 +649,7 @@ mod tests {
             "notifications",
             "home_page",
             "issue_activity_entries",
+            "issue_activity_state",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }
@@ -669,6 +692,30 @@ mod tests {
                 .unwrap();
             assert_eq!(left, 0);
         }
+    }
+
+    #[test]
+    fn issue_events_sync_queue_link_is_nullable_and_keeps_rows() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 26) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)", [now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1', 'B', 0, 't1', ?1, ?1)", [now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1', 'i', 4, 'l1', 't1', ?1, ?1)", [now]).unwrap();
+        conn.execute("INSERT INTO issue_events (issue_id, kind, old_value, new_value, created_at) VALUES ('i1', 'title', 'a', 'b', ?1)", [now]).unwrap();
+        run(&conn).unwrap();
+        let row: (String, String, Option<i64>) = conn
+            .query_row("SELECT kind, new_value, sync_queue_id FROM issue_events WHERE issue_id = 'i1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(row, ("title".to_string(), "b".to_string(), None));
+        conn.execute("UPDATE issue_events SET sync_queue_id = 5", []).unwrap();
     }
 
     #[test]
@@ -969,5 +1016,43 @@ mod tests {
             dup.is_err(),
             "expected UNIQUE violation on duplicate dependency"
         );
+    }
+
+    #[test]
+    fn issue_activity_state_one_row_per_issue_and_cascades() {
+        let conn = open_mem();
+        run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+             VALUES ('l1', 'B', 0, 't1', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES ('i1', 'i', 4, 'l1', 't1', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issue_activity_state (issue_id, cursor, fully_fetched) VALUES ('i1', 'c', 1)",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute("INSERT INTO issue_activity_state (issue_id) VALUES ('i1')", []);
+        assert!(dup.is_err(), "at most one row per issue");
+
+        conn.execute("DELETE FROM issues WHERE id = 'i1'", []).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_activity_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "state row should cascade with the issue");
     }
 }

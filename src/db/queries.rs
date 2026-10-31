@@ -247,6 +247,10 @@ fn purge_issue_rows(conn: &Connection, issue_id: &str) -> Result<()> {
         "DELETE FROM issue_activity_entries WHERE issue_id = ?1",
         params![issue_id],
     )?;
+    tx.execute(
+        "DELETE FROM issue_activity_state WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
     tx.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
     tx.commit()
 }
@@ -1208,6 +1212,85 @@ pub fn delete_issue_dependency(conn: &Connection, dep_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run a local issue edit and enqueue its push in ONE transaction. Returns the
+/// new sync-queue entry id; if either the edit or the enqueue fails, neither
+/// is committed.
+pub fn edit_issue_queued(
+    conn: &Connection,
+    issue_id: &str,
+    action: &str,
+    payload: Option<&str>,
+    edit: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    edit(&tx)?;
+    let id = super::sync_queue::enqueue_returning_id(&tx, "issue", issue_id, action, payload)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// [`update_issue`] plus its `issue/update` queue entry (payload = the issue
+/// JSON), atomically.
+pub fn update_issue_queued(conn: &Connection, issue: &Issue) -> Result<i64> {
+    let payload = serde_json::to_string(issue).ok();
+    edit_issue_queued(conn, &issue.id, "update", payload.as_deref(), |c| {
+        update_issue(c, issue)
+    })
+}
+
+/// [`insert_issue_dependency`] plus its `dependency/create` queue entry,
+/// atomically. A UNIQUE-constraint failure leaves no queue entry behind.
+pub fn insert_issue_dependency_queued(conn: &Connection, dep: &IssueDependency) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    insert_issue_dependency(&tx, dep)?;
+    let id = super::sync_queue::enqueue_returning_id(&tx, "dependency", &dep.id, "create", None)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Delete a dependency edge and, when the server knows it, enqueue the
+/// `dependency/delete` push (carrying the remote ids captured before the row
+/// goes), atomically. Returns the queue entry id, or None when nothing needed
+/// pushing (unknown edge, never synced, or ids unresolvable).
+pub fn delete_issue_dependency_queued(conn: &Connection, dep_id: &str) -> Result<Option<i64>> {
+    let Some(dep) = get_issue_dependency(conn, dep_id)? else {
+        return Ok(None);
+    };
+    let tx = conn.unchecked_transaction()?;
+    // The Rails edge lives under the BLOCKING issue's endpoint.
+    let mut payload = None;
+    if let (Some(remote_id), Some(blocking)) =
+        (dep.remote_id, get_issue(&tx, &dep.blocking_issue_id)?)
+    {
+        if let (Some(issue_remote_id), Some(team_remote_id)) = (
+            blocking.remote_id,
+            remote_id_for(&tx, "teams", &blocking.team_id)?,
+        ) {
+            payload = Some(
+                serde_json::json!({
+                    "team_remote_id": team_remote_id,
+                    "issue_remote_id": issue_remote_id,
+                    "remote_id": remote_id,
+                })
+                .to_string(),
+            );
+        }
+    }
+    let queued = match &payload {
+        Some(p) => Some(super::sync_queue::enqueue_returning_id(
+            &tx,
+            "dependency",
+            dep_id,
+            "delete",
+            Some(p),
+        )?),
+        None => None,
+    };
+    delete_issue_dependency(&tx, dep_id)?;
+    tx.commit()?;
+    Ok(queued)
+}
+
 /// A resolved dependency edge for the issue-detail sidebar: the dependency row's
 /// own id/kind plus the issue on the far end (for display + navigation +
 /// removal).
@@ -1914,6 +1997,106 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn edit_and_queue_entry_commit_together_and_return_the_entry_id() {
+        let conn = setup();
+        let mut issue = get_issue(&conn, "i1").unwrap().unwrap();
+        issue.title = "Renamed".into();
+        let id = update_issue_queued(&conn, &issue).unwrap();
+        assert_eq!(get_issue(&conn, "i1").unwrap().unwrap().title, "Renamed");
+        let entries = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, Some(id));
+        assert_eq!(entries[0].entity_type, "issue");
+        assert_eq!(entries[0].action, "update");
+    }
+
+    #[test]
+    fn failed_edit_leaves_no_queue_entry() {
+        let conn = setup();
+        let r = edit_issue_queued(&conn, "i1", "update", None, |c| {
+            c.execute("UPDATE issues SET title = 'half' WHERE id = 'i1'", [])?;
+            c.execute("UPDATE no_such_table SET x = 1", [])?;
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert_eq!(get_issue(&conn, "i1").unwrap().unwrap().title, "Issue");
+        assert!(crate::db::sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_enqueue_rolls_back_the_edit() {
+        let conn = setup();
+        conn.execute_batch(
+            "CREATE TRIGGER no_queue BEFORE INSERT ON sync_queue
+             BEGIN SELECT RAISE(ABORT, 'nope'); END;",
+        )
+        .unwrap();
+        let mut issue = get_issue(&conn, "i1").unwrap().unwrap();
+        issue.title = "Renamed".into();
+        assert!(update_issue_queued(&conn, &issue).is_err());
+        assert_eq!(get_issue(&conn, "i1").unwrap().unwrap().title, "Issue");
+    }
+
+    fn two_issue_dep(conn: &Connection) -> IssueDependency {
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES ('i2', 'Two', 0, 'l1', 't1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        IssueDependency {
+            id: "d1".into(),
+            remote_id: None,
+            blocking_issue_id: "i1".into(),
+            blocked_issue_id: "i2".into(),
+            kind: "blocks".into(),
+            direction: "blocks".into(),
+            created_at: NOW.into(),
+            updated_at: NOW.into(),
+        }
+    }
+
+    #[test]
+    fn dependency_add_queues_atomically_and_duplicate_queues_nothing() {
+        let conn = setup();
+        let dep = two_issue_dep(&conn);
+        let id = insert_issue_dependency_queued(&conn, &dep).unwrap();
+        let entries = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, Some(id));
+        assert_eq!(entries[0].entity_type, "dependency");
+
+        let dup = IssueDependency { id: "d2".into(), ..dep };
+        assert!(insert_issue_dependency_queued(&conn, &dup).is_err());
+        assert_eq!(crate::db::sync_queue::pending_entries(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dependency_remove_queues_only_when_the_server_knows_the_edge() {
+        let conn = setup();
+        let dep = two_issue_dep(&conn);
+        insert_issue_dependency_queued(&conn, &dep).unwrap();
+        // Never synced: deleted locally, nothing queued beyond the create.
+        assert_eq!(delete_issue_dependency_queued(&conn, "d1").unwrap(), None);
+        assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
+        assert_eq!(crate::db::sync_queue::pending_entries(&conn).unwrap().len(), 1);
+
+        // Synced edge: delete is queued with the captured remote ids.
+        conn.execute("UPDATE teams SET remote_id = 9 WHERE id = 't1'", []).unwrap();
+        conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
+        insert_issue_dependency(&conn, &IssueDependency { remote_id: Some(77), ..dep }).unwrap();
+        let id = delete_issue_dependency_queued(&conn, "d1").unwrap().unwrap();
+        let entry = crate::db::sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == Some(id))
+            .unwrap();
+        assert_eq!(entry.action, "delete");
+        assert!(entry.payload.unwrap().contains("\"remote_id\":77"));
+        assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
     }
 
     #[test]
