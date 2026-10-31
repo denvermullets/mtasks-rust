@@ -368,16 +368,55 @@ fn created_item(conn: &Connection, issue_id: &str) -> Result<Option<ActivityItem
     }
 }
 
-/// One line per change in a version entry. Changes this layer can't word yet
-/// produce no line.
+/// One line per change in a version entry. Changes this layer can't word
+/// (unknown fields) are covered by a single fallback line: the server's
+/// description with tags stripped (JRST-135), once per entry.
 fn version_lines(conn: &Connection, entry: &StoredEntry) -> Vec<String> {
     let Some(changes) = entry.payload["changes"].as_array() else {
         return Vec::new();
     };
-    changes
+    let mut unknown = false;
+    let mut lines: Vec<String> = changes
         .iter()
-        .filter_map(|c| plain_change_line(c).or_else(|| reference_change_line(conn, c)))
-        .collect()
+        .filter_map(|c| {
+            let line = plain_change_line(c).or_else(|| reference_change_line(conn, c));
+            unknown |= line.is_none();
+            line
+        })
+        .collect();
+    if unknown {
+        let text = strip_html(&entry.description);
+        if !text.is_empty() {
+            lines.push(text);
+        }
+    }
+    lines
+}
+
+/// Server HTML as plain text: tags removed, common entities decoded,
+/// whitespace collapsed.
+fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                out.push(' ');
+            }
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Reference fields (JRST-134): each side is resolved to the local entity's
@@ -1019,5 +1058,50 @@ mod jrst141_tests {
             ("created the issue".to_string(), ItemOrigin::Server),
             ("changed priority from None to High".to_string(), ItemOrigin::Pending),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod jrst135_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn texts(description: &str, changes: &str) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let body = serde_json::json!([{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z",
+            "actor":null,"event":"update","description":description,
+            "changes":serde_json::from_str::<Value>(changes).unwrap()}]);
+        let entries: Vec<ActivityEntry> = serde_json::from_value(body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        activity_for_issue(&conn, "i1").unwrap()[1..].iter().map(|i| i.text.clone()).collect()
+    }
+
+    #[test]
+    fn only_unknown_field_shows_stripped_description() {
+        let t = texts("<p>Ryan set <b>story points</b> &amp; more</p>", r#"[{"field":"story_points","from":1,"to":2}]"#);
+        assert_eq!(t, ["Ryan set story points & more"]);
+    }
+
+    #[test]
+    fn mixed_known_and_unknown_surfaces_both() {
+        let t = texts("<p>changed sprint</p>", r#"[{"field":"title","from":"a","to":"b"},{"field":"sprint","from":null,"to":"S1"}]"#);
+        assert_eq!(t, ["changed the title", "changed sprint"]);
+    }
+
+    #[test]
+    fn several_unknown_changes_emit_one_fallback() {
+        let t = texts("<p>did things</p>", r#"[{"field":"a","from":1,"to":2},{"field":"b","from":1,"to":2}]"#);
+        assert_eq!(t, ["did things"]);
+    }
+
+    #[test]
+    fn all_known_has_no_fallback_and_empty_description_adds_nothing() {
+        assert_eq!(texts("<p>x</p>", r#"[{"field":"title","from":"a","to":"b"}]"#), ["changed the title"]);
+        assert!(texts("<p> </p>", r#"[{"field":"zzz","from":1,"to":2}]"#).is_empty());
     }
 }
