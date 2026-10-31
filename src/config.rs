@@ -37,7 +37,7 @@ pub struct Config {
 }
 
 fn default_theme() -> String {
-    "default".to_string()
+    crate::theme::DEFAULT_THEME_KEY.to_string()
 }
 
 fn default_font() -> String {
@@ -110,25 +110,6 @@ pub fn save(cfg: &Config) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod theme_tests {
-    use super::*;
-
-    #[test]
-    fn old_config_without_theme_defaults_to_default_key() {
-        let cfg: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
-        assert_eq!(cfg.theme, "default");
-    }
-
-    #[test]
-    fn theme_key_round_trips() {
-        let mut cfg = Config::default();
-        cfg.theme = "warm-paper".to_string();
-        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
-        assert_eq!(back.theme, "warm-paper");
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::display::{CardProperty, FilterField, GroupBy, OrderBy, SubGroup};
@@ -185,5 +166,19 @@ mod tests {
         cfg.display.view_mode = crate::display::ViewMode::List;
         let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.display.view_mode, crate::display::ViewMode::List);
+    }
+
+    #[test]
+    fn old_config_without_theme_defaults_to_default_key() {
+        let cfg: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert_eq!(cfg.theme, "default");
+    }
+
+    #[test]
+    fn theme_key_round_trips() {
+        let mut cfg = Config::default();
+        cfg.theme = "warm-paper".to_string();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.theme, "warm-paper");
     }
 }

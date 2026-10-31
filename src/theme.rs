@@ -269,6 +269,9 @@ pub const THEMES: [Tokens; 15] = [
     ),
 ];
 
+/// Key of the theme used when none (or an unknown one) is configured.
+pub const DEFAULT_THEME_KEY: &str = "default";
+
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 
 /// The active theme's tokens.
@@ -276,10 +279,18 @@ pub fn tok() -> &'static Tokens {
     &THEMES[CURRENT.load(Ordering::Relaxed)]
 }
 
-/// Select the current theme by key. An unknown key selects `default`.
+/// Catalog index for a key; an unknown key resolves to `DEFAULT_THEME_KEY`.
+fn index_for_key(key: &str) -> usize {
+    THEMES
+        .iter()
+        .position(|t| t.key == key)
+        .or_else(|| THEMES.iter().position(|t| t.key == DEFAULT_THEME_KEY))
+        .unwrap_or(0)
+}
+
+/// Select the current theme by key. An unknown key selects `DEFAULT_THEME_KEY`.
 pub fn set_by_key(key: &str) {
-    let i = THEMES.iter().position(|t| t.key == key).unwrap_or(0);
-    CURRENT.store(i, Ordering::Relaxed);
+    CURRENT.store(index_for_key(key), Ordering::Relaxed);
 }
 
 /// A catalog entry for pick lists: displays as the theme name, carries the key.
@@ -308,7 +319,7 @@ pub fn choices() -> Vec<ThemeChoice> {
 
 /// The choice for a config key; an unknown key resolves to `default`.
 pub fn choice_for_key(key: &str) -> ThemeChoice {
-    let t = THEMES.iter().find(|t| t.key == key).unwrap_or(&THEMES[0]);
+    let t = &THEMES[index_for_key(key)];
     ThemeChoice {
         key: t.key,
         name: t.name,
@@ -485,22 +496,39 @@ mod tests {
     #[test]
     fn choice_for_key_resolves_known_and_falls_back_to_default() {
         assert_eq!(choice_for_key("ink").key, "ink");
-        assert_eq!(choice_for_key("nope").key, "default");
+        assert_eq!(choice_for_key("nope").key, DEFAULT_THEME_KEY);
     }
 
     fn lum(c: Color) -> f32 {
         0.299 * c.r + 0.587 * c.g + 0.114 * c.b
     }
 
+    /// Restores the default theme on drop, so a failed assertion cannot leak
+    /// a non-default theme into other tests.
+    struct RestoreDefault;
+
+    impl Drop for RestoreDefault {
+        fn drop(&mut self) {
+            set_by_key(DEFAULT_THEME_KEY);
+        }
+    }
+
+    #[test]
+    fn default_theme_key_is_the_first_catalog_entry() {
+        assert_eq!(DEFAULT_THEME_KEY, "default");
+        assert_eq!(THEMES[0].key, DEFAULT_THEME_KEY);
+    }
+
     // The current theme is process-global, so everything touching it runs in one test.
     #[test]
     fn theme_selection_and_read_functions() {
+        let _restore = RestoreDefault;
         let keys: Vec<_> = THEMES.iter().map(|t| t.key).collect();
         assert_eq!(keys, RAILS_KEYS);
         let light: Vec<_> = THEMES.iter().filter(|t| t.light).map(|t| t.name).collect();
         assert_eq!(light, ["Warm Paper", "Cool Linen", "Chalk"]);
 
-        set_by_key("default");
+        set_by_key(DEFAULT_THEME_KEY);
         let (dark_acc, dark_bg) = (accent(), bg_primary());
         let dark = [
             priority_urgent(),
@@ -544,12 +572,11 @@ mod tests {
         assert_eq!(p.text, text_primary());
         assert_eq!(p.primary, accent());
         assert_eq!(p.danger, danger());
-        set_by_key("default");
+        set_by_key(DEFAULT_THEME_KEY);
         assert_ne!(iced_theme().palette().background, p.background);
 
         set_by_key("no-such-theme");
-        assert_eq!(tok().key, "default");
+        assert_eq!(tok().key, DEFAULT_THEME_KEY);
         assert_eq!(accent(), dark_acc);
-        set_by_key("default");
     }
 }
