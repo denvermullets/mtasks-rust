@@ -9,6 +9,18 @@ pub struct MeDto {
     pub name: String,
     pub email: String,
     pub token: MeTokenDto,
+    /// The user's Home page; null or absent when none is set (or its target is
+    /// hidden from this token).
+    #[serde(default)]
+    pub home_page: Option<HomePageDto>,
+}
+
+/// `{kind, id}` of the Home page target. `kind` is `team`, `view` or
+/// `dashboard`; `id` is the target's remote id.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HomePageDto {
+    pub kind: String,
+    pub id: i64,
 }
 
 /// Metadata about the API token making the request. `team_ids` is the
@@ -51,6 +63,27 @@ mod tests {
 
     fn token(json: &str) -> MeTokenDto {
         serde_json::from_str(json).unwrap()
+    }
+
+    fn me(extra: &str) -> MeDto {
+        serde_json::from_str(&format!(
+            r#"{{"id":1,"name":"n","email":"e","token":{{"name":"t","scopes":[]}}{extra}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn decodes_home_page_kind_and_id() {
+        for kind in ["team", "view", "dashboard"] {
+            let m = me(&format!(r#","home_page":{{"kind":"{kind}","id":42}}"#));
+            assert_eq!(m.home_page, Some(HomePageDto { kind: kind.into(), id: 42 }));
+        }
+    }
+
+    #[test]
+    fn decodes_null_or_absent_home_page_as_none() {
+        assert_eq!(me(r#","home_page":null"#).home_page, None);
+        assert_eq!(me("").home_page, None);
     }
 
     #[test]
