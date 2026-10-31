@@ -103,7 +103,11 @@ fn chips<'a, T: Copy + PartialEq + 'a>(
 }
 
 /// The "Display" dropdown: group by / sub-group / order / completed / properties.
-pub fn display_view<'a>(opts: &'a DisplayOptions) -> Element<'a, Message> {
+/// `save_blocked` is the reason "Save view…" is unavailable, if it is.
+pub fn display_view<'a>(
+    opts: &'a DisplayOptions,
+    save_blocked: Option<&'static str>,
+) -> Element<'a, Message> {
     let mut props: Column<'a, Message> = column![].spacing(4);
     for (prop, label) in CardProperty::ALL {
         props = props.push(
@@ -171,7 +175,18 @@ pub fn display_view<'a>(opts: &'a DisplayOptions) -> Element<'a, Message> {
                 .text_size(12),
         )
         .push(heading("CARD PROPERTIES"))
-        .push(props);
+        .push(props)
+        .push(heading("SAVED VIEW"))
+        .push(
+            button(text("Save view\u{2026}").size(12))
+                .on_press_maybe(save_blocked.is_none().then_some(Message::OpenSaveView))
+                .padding([5, 12])
+                .style(button::secondary),
+        );
+    let body = match save_blocked {
+        Some(reason) => body.push(text(reason).size(11).color(t::text_muted())),
+        None => body,
+    };
 
     container(body)
         .padding(16)

@@ -191,6 +191,56 @@ pub fn delete_local(conn: &Connection, view_id: &str) -> Result<Option<String>> 
         .map(|id| serde_json::json!({ "remote_id": id }).to_string()))
 }
 
+/// Add a new view to `team_id` (local uuid), last in the sidebar, and queue
+/// its `saved_view` create. `query` is the encoded Rails query as JSON text.
+/// Position mirrors Rails (highest + 1) until the push adopts the server's.
+pub fn create_local(conn: &Connection, team_id: &str, name: &str, query: &str) -> Result<SavedView> {
+    let tx = conn.unchecked_transaction()?;
+    let position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM saved_views",
+        [],
+        |r| r.get(0),
+    )?;
+    let view = SavedView {
+        id: Uuid::new_v4().to_string(),
+        remote_id: None,
+        team_id: team_id.to_string(),
+        name: name.to_string(),
+        query: query.to_string(),
+        position,
+        updated_at: crate::db::now_iso(),
+    };
+    tx.execute(
+        "INSERT INTO saved_views (id, remote_id, team_id, name, query, position, updated_at)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+        params![view.id, view.team_id, view.name, view.query, view.position, view.updated_at],
+    )?;
+    sync_queue::enqueue(&tx, ENTITY_TYPE, &view.id, "create", None)?;
+    tx.commit()?;
+    Ok(view)
+}
+
+/// Link a pushed view to the server's row: remote id, position, query and
+/// timestamp come from the create response.
+pub fn adopt_created(conn: &Connection, view_id: &str, dto: &SavedViewIn) -> Result<()> {
+    let query = if dto.query.is_object() {
+        dto.query.to_string()
+    } else {
+        "{}".to_string()
+    };
+    // A pull may already have mirrored the pushed row as a separate view.
+    conn.execute(
+        "DELETE FROM saved_views WHERE remote_id = ?2 AND id <> ?1",
+        params![view_id, dto.id],
+    )?;
+    conn.execute(
+        "UPDATE saved_views SET remote_id = ?2, position = ?3, query = ?4, updated_at = ?5
+         WHERE id = ?1",
+        params![view_id, dto.id, dto.position, query, dto.updated_at],
+    )?;
+    Ok(())
+}
+
 /// Stored Saved-views cursor (last applied `server_time`), if any.
 pub fn cursor(conn: &Connection) -> Result<Option<String>> {
     get_pull_cursor(conn, SCOPE, RESOURCE)
@@ -425,5 +475,37 @@ mod tests {
         apply_tombstones(&conn, &[], None).unwrap();
         assert_eq!(deleted_cursor(&conn).unwrap().as_deref(), Some("D1"));
         assert_eq!(cursor(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn create_local_adds_a_view_after_the_others_and_queues_a_create() {
+        let conn = setup();
+        apply_pulled(&conn, &[view(4, 700, "Old", json!({}))], None).unwrap();
+        let q = serde_json::json!({"view_mode": "board"}).to_string();
+        let sv = create_local(&conn, "t1", "Mine", &q).unwrap();
+        assert_eq!((sv.remote_id, sv.name.as_str(), sv.team_id.as_str()), (None, "Mine", "t1"));
+        assert_eq!(sv.position, 5);
+        assert_eq!(sv.query, q);
+        let names: Vec<_> = list_for_team(&conn, "t1").unwrap().into_iter().map(|v| v.name).collect();
+        assert_eq!(names, ["Old", "Mine"]);
+        let pending = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            (pending[0].entity_type.as_str(), pending[0].action.as_str(), pending[0].entity_id.as_str()),
+            ("saved_view", "create", sv.id.as_str())
+        );
+    }
+
+    #[test]
+    fn adopt_created_takes_id_position_and_query_from_the_server() {
+        let conn = setup();
+        let sv = create_local(&conn, "t1", "Mine", "{\"a\":\"1\"}").unwrap();
+        let mut dto = view(77, 700, "Mine", json!({"a": "1", "view_mode": "list"}));
+        dto.position = 9;
+        adopt_created(&conn, &sv.id, &dto).unwrap();
+        let got = find_by_remote_id(&conn, 77).unwrap().unwrap();
+        assert_eq!((got.id.as_str(), got.position), (sv.id.as_str(), 9));
+        assert_eq!(stored_query(&got), json!({"a": "1", "view_mode": "list"}));
+        assert_eq!(got.updated_at, "2026-10-31T10:00:00Z");
     }
 }

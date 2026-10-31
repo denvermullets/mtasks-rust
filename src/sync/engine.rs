@@ -391,6 +391,7 @@ async fn process(
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
         ("notification", "read_all") => notification_read_all(client, entry.payload.as_deref()).await,
         ("home_page", "update") => home_page_set(client, entry.payload.as_deref()).await,
+        ("saved_view", "create") => saved_view_create(client, &entry.entity_id, entry_id).await,
         ("saved_view", "delete") => saved_view_delete(client, entry.payload.as_deref()).await,
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
@@ -1849,6 +1850,99 @@ async fn home_page_set(client: &ApiClient, payload: Option<&str>) -> Outcome {
     }
 }
 
+struct SavedViewCreatePrep {
+    team_remote_id: i64,
+    local_id: String,
+    name: String,
+    query: serde_json::Value,
+}
+
+fn saved_view_create_prep(conn: &Connection, entity_id: &str) -> Prep<SavedViewCreatePrep> {
+    use rusqlite::OptionalExtension;
+    let view = match conn
+        .query_row(
+            "SELECT id, remote_id, team_id, name, query FROM saved_views WHERE id = ?1",
+            [entity_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()
+    {
+        Ok(Some(v)) => v,
+        // Deleted before it was ever pushed.
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "saved view {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let (local_id, remote_id, team_id, name, query) = view;
+    if remote_id.is_some() {
+        return Prep::Done(Outcome::Success);
+    }
+    let team_remote_id = match queries::remote_id_for(conn, "teams", &team_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    Prep::Ready(SavedViewCreatePrep {
+        team_remote_id,
+        local_id,
+        name,
+        query: serde_json::from_str(&query).unwrap_or_else(|_| serde_json::json!({})),
+    })
+}
+
+/// Adopt the server's row and retire the queue entry together.
+fn commit_saved_view_create(
+    conn: &mut Connection,
+    entry_id: i64,
+    local_id: &str,
+    dto: &crate::api::saved_views::SavedViewDto,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
+    crate::db::saved_views::adopt_created(&tx, local_id, dto)
+        .map_err(|e| format!("adopt saved view: {e}"))?;
+    sync_queue::mark_synced(&tx, entry_id).map_err(|e| format!("mark_synced: {e}"))?;
+    tx.commit().map_err(|e| format!("commit: {e}"))
+}
+
+/// `POST /teams/:team_id/saved_views`. Rails has no idempotency or lookup for
+/// these, so a re-drain after a lost response creates a second server row; the
+/// pull then mirrors it as a separate view the user can delete.
+async fn saved_view_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match saved_view_create_prep(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    match crate::api::saved_views::create(client, prep.team_remote_id, &prep.name, &prep.query)
+        .await
+    {
+        Ok(dto) => {
+            let mut conn = match open() {
+                Ok(c) => c,
+                Err(e) => return Outcome::LeavePending(e),
+            };
+            match commit_saved_view_create(&mut conn, entry_id, &prep.local_id, &dto) {
+                Ok(()) => Outcome::Created,
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
 /// `DELETE /saved_views/:id`. A 404 means it is already gone: done.
 async fn saved_view_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
     let Some(remote_id) = saved_view_delete_id(payload) else {
@@ -2109,6 +2203,12 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
         ("issue", _) => team_remote(&queries::get_issue(conn, id).ok()??.team_id),
         ("project", _) => team_remote(&queries::get_project(conn, id).ok()??.team_id),
         ("label", _) => team_remote(&queries::get_label(conn, id).ok()??.team_id),
+        ("saved_view", "create") => {
+            let team_id: String = conn
+                .query_row("SELECT team_id FROM saved_views WHERE id = ?1", [id], |r| r.get(0))
+                .ok()?;
+            team_remote(&team_id)
+        }
         ("comment", _) => {
             let c = queries::get_comment(conn, id).ok()??;
             let team_id = match (&c.issue_id, &c.project_id) {
@@ -4084,6 +4184,75 @@ mod tests {
                 Prep::Done(Outcome::DropAndLog(_))
             ));
         }
+    }
+
+    fn saved_view_conn() -> (Connection, String) {
+        let conn = setup_labels_db();
+        let sv = crate::db::saved_views::create_local(&conn, "t1", "Mine", r#"{"view_mode":"list"}"#)
+            .unwrap();
+        (conn, sv.id)
+    }
+
+    fn saved_view_dto(id: i64) -> crate::api::saved_views::SavedViewDto {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "team_id": 700, "name": "Mine",
+            "query": {"view_mode": "list"}, "position": 3,
+            "updated_at": "2026-10-31T10:00:00.000Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn saved_view_create_prep_carries_team_name_and_query() {
+        let (conn, id) = saved_view_conn();
+        let Prep::Ready(p) = saved_view_create_prep(&conn, &id) else {
+            panic!("expected Ready");
+        };
+        assert_eq!(p.team_remote_id, 700);
+        assert_eq!(p.name, "Mine");
+        assert_eq!(p.query, serde_json::json!({"view_mode": "list"}));
+        assert_eq!(p.local_id, id);
+    }
+
+    #[test]
+    fn saved_view_create_prep_waits_for_the_team_and_skips_done_or_missing_views() {
+        let (conn, id) = saved_view_conn();
+        conn.execute("UPDATE teams SET remote_id = NULL", []).unwrap();
+        assert!(matches!(
+            saved_view_create_prep(&conn, &id),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        assert!(matches!(
+            saved_view_create_prep(&conn, "nope"),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
+        conn.execute("UPDATE saved_views SET remote_id = 5", []).unwrap();
+        assert!(matches!(
+            saved_view_create_prep(&conn, &id),
+            Prep::Done(Outcome::Success)
+        ));
+    }
+
+    #[test]
+    fn saved_view_create_push_adopts_the_server_row_and_marks_synced() {
+        let (mut conn, id) = saved_view_conn();
+        let entry = sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        commit_saved_view_create(&mut conn, entry, &id, &saved_view_dto(88)).unwrap();
+        let got = crate::db::saved_views::find_by_remote_id(&conn, 88).unwrap().unwrap();
+        assert_eq!((got.id, got.position), (id, 3));
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn saved_view_create_push_survives_a_pull_that_already_inserted_the_row() {
+        let (mut conn, id) = saved_view_conn();
+        let entry = sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        // The POST landed earlier and a pull mirrored it as a second local row.
+        crate::db::saved_views::apply_pulled(&conn, &[saved_view_dto(88)], None).unwrap();
+        commit_saved_view_create(&mut conn, entry, &id, &saved_view_dto(88)).unwrap();
+        let all = crate::db::saved_views::list_for_team(&conn, "t1").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].id.as_str(), all[0].remote_id), (id.as_str(), Some(88)));
     }
 
     #[test]
