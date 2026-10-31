@@ -26,7 +26,7 @@ use crate::views::{
     board, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
-    team_list, team_members, toast,
+    team_list, team_members, team_picker, toast,
 };
 
 #[derive(Debug, Clone)]
@@ -129,6 +129,12 @@ pub enum Message {
     DependencyPickerSelected(String),
     /// Remove a dependency edge by its local dependency-row UUID.
     RemoveDependency(String),
+    /// Open the "Move to team" picker for an issue (local UUID).
+    OpenMoveTeamPicker(String),
+    /// `t` on the board: open the move picker for the focused issue.
+    MoveFocusedIssueToTeam,
+    /// A target team (local UUID) was chosen in the move picker.
+    MoveTeamSelected(String),
 
     // Labels
     OpenLabels,
@@ -140,6 +146,8 @@ pub enum Message {
     EditLabelNameChanged(String),
     EditLabelColorChanged(String),
     SaveLabelEdit,
+    ConfirmDeleteLabel,
+    DeleteLabelConfirmed,
     /// Toggle a label on the issue targeted by the label modal (by local UUID).
     ToggleIssueLabel(String),
     SaveIssueLabels,
@@ -304,8 +312,12 @@ pub enum Modal {
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
     Labels,
+    /// Confirm deleting the label being edited (local id) from the labels panel.
+    DeleteLabelConfirm(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
+    /// Team picker for moving an issue (local UUID); see `team_picker`.
+    MoveTeam(String),
     /// "Add project to roadmap" picker; carries the lane a chosen project lands in.
     RoadmapAdd(RoadmapCommitment),
     /// Read-only members panel for a team (local UUID).
@@ -376,22 +388,12 @@ impl DepDirection {
         }
     }
 
-    /// Relates and duplicates links can't be created yet.
-    pub fn enabled(self) -> bool {
-        matches!(self, DepDirection::Blocking | DepDirection::BlockedBy)
-    }
-
-    /// The next (or previous) enabled kind, wrapping around.
+    /// The next (or previous) kind, wrapping around.
     pub fn cycle(self, forward: bool) -> DepDirection {
         let n = Self::ALL.len();
         let start = Self::ALL.iter().position(|d| *d == self).unwrap_or(0);
-        (1..=n)
-            .map(|step| {
-                let i = if forward { start + step } else { start + n - step };
-                Self::ALL[i % n]
-            })
-            .find(|d| d.enabled())
-            .unwrap_or(self)
+        let i = if forward { start + 1 } else { start + n - 1 };
+        Self::ALL[i % n]
     }
 
     /// The stored edge for linking `current` to `target` in this kind. The link's
@@ -1271,6 +1273,12 @@ impl App {
             self.push_toast("An issue can't depend on itself", ToastKind::Error, false);
             return;
         }
+        let conn = self.db();
+        // Rails allows one link per pair, in either order and of any kind.
+        if queries::issue_dependency_pair_exists(&conn, &current_id, target_id).unwrap_or(false) {
+            self.push_toast("Those issues are already linked", ToastKind::Error, false);
+            return;
+        }
         let (blocking_issue_id, blocked_issue_id, kind) =
             direction.stored_edge(&current_id, target_id);
         let now = crate::db::now_iso();
@@ -1286,7 +1294,6 @@ impl App {
             created_at: now.clone(),
             updated_at: now,
         };
-        let conn = self.db();
         match queries::insert_issue_dependency(&conn, &dep) {
             Ok(()) => {
                 self.enqueue_sync("dependency", &dep.id, "create", None);
@@ -1296,6 +1303,42 @@ impl App {
                 // Almost always the UNIQUE(blocking, blocked) constraint.
                 self.push_toast("Those issues are already linked", ToastKind::Error, false);
             }
+        }
+    }
+
+    /// Move `issue_id` to `target_team_id`: apply the local move rules at once,
+    /// queue `issue/move`, and toast what was cleared. Any open detail edits are
+    /// flushed first so they are queued before the move. The moved issue leaves
+    /// the current team's list, so an open detail for it is closed.
+    fn move_issue_to_team(&mut self, issue_id: &str, target_team_id: &str) {
+        self.commit_issue_detail();
+        let conn = self.db();
+        let Ok(Some(issue)) = queries::get_issue(&conn, issue_id) else {
+            return;
+        };
+        match queries::move_issue_to_team(&conn, issue_id, target_team_id) {
+            Ok(summary) => {
+                let _ = queries::queue_issue_move(&conn, issue_id, &issue.team_id);
+                let name = self
+                    .teams
+                    .iter()
+                    .find(|t| t.id == target_team_id)
+                    .map_or("team", |t| t.name.as_str())
+                    .to_string();
+                self.push_toast(summary.toast(&name), ToastKind::Info, false);
+                if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
+                    let back = if self.detail_from_my_issues {
+                        View::MyIssues
+                    } else {
+                        View::Board
+                    };
+                    self.detail_from_my_issues = false;
+                    self.issue_detail = None;
+                    self.switch_view(back);
+                }
+                self.reload_data();
+            }
+            Err(e) => self.push_toast(format!("Move failed: {e}"), ToastKind::Error, false),
         }
     }
 
@@ -2130,9 +2173,7 @@ impl App {
             }
             Message::SetDependencyKind(kind) => {
                 if let Some(ref mut picker) = self.issue_picker {
-                    if kind.enabled() {
-                        picker.direction = kind;
-                    }
+                    picker.direction = kind;
                 }
             }
             Message::DependencyPickerSearchChanged(query) => {
@@ -2147,6 +2188,19 @@ impl App {
             }
             Message::RemoveDependency(dep_id) => {
                 self.remove_dependency(&dep_id);
+            }
+            Message::OpenMoveTeamPicker(issue_id) => {
+                self.modal = Modal::MoveTeam(issue_id);
+            }
+            Message::MoveFocusedIssueToTeam => {
+                if let Some(issue) = self.focused_issue() {
+                    self.modal = Modal::MoveTeam(issue.id.clone());
+                }
+            }
+            Message::MoveTeamSelected(target_id) => {
+                if let Modal::MoveTeam(issue_id) = std::mem::replace(&mut self.modal, Modal::None) {
+                    self.move_issue_to_team(&issue_id, &target_id);
+                }
             }
 
             Message::ConfirmDeleteFocusedIssue => {
@@ -2739,6 +2793,15 @@ impl App {
                     for f in report.failures() {
                         match &f.kind {
                             SyncErrorKind::Auth | SyncErrorKind::Network | SyncErrorKind::TeamAccess => {}
+                            // A refused move (422/404) is dropped; the next full pull
+                            // restores the issue, so the toast just carries the reason.
+                            SyncErrorKind::Validation(errs) if f.entity_type == "issue_move" => {
+                                error_toasts
+                                    .push((format!("Move rejected: {}", errs.join("; ")), false));
+                            }
+                            SyncErrorKind::Other if f.entity_type == "issue_move" => {
+                                error_toasts.push((format!("Move rejected: {}", f.message), false));
+                            }
                             SyncErrorKind::Validation(errs) if f.entity_type == "issue" => {
                                 validation_issue = Some((f.entity_id.clone(), errs.clone()));
                             }
@@ -3066,7 +3129,9 @@ impl App {
             Message::DeleteCommentConfirmed => {
                 if let Modal::DeleteCommentConfirm(ref comment_id) = self.modal {
                     let conn = self.db();
-                    let _ = queries::delete_unsynced_comment(&conn, comment_id);
+                    if let Ok((_, Some(payload))) = queries::delete_comment(&conn, comment_id) {
+                        self.enqueue_sync("comment", comment_id, "delete", Some(payload.as_str()));
+                    }
                     if let Some(d) = &mut self.issue_detail {
                         if d.reply_to.as_deref() == Some(comment_id.as_str()) {
                             d.reply_to = None;
@@ -3220,6 +3285,28 @@ impl App {
                         }
                     }
                 }
+            }
+
+            Message::ConfirmDeleteLabel => {
+                if let Some(id) = self.label_form.as_ref().and_then(|f| f.editing_id.clone()) {
+                    self.modal = Modal::DeleteLabelConfirm(id);
+                }
+            }
+
+            Message::DeleteLabelConfirmed => {
+                if let Modal::DeleteLabelConfirm(ref label_id) = self.modal {
+                    let label_id = label_id.clone();
+                    if let Ok(Some(payload)) = queries::delete_label(&self.db(), &label_id) {
+                        self.enqueue_sync("label", &label_id, "delete", Some(payload.as_str()));
+                    }
+                    if let Some(ref mut form) = self.label_form {
+                        form.selected_label_ids.retain(|id| *id != label_id);
+                        form.editing_id = None;
+                        form.edit_error = None;
+                    }
+                }
+                self.modal = Modal::Labels;
+                self.reload_data();
             }
 
             Message::ToggleIssueLabel(label_id) => {
@@ -3560,6 +3647,16 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::DeleteLabelConfirm(label_id) => {
+                let conn = self.db();
+                let name = queries::get_label(&conn, label_id)
+                    .ok()
+                    .flatten()
+                    .map(|l| l.name)
+                    .unwrap_or_default();
+                let count = queries::label_issue_count(&conn, label_id).unwrap_or(0);
+                iced::widget::stack![base, delete_label_confirm_modal(name, count)].into()
+            }
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
@@ -3585,6 +3682,15 @@ impl App {
                 }
                 _ => base,
             },
+            Modal::MoveTeam(issue_id) => {
+                let source = self
+                    .issues
+                    .iter()
+                    .find(|i| i.id == *issue_id)
+                    .map(|i| i.team_id.as_str());
+                let targets = team_picker::move_targets(&self.teams, source.unwrap_or_default());
+                iced::widget::stack![base, team_picker::view(&targets)].into()
+            }
             Modal::RoadmapAdd(commitment) => {
                 let modal =
                     roadmap_view::add_modal_view(*commitment, &self.projects, self.selected_team());
@@ -3788,6 +3894,15 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
     )
 }
 
+fn delete_label_confirm_modal<'a>(name: String, issues: usize) -> Element<'a, Message> {
+    let body = match issues {
+        0 => format!("Delete the label \"{name}\"? No issues carry it."),
+        1 => format!("Delete the label \"{name}\"? It will be removed from 1 issue."),
+        n => format!("Delete the label \"{name}\"? It will be removed from {n} issues."),
+    };
+    delete_modal("Delete Label?", body, Message::DeleteLabelConfirmed)
+}
+
 fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
     let body = match replies {
         0 => "Delete this comment?".to_string(),
@@ -3965,9 +4080,10 @@ mod tests {
     }
 
     #[test]
-    fn dep_direction_cycles_only_through_enabled_kinds() {
-        assert_eq!(DepDirection::Blocking.cycle(true), DepDirection::BlockedBy);
-        assert_eq!(DepDirection::BlockedBy.cycle(true), DepDirection::Blocking);
-        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::BlockedBy);
+    fn dep_direction_cycles_through_every_kind() {
+        assert_eq!(DepDirection::Relates.cycle(true), DepDirection::Duplicates);
+        assert_eq!(DepDirection::Duplicates.cycle(true), DepDirection::DuplicatedBy);
+        assert_eq!(DepDirection::DuplicatedBy.cycle(true), DepDirection::Blocking);
+        assert_eq!(DepDirection::Blocking.cycle(false), DepDirection::DuplicatedBy);
     }
 }

@@ -1,7 +1,7 @@
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
 use super::events::{self, Source};
-use super::models::{Comment, Issue, IssueDependency, Label, Lane, Member, Project, Team};
+use super::models::{Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
 
@@ -315,6 +315,43 @@ pub fn delete_unsynced_comment(conn: &Connection, comment_id: &str) -> Result<us
     Ok(ids.len())
 }
 
+/// Delete the user's own comment and its reply subtree. A comment the server
+/// has seen also yields the `comment/delete` queue payload, captured before the
+/// rows go: `{team_remote_id, issue_remote_id, remote_id}`. Unsynced comments
+/// are dropped as by [`delete_unsynced_comment`] and yield no payload. Returns
+/// `(removed count, payload)`.
+pub fn delete_comment(conn: &Connection, comment_id: &str) -> Result<(usize, Option<String>)> {
+    let Some(comment) = get_comment(conn, comment_id)? else {
+        return Ok((0, None));
+    };
+    let Some(remote_id) = comment.remote_id else {
+        return Ok((delete_unsynced_comment(conn, comment_id)?, None));
+    };
+    let owner_remote = match comment.owner() {
+        CommentOwner::Issue(issue_id) => get_issue(conn, &issue_id)?.and_then(|i| {
+            let team = remote_id_for(conn, "teams", &i.team_id).ok().flatten()?;
+            Some((team, i.remote_id?))
+        }),
+        CommentOwner::Project(_) => None,
+    };
+    let tx = conn.unchecked_transaction()?;
+    let ids = comment_subtree_ids(&tx, comment_id)?;
+    for id in ids.iter().rev() {
+        tx.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
+        retire_pending_sync(&tx, "comment", id)?;
+    }
+    tx.commit()?;
+    let payload = owner_remote.map(|(team_remote_id, issue_remote_id)| {
+        serde_json::json!({
+            "team_remote_id": team_remote_id,
+            "issue_remote_id": issue_remote_id,
+            "remote_id": remote_id,
+        })
+        .to_string()
+    });
+    Ok((ids.len(), payload))
+}
+
 /// Apply a server tombstone for an issue dependency (Rails destroys blocking
 /// edges when an issue completes): delete the local edge with this remote id
 /// and retire its pending sync entries. Edges are team-scoped through their
@@ -453,7 +490,6 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
 }
 
 /// What a local team move changed, for the toast.
-#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMoveSummary {
     pub team_number: i32,
@@ -470,7 +506,6 @@ pub struct IssueMoveSummary {
 /// Move an issue to another local team in one transaction, mirroring the Rails
 /// `IssueTeamMover`. Not queued here; the normal `update_issue` path still
 /// never writes `team_id` / `team_number`.
-#[allow(dead_code)] // not wired to UI/queue yet (JRST-71)
 pub fn move_issue_to_team(
     conn: &Connection,
     issue_id: &str,
@@ -567,6 +602,59 @@ pub fn move_issue_to_team(
         labels_removed,
         sub_issues_detached,
     })
+}
+
+impl IssueMoveSummary {
+    /// One-line toast text: where the issue went and what the move cleared.
+    pub fn toast(&self, target_team_name: &str) -> String {
+        let mut cleared: Vec<String> = Vec::new();
+        if self.lane_fell_back {
+            cleared.push("lane reset to first".into());
+        }
+        if self.assignee_cleared {
+            cleared.push("assignee".into());
+        }
+        if self.project_cleared {
+            cleared.push("project".into());
+        }
+        if self.parent_cleared {
+            cleared.push("parent".into());
+        }
+        if self.labels_removed > 0 {
+            cleared.push(format!("{} label(s)", self.labels_removed));
+        }
+        if self.sub_issues_detached > 0 {
+            cleared.push(format!("{} sub-issue link(s)", self.sub_issues_detached));
+        }
+        if cleared.is_empty() {
+            format!("Moved to {target_team_name}")
+        } else {
+            format!("Moved to {target_team_name}; cleared: {}", cleared.join(", "))
+        }
+    }
+}
+
+/// Queue the `issue/move` push for an issue that was just moved locally out of
+/// `source_team_id` (see [`move_issue_to_team`]). The payload captures the
+/// remote ids now, since the source team is gone from the row afterwards; a
+/// target team without a remote id is left null and resolved at push time.
+/// Returns false (nothing queued) when the server has never seen the issue:
+/// its pending create already posts to the new team.
+pub fn queue_issue_move(conn: &Connection, issue_id: &str, source_team_id: &str) -> Result<bool> {
+    let issue = get_issue(conn, issue_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let Some(issue_remote_id) = issue.remote_id else {
+        return Ok(false);
+    };
+    let payload = serde_json::json!({
+        "source_team_id": source_team_id,
+        "target_team_id": issue.team_id,
+        "source_team_remote_id": remote_id_for(conn, "teams", source_team_id)?,
+        "issue_remote_id": issue_remote_id,
+        "target_team_remote_id": remote_id_for(conn, "teams", &issue.team_id)?,
+    })
+    .to_string();
+    super::sync_queue::enqueue(conn, "issue", issue_id, "move", Some(&payload))?;
+    Ok(true)
 }
 
 pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> Result<()> {
@@ -886,6 +974,41 @@ pub fn edit_label(
     Ok(label.remote_id.is_some())
 }
 
+/// How many issues carry the label; the delete confirmation shows it.
+pub fn label_issue_count(conn: &Connection, label_id: &str) -> Result<usize> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM issue_labels WHERE label_id = ?1",
+        params![label_id],
+        |r| r.get::<_, i64>(0).map(|n| n as usize),
+    )
+}
+
+/// Delete a label locally with the same effect as the server tombstone: detach
+/// it from issues and projects and remove it in one transaction, retiring any
+/// pending queue entries for it. Returns the `label/delete` payload
+/// (`{team_remote_id, remote_id}`) when the label and its team are synced,
+/// i.e. when a delete must be queued; `None` otherwise (an unsynced label's
+/// create is simply retired).
+pub fn delete_label(conn: &Connection, label_id: &str) -> Result<Option<String>> {
+    let Some(label) = get_label(conn, label_id)? else {
+        return Ok(None);
+    };
+    let payload = match (label.remote_id, remote_id_for(conn, "teams", &label.team_id)?) {
+        (Some(remote_id), Some(team_remote_id)) => Some(
+            serde_json::json!({ "team_remote_id": team_remote_id, "remote_id": remote_id })
+                .to_string(),
+        ),
+        _ => None,
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM issue_labels WHERE label_id = ?1", params![label_id])?;
+    tx.execute("DELETE FROM project_labels WHERE label_id = ?1", params![label_id])?;
+    tx.execute("DELETE FROM labels WHERE id = ?1", params![label_id])?;
+    retire_pending_sync(&tx, "label", label_id)?;
+    tx.commit()?;
+    Ok(payload)
+}
+
 /// Local UUIDs of the labels currently attached to `issue_id`. Used to preload
 /// the multi-select when editing an issue.
 pub fn label_ids_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<String>> {
@@ -951,6 +1074,18 @@ pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<Is
         IssueDependency::from_row,
     )
     .optional()
+}
+
+/// Whether the two issues are already linked, in either order and of any kind
+/// (Rails allows one link per pair).
+pub fn issue_dependency_pair_exists(conn: &Connection, a: &str, b: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_dependencies
+         WHERE (blocking_issue_id = ?1 AND blocked_issue_id = ?2)
+            OR (blocking_issue_id = ?2 AND blocked_issue_id = ?1))",
+        params![a, b],
+        |r| r.get(0),
+    )
 }
 
 /// Insert a new local dependency row. Errors on the `UNIQUE(blocking_issue_id,
@@ -1931,6 +2066,49 @@ mod tests {
         assert_eq!(deletes, 0);
     }
 
+    fn link_remote_owner(conn: &Connection) {
+        conn.execute_batch(
+            "UPDATE issues SET remote_id = 50 WHERE id = 'i1';
+             UPDATE teams SET remote_id = 7 WHERE id = (SELECT team_id FROM issues WHERE id = 'i1');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn delete_comment_synced_root_captures_payload_and_retires_subtree() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        link_remote_owner(&conn);
+        set_comment_remote_id(&conn, "c1", 9).unwrap();
+        set_comment_remote_id(&conn, "c2", 10).unwrap();
+        let (removed, payload) = delete_comment(&conn, "c1").unwrap();
+        assert_eq!(removed, 4);
+        let payload: serde_json::Value = serde_json::from_str(&payload.unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"team_remote_id": 7, "issue_remote_id": 50, "remote_id": 9})
+        );
+        assert_eq!(comments_for_issue(&conn, "i1").unwrap().len(), 1);
+        // Pending creates for the subtree are retired; only c5's remains.
+        assert_eq!(pending_count(&conn), 1);
+    }
+
+    #[test]
+    fn delete_comment_unsynced_root_has_no_payload() {
+        let conn = setup();
+        seed_reply_tree(&conn);
+        link_remote_owner(&conn);
+        let (removed, payload) = delete_comment(&conn, "c1").unwrap();
+        assert_eq!(removed, 4);
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn delete_comment_unknown_id_removes_nothing() {
+        let conn = setup();
+        assert_eq!(delete_comment(&conn, "nope").unwrap(), (0, None));
+    }
+
     #[test]
     fn delete_unsynced_comment_refuses_a_synced_comment() {
         let conn = setup();
@@ -2061,6 +2239,41 @@ mod tests {
     }
 
     #[test]
+    fn delete_label_detaches_and_removes_in_one_go() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        set_issue_labels(&conn, "i1", &["lab1".into()]).unwrap();
+        assert_eq!(label_issue_count(&conn, "lab1").unwrap(), 1);
+        assert!(delete_label(&conn, "lab1").unwrap().is_none());
+        assert!(get_label(&conn, "lab1").unwrap().is_none());
+        assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+        assert_eq!(label_issue_count(&conn, "lab1").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_label_unsynced_retires_pending_create_and_queues_nothing() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        crate::db::sync_queue::enqueue(&conn, "label", "lab1", "create", None).unwrap();
+        assert!(delete_label(&conn, "lab1").unwrap().is_none());
+        assert_eq!(crate::db::sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_label_synced_returns_payload() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        set_label_remote_id(&conn, "lab1", 11).unwrap();
+        let team_id = get_label(&conn, "lab1").unwrap().unwrap().team_id;
+        conn.execute("UPDATE teams SET remote_id = 700 WHERE id = ?1", params![team_id])
+            .unwrap();
+        let payload = delete_label(&conn, "lab1").unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["team_remote_id"], 700);
+        assert_eq!(v["remote_id"], 11);
+    }
+
+    #[test]
     fn deleting_a_label_cascades_to_issue_labels() {
         let conn = setup();
         insert_label(&conn, &make_label("lab1", "bug")).unwrap();
@@ -2172,6 +2385,16 @@ mod tests {
         insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
         // Same ordered (blocking, blocked) pair violates the UNIQUE constraint.
         assert!(insert_issue_dependency(&conn, &make_dependency("d2", "i1", "i2")).is_err());
+    }
+
+    #[test]
+    fn issue_dependency_pair_exists_matches_either_order() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("i2", None, None)).unwrap();
+        assert!(!issue_dependency_pair_exists(&conn, "i1", "i2").unwrap());
+        insert_issue_dependency(&conn, &make_dependency("d1", "i1", "i2")).unwrap();
+        assert!(issue_dependency_pair_exists(&conn, "i1", "i2").unwrap());
+        assert!(issue_dependency_pair_exists(&conn, "i2", "i1").unwrap());
     }
 
     #[test]
@@ -2387,6 +2610,80 @@ mod tests {
         let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
         assert_eq!(issue_row(&conn, "i1").parent_issue_id, None);
         assert!(s.parent_cleared);
+    }
+
+    fn move_entries(conn: &Connection) -> Vec<crate::db::models::SyncQueueEntry> {
+        crate::db::sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.entity_type == "issue" && e.action == "move")
+            .collect()
+    }
+
+    #[test]
+    fn queue_move_captures_remote_ids_before_the_team_changes() {
+        let conn = move_setup();
+        conn.execute_batch(
+            "UPDATE teams SET remote_id = 100 WHERE id = 't1';
+             UPDATE teams SET remote_id = 200 WHERE id = 't2';
+             UPDATE issues SET remote_id = 55 WHERE id = 'i1';",
+        )
+        .unwrap();
+        move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert!(queue_issue_move(&conn, "i1", "t1").unwrap());
+        let entries = move_entries(&conn);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entity_id, "i1");
+        let p: serde_json::Value =
+            serde_json::from_str(entries[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(p["source_team_remote_id"], 100);
+        assert_eq!(p["issue_remote_id"], 55);
+        assert_eq!(p["target_team_remote_id"], 200);
+        assert_eq!(p["target_team_id"], "t2");
+    }
+
+    #[test]
+    fn queue_move_keeps_unknown_target_remote_id_null() {
+        let conn = move_setup();
+        conn.execute_batch(
+            "UPDATE teams SET remote_id = 100 WHERE id = 't1';
+             UPDATE issues SET remote_id = 55 WHERE id = 'i1';",
+        )
+        .unwrap();
+        move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert!(queue_issue_move(&conn, "i1", "t1").unwrap());
+        let p: serde_json::Value =
+            serde_json::from_str(move_entries(&conn)[0].payload.as_deref().unwrap()).unwrap();
+        assert!(p["target_team_remote_id"].is_null());
+    }
+
+    #[test]
+    fn queue_move_skips_an_issue_the_server_has_never_seen() {
+        // Its pending create already posts to the new team.
+        let conn = move_setup();
+        move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert!(!queue_issue_move(&conn, "i1", "t1").unwrap());
+        assert!(move_entries(&conn).is_empty());
+    }
+
+    #[test]
+    fn move_toast_names_the_team_and_what_was_cleared() {
+        let conn = move_setup();
+        conn.execute("UPDATE issues SET assignee_id='m2', project_id='p1' WHERE id='i1'", [])
+            .unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(s.toast("T2"), "Moved to T2; cleared: lane reset to first, assignee, project");
+        let plain = IssueMoveSummary {
+            team_number: 1,
+            lane_id: "l".into(),
+            lane_fell_back: false,
+            assignee_cleared: false,
+            project_cleared: false,
+            parent_cleared: false,
+            labels_removed: 0,
+            sub_issues_detached: 0,
+        };
+        assert_eq!(plain.toast("T2"), "Moved to T2");
     }
 
     #[test]

@@ -96,6 +96,23 @@ pub async fn create(
         .await
 }
 
+/// Delete a comment (and, server-side, its replies). 204 on success; 403 unless
+/// the caller is the author or a team admin.
+pub async fn delete(
+    client: &ApiClient,
+    team_id: i64,
+    issue_id: i64,
+    comment_id: i64,
+) -> Result<(), ApiError> {
+    client
+        .delete(&comment_member_path(team_id, issue_id, comment_id))
+        .await
+}
+
+fn comment_member_path(team_id: i64, issue_id: i64, comment_id: i64) -> String {
+    format!("api/v1/teams/{team_id}/issues/{issue_id}/comments/{comment_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +134,14 @@ mod tests {
         assert_eq!(
             CommentTarget::Project(9).path(3),
             "api/v1/teams/3/projects/9/comments"
+        );
+    }
+
+    #[test]
+    fn comment_delete_path_nests_under_issue() {
+        assert_eq!(
+            comment_member_path(3, 50, 9),
+            "api/v1/teams/3/issues/50/comments/9"
         );
     }
 

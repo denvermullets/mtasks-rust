@@ -17,5 +17,6 @@ pub mod settings;
 pub mod status_bar;
 pub mod team_list;
 pub mod team_members;
+pub mod team_picker;
 pub mod toast;
 pub mod util;

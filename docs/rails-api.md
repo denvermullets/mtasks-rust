@@ -239,7 +239,7 @@ The desktop uses both: issue and project `GET` on opening the detail view (merge
 ```
 
 - `POST` body: `{ "comment": { "body": "...", "parent_id": null } }`. Send an `Idempotency-Key` header: a replay with the same key returns the existing comment with **200**; a new comment returns **201**. Creating a comment touches the parent issue/project (`updated_at` moves).
-- `DELETE .../issues/:issue_id/comments/:id` returns 204; 403 `Only the author or a team admin can delete this` otherwise. Comment attachments: `DELETE .../comments/:comment_id/attachments/:id`. Project comments have no delete route (attachment delete only).
+- `DELETE .../issues/:issue_id/comments/:id` returns 204; 403 `Only the author or a team admin can delete this` otherwise. **Used by the desktop** (`comment/delete` queue entry): 204 and 404 count as success; a 403 drops the entry with a toast, and the next per-issue comment fetch restores the comment. Comment attachments: `DELETE .../comments/:comment_id/attachments/:id`. Project comments have no delete route (attachment delete only).
 
 ## Write endpoints
 
@@ -258,7 +258,11 @@ Server-side behavior:
 - `creator` set from token's user; immutable
 - Lane transitions auto-set `completed_at` (completed lane) or `canceled_at` (canceled lane)
 
-`DELETE` is documented above. There is also `PATCH .../issues/:id/move` (move to another team); unused by the desktop.
+`DELETE` is documented above.
+
+### `PATCH /api/v1/teams/:team_id/issues/:id/move` (used by the desktop)
+
+`:team_id` is the source team. Body: `{ "target_team_id": <rails id> }`. 200 returns the detailed issue (new `identifier`, remapped lane, assignee, parent). 404 when the target team is outside the token; 422 `{ errors: [msg] }` when the issue is already in that team or the user isn't a member of both. The desktop drops the entry on 404/422 and toasts the message.
 
 ### `POST /api/v1/teams/:team_id/projects` / `PATCH /api/v1/teams/:team_id/projects/:id` / `DELETE /api/v1/teams/:team_id/projects/:id`
 
@@ -274,7 +278,7 @@ Body: `{ "label": { "name": "...", "color": "#hex" } }`
 
 `color` optional on create: server picks a random color if omitted. Names are unique per team, case-insensitively (duplicate gives 422). Create returns 201 and update 200 with `{ id, name, color, updated_at }`. `DELETE` returns 204 and touches every carrying issue so it shows up in the next `updated_since` pull.
 
-Desktop use: create and update are used (`label/update` queues `PATCH` with `{label:{name,color}}`; a 422 is dropped and the next label pull restores the server value). Delete is not used yet.
+Desktop use: create and update are used (`label/update` queues `PATCH` with `{label:{name,color}}`; a 422 is dropped and the next label pull restores the server value). Delete is used too (`label/delete` queues `DELETE`; 204 and 404 are success).
 
 ### Issue dependencies: `/api/v1/teams/:team_id/issues/:issue_id/issue_dependencies`
 
@@ -308,7 +312,7 @@ Response object (index and create):
 
 ## Present but unused by the desktop
 
-`GET /api/v1/users/by_email`, `GET /api/v1/issues/by_identifier/:identifier`, `POST /api/v1/integrations/handshake`, issue and project `decisions` (Hourglass pins), `activity` feeds, attachments / direct uploads, notifications, dashboards, saved views, recurring issues, `PATCH .../issues/:id/move`, and `GET /api/v1/deleted` (user feed).
+`GET /api/v1/users/by_email`, `GET /api/v1/issues/by_identifier/:identifier`, `POST /api/v1/integrations/handshake`, issue and project `decisions` (Hourglass pins), `activity` feeds, attachments / direct uploads, notifications, dashboards, saved views, recurring issues, and `GET /api/v1/deleted` (user feed).
 
 ## Rust mapping
 
