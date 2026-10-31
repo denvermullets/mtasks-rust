@@ -3316,8 +3316,8 @@ fn drop_deleted_comments(dtos: Vec<CommentDto>, deleted: &HashSet<i64>) -> Vec<C
 }
 
 /// Apply feed entries to the local DB (idempotent, so the cursor overlap is
-/// safe). Handles Issue, Comment, Label and Project; other record types
-/// (RecurringIssue) are ignored. Returns how many entries
+/// safe). Handles Issue, Comment, Label, Project and
+/// RecurringIssue; other record types are ignored. Returns how many entries
 /// failed to apply.
 fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto]) -> usize {
     let mut failed = 0;
@@ -3330,6 +3330,9 @@ fn apply_tombstones(conn: &Connection, local_team_id: &str, rows: &[TombstoneDto
             "Project" => queries::apply_server_project_tombstone(conn, local_team_id, id),
             "IssueDependency" => {
                 queries::apply_server_dependency_tombstone(conn, local_team_id, id)
+            }
+            "RecurringIssue" => {
+                crate::db::recurring_issues::apply_tombstone(conn, local_team_id, id)
             }
             _ => continue,
         };
@@ -4768,12 +4771,30 @@ mod tests {
         give_i1_remote_id(&conn);
         let rows = [
             tomb("IssueDependency", 1),
-            tomb("RecurringIssue", 2),
+            tomb("SomethingNew", 2),
             tomb("Issue", 500),
         ];
         assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
         assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
         assert_purged(&conn);
+    }
+
+    #[test]
+    fn recurring_issue_tombstone_removes_the_local_row() {
+        let conn = setup_labels_db();
+        exec(
+            &conn,
+            "INSERT INTO recurring_issues (id, remote_id, team_id, title, priority, frequency,
+                interval, active, created_at, updated_at)
+               VALUES ('r1', 40, 't1', 'R', 0, 'daily', 1, 1, '2026-01-01', '2026-01-01');
+             INSERT INTO recurring_issue_labels (recurring_issue_id, label_id)
+               SELECT 'r1', id FROM labels LIMIT 1;",
+        );
+        let rows = [tomb("RecurringIssue", 999), tomb("RecurringIssue", 40)];
+        assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM recurring_issues"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM recurring_issue_labels"), 0);
+        assert_eq!(apply_tombstones(&conn, "t1", &rows), 0);
     }
 
     fn exec(conn: &Connection, sql: &str) {

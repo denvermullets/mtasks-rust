@@ -223,6 +223,32 @@ fn replace_labels(conn: &Connection, id: &str, remote_ids: &[i64]) -> Result<()>
     Ok(())
 }
 
+/// Apply a server tombstone: remove the team's local row for `remote_id`, its
+/// label join rows (cascade) and any queued local write for it. Idempotent;
+/// returns whether a local row existed. An unknown id or another team's row is
+/// a no-op.
+pub fn apply_tombstone(conn: &Connection, local_team_id: &str, remote_id: i64) -> Result<bool> {
+    let local: Option<String> = conn
+        .query_row(
+            "SELECT id FROM recurring_issues WHERE remote_id = ?1 AND team_id = ?2",
+            params![remote_id, local_team_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(local_id) = local else {
+        return Ok(false);
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM recurring_issue_labels WHERE recurring_issue_id = ?1",
+        params![local_id],
+    )?;
+    tx.execute("DELETE FROM recurring_issues WHERE id = ?1", params![local_id])?;
+    super::queries::retire_pending_sync(&tx, ENTITY_TYPE, &local_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 #[allow(dead_code)] // used by the view/write tickets that build on this module
 pub fn get(conn: &Connection, id: &str) -> Result<Option<RecurringIssue>> {
     conn.query_row(
@@ -340,6 +366,27 @@ mod tests {
     fn count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM recurring_issues", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn tombstone_removes_the_row_and_its_labels_and_unknown_ids_are_noops() {
+        let conn = setup();
+        let mut row = rec(5, "R", NOW);
+        row.label_ids = vec![1, 2];
+        apply_pulled(&conn, "t1", &[row, rec(6, "Keep", NOW)], None).unwrap();
+        let id5 = find_by_remote_id(&conn, 5).unwrap().unwrap().id;
+        sync_queue::enqueue(&conn, ENTITY_TYPE, &id5, "update", Some("{}")).unwrap();
+
+        assert!(!apply_tombstone(&conn, "t1", 999).unwrap());
+        assert!(!apply_tombstone(&conn, "other-team", 5).unwrap());
+        assert_eq!(count(&conn), 2);
+
+        assert!(apply_tombstone(&conn, "t1", 5).unwrap());
+        assert!(!apply_tombstone(&conn, "t1", 5).unwrap(), "repeat is safe");
+        assert_eq!(count(&conn), 1);
+        assert!(find_by_remote_id(&conn, 6).unwrap().is_some());
+        assert!(label_ids(&conn, &id5).unwrap().is_empty());
+        assert!(!sync_queue::has_pending_entry(&conn, ENTITY_TYPE, &id5).unwrap());
     }
 
     #[test]

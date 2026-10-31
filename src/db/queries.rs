@@ -290,7 +290,7 @@ pub fn apply_server_issue_tombstone(
     Ok(true)
 }
 
-fn retire_pending_sync(conn: &Connection, entity_type: &str, local_id: &str) -> Result<()> {
+pub(crate) fn retire_pending_sync(conn: &Connection, entity_type: &str, local_id: &str) -> Result<()> {
     crate::db::activity::discard_pending_for_entity(conn, entity_type, local_id)?;
     conn.execute(
         "UPDATE sync_queue SET synced_at = ?3
