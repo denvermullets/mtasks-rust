@@ -239,8 +239,10 @@ pub fn apply_server_comment_tombstone(
 ) -> Result<bool> {
     let local: Option<String> = conn
         .query_row(
-            "SELECT c.id FROM comments c JOIN issues i ON i.id = c.issue_id
-             WHERE c.remote_id = ?1 AND i.team_id = ?2",
+            "SELECT c.id FROM comments c
+             LEFT JOIN issues i ON i.id = c.issue_id
+             LEFT JOIN projects p ON p.id = c.project_id
+             WHERE c.remote_id = ?1 AND COALESCE(i.team_id, p.team_id) = ?2",
             params![remote_id, team_id],
             |r| r.get(0),
         )
