@@ -277,6 +277,7 @@ pub fn apply_server_issue_tombstone(
     // The server delete wins whether or not the user had already deleted it
     // locally, so purge without requiring the local marker.
     purge_issue_rows(conn, &local_id)?;
+    crate::db::activity::discard_pending_for_entity(conn, "issue", &local_id)?;
     conn.execute(
         "UPDATE sync_queue SET synced_at = ?2
          WHERE entity_type = 'issue' AND entity_id = ?1 AND synced_at IS NULL",
@@ -289,6 +290,7 @@ pub fn apply_server_issue_tombstone(
 }
 
 fn retire_pending_sync(conn: &Connection, entity_type: &str, local_id: &str) -> Result<()> {
+    crate::db::activity::discard_pending_for_entity(conn, entity_type, local_id)?;
     conn.execute(
         "UPDATE sync_queue SET synced_at = ?3
          WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",

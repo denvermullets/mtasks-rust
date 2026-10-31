@@ -511,7 +511,7 @@ fn record(
         }
         Outcome::DropAndLog(reason) => {
             sync_log(&scope, "dropped", &reason);
-            let _ = mark_synced(entry_id);
+            let _ = discard_entry(entry_id);
             report.failed += 1;
             record_push_failure(report, entry, &reason);
             report.last_error = Some(reason);
@@ -572,6 +572,11 @@ fn open() -> Result<Connection, String> {
 fn read_pending() -> Result<Vec<SyncQueueEntry>, String> {
     let conn = open()?;
     sync_queue::pending_entries(&conn).map_err(|e| format!("read sync_queue: {e}"))
+}
+
+fn discard_entry(entry_id: i64) -> Result<(), String> {
+    let conn = open()?;
+    sync_queue::discard(&conn, entry_id).map_err(|e| format!("discard: {e}"))
 }
 
 fn mark_synced(entry_id: i64) -> Result<(), String> {
