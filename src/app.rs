@@ -4464,6 +4464,7 @@ impl App {
             Message::RecurringFormStartsOnChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.starts_on = v;
+                    f.starts_on_touched = true;
                 }
             }
             Message::RecurringFormAssigneeChanged(v) => {

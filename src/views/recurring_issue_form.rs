@@ -183,9 +183,10 @@ pub struct RecurringFormState {
     pub day_of_month: String,
     /// Raw `YYYY-MM-DD` text.
     pub starts_on: String,
-    /// What `starts_on` defaulted to (today); an edit that leaves it alone
-    /// doesn't count as moving the schedule.
-    pub default_starts_on: String,
+    /// Set once the user edits Starts on; an edit that never touches it
+    /// doesn't count as moving the schedule, but any touch does (even back
+    /// to today).
+    pub starts_on_touched: bool,
     /// Pick lists (first entry is the empty choice) and the current picks.
     pub assignee_options: Vec<Choice>,
     pub project_options: Vec<Choice>,
@@ -229,7 +230,7 @@ impl RecurringFormState {
             weekday: i64::from(today.weekday().num_days_from_sunday()),
             day_of_month: today.day().to_string(),
             starts_on: today.format("%Y-%m-%d").to_string(),
-            default_starts_on: today.format("%Y-%m-%d").to_string(),
+            starts_on_touched: false,
             time_zone: None,
             label_ids: Vec::new(),
             errors: FormErrors::default(),
@@ -463,7 +464,7 @@ pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, FormErr
             interval,
             weekday,
             day_of_month,
-            starts_on_moved: starts_on != form.default_starts_on,
+            starts_on_moved: form.starts_on_touched,
             starts_on,
         },
     })
@@ -926,6 +927,10 @@ mod tests {
             ("weekly", 2, Some(5))
         );
         f.starts_on = "2026-12-01".into();
+        f.starts_on_touched = true;
+        assert!(validate_edit(&f).unwrap().schedule.starts_on_moved);
+        // Rescheduling back to the default (today) is still a schedule change.
+        f.starts_on = today().format("%Y-%m-%d").to_string();
         assert!(validate_edit(&f).unwrap().schedule.starts_on_moved);
         f.interval = "0".into();
         f.starts_on = "nope".into();
