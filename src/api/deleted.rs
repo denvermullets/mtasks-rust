@@ -27,6 +27,18 @@ pub async fn list(
     client.get_list_page(&path).await
 }
 
+/// `GET /deleted?since=`: the user-level feed (Saved views, dashboards).
+pub async fn list_user(
+    client: &ApiClient,
+    since: Option<&str>,
+) -> Result<Page<TombstoneDto>, ApiError> {
+    let mut path = "api/v1/deleted".to_string();
+    if let Some(s) = since {
+        path.push_str(&format!("?since={s}"));
+    }
+    client.get_list_page(&path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

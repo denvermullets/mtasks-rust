@@ -48,6 +48,8 @@ pub enum Message {
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
     ToggleTeamMenu(String),
+    /// Make a team's board the user's Home page (local UUID).
+    SetTeamAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
     /// Open the read-only members panel for a team (local UUID).
@@ -530,6 +532,8 @@ pub struct App {
     /// The open Saved view's working copy; while set it stands in for the
     /// config's display options and filters and the header search.
     open_view: Option<crate::saved_view::OpenView>,
+    /// The user's Home page as last reported by the server (see `db::home_page`).
+    home_page: Option<crate::db::home_page::HomePage>,
     selected_team_id: Option<String>,
     /// Current right-pane screen.
     view: View,
@@ -677,6 +681,7 @@ impl App {
         let conn = self.db();
         self.teams = queries::all_teams(&conn).unwrap_or_default();
         self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
+        self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
 
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
@@ -1876,6 +1881,7 @@ impl App {
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views: crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default(),
             open_view: None,
+            home_page: crate::db::home_page::get(&conn).unwrap_or_default(),
             last_notif_poll: None,
             inbox: Default::default(),
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
@@ -2282,6 +2288,28 @@ impl App {
                     self.team_menu_open = None;
                 } else {
                     self.team_menu_open = Some(team_id);
+                }
+            }
+
+            Message::SetTeamAsHome(team_id) => {
+                self.team_menu_open = None;
+                let remote_id = self
+                    .teams
+                    .iter()
+                    .find(|t| t.id == team_id)
+                    .and_then(|t| t.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(rid) = remote_id {
+                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "team", rid) {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                } else {
+                    self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
                 }
             }
 
@@ -3896,8 +3924,15 @@ impl App {
             self.team_menu_open.as_deref(),
             self.show_archived_teams,
             self.notif_unread_count,
+            crate::db::home_page::get(&self.db())
+                .ok()
+                .flatten()
+                .filter(|h| h.kind == "team")
+                .map(|h| h.remote_id),
+            self.sync_read_only,
             &self.saved_views,
             self.open_view.as_ref().map(|v| v.view_id.as_str()),
+            self.home_page.as_ref(),
         );
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),

@@ -23,7 +23,6 @@ pub struct HomePage {
 }
 
 /// The stored Home page, if any.
-#[allow(dead_code)] // read by the launch resolver (JRST-111)
 pub fn get(conn: &Connection) -> Result<Option<HomePage>> {
     Ok(get_pull_cursor(conn, SCOPE, RESOURCE)?.and_then(|raw| {
         let (kind, id) = raw.split_once(':')?;
@@ -39,6 +38,20 @@ fn write_pending(conn: &Connection) -> Result<bool> {
         params![QUEUE_ENTITY],
         |r| r.get(0),
     )
+}
+
+/// Set the Home page locally and queue the write. The stored home changes at
+/// once (offline too); while the write is pending `/me` cannot overwrite it.
+pub fn set_local(conn: &Connection, kind: &str, remote_id: i64) -> Result<()> {
+    set_pull_cursor(conn, SCOPE, RESOURCE, &format!("{kind}:{remote_id}"))?;
+    let payload = serde_json::json!({ "kind": kind, "id": remote_id }).to_string();
+    super::sync_queue::enqueue(conn, QUEUE_ENTITY, "home", "update", Some(&payload))
+}
+
+/// `(kind, id)` from a queued `home_page` payload.
+pub fn parse_payload(payload: Option<&str>) -> Option<(String, i64)> {
+    let v: serde_json::Value = serde_json::from_str(payload?).ok()?;
+    Some((v.get("kind")?.as_str()?.to_string(), v.get("id")?.as_i64()?))
 }
 
 /// Store what `/me` reported: a value replaces the stored home, `None` clears
@@ -75,6 +88,44 @@ mod tests {
             params![synced.then_some("2026-10-31T00:00:01.000Z")],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn set_local_stores_at_once_and_queues_the_put() {
+        let conn = mem();
+        set_local(&conn, "team", 7).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "team".into(), remote_id: 7 }));
+        let pending = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!((pending[0].entity_type.as_str(), pending[0].action.as_str()), ("home_page", "update"));
+        assert_eq!(parse_payload(pending[0].payload.as_deref()), Some(("team".into(), 7)));
+    }
+
+    #[test]
+    fn a_pending_set_is_not_overwritten_by_me() {
+        let conn = mem();
+        apply_me(&conn, Some(&dto("team", 1))).unwrap();
+        set_local(&conn, "team", 2).unwrap();
+        apply_me(&conn, Some(&dto("team", 1))).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "team".into(), remote_id: 2 }));
+    }
+
+    #[test]
+    fn once_pushed_me_restores_the_server_value() {
+        // A 422 drops the entry (marked synced); the next /me restores.
+        let conn = mem();
+        set_local(&conn, "team", 2).unwrap();
+        let id = crate::db::sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        crate::db::sync_queue::mark_synced(&conn, id).unwrap();
+        apply_me(&conn, Some(&dto("view", 5))).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { kind: "view".into(), remote_id: 5 }));
+    }
+
+    #[test]
+    fn bad_payloads_do_not_parse() {
+        for bad in [None, Some("nope"), Some(r#"{"kind":"team"}"#)] {
+            assert_eq!(parse_payload(bad), None);
+        }
     }
 
     #[test]
