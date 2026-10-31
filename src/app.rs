@@ -14,7 +14,9 @@ use crate::db::models::{
 };
 use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
-use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup, ViewMode};
+use crate::display::{
+    self, CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy, SubGroup, ViewMode,
+};
 use crate::fonts;
 use crate::keys;
 use crate::scroll;
@@ -38,12 +40,24 @@ pub enum Message {
     ToggleTeamExpanded(String),
     /// Select a team and switch the right pane to `view` (team sub-row click).
     SelectTeamView(String, View),
+    /// Open a Saved view (local id) on its team's board.
+    OpenSavedView(String),
+    /// Drop the open Saved view's unsaved changes (local only).
+    RevertSavedView,
+    /// Ask to delete a Saved view (local id).
+    ConfirmDeleteSavedView(String),
+    OpenRenameSavedView(String),
+    DeleteSavedViewConfirmed,
+    /// Make a Saved view (local id) the user's Home page.
+    SetSavedViewAsHome(String),
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
     ToggleTeamMenu(String),
+    /// Make a team's board the user's Home page (local UUID).
+    SetTeamAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
     /// Open the read-only members panel for a team (local UUID).
@@ -191,8 +205,16 @@ pub enum Message {
     FocusSearch,
     /// "Display" button: open the display-options popover.
     OpenDisplayOptions,
+    /// Save the open Modified view's working copy as its new definition.
+    UpdateSavedView,
     /// "Filter" button: open the filter popover.
     OpenFilterPanel,
+    /// "Save view…" in the display popover: ask for a name.
+    OpenSaveView,
+    OpenSaveAsNewView,
+    SaveViewNameChanged(String),
+    /// Create the Saved view from the current board state.
+    SaveViewSubmit,
     /// Inert click target (swallows clicks inside a popover).
     Noop,
     SetViewMode(ViewMode),
@@ -351,6 +373,12 @@ pub enum Modal {
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
+    /// Confirm deleting a Saved view (local id) from the sidebar.
+    DeleteSavedViewConfirm(String),
+    /// Name prompt for saving the current board as a new Saved view.
+    SaveView,
+    /// Name prompt for renaming a Saved view (local id).
+    RenameSavedView(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
     IssuePicker,
     /// Team picker for moving an issue (local UUID); see `team_picker`.
@@ -521,6 +549,18 @@ impl SortDir {
 
 pub struct App {
     teams: Vec<Team>,
+    /// Saved views per local team id, in sidebar order (see `db::saved_views`).
+    saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
+    /// The open Saved view's working copy; while set it stands in for the
+    /// config's display options and filters and the header search.
+    open_view: Option<crate::saved_view::OpenView>,
+    /// Name being typed in the "Save view" prompt, and its validation error.
+    save_view_name: String,
+    save_view_error: Option<&'static str>,
+    /// The name prompt is saving the open view's working copy (Save as new view).
+    save_view_from_open: bool,
+    /// The user's Home page as last reported by the server (see `db::home_page`).
+    home_page: Option<crate::db::home_page::HomePage>,
     selected_team_id: Option<String>,
     /// Current right-pane screen.
     view: View,
@@ -628,7 +668,28 @@ impl App {
                 .cloned()
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
+            saved_views: self.palette_saved_views(),
         }
+    }
+
+    /// Saved views of unarchived teams, for the palette.
+    fn palette_saved_views(&self) -> Vec<crate::palette_results::SearchableSavedView> {
+        self.teams
+            .iter()
+            .filter(|t| t.archived_at.is_none())
+            .flat_map(|t| {
+                self.saved_views
+                    .get(&t.id)
+                    .into_iter()
+                    .flatten()
+                    .map(|v| crate::palette_results::SearchableSavedView {
+                        id: v.id.clone(),
+                        team_id: v.team_id.clone(),
+                        team_name: t.name.clone(),
+                        name: v.name.clone(),
+                    })
+            })
+            .collect()
     }
 
     /// Before opening an issue or project from the palette: when it belongs to
@@ -667,6 +728,8 @@ impl App {
     fn reload_data(&mut self) {
         let conn = self.db();
         self.teams = queries::all_teams(&conn).unwrap_or_default();
+        self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
+        self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
 
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
@@ -688,15 +751,12 @@ impl App {
             self.issue_labels.clear();
         }
 
+        self.refresh_open_view();
+
         // Filters are global but hold per-team ids; drop the ones this data
         // doesn't contain (My Issues loads every team, so its ids all stay).
         if self.selected_team_id.is_some()
-            && self.config.filters.prune(
-                &self.members,
-                &self.labels,
-                &self.lanes,
-                &self.projects,
-            )
+            && self.prune_board_filters()
         {
             if let Err(e) = config::save(&self.config) {
                 self.config_error = Some(e);
@@ -739,6 +799,7 @@ impl App {
     fn switch_view(&mut self, view: View) {
         let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
         self.view = view;
+        self.retain_open_view();
         if self.view == View::Inbox {
             self.reload_inbox();
         }
@@ -942,14 +1003,144 @@ impl App {
             .and_then(|id| self.teams.iter().find(|t| t.id == *id))
     }
 
+    // --- Active board state -------------------------------------------
+    // The one accessor for the board's display options, filters and view
+    // search. Everything outside this block goes through it; today it
+    // resolves to the local state (the config plus the header search).
+
+    /// Why "Save view…" is unavailable right now, if it is.
+    fn save_view_block_reason(&self) -> Option<&'static str> {
+        let on_team_board = self.view == View::Board && self.selected_team_id.is_some();
+        crate::saved_view::save_block_reason(on_team_board, self.sync_read_only)
+    }
+
+    fn board_display(&self) -> &DisplayOptions {
+        match &self.open_view {
+            Some(v) => &v.state.display,
+            None => &self.config.display,
+        }
+    }
+
+    fn board_display_mut(&mut self) -> &mut DisplayOptions {
+        match &mut self.open_view {
+            Some(v) => &mut v.state.display,
+            None => &mut self.config.display,
+        }
+    }
+
+    fn board_filters(&self) -> &Filters {
+        match &self.open_view {
+            Some(v) => &v.state.filters,
+            None => &self.config.filters,
+        }
+    }
+
+    fn board_filters_mut(&mut self) -> &mut Filters {
+        match &mut self.open_view {
+            Some(v) => &mut v.state.filters,
+            None => &mut self.config.filters,
+        }
+    }
+
+    /// Drop the open view's working copy unless it is still on screen: its
+    /// team's board (or an issue opened from it). Leaving drops unsaved edits.
+    fn retain_open_view(&mut self) {
+        let on_board = matches!(self.view, View::Board | View::IssueDetail(_));
+        if let Some(v) = &self.open_view {
+            if !v.stays_open(self.selected_team_id.as_deref(), on_board) {
+                self.open_view = None;
+            }
+        }
+    }
+
+    /// Reconcile the open Saved view with the freshly loaded mirror: follow a
+    /// pulled change (see `OpenView::refresh`), or, if the view is gone (a
+    /// server tombstone), land on the team's board.
+    fn refresh_open_view(&mut self) {
+        let Some(v) = &mut self.open_view else {
+            return;
+        };
+        let latest = self
+            .saved_views
+            .values()
+            .flatten()
+            .find(|sv| sv.id == v.view_id);
+        match latest {
+            Some(sv) => {
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                let local = crate::saved_view::BoardState {
+                    display: self.config.display.clone(),
+                    filters: self.config.filters.clone(),
+                    search: String::new(),
+                };
+                v.refresh(sv, &mirror, &local);
+            }
+            None => {
+                self.open_view = None;
+                if matches!(self.view, View::IssueDetail(_)) {
+                    self.commit_issue_detail();
+                    self.detail_from_my_issues = false;
+                    self.detail_from_inbox = false;
+                }
+                self.view = View::Board;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+        }
+    }
+
+    /// Drop filter ids the loaded data doesn't contain; true if any changed.
+    /// On an open view this prunes the working copy, which no config save
+    /// follows (the stored query is untouched).
+    fn prune_board_filters(&mut self) -> bool {
+        if let Some(v) = &mut self.open_view {
+            v.state
+                .filters
+                .prune(&self.members, &self.labels, &self.lanes, &self.projects);
+            return false;
+        }
+        self.config.filters.prune(
+            &self.members,
+            &self.labels,
+            &self.lanes,
+            &self.projects,
+        )
+    }
+
     /// The header search text if it applies to the current view, else "".
     fn active_search(&self) -> &str {
+        if let Some(v) = &self.open_view {
+            return &v.state.search;
+        }
         if self.search_view == self.view {
             &self.search_query
         } else {
             ""
         }
     }
+
+    fn set_view_search(&mut self, query: String) {
+        if let Some(v) = &mut self.open_view {
+            v.state.search = query;
+            return;
+        }
+        self.search_query = query;
+        self.search_view = self.view.clone();
+    }
+
+    fn clear_view_search(&mut self) {
+        if let Some(v) = &mut self.open_view {
+            v.state.search.clear();
+            return;
+        }
+        self.search_query.clear();
+    }
+    // --- end active board state ----------------------------------------
 
     fn breadcrumb(&self) -> Vec<String> {
         let mut crumbs = breadcrumb(
@@ -964,6 +1155,22 @@ impl App {
         if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "Inbox".into());
         }
+        if let (Some(v), View::Board) = (&self.open_view, &self.view) {
+            // The view's name replaces the "Issues" crumb.
+            if let Some(last) = crumbs.last_mut() {
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                *last = if v.is_modified(&mirror) {
+                    format!("{} (Modified)", v.name)
+                } else {
+                    v.name.clone()
+                };
+            }
+        }
         crumbs
     }
 
@@ -971,7 +1178,7 @@ impl App {
     fn my_issues_empty(&self) -> Option<&'static str> {
         let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
         let visible: usize = self.board_columns().iter().map(|c| c.issues.len()).sum();
-        let narrowed = self.config.filters.count() > self.config.filters.assignees.len()
+        let narrowed = self.board_filters().count() > self.board_filters().assignees.len()
             || !header::needle(self.active_search()).is_empty();
         display::my_issues_empty_message(!ids.is_empty(), visible, narrowed)
     }
@@ -1017,10 +1224,10 @@ impl App {
         let needle = header::needle(self.active_search());
         if my {
             let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
-            let filters = display::my_issues_filters(&self.config.filters, &ids, &self.lanes);
-            return display::build_columns(&data, &self.config.display, &filters, &needle);
+            let filters = display::my_issues_filters(self.board_filters(), &ids, &self.lanes);
+            return display::build_columns(&data, self.board_display(), &filters, &needle);
         }
-        display::build_columns(&data, &self.config.display, &self.config.filters, &needle)
+        display::build_columns(&data, self.board_display(), self.board_filters(), &needle)
     }
 
     /// A project's issues for the detail page: the board's filters (minus the
@@ -1038,14 +1245,14 @@ impl App {
             labels: &self.labels,
             issue_labels: &self.issue_labels,
         };
-        let mut filters = self.config.filters.clone();
+        let mut filters = self.board_filters().clone();
         filters.projects.clear();
         display::visible_from(
             self.issues
                 .iter()
                 .filter(|i| i.project_id.as_deref() == Some(project_id)),
             &data,
-            &self.config.display,
+            self.board_display(),
             &filters,
             needle,
         )
@@ -1083,7 +1290,7 @@ impl App {
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
-        let list = self.config.display.view_mode == ViewMode::List;
+        let list = self.board_display().view_mode == ViewMode::List;
         let (key, id, top, height) = {
             let columns = self.board_columns();
             let Some(col) = columns.get(self.focused_lane) else {
@@ -1110,7 +1317,7 @@ impl App {
                     members: &self.members,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
-                    display: &self.config.display,
+                    display: self.board_display(),
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
                 (
@@ -1185,8 +1392,11 @@ impl App {
 
     /// Persist the display/filter settings and re-validate board focus.
     fn persist_display(&mut self) {
-        if let Err(e) = config::save(&self.config) {
-            self.config_error = Some(e);
+        // An open view's edits live in the working copy only.
+        if self.open_view.is_none() {
+            if let Err(e) = config::save(&self.config) {
+                self.config_error = Some(e);
+            }
         }
         self.clamp_focus();
     }
@@ -1196,12 +1406,40 @@ impl App {
         // My Issues pins the assignee, so a saved assignee filter doesn't count.
         // Project detail is scoped to one project, so project filters don't count.
         let ignored = match self.view {
-            View::MyIssues => self.config.filters.assignees.len(),
-            View::ProjectDetail(_) => self.config.filters.projects.len(),
+            View::MyIssues => self.board_filters().assignees.len(),
+            View::ProjectDetail(_) => self.board_filters().projects.len(),
             _ => 0,
         };
-        self.config.filters.count() - ignored
+        self.board_filters().count() - ignored
             + usize::from(!header::needle(self.active_search()).is_empty())
+    }
+
+    /// The header's view actions on an open view on the Board: Update view, Save
+    /// as new view and Revert (only when Modified), then always Rename and Delete.
+    fn update_view_action(&self) -> Option<Element<'_, Message>> {
+        let v = self.open_view.as_ref()?;
+        if self.view != View::Board {
+            return None;
+        }
+        let mirror = crate::saved_view::Mirror {
+            lanes: &self.lanes,
+            members: &self.members,
+            labels: &self.labels,
+            projects: &self.projects,
+        };
+        let mut actions = iced::widget::row![].spacing(8);
+        if v.is_modified(&mirror) {
+            actions = actions
+                .push(header::update_view_button(self.sync_read_only))
+                .push(header::save_as_new_view_button(self.sync_read_only))
+                .push(header::revert_button());
+        }
+        Some(
+            actions
+                .push(header::rename_view_button(&v.view_id, self.sync_read_only))
+                .push(header::delete_view_button(&v.view_id, self.sync_read_only))
+                .into(),
+        )
     }
 
     fn enqueue_sync(
@@ -1708,7 +1946,18 @@ impl App {
         }
 
         let teams = queries::all_teams(&conn).unwrap_or_default();
-        let selected_team_id = default_team_id(&teams);
+        let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
+        let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        // Open the stored Home page; anything unresolvable falls back to the
+        // first team's board.
+        let launch = crate::db::home_page::launch_target(home_page.as_ref(), &teams, &saved_views);
+        let (selected_team_id, launch_view) = match launch {
+            crate::db::home_page::LaunchTarget::Team(id) => (Some(id), None),
+            crate::db::home_page::LaunchTarget::View { view_id, team_id } => {
+                (Some(team_id), Some(view_id))
+            }
+            crate::db::home_page::LaunchTarget::Default => (default_team_id(&teams), None),
+        };
 
         let (lanes, issues, projects, members, labels, issue_labels) =
             if let Some(ref tid) = selected_team_id {
@@ -1729,7 +1978,7 @@ impl App {
         // Expand the boot-selected team so its sub-rows are visible on first paint.
         let expanded_teams = selected_team_id.iter().cloned().collect();
 
-        let app = Self {
+        let mut app = Self {
             teams,
             selected_team_id,
             view: View::Board,
@@ -1776,6 +2025,12 @@ impl App {
             sync_read_only: false,
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
+            saved_views,
+            open_view: None,
+            save_view_name: String::new(),
+            save_view_error: None,
+            save_view_from_open: false,
+            home_page,
             last_notif_poll: None,
             inbox: Default::default(),
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
@@ -1785,7 +2040,11 @@ impl App {
             sync_paused_auth: false,
         };
 
-        (app, Task::none())
+        let task = match launch_view {
+            Some(view_id) => app.update_inner(Message::OpenSavedView(view_id)),
+            None => Task::none(),
+        };
+        (app, task)
     }
 
     pub fn title(&self) -> String {
@@ -1934,6 +2193,7 @@ impl App {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
         let task = self.update_inner(message);
+        self.retain_open_view();
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
@@ -1991,7 +2251,270 @@ impl App {
                 }
             }
 
+            Message::OpenSavedView(view_id) => {
+                let found = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == view_id)
+                    .cloned();
+                let Some(sv) = found else {
+                    return Task::none();
+                };
+                // The board's own search, read before the team switch may clear it.
+                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
+                    self.search_query.clone()
+                } else {
+                    String::new()
+                };
+                // Switch team first when needed (this drops any open view).
+                let task =if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
+                    || self.view != View::Board
+                {
+                    self.expanded_teams.insert(sv.team_id.clone());
+                    self.update_inner(Message::SelectTeamView(sv.team_id.clone(), View::Board))
+                } else {
+                    Task::none()
+                };
+                let local = crate::saved_view::BoardState {
+                    display: self.config.display.clone(),
+                    filters: self.config.filters.clone(),
+                    search: board_search,
+                };
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                self.open_view = Some(crate::saved_view::OpenView::open(&sv, &mirror, &local));
+                self.scroll_state.clear();
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+                return task;
+            }
+
+            Message::OpenSaveView => {
+                if self.save_view_block_reason().is_none() {
+                    self.save_view_name.clear();
+                    self.save_view_error = None;
+                    self.save_view_from_open = false;
+                    self.modal = Modal::SaveView;
+                    return text_input::focus(save_view_input_id());
+                }
+            }
+
+            Message::OpenSaveAsNewView => {
+                if self.save_view_block_reason().is_none() && self.open_view.is_some() {
+                    self.save_view_name.clear();
+                    self.save_view_error = None;
+                    self.save_view_from_open = true;
+                    self.modal = Modal::SaveView;
+                    return text_input::focus(save_view_input_id());
+                }
+            }
+
+            Message::SaveViewNameChanged(name) => {
+                self.save_view_name = name;
+                self.save_view_error = None;
+            }
+
+            Message::OpenRenameSavedView(view_id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't rename a view",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(sv) = self.saved_views.values().flatten().find(|v| v.id == view_id)
+                {
+                    self.save_view_name = sv.name.clone();
+                    self.save_view_error = None;
+                    self.modal = Modal::RenameSavedView(view_id);
+                    return text_input::focus(save_view_input_id());
+                }
+            }
+
+            Message::SaveViewSubmit => {
+                if let Modal::RenameSavedView(view_id) = self.modal.clone() {
+                    if self.sync_read_only {
+                        self.modal = Modal::None;
+                        self.push_toast(
+                            "Read-only token: can't rename a view",
+                            ToastKind::Error,
+                            false,
+                        );
+                        return Task::none();
+                    }
+                    let name = match crate::saved_view::validate_name(&self.save_view_name) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            self.save_view_error = Some(e.message());
+                            return Task::none();
+                        }
+                    };
+                    match crate::db::saved_views::rename_local(&self.db(), &view_id, &name) {
+                        Ok(true) => {
+                            self.enqueue_sync(
+                                "saved_view",
+                                &view_id,
+                                "rename",
+                                None,
+                            );
+                            self.modal = Modal::None;
+                            self.save_view_name.clear();
+                            self.reload_data();
+                        }
+                        Ok(false) => self.modal = Modal::None,
+                        Err(e) => eprintln!("[saved_views] rename failed: {e}"),
+                    }
+                    return Task::none();
+                }
+                if self.modal != Modal::SaveView {
+                    return Task::none();
+                }
+                if let Some(reason) = self.save_view_block_reason() {
+                    self.modal = Modal::None;
+                    self.push_toast(reason, ToastKind::Error, false);
+                    return Task::none();
+                }
+                let name = match crate::saved_view::validate_name(&self.save_view_name) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        self.save_view_error = Some(e.message());
+                        return Task::none();
+                    }
+                };
+                let Some(team_id) = self.selected_team_id.clone() else {
+                    return Task::none();
+                };
+                let state = crate::saved_view::BoardState {
+                    display: self.board_display().clone(),
+                    filters: self.board_filters().clone(),
+                    search: self.active_search().to_string(),
+                };
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                let query = match (&self.open_view, self.save_view_from_open) {
+                    (Some(v), true) => v.encoded(&mirror),
+                    _ => crate::saved_view::new_view_query(&state, &mirror),
+                };
+                let dropped_unassigned = crate::saved_view::has_unassigned(&state);
+                let query_json = serde_json::to_string(&query).unwrap_or_else(|_| "{}".into());
+                match crate::db::saved_views::create_local(&self.db(), &team_id, &name, &query_json)
+                {
+                    Ok(sv) => {
+                        self.modal = Modal::None;
+                        self.save_view_name.clear();
+                        if dropped_unassigned {
+                            self.push_toast(
+                                "Unassigned isn't saved: Rails can't store it in a view",
+                                ToastKind::Info,
+                                false,
+                            );
+                        }
+                        self.reload_data();
+                        return self.update_inner(Message::OpenSavedView(sv.id));
+                    }
+                    Err(e) => {
+                        eprintln!("[saved_views] create failed: {e}");
+                        self.save_view_error = Some("Couldn't save the view");
+                    }
+                }
+            }
+
+            Message::UpdateSavedView => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't update a view",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                let mirror = crate::saved_view::Mirror {
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    labels: &self.labels,
+                    projects: &self.projects,
+                };
+                let Some(v) = &mut self.open_view else {
+                    return Task::none();
+                };
+                if !v.is_modified(&mirror) {
+                    return Task::none();
+                }
+                v.mark_saved(&mirror);
+                let (view_id, query) = (v.view_id.clone(), v.raw.clone());
+                match crate::db::saved_views::update_query_local(&self.db(), &view_id, &query) {
+                    Ok(true) => {
+                        self.enqueue_sync("saved_view", &view_id, "update", None);
+                        self.saved_views =
+                            crate::db::saved_views::grouped_by_team(&self.db()).unwrap_or_default();
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[saved_views] update failed: {e}"),
+                }
+            }
+
+            Message::RevertSavedView => {
+                // Local only: nothing is written or queued.
+                if let Some(v) = &mut self.open_view {
+                    v.revert();
+                }
+                self.scroll_state.clear();
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::ConfirmDeleteSavedView(view_id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a view",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteSavedViewConfirm(view_id);
+                }
+            }
+
+            Message::DeleteSavedViewConfirmed => {
+                let Modal::DeleteSavedViewConfirm(view_id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                let team_id = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == view_id)
+                    .map(|v| v.team_id.clone());
+                match crate::db::saved_views::delete_local(&self.db(), &view_id) {
+                    Ok(Some(payload)) => {
+                        self.enqueue_sync("saved_view", &view_id, "delete", Some(payload.as_str()))
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[saved_views] delete failed: {e}"),
+                }
+                let was_open = self.open_view.as_ref().is_some_and(|v| v.view_id == view_id);
+                self.reload_data();
+                if was_open {
+                    if let Some(team_id) = team_id {
+                        return self.update_inner(Message::SelectTeamView(team_id, View::Board));
+                    }
+                    self.open_view = None;
+                }
+            }
+
             Message::SelectTeamView(team_id, view) => {
+                // Going to a team's own pages leaves any open Saved view.
+                self.open_view = None;
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
@@ -2142,6 +2665,54 @@ impl App {
                     self.team_menu_open = None;
                 } else {
                     self.team_menu_open = Some(team_id);
+                }
+            }
+
+            Message::SetTeamAsHome(team_id) => {
+                self.team_menu_open = None;
+                let remote_id = self
+                    .teams
+                    .iter()
+                    .find(|t| t.id == team_id)
+                    .and_then(|t| t.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(rid) = remote_id {
+                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "team", rid) {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
+                } else {
+                    self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
+                }
+            }
+
+            Message::SetSavedViewAsHome(view_id) => {
+                let found = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == view_id)
+                    .map(|v| v.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(remote_id) = found {
+                    // An unpushed view is queued by local id; the push waits
+                    // for its create.
+                    if let Err(e) =
+                        crate::db::home_page::set_view_local(&self.db(), &view_id, remote_id)
+                    {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
                 }
             }
 
@@ -2558,7 +3129,7 @@ impl App {
 
             Message::MoveIssueNextLane => {
                 // Lanes are only columns when grouped by status.
-                if self.config.display.group_by != GroupBy::Status {
+                if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
                         "Moving between lanes needs Display > Group by: Status",
                         ToastKind::Info,
@@ -2585,7 +3156,7 @@ impl App {
 
             Message::MoveIssuePrevLane => {
                 // Lanes are only columns when grouped by status.
-                if self.config.display.group_by != GroupBy::Status {
+                if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
                         "Moving between lanes needs Display > Group by: Status",
                         ToastKind::Info,
@@ -2620,7 +3191,7 @@ impl App {
             }
 
             Message::FocusNextIssue | Message::FocusPrevIssue
-                if self.config.display.view_mode == ViewMode::List =>
+                if self.board_display().view_mode == ViewMode::List =>
             {
                 // List mode: j/k walk rows top-to-bottom across sections.
                 let counts = self.list_nav_counts();
@@ -2634,7 +3205,7 @@ impl App {
                 return self.scroll_to_focus();
             }
             Message::FocusNextLane | Message::FocusPrevLane
-                if self.config.display.view_mode == ViewMode::List =>
+                if self.board_display().view_mode == ViewMode::List =>
             {
                 // List mode: h/l jump to the next/previous non-empty section.
                 let counts = self.list_nav_counts();
@@ -2686,8 +3257,7 @@ impl App {
             }
 
             Message::HeaderSearchChanged(query) => {
-                self.search_query = query;
-                self.search_view = self.view.clone();
+                self.set_view_search(query);
                 if matches!(self.view, View::Board | View::MyIssues) {
                     self.focused_issue = 0;
                     self.clamp_focus();
@@ -2700,12 +3270,12 @@ impl App {
             Message::OpenFilterPanel => self.modal = Modal::FilterPanel,
             Message::Noop => {}
             Message::SetViewMode(m) => {
-                self.config.display.view_mode = m;
+                self.board_display_mut().view_mode = m;
                 self.scroll_state.clear();
                 self.persist_display();
             }
             Message::ToggleViewMode => {
-                let next = match self.config.display.view_mode {
+                let next = match self.board_display().view_mode {
                     ViewMode::Board => ViewMode::List,
                     ViewMode::List => ViewMode::Board,
                 };
@@ -2717,7 +3287,7 @@ impl App {
                 }
             }
             Message::ToggleFocusedSection => {
-                if self.config.display.view_mode == ViewMode::List {
+                if self.board_display().view_mode == ViewMode::List {
                     let title = self
                         .board_columns()
                         .get(self.focused_lane)
@@ -2736,52 +3306,52 @@ impl App {
                 self.scroll_state.insert(key, (offset, viewport));
             }
             Message::SetGroupBy(g) => {
-                self.config.display.group_by = g;
+                self.board_display_mut().group_by = g;
                 // A sub-group repeating the new group-by axis is meaningless.
-                if self.config.display.sub_group_conflicts(self.config.display.sub_group) {
-                    self.config.display.sub_group = SubGroup::None;
+                if self.board_display().sub_group_conflicts(self.board_display().sub_group) {
+                    self.board_display_mut().sub_group = SubGroup::None;
                 }
                 self.focused_lane = 0;
                 self.focused_issue = 0;
                 self.persist_display();
             }
             Message::SetSubGroup(g) => {
-                if !self.config.display.sub_group_conflicts(g) {
-                    self.config.display.sub_group = g;
+                if !self.board_display().sub_group_conflicts(g) {
+                    self.board_display_mut().sub_group = g;
                     self.persist_display();
                 }
             }
             Message::SetOrderBy(o) => {
-                self.config.display.order_by = o;
+                self.board_display_mut().order_by = o;
                 self.persist_display();
             }
             Message::SetCompletedFilter(f) => {
-                self.config.display.set_completed_filter(f);
+                self.board_display_mut().set_completed_filter(f);
                 self.persist_display();
             }
             Message::ToggleShowSubIssues => {
-                let d = &mut self.config.display;
+                let d = self.board_display_mut();
                 d.show_sub_issues = !d.show_sub_issues;
                 self.persist_display();
             }
             Message::ToggleShowEmptyGroups => {
-                let d = &mut self.config.display;
+                let d = self.board_display_mut();
                 d.show_empty_groups = !d.show_empty_groups;
                 self.persist_display();
             }
             Message::ToggleCardProperty(p) => {
-                self.config.display.toggle_property(p);
+                self.board_display_mut().toggle_property(p);
                 self.persist_display();
             }
             Message::ToggleFilter(field, value) => {
-                self.config.filters.toggle(field, &value);
+                self.board_filters_mut().toggle(field, &value);
                 self.focused_issue = 0;
                 self.persist_display();
             }
             Message::ClearFilters => {
-                self.config.filters.clear();
+                self.board_filters_mut().clear();
                 // The panel's search box mirrors the header search; clear it too.
-                self.search_query.clear();
+                self.clear_view_search();
                 self.focused_issue = 0;
                 self.persist_display();
             }
@@ -2839,6 +3409,7 @@ impl App {
                     PaletteNav::Team(id) => {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
+                    PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
@@ -3749,15 +4320,19 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let team_sidebar = team_list::view(
-            &self.teams,
-            self.selected_team_id.as_deref(),
-            &self.expanded_teams,
-            &self.view,
-            self.team_menu_open.as_deref(),
-            self.show_archived_teams,
-            self.notif_unread_count,
-        );
+        let team_sidebar = team_list::view(team_list::SidebarState {
+            teams: &self.teams,
+            selected_team_id: self.selected_team_id.as_deref(),
+            expanded_teams: &self.expanded_teams,
+            current_view: &self.view,
+            team_menu_open: self.team_menu_open.as_deref(),
+            show_archived: self.show_archived_teams,
+            unread_count: self.notif_unread_count,
+            read_only: self.sync_read_only,
+            saved_views: &self.saved_views,
+            open_view_id: self.open_view.as_ref().map(|v| v.view_id.as_str()),
+            home: self.home_page.as_ref(),
+        });
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
             team_list::footer(self.selected_team_id.is_some()),
@@ -3781,6 +4356,7 @@ impl App {
                     (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
                         .then_some(Message::BackToInbox)
                 }),
+            self.update_view_action(),
         );
 
         let columns = if matches!(self.view, View::Board | View::MyIssues) {
@@ -3803,7 +4379,7 @@ impl App {
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into(),
-            View::Board | View::MyIssues if self.config.display.view_mode == ViewMode::List => {
+            View::Board | View::MyIssues if self.board_display().view_mode == ViewMode::List => {
                 issue_list::view(
                     &columns,
                     board::CardData {
@@ -3812,7 +4388,7 @@ impl App {
                         members: &self.members,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
-                        display: &self.config.display,
+                        display: self.board_display(),
                     },
                     &self.collapsed_sections,
                     self.focused_lane,
@@ -3827,7 +4403,7 @@ impl App {
                     members: &self.members,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
-                    display: &self.config.display,
+                    display: self.board_display(),
                 },
                 self.focused_lane,
                 self.focused_issue,
@@ -3868,7 +4444,7 @@ impl App {
                             &self.members,
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
-                            &self.config.display,
+                            self.board_display(),
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,
@@ -3986,12 +4562,12 @@ impl App {
         // Overlay modals
         let content: Element<'_, Message> = match &self.modal {
             Modal::DisplayOptions => {
-                let panel = display_panel::display_view(&self.config.display);
+                let panel = display_panel::display_view(self.board_display(), self.save_view_block_reason());
                 iced::widget::stack![base, display_panel::popover(panel)].into()
             }
             Modal::FilterPanel => {
                 let panel = display_panel::filter_view(
-                    &self.config.filters,
+                    self.board_filters(),
                     search,
                     display_panel::FilterData {
                         lanes: &self.lanes,
@@ -4000,6 +4576,8 @@ impl App {
                         projects: &self.projects,
                         cross_team: self.view == View::MyIssues,
                         scoped_to_project: matches!(self.view, View::ProjectDetail(_)),
+                        // Rails can't store "unassigned" in a Saved view.
+                        offer_unassigned: self.open_view.is_none(),
                     },
                 );
                 iced::widget::stack![base, display_panel::popover(panel)].into()
@@ -4060,6 +4638,31 @@ impl App {
                     .unwrap_or("this project");
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
+            }
+            Modal::SaveView => iced::widget::stack![
+                base,
+                save_view_modal("Save view", &self.save_view_name, self.save_view_error)
+            ]
+            .into(),
+            Modal::RenameSavedView(_) => iced::widget::stack![
+                base,
+                save_view_modal("Rename view", &self.save_view_name, self.save_view_error)
+            ]
+            .into(),
+            Modal::DeleteSavedViewConfirm(view_id) => {
+                let name = self
+                    .saved_views
+                    .values()
+                    .flatten()
+                    .find(|v| v.id == *view_id)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_default();
+                let body = format!("Delete the view \"{name}\"? Issues are not affected.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete View?", body, Message::DeleteSavedViewConfirmed)
+                ]
+                .into()
             }
             Modal::DeleteLabelConfirm(label_id) => {
                 let conn = self.db();
@@ -4330,6 +4933,73 @@ fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
         n => format!("Delete this comment and its {n} replies?"),
     };
     delete_modal("Delete Comment?", body, Message::DeleteCommentConfirmed)
+}
+
+fn save_view_input_id() -> text_input::Id {
+    text_input::Id::new("save-view-name")
+}
+
+/// Name prompt for "Save view…".
+fn save_view_modal<'a>(title: &'a str, name: &'a str, error: Option<&'static str>) -> Element<'a, Message> {
+    use iced::widget::{button, text};
+
+    let mut content = column![]
+        .spacing(12)
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(
+            text_input("View name", name)
+                .id(save_view_input_id())
+                .on_input(Message::SaveViewNameChanged)
+                .on_submit(Message::SaveViewSubmit)
+                .padding([6, 10])
+                .size(14)
+                .width(Length::Fixed(320.0)),
+        );
+    if let Some(e) = error {
+        content = content.push(text(e).size(12).color(t::danger()));
+    }
+    content = content.push(
+        row![]
+            .spacing(8)
+            .push(
+                button(text("Save").size(14))
+                    .on_press(Message::SaveViewSubmit)
+                    .padding([8, 24])
+                    .style(button::primary),
+            )
+            .push(
+                button(text("Cancel").size(14))
+                    .on_press(Message::CloseModal)
+                    .padding([8, 24])
+                    .style(button::secondary),
+            ),
+    );
+
+    let modal =
+        container(content)
+            .padding(28)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::bg_modal())),
+                border: iced::Border {
+                    color: t::border(),
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            });
+
+    container(modal)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                0.0, 0.0, 0.0, 0.7,
+            ))),
+            ..Default::default()
+        })
+        .into()
 }
 
 fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'a, Message> {

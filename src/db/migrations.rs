@@ -420,6 +420,51 @@ const MIGRATIONS: &[Migration] = &[
                 ON notifications (read_at, created_at);
         ",
     },
+    Migration {
+        version: 22,
+        name: "saved_views",
+        up: "
+            -- Local mirror of the user's Saved views. `query` is the raw Rails
+            -- string->string map as JSON, with remote ids, unknown keys kept.
+            CREATE TABLE IF NOT EXISTS saved_views (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                query TEXT NOT NULL DEFAULT '{}',
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_views_team_position
+                ON saved_views (team_id, position);
+        ",
+    },
+    Migration {
+        version: 23,
+        name: "home_page_table",
+        up: "
+            -- The user's Home page: a single row (id = 1). `local_view_id` is
+            -- set instead of a remote id for a Saved view not pushed yet.
+            CREATE TABLE IF NOT EXISTS home_page (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                kind TEXT NOT NULL,
+                remote_id INTEGER NOT NULL DEFAULT 0,
+                local_view_id TEXT
+            );
+            -- Move the value older builds kept in pull_cursors as 'kind:id'
+            -- (or 'kind:~local-uuid'), then drop that row.
+            INSERT OR IGNORE INTO home_page (id, kind, remote_id, local_view_id)
+                SELECT 1,
+                    substr(cursor, 1, instr(cursor, ':') - 1),
+                    CASE WHEN substr(cursor, instr(cursor, ':') + 1, 1) = '~' THEN 0
+                         ELSE CAST(substr(cursor, instr(cursor, ':') + 1) AS INTEGER) END,
+                    CASE WHEN substr(cursor, instr(cursor, ':') + 1, 1) = '~'
+                         THEN substr(cursor, instr(cursor, ':') + 2) END
+                FROM pull_cursors
+                WHERE team_id = 'user' AND resource = 'home_page' AND instr(cursor, ':') > 0;
+            DELETE FROM pull_cursors WHERE team_id = 'user' AND resource = 'home_page';
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -556,6 +601,7 @@ mod tests {
             "comments",
             "issue_events",
             "notifications",
+            "home_page",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }
@@ -564,6 +610,40 @@ mod tests {
             applied_versions(&conn),
             MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn home_page_table_migration_moves_the_old_pull_cursor_value() {
+        for (stored, want) in [
+            ("team:7", ("team", 7, None)),
+            ("view:~abc", ("view", 0, Some("abc".to_string()))),
+        ] {
+            let conn = open_mem();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+            )
+            .unwrap();
+            for m in MIGRATIONS.iter().filter(|m| m.version < 23) {
+                conn.execute_batch(m.up).unwrap();
+                conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO pull_cursors (team_id, resource, cursor) VALUES ('user', 'home_page', ?1)",
+                [stored],
+            )
+            .unwrap();
+            run(&conn).unwrap();
+            let got: (String, i64, Option<String>) = conn
+                .query_row("SELECT kind, remote_id, local_view_id FROM home_page WHERE id = 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap();
+            assert_eq!((got.0.as_str(), got.1, got.2), want);
+            let left: i64 = conn
+                .query_row("SELECT COUNT(*) FROM pull_cursors WHERE resource = 'home_page'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(left, 0);
+        }
     }
 
     #[test]

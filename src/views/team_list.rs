@@ -1,21 +1,43 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{Message, TeamWebSection, View};
+use crate::db::home_page::HomePage;
 use crate::db::models::Team;
+use crate::db::saved_views::SavedView;
 use crate::theme as t;
 
-pub fn view<'a>(
-    teams: &'a [Team],
-    selected_team_id: Option<&'a str>,
-    expanded_teams: &'a HashSet<String>,
-    current_view: &'a View,
-    team_menu_open: Option<&'a str>,
-    show_archived: bool,
-    unread_count: i64,
-) -> Element<'a, Message> {
+/// Everything the sidebar reads, bundled so `view` takes one argument.
+pub struct SidebarState<'a> {
+    pub teams: &'a [Team],
+    pub selected_team_id: Option<&'a str>,
+    pub expanded_teams: &'a HashSet<String>,
+    pub current_view: &'a View,
+    pub team_menu_open: Option<&'a str>,
+    pub show_archived: bool,
+    pub unread_count: i64,
+    pub read_only: bool,
+    pub saved_views: &'a HashMap<String, Vec<SavedView>>,
+    pub open_view_id: Option<&'a str>,
+    pub home: Option<&'a HomePage>,
+}
+
+pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
+    let SidebarState {
+        teams,
+        selected_team_id,
+        expanded_teams,
+        current_view,
+        team_menu_open,
+        show_archived,
+        unread_count,
+        read_only,
+        saved_views,
+        open_view_id,
+        home,
+    } = state;
     let mut col = column![].spacing(0).width(Length::Fill);
 
     // Workspace section
@@ -92,6 +114,7 @@ pub fn view<'a>(
             .push(chevron)
             .push(identifier_badge)
             .push(name_text)
+            .push_maybe(is_home_team(home, team).then(home_marker))
             .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())));
 
         let header_button = button(header_content)
@@ -133,7 +156,14 @@ pub fn view<'a>(
                     synced.then(|| Message::OpenTeamWebSettings(team.id.clone(), section)),
                 )
             };
+            let is_home = is_home_team(home, team);
+            let home_label = if is_home { "Home page \u{2713}" } else { "Set as home" };
+            let can_set_home = synced && !read_only && !is_home;
             col = col
+                .push(menu_row(
+                    home_label,
+                    can_set_home.then(|| Message::SetTeamAsHome(team.id.clone())),
+                ))
                 .push(menu_row(
                     "Members",
                     Some(Message::OpenTeamMembers(team.id.clone())),
@@ -150,13 +180,56 @@ pub fn view<'a>(
                 ("Roadmap", View::Roadmap),
             ];
             for (label, view) in sub_rows {
-                let active = is_selected && *current_view == view;
+                let active = is_selected && *current_view == view && open_view_id.is_none();
                 col = col.push(nav_row(
                     label,
                     active,
                     Message::SelectTeamView(team.id.clone(), view),
                     28,
                 ));
+            }
+            for sv in saved_views.get(&team.id).into_iter().flatten() {
+                let active = open_view_id == Some(sv.id.as_str());
+                let open_btn = button(
+                    row![text(&sv.name).size(13).color(if active {
+                        t::text_primary()
+                    } else {
+                        t::text_secondary()
+                    })]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center)
+                    .push_maybe(is_home_view(home, sv).then(home_marker)),
+                )
+                .on_press(Message::OpenSavedView(sv.id.clone()))
+                .padding([6, 28])
+                .width(Length::Fill)
+                .style(move |_theme: &Theme, _status| selected_row_style(active));
+                // Set-as-home needs a writable token and is a no-op on the
+                // current home; disabled (muted) otherwise.
+                let is_home = is_home_view(home, sv);
+                let home_btn = icon_btn(
+                    "\u{2302}",
+                    12,
+                    [6, 8],
+                    (!read_only && !is_home).then(|| Message::SetSavedViewAsHome(sv.id.clone())),
+                );
+                // Delete needs a writable token; disabled (muted) otherwise.
+                let delete_btn = icon_btn(
+                    "\u{2715}",
+                    11,
+                    [6, 8],
+                    (!read_only).then(|| Message::ConfirmDeleteSavedView(sv.id.clone())),
+                );
+                let rename_btn = icon_btn(
+                    "\u{270E}",
+                    11,
+                    [6, 4],
+                    (!read_only).then(|| Message::OpenRenameSavedView(sv.id.clone())),
+                );
+                col = col.push(
+                    row![open_btn, home_btn, rename_btn, delete_btn]
+                        .align_y(iced::Alignment::Center),
+                );
             }
         }
     }
@@ -169,6 +242,34 @@ pub fn view<'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// True when `home` is this team. A team without a remote id never matches.
+pub fn is_home_team(home: Option<&HomePage>, team: &Team) -> bool {
+    home.is_some_and(|h| h.matches_team(team))
+}
+
+/// True when `home` is this Saved view, by remote id or (chosen before its
+/// create pushed) by local id.
+pub fn is_home_view(home: Option<&HomePage>, view: &SavedView) -> bool {
+    home.is_some_and(|h| h.matches_view(view))
+}
+
+/// A muted glyph-only sidebar button; disabled when `msg` is `None`.
+fn icon_btn<'a>(glyph: &'static str, size: u16, padding: [u16; 2], msg: Option<Message>) -> Element<'a, Message> {
+    button(text(glyph).size(size).color(t::text_muted()))
+        .on_press_maybe(msg)
+        .padding(padding)
+        .style(|_theme: &Theme, _status| button::Style {
+            background: None,
+            ..Default::default()
+        })
+        .into()
+}
+
+/// The small home glyph shown next to the Home page's row.
+fn home_marker<'a>() -> Element<'a, Message> {
+    text("\u{2302}").size(12).color(t::accent()).into() // ⌂
 }
 
 /// Sidebar footer: per-team CSV export / import (disabled without a team).
@@ -321,7 +422,65 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
-    use super::badge_label;
+    use super::{badge_label, is_home_team, is_home_view};
+    use crate::db::home_page::HomePage;
+    use crate::db::models::Team;
+    use crate::db::saved_views::SavedView;
+
+    fn home(kind: &str, id: i64) -> HomePage {
+        use crate::db::home_page::HomeTarget;
+        HomePage { target: HomeTarget::from_wire(kind, id).unwrap() }
+    }
+
+    fn team(remote_id: Option<i64>) -> Team {
+        Team {
+            id: "t".into(),
+            name: "Team".into(),
+            identifier: "TM".into(),
+            remote_id,
+            archived_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn sv(remote_id: Option<i64>) -> SavedView {
+        SavedView {
+            id: "x".into(),
+            remote_id,
+            team_id: "t".into(),
+            name: "v".into(),
+            query: "{}".into(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn team_home_marks_that_team_only() {
+        let h = home("team", 5);
+        assert!(is_home_team(Some(&h), &team(Some(5))));
+        assert!(!is_home_team(Some(&h), &team(Some(6))));
+        assert!(!is_home_team(Some(&h), &team(None)));
+        assert!(!is_home_view(Some(&h), &sv(Some(5))));
+    }
+
+    #[test]
+    fn view_home_marks_that_view_only() {
+        let h = home("view", 7);
+        assert!(is_home_view(Some(&h), &sv(Some(7))));
+        assert!(!is_home_view(Some(&h), &sv(Some(8))));
+        assert!(!is_home_team(Some(&h), &team(Some(7))));
+    }
+
+    #[test]
+    fn dashboard_or_missing_home_marks_nothing() {
+        let d = home("dashboard", 7);
+        assert!(!is_home_team(Some(&d), &team(Some(7))));
+        assert!(!is_home_view(Some(&d), &sv(Some(7))));
+        assert!(!is_home_team(None, &team(Some(7))));
+        assert!(!is_home_view(None, &sv(Some(7))));
+    }
 
     #[test]
     fn badge_hidden_at_zero_and_capped() {

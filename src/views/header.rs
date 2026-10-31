@@ -33,6 +33,54 @@ pub fn project_matches(project: &Project, needle: &str) -> bool {
     needle.is_empty() || project.name.to_lowercase().contains(needle)
 }
 
+/// "Update view" for a Modified Saved view: saves the working copy as the
+/// view's definition. Disabled (no press) with a read-only token.
+pub fn update_view_button<'a>(read_only: bool) -> Element<'a, Message> {
+    button(text("Update view").size(13))
+        .on_press_maybe((!read_only).then_some(Message::UpdateSavedView))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
+/// "Save as new view" for a Modified Saved view: asks for a name and saves the
+/// working copy as a new view. Disabled (no press) with a read-only token.
+pub fn save_as_new_view_button<'a>(read_only: bool) -> Element<'a, Message> {
+    button(text("Save as new view").size(13))
+        .on_press_maybe((!read_only).then_some(Message::OpenSaveAsNewView))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
+/// The header's Revert action for a Modified view.
+pub fn revert_button<'a>() -> Element<'a, Message> {
+    button(text("Revert").size(13))
+        .on_press(Message::RevertSavedView)
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
+/// Rename for the open Saved view. Disabled (no press) with a read-only token.
+pub fn rename_view_button<'a>(view_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Rename").size(13))
+        .on_press_maybe((!read_only).then(|| Message::OpenRenameSavedView(view_id.to_string())))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
+/// Delete for the open Saved view (asks to confirm). Disabled (no press) with
+/// a read-only token.
+pub fn delete_view_button<'a>(view_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Delete").size(13))
+        .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteSavedView(view_id.to_string())))
+        .padding([5, 12])
+        .style(button::secondary)
+        .into()
+}
+
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
@@ -45,6 +93,7 @@ pub fn view<'a>(
     board_controls: Option<usize>,
     new_action: Option<Message>,
     back: Option<Message>,
+    view_actions: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut trail = row![].spacing(8).align_y(Alignment::Center);
     if let Some(msg) = back {
@@ -133,6 +182,7 @@ pub fn view<'a>(
         .align_y(Alignment::Center)
         .push(trail)
         .push(iced::widget::horizontal_space())
+        .push_maybe(view_actions)
         .push(search)
         .push(filter)
         .push(display)
