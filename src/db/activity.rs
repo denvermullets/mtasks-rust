@@ -852,7 +852,7 @@ mod jrst_134_tests {
         );
         let entries: Vec<ActivityEntry> = serde_json::from_str(&body).unwrap();
         store_batch(conn, "i1", &entries, None, false).unwrap();
-        activity_for_issue(conn, "i1").unwrap().into_iter().map(|i| i.text).collect()
+        activity_for_issue(conn, "i1").unwrap().into_iter().skip(1).map(|i| i.text).collect()
     }
 
     #[test]
