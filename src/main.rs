@@ -4,6 +4,7 @@ mod config;
 mod csv_io;
 mod db;
 mod display;
+mod fonts;
 mod keys;
 mod mentions;
 mod scroll;
@@ -14,7 +15,14 @@ mod views;
 use iced::{window, Size};
 
 fn main() -> iced::Result {
-    iced::application(app::App::title, app::App::update, app::App::view)
+    let cfg = config::load().0;
+    theme::set_by_key(&cfg.theme);
+    let font_key = cfg.font;
+    let mut app = iced::application(app::App::title, app::App::update, app::App::view);
+    for bytes in fonts::FONT_BYTES {
+        app = app.font(bytes);
+    }
+    app.default_font(fonts::font_for_key(&font_key))
         .subscription(app::App::subscription)
         .theme(app::App::theme)
         .window(window::Settings {

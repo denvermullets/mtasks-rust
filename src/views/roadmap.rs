@@ -7,39 +7,29 @@ use crate::theme as t;
 use crate::views::header;
 use crate::views::projects::format_target_date;
 
-/// u8 → Color helper (mirrors `theme::c`), for the roadmap-specific dot/status
-/// colors carried over verbatim from the Rails `roadmaps/_card` partial.
-const fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
-}
-
-const BEHIND: Color = rgb(0xF0, 0x95, 0x95);
-const GOOD: Color = rgb(0x5D, 0xCA, 0xA5);
-const AMBER: Color = rgb(0xEF, 0x9F, 0x27);
-const NEUTRAL: Color = rgb(0x88, 0x87, 0x80);
-const BAR_BEHIND: Color = rgb(0xE2, 0x4B, 0x4A);
-
 /// The three swimlanes, in display order, with their header copy + dot color.
-const LANES: [(RoadmapCommitment, &str, &str, Color); 3] = [
-    (
-        RoadmapCommitment::Now,
-        "Now",
-        "Shipping in the next ~6 weeks",
-        t::ACCENT,
-    ),
-    (
-        RoadmapCommitment::Next,
-        "Next",
-        "Starting once Now slots open",
-        t::HIGHLIGHT,
-    ),
-    (
-        RoadmapCommitment::Later,
-        "Later",
-        "On the radar, not committed",
-        NEUTRAL,
-    ),
-];
+fn lane_defs() -> [(RoadmapCommitment, &'static str, &'static str, Color); 3] {
+    [
+        (
+            RoadmapCommitment::Now,
+            "Now",
+            "Shipping in the next ~6 weeks",
+            t::accent(),
+        ),
+        (
+            RoadmapCommitment::Next,
+            "Next",
+            "Starting once Now slots open",
+            t::highlight(),
+        ),
+        (
+            RoadmapCommitment::Later,
+            "Later",
+            "On the radar, not committed",
+            t::text_muted(),
+        ),
+    ]
+}
 
 /// Cards per grid row within a lane body.
 const PER_ROW: usize = 3;
@@ -85,12 +75,12 @@ pub fn view<'a>(
 
     let mut chips = row![].spacing(6).align_y(Alignment::Center);
     if behind > 0 {
-        chips = chips.push(count_chip(behind, "behind", BEHIND));
+        chips = chips.push(count_chip(behind, "behind", t::danger()));
     }
     if in_progress > 0 {
-        chips = chips.push(count_chip(in_progress, "in progress", AMBER));
+        chips = chips.push(count_chip(in_progress, "in progress", t::warning()));
     }
-    chips = chips.push(count_chip(planned, "planned", NEUTRAL));
+    chips = chips.push(count_chip(planned, "planned", t::text_muted()));
 
     let header = row![]
         .spacing(12)
@@ -98,11 +88,11 @@ pub fn view<'a>(
         .push(
             column![]
                 .spacing(2)
-                .push(text("Now / Next / Later").size(16).color(t::TEXT_PRIMARY))
+                .push(text("Now / Next / Later").size(16).color(t::text_primary()))
                 .push(
                     text("No specific dates — just intent.")
                         .size(12)
-                        .color(t::TEXT_MUTED),
+                        .color(t::text_muted()),
                 ),
         )
         .push(iced::widget::horizontal_space())
@@ -111,7 +101,7 @@ pub fn view<'a>(
 
     // One lane block per commitment.
     let mut lanes = column![].spacing(12).width(Length::Fill);
-    for (commitment, label, subtitle, dot) in LANES {
+    for (commitment, label, subtitle, dot) in lane_defs() {
         let mut in_lane: Vec<&Project> = roadmap_scope(projects)
             .filter(|p| p.roadmap_commitment == Some(commitment))
             .filter(|p| header::project_matches(p, needle))
@@ -132,7 +122,7 @@ pub fn view<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_PRIMARY)),
+            background: Some(iced::Background::Color(t::bg_primary())),
             ..Default::default()
         })
         .into()
@@ -159,7 +149,7 @@ fn lane_block<'a>(
                 .push(text(label).size(14).color(dot))
                 .push(count_pill(projects.len())),
         )
-        .push(text(subtitle).size(11).color(t::TEXT_MUTED));
+        .push(text(subtitle).size(11).color(t::text_muted()));
 
     let mut cells: Vec<Element<'a, Message>> = projects
         .iter()
@@ -176,9 +166,9 @@ fn lane_block<'a>(
         .padding(16)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_SECONDARY)),
+            background: Some(iced::Background::Color(t::bg_secondary())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 12.0.into(),
             },
@@ -201,20 +191,20 @@ fn card<'a>(project: &'a Project, identifier: &'a str) -> Element<'a, Message> {
         Some(d) if !d.is_empty() => text(format!("Due {}", format_target_date(d)))
             .size(11)
             .color(if project.behind_schedule {
-                t::DANGER
+                t::danger()
             } else {
-                t::TEXT_MUTED
+                t::text_muted()
             })
             .into(),
         _ => iced::widget::horizontal_space().into(),
     };
 
-    let ident_pill = container(text(identifier).size(10).color(t::TEXT_SECONDARY))
+    let ident_pill = container(text(identifier).size(10).color(t::text_secondary()))
         .padding([2, 6])
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_PRIMARY)),
+            background: Some(iced::Background::Color(t::bg_primary())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 4.0.into(),
             },
@@ -232,7 +222,7 @@ fn card<'a>(project: &'a Project, identifier: &'a str) -> Element<'a, Message> {
         .push(
             text(&project.name)
                 .size(13)
-                .color(t::TEXT_PRIMARY)
+                .color(t::text_primary())
                 .wrapping(text::Wrapping::WordOrGlyph),
         )
         .push(bottom);
@@ -245,9 +235,9 @@ fn card<'a>(project: &'a Project, identifier: &'a str) -> Element<'a, Message> {
         .padding(14)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_PRIMARY)),
+            background: Some(iced::Background::Color(t::bg_primary())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 8.0.into(),
             },
@@ -262,20 +252,20 @@ fn card<'a>(project: &'a Project, identifier: &'a str) -> Element<'a, Message> {
 /// Status pill label + color, mirroring the Rails `roadmaps/_card` logic.
 fn card_status(project: &Project) -> (&'static str, Color) {
     if project.behind_schedule {
-        return ("Behind", BEHIND);
+        return ("Behind", t::danger());
     }
     match project.status {
-        Some(ProjectStatus::Completed) => ("Completed", GOOD),
-        Some(ProjectStatus::Cancelled) => ("Cancelled", NEUTRAL),
-        Some(ProjectStatus::Paused) => ("Paused", AMBER),
+        Some(ProjectStatus::Completed) => ("Completed", t::priority_low()),
+        Some(ProjectStatus::Cancelled) => ("Cancelled", t::text_muted()),
+        Some(ProjectStatus::Paused) => ("Paused", t::warning()),
         Some(ProjectStatus::Started) => {
             if project.progress_percentage > 0 {
-                ("In progress", GOOD)
+                ("In progress", t::priority_low())
             } else {
-                ("Started", AMBER)
+                ("Started", t::warning())
             }
         }
-        Some(ProjectStatus::Backlog) | None => ("Planned", NEUTRAL),
+        Some(ProjectStatus::Backlog) | None => ("Planned", t::text_muted()),
     }
 }
 
@@ -283,11 +273,11 @@ fn card_status(project: &Project) -> (&'static str, Color) {
 fn progress_bar<'a>(project: &Project) -> Element<'a, Message> {
     let pct = project.progress_percentage.clamp(0, 100);
     let bar_color = if project.behind_schedule {
-        BAR_BEHIND
+        t::danger()
     } else if project.status == Some(ProjectStatus::Started) && pct < 50 {
-        AMBER
+        t::warning()
     } else {
-        GOOD
+        t::priority_low()
     };
     let filled = pct.max(2) as u16;
     let empty = (100 - pct).clamp(0, 100) as u16;
@@ -317,7 +307,7 @@ fn add_to_lane_cell<'a>(commitment: RoadmapCommitment) -> Element<'a, Message> {
         container(
             text("+ Add project")
                 .size(12)
-                .color(t::TEXT_SECONDARY),
+                .color(t::text_secondary()),
         )
         .center_x(Length::Fill)
         .center_y(Length::Fill),
@@ -327,9 +317,9 @@ fn add_to_lane_cell<'a>(commitment: RoadmapCommitment) -> Element<'a, Message> {
     .height(Length::Fixed(96.0))
     .style(|_theme: &Theme, _status| button::Style {
         background: None,
-        text_color: t::TEXT_SECONDARY,
+        text_color: t::text_secondary(),
         border: Border {
-            color: t::BORDER,
+            color: t::border(),
             width: 1.0,
             radius: 8.0.into(),
         },
@@ -340,14 +330,14 @@ fn add_to_lane_cell<'a>(commitment: RoadmapCommitment) -> Element<'a, Message> {
 
 /// The header's "+ Add project" button (opens the picker preset to `commitment`).
 fn add_project_button<'a>(commitment: RoadmapCommitment) -> Element<'a, Message> {
-    button(text("+ Add project").size(13).color(t::ACCENT))
+    button(text("+ Add project").size(13).color(t::accent()))
         .on_press(Message::OpenRoadmapAdd(commitment))
         .padding([6, 12])
         .style(|_theme: &Theme, _status| button::Style {
             background: None,
-            text_color: t::ACCENT,
+            text_color: t::accent(),
             border: Border {
-                color: t::ACCENT,
+                color: t::accent(),
                 width: 1.0,
                 radius: 6.0.into(),
             },
@@ -366,14 +356,14 @@ fn count_chip<'a>(n: usize, label: &'a str, dot: Color) -> Element<'a, Message> 
             .push(
                 text(format!("{n} {label}"))
                     .size(11)
-                    .color(t::TEXT_SECONDARY),
+                    .color(t::text_secondary()),
             ),
     )
     .padding([2, 6])
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::BG_SECONDARY)),
+        background: Some(iced::Background::Color(t::bg_secondary())),
         border: Border {
-            color: t::BORDER,
+            color: t::border(),
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -384,12 +374,12 @@ fn count_chip<'a>(n: usize, label: &'a str, dot: Color) -> Element<'a, Message> 
 
 /// The small count badge next to a lane label.
 fn count_pill<'a>(n: usize) -> Element<'a, Message> {
-    container(text(n.to_string()).size(11).color(t::TEXT_SECONDARY))
+    container(text(n.to_string()).size(11).color(t::text_secondary()))
         .padding([1, 6])
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_PRIMARY)),
+            background: Some(iced::Background::Color(t::bg_primary())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 4.0.into(),
             },
@@ -428,7 +418,7 @@ fn grid<'a>(cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 fn divider<'a>() -> Element<'a, Message> {
     container(iced::widget::horizontal_rule(1))
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BORDER)),
+            background: Some(iced::Background::Color(t::border())),
             ..Default::default()
         })
         .into()
@@ -474,7 +464,7 @@ pub fn add_modal_view<'a>(
 
     // Lane chip selector.
     let mut chip_row = row![].spacing(6).align_y(Alignment::Center);
-    for (commitment, label, _subtitle, dot) in LANES {
+    for (commitment, label, _subtitle, dot) in lane_defs() {
         let active = commitment == selected_lane;
         chip_row = chip_row.push(
             button(
@@ -483,18 +473,18 @@ pub fn add_modal_view<'a>(
                     .align_y(Alignment::Center)
                     .push(text("\u{25CF}").size(7).color(dot))
                     .push(text(label).size(12).color(if active {
-                        t::TEXT_PRIMARY
+                        t::text_primary()
                     } else {
-                        t::TEXT_SECONDARY
+                        t::text_secondary()
                     })),
             )
             .on_press(Message::RoadmapAddLaneChanged(commitment))
             .padding([4, 10])
             .style(move |_theme: &Theme, _status| button::Style {
-                background: active.then_some(iced::Background::Color(t::BG_CARD_FOCUSED)),
-                text_color: t::TEXT_PRIMARY,
+                background: active.then_some(iced::Background::Color(t::bg_card_focused())),
+                text_color: t::text_primary(),
                 border: Border {
-                    color: if active { t::ACCENT } else { t::BORDER },
+                    color: if active { t::accent() } else { t::border() },
                     width: 1.0,
                     radius: 6.0.into(),
                 },
@@ -508,7 +498,7 @@ pub fn add_modal_view<'a>(
         container(
             text("No projects off the roadmap.")
                 .size(12)
-                .color(t::TEXT_MUTED),
+                .color(t::text_muted()),
         )
         .center_x(Length::Fill)
         .padding(24)
@@ -521,16 +511,16 @@ pub fn add_modal_view<'a>(
                     row![]
                         .spacing(8)
                         .align_y(Alignment::Center)
-                        .push(text(identifier).size(10).color(t::TEXT_MUTED))
-                        .push(text(&p.name).size(13).color(t::TEXT_PRIMARY)),
+                        .push(text(identifier).size(10).color(t::text_muted()))
+                        .push(text(&p.name).size(13).color(t::text_primary())),
                 )
                 .on_press(Message::RoadmapAssignProject(p.id.clone()))
                 .padding([8, 12])
                 .width(Length::Fill)
                 .style(|_theme: &Theme, status: button::Status| button::Style {
                     background: matches!(status, button::Status::Hovered)
-                        .then_some(iced::Background::Color(t::BG_CARD_FOCUSED)),
-                    text_color: t::TEXT_PRIMARY,
+                        .then_some(iced::Background::Color(t::bg_card_focused())),
+                    text_color: t::text_primary(),
                     border: Border {
                         radius: 4.0.into(),
                         ..Default::default()
@@ -548,12 +538,12 @@ pub fn add_modal_view<'a>(
         .push(
             text("Add project to roadmap")
                 .size(16)
-                .color(t::TEXT_PRIMARY),
+                .color(t::text_primary()),
         )
         .push(
             column![]
                 .spacing(6)
-                .push(text("Add to lane").size(11).color(t::TEXT_MUTED))
+                .push(text("Add to lane").size(11).color(t::text_muted()))
                 .push(chip_row),
         )
         .push(divider())
@@ -572,9 +562,9 @@ pub fn add_modal_view<'a>(
     let modal = container(content)
         .padding(24)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::bg_modal())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 8.0.into(),
             },

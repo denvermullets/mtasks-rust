@@ -15,7 +15,7 @@ pub fn modal_view<'a>(team: &'a Team, members: &'a [Member]) -> Element<'a, Mess
             "This team only exists locally, so it has no members."
         })
         .size(12)
-        .color(t::TEXT_MUTED)
+        .color(t::text_muted())
         .into()
     } else {
         let mut col = column![].spacing(10);
@@ -27,10 +27,10 @@ pub fn modal_view<'a>(team: &'a Team, members: &'a [Member]) -> Element<'a, Mess
                     .push(
                         text(&member.name)
                             .size(14)
-                            .color(t::TEXT_PRIMARY)
+                            .color(t::text_primary())
                             .width(Length::Fill),
                     )
-                    .push(text(&member.email).size(12).color(t::TEXT_MUTED)),
+                    .push(text(&member.email).size(12).color(t::text_muted())),
             );
         }
         scrollable(col).height(Length::Shrink).into()
@@ -47,16 +47,16 @@ pub fn modal_view<'a>(team: &'a Team, members: &'a [Member]) -> Element<'a, Mess
             button(
                 text("Manage in web app \u{2197}")
                     .size(14)
-                    .color(t::BG_PRIMARY),
+                    .color(t::bg_primary()),
             )
             .on_press(Message::OpenTeamWebSettings(
                 team.id.clone(),
                 TeamWebSection::Members,
             ))
             .padding([8, 16])
-            .style(move |_theme: &Theme, _status| button::Style {
-                background: Some(iced::Background::Color(t::ACCENT)),
-                text_color: t::BG_PRIMARY,
+            .style(move |_theme: &Theme, status| button::Style {
+                background: Some(iced::Background::Color(t::accent_fill(status))),
+                text_color: t::bg_primary(),
                 border: Border {
                     radius: 4.0.into(),
                     ..Default::default()
@@ -72,12 +72,12 @@ pub fn modal_view<'a>(team: &'a Team, members: &'a [Member]) -> Element<'a, Mess
         .push(
             text(format!("{} members", team.name))
                 .size(18)
-                .color(t::TEXT_PRIMARY),
+                .color(t::text_primary()),
         )
         .push(
             text("Members are managed in the web app.")
                 .size(12)
-                .color(t::TEXT_MUTED),
+                .color(t::text_muted()),
         )
         .push(container(list).max_height(360.0))
         .push(footer);
@@ -85,9 +85,9 @@ pub fn modal_view<'a>(team: &'a Team, members: &'a [Member]) -> Element<'a, Mess
     let modal = container(content)
         .padding(28)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::bg_modal())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 8.0.into(),
             },

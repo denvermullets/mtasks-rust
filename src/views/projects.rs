@@ -137,7 +137,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
     let mut form_content = column![]
         .spacing(14)
         .width(Length::Fixed(460.0))
-        .push(text(title).size(18).color(t::TEXT_PRIMARY))
+        .push(text(title).size(18).color(t::text_primary()))
         .push(
             text_input("Name", &form.name)
                 .on_input(Message::ProjectNameChanged)
@@ -147,7 +147,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
         .push_maybe(
             form.error
                 .as_deref()
-                .map(|e| text(e).size(12).color(t::DANGER)),
+                .map(|e| text(e).size(12).color(t::danger())),
         )
         .push(
             text_editor(&form.description)
@@ -164,7 +164,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
                     column![]
                         .spacing(4)
                         .width(Length::Fill)
-                        .push(text("Status").size(12).color(t::TEXT_MUTED))
+                        .push(text("Status").size(12).color(t::text_muted()))
                         .push(pick_list(
                             STATUSES.as_slice(),
                             Some(form.status),
@@ -175,7 +175,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
                     column![]
                         .spacing(4)
                         .width(Length::Fill)
-                        .push(text("Priority").size(12).color(t::TEXT_MUTED))
+                        .push(text("Priority").size(12).color(t::text_muted()))
                         .push(pick_list(
                             PRIORITIES.as_slice(),
                             Some(form.priority),
@@ -186,7 +186,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
         .push(
             column![]
                 .spacing(4)
-                .push(text("Lead").size(12).color(t::TEXT_MUTED))
+                .push(text("Lead").size(12).color(t::text_muted()))
                 .push(pick_list(
                     member_options,
                     selected_member,
@@ -200,7 +200,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
                     column![]
                         .spacing(4)
                         .width(Length::Fill)
-                        .push(text("Start date").size(12).color(t::TEXT_MUTED))
+                        .push(text("Start date").size(12).color(t::text_muted()))
                         .push(
                             text_input("YYYY-MM-DD", &form.start_date)
                                 .on_input(Message::ProjectStartDateChanged)
@@ -212,7 +212,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
                     column![]
                         .spacing(4)
                         .width(Length::Fill)
-                        .push(text("Due date").size(12).color(t::TEXT_MUTED))
+                        .push(text("Due date").size(12).color(t::text_muted()))
                         .push(
                             text_input("YYYY-MM-DD", &form.due_date)
                                 .on_input(Message::ProjectDueDateChanged)
@@ -224,7 +224,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
         .push(
             column![]
                 .spacing(4)
-                .push(text("Roadmap commitment").size(12).color(t::TEXT_MUTED))
+                .push(text("Roadmap commitment").size(12).color(t::text_muted()))
                 .push(pick_list(
                     ROADMAPS.as_slice(),
                     Some(selected_roadmap),
@@ -235,12 +235,12 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
     let mut button_row = row![]
         .spacing(8)
         .push(
-            button(text("Save").size(14).color(t::BG_PRIMARY))
+            button(text("Save").size(14).color(t::bg_primary()))
                 .on_press(Message::SaveProject)
                 .padding([8, 24])
-                .style(move |_theme: &Theme, _status| button::Style {
-                    background: Some(iced::Background::Color(t::ACCENT)),
-                    text_color: t::BG_PRIMARY,
+                .style(move |_theme: &Theme, status| button::Style {
+                    background: Some(iced::Background::Color(t::accent_fill(status))),
+                    text_color: t::bg_primary(),
                     border: Border {
                         radius: 4.0.into(),
                         ..Default::default()
@@ -257,7 +257,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
 
     if form.editing_project_id.is_some() {
         button_row = button_row.push(iced::widget::horizontal_space()).push(
-            button(text("Delete").size(14).color(t::DANGER))
+            button(text("Delete").size(14).color(t::danger()))
                 .on_press(Message::ConfirmDeleteProject)
                 .padding([8, 24])
                 .style(button::secondary),
@@ -269,9 +269,9 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
     let modal = container(form_content)
         .padding(28)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::bg_modal())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 8.0.into(),
             },
@@ -319,7 +319,7 @@ pub fn list_view<'a>(
     let mut sort_row = row![]
         .spacing(6)
         .align_y(Alignment::Center)
-        .push(text("Sort by").size(12).color(t::TEXT_MUTED));
+        .push(text("Sort by").size(12).color(t::text_muted()));
     for option in ProjectSort::ALL {
         let active = option == sort;
         let mut label =
@@ -327,23 +327,23 @@ pub fn list_view<'a>(
                 .spacing(4)
                 .align_y(Alignment::Center)
                 .push(text(option.label()).size(12).color(if active {
-                    t::TEXT_PRIMARY
+                    t::text_primary()
                 } else {
-                    t::TEXT_SECONDARY
+                    t::text_secondary()
                 }));
         if active {
-            label = label.push(text(dir.arrow()).size(9).color(t::TEXT_SECONDARY));
+            label = label.push(text(dir.arrow()).size(9).color(t::text_secondary()));
         }
         sort_row = sort_row.push(
             button(label)
                 .on_press(Message::ProjectSortChanged(option))
                 .padding([4, 8])
                 .style(move |_theme: &Theme, _status| button::Style {
-                    background: active.then_some(iced::Background::Color(t::BG_CARD_FOCUSED)),
-                    text_color: t::TEXT_PRIMARY,
+                    background: active.then_some(iced::Background::Color(t::bg_card_focused())),
+                    text_color: t::text_primary(),
                     border: Border {
                         color: if active {
-                            t::BORDER
+                            t::border()
                         } else {
                             Color::TRANSPARENT
                         },
@@ -366,7 +366,7 @@ pub fn list_view<'a>(
         .push(sort_row)
         .push(iced::widget::horizontal_space())
         .push(
-            button(text(hide_label).size(12).color(t::TEXT_SECONDARY))
+            button(text(hide_label).size(12).color(t::text_secondary()))
                 .on_press(Message::ToggleHideCompletedProjects)
                 .padding([6, 10])
                 .style(button::text),
@@ -378,15 +378,15 @@ pub fn list_view<'a>(
                 if projects.len() == 1 { "" } else { "s" }
             ))
             .size(12)
-            .color(t::TEXT_MUTED),
+            .color(t::text_muted()),
         )
         .push(
-            button(text("+ New Project").size(13).color(t::BG_PRIMARY))
+            button(text("+ New Project").size(13).color(t::bg_primary()))
                 .on_press(Message::CreateProject)
                 .padding([6, 14])
-                .style(move |_theme: &Theme, _status| button::Style {
-                    background: Some(iced::Background::Color(t::ACCENT)),
-                    text_color: t::BG_PRIMARY,
+                .style(move |_theme: &Theme, status| button::Style {
+                    background: Some(iced::Background::Color(t::accent_fill(status))),
+                    text_color: t::bg_primary(),
                     border: Border {
                         radius: 4.0.into(),
                         ..Default::default()
@@ -425,9 +425,13 @@ pub fn list_view<'a>(
                     column![]
                         .spacing(10)
                         .align_x(Alignment::Center)
-                        .push(text("No projects yet").size(14).color(t::TEXT_MUTED))
+                        .push(text("No projects yet").size(14).color(t::text_muted()))
                         .push(
-                            button(text("Create your first project").size(13).color(t::ACCENT))
+                            button(
+                                text("Create your first project")
+                                    .size(13)
+                                    .color(t::accent()),
+                            )
                                 .on_press(Message::CreateProject)
                                 .padding(0)
                                 .style(button::text),
@@ -441,7 +445,7 @@ pub fn list_view<'a>(
                 rows = rows.push(project_row(project, members, issues, show_trend));
                 rows = rows.push(container(horizontal_rule(1)).style(|_theme: &Theme| {
                     container::Style {
-                        background: Some(iced::Background::Color(t::BORDER)),
+                        background: Some(iced::Background::Color(t::border())),
                         ..Default::default()
                     }
                 }));
@@ -454,7 +458,7 @@ pub fn list_view<'a>(
             .push(header)
             .push(
                 container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(t::BORDER)),
+                    background: Some(iced::Background::Color(t::border())),
                     ..Default::default()
                 }),
             )
@@ -468,7 +472,7 @@ pub fn list_view<'a>(
         .push(container(controls).padding([10, 16]))
         .push(
             container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::BORDER)),
+                background: Some(iced::Background::Color(t::border())),
                 ..Default::default()
             }),
         )
@@ -478,14 +482,14 @@ pub fn list_view<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_PRIMARY)),
+            background: Some(iced::Background::Color(t::bg_primary())),
             ..Default::default()
         })
         .into()
 }
 
 fn header_cell<'a>(label: &'a str, width: Length) -> Element<'a, Message> {
-    container(text(label).size(11).color(t::TEXT_MUTED))
+    container(text(label).size(11).color(t::text_muted()))
         .width(width)
         .into()
 }
@@ -502,7 +506,7 @@ fn project_row<'a>(
     let name_cell = container(
         text(&project.name)
             .size(14)
-            .color(t::TEXT_PRIMARY)
+            .color(t::text_primary())
             .wrapping(text::Wrapping::None),
     )
     .width(Length::Fill);
@@ -512,7 +516,7 @@ fn project_row<'a>(
             .spacing(6)
             .align_y(Alignment::Center)
             .push(text("\u{25CF}").size(9).color(health_color))
-            .push(text(health_label).size(12).color(t::TEXT_SECONDARY)),
+            .push(text(health_label).size(12).color(t::text_secondary())),
     )
     .width(Length::Fixed(COL_HEALTH));
 
@@ -524,7 +528,7 @@ fn project_row<'a>(
             .push(
                 text(format!("{priority}"))
                     .size(12)
-                    .color(t::TEXT_SECONDARY),
+                    .color(t::text_secondary()),
             ),
     )
     .width(Length::Fixed(COL_PRIORITY));
@@ -535,7 +539,7 @@ fn project_row<'a>(
     let trend_cell = show_trend.then(|| {
         let trend_data = progress_chart::compute(project, issues, progress_chart::today());
         container(if trend_data.snapshots.is_empty() {
-            text("\u{2014}").size(12).color(t::TEXT_MUTED).into()
+            text("\u{2014}").size(12).color(t::text_muted()).into()
         } else {
             progress_chart::sparkline(trend_data, COL_TREND - 12.0)
         })
@@ -543,13 +547,13 @@ fn project_row<'a>(
     });
 
     let target_color = if project.behind_schedule {
-        t::DANGER
+        t::danger()
     } else {
-        t::TEXT_SECONDARY
+        t::text_secondary()
     };
     let target_cell = container(match project.due_date.as_deref() {
         Some(d) if !d.is_empty() => text(format_target_date(d)).size(12).color(target_color),
-        _ => text("\u{2014}").size(12).color(t::TEXT_MUTED),
+        _ => text("\u{2014}").size(12).color(t::text_muted()),
     })
     .width(Length::Fixed(COL_TARGET));
 
@@ -576,16 +580,16 @@ fn project_row<'a>(
 /// Health dot color + label, mirroring Rails `project_health_state`.
 fn project_health(project: &Project) -> (Color, String) {
     match project.status {
-        Some(ProjectStatus::Completed) => (t::PRIORITY_LOW, "Complete".to_string()),
-        Some(ProjectStatus::Cancelled) => (t::TEXT_MUTED, "Cancelled".to_string()),
-        Some(ProjectStatus::Paused) => (t::PRIORITY_HIGH, "Paused".to_string()),
+        Some(ProjectStatus::Completed) => (t::priority_low(), "Complete".to_string()),
+        Some(ProjectStatus::Cancelled) => (t::text_muted(), "Cancelled".to_string()),
+        Some(ProjectStatus::Paused) => (t::priority_high(), "Paused".to_string()),
         Some(ProjectStatus::Started) => {
             if project.progress_percentage >= 100 {
-                (t::PRIORITY_LOW, "Complete".to_string())
+                (t::priority_low(), "Complete".to_string())
             } else if project.behind_schedule {
-                (t::DANGER, "At risk".to_string())
+                (t::danger(), "At risk".to_string())
             } else {
-                (t::PRIORITY_LOW, "On track".to_string())
+                (t::priority_low(), "On track".to_string())
             }
         }
         Some(ProjectStatus::Backlog) | None => {
@@ -595,9 +599,9 @@ fn project_health(project: &Project) -> (Color, String) {
                 .map(is_past_date)
                 .unwrap_or(false)
             {
-                (t::DANGER, "Overdue".to_string())
+                (t::danger(), "Overdue".to_string())
             } else {
-                (t::TEXT_MUTED, "No updates".to_string())
+                (t::text_muted(), "No updates".to_string())
             }
         }
     }
@@ -607,14 +611,14 @@ fn project_health(project: &Project) -> (Color, String) {
 fn lead_avatar<'a>(lead_id: Option<&str>, members: &'a [Member]) -> Element<'a, Message> {
     let name = lead_id.and_then(|id| members.iter().find(|m| m.id == id).map(|m| m.name.as_str()));
     let (initials, border, txt) = match name {
-        Some(n) => (lead_initials(n), t::ACCENT, t::TEXT_PRIMARY),
-        None => (String::new(), t::BORDER, t::TEXT_MUTED),
+        Some(n) => (lead_initials(n), t::accent(), t::text_primary()),
+        None => (String::new(), t::border(), t::text_muted()),
     };
     container(text(initials).size(10).color(txt))
         .center_x(Length::Fixed(24.0))
         .center_y(Length::Fixed(24.0))
         .style(move |_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_CARD)),
+            background: Some(iced::Background::Color(t::bg_card())),
             border: Border {
                 color: border,
                 width: 1.0,
@@ -631,11 +635,11 @@ fn progress_status<'a>(pct: i64) -> Element<'a, Message> {
     let filled = pct as u16;
     let empty = (100 - pct) as u16;
     let bar_color = if pct >= 100 {
-        t::PRIORITY_LOW
+        t::priority_low()
     } else if pct > 0 {
-        t::PRIORITY_MEDIUM
+        t::priority_medium()
     } else {
-        t::TEXT_MUTED
+        t::text_muted()
     };
 
     let bar = row![]
@@ -658,7 +662,7 @@ fn progress_status<'a>(pct: i64) -> Element<'a, Message> {
                 .width(Length::FillPortion(empty.max(1)))
                 .height(Length::Fixed(4.0))
                 .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(t::BG_CARD_FOCUSED)),
+                    background: Some(iced::Background::Color(t::bg_card_focused())),
                     border: Border {
                         radius: 2.0.into(),
                         ..Default::default()
@@ -669,7 +673,7 @@ fn progress_status<'a>(pct: i64) -> Element<'a, Message> {
 
     column![]
         .spacing(4)
-        .push(text(format!("{pct}%")).size(12).color(t::TEXT_SECONDARY))
+        .push(text(format!("{pct}%")).size(12).color(t::text_secondary()))
         .push(bar)
         .into()
 }

@@ -129,7 +129,7 @@ pub fn view<'a>(
     let form_content = column![]
         .spacing(14)
         .width(Length::Fixed(420.0))
-        .push(text(title).size(18).color(t::TEXT_PRIMARY))
+        .push(text(title).size(18).color(t::text_primary()))
         .push(
             text_input("Title", &form.title)
                 .on_input(Message::IssueTitleChanged)
@@ -139,7 +139,7 @@ pub fn view<'a>(
         .push_maybe(
             form.error
                 .as_deref()
-                .map(|e| text(e).size(12).color(t::DANGER)),
+                .map(|e| text(e).size(12).color(t::danger())),
         )
         .push(
             text_editor(&form.description)
@@ -165,7 +165,7 @@ pub fn view<'a>(
                     column![]
                         .spacing(4)
                         .width(Length::Fill)
-                        .push(text("Priority").size(12).color(t::TEXT_MUTED))
+                        .push(text("Priority").size(12).color(t::text_muted()))
                         .push(pick_list(
                             PRIORITIES.as_slice(),
                             Some(form.priority),
@@ -176,7 +176,7 @@ pub fn view<'a>(
                     column![]
                         .spacing(4)
                         .width(Length::Fill)
-                        .push(text("Lane").size(12).color(t::TEXT_MUTED))
+                        .push(text("Lane").size(12).color(t::text_muted()))
                         .push(pick_list(lane_options, selected_lane, |l: LaneOption| {
                             Message::IssueLaneChanged(l.id)
                         })),
@@ -187,12 +187,12 @@ pub fn view<'a>(
             row![]
                 .spacing(8)
                 .push(
-                    button(text("Save").size(14).color(t::BG_PRIMARY))
+                    button(text("Save").size(14).color(t::bg_primary()))
                         .on_press(Message::SaveIssue)
                         .padding([8, 24])
-                        .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(t::ACCENT)),
-                            text_color: t::BG_PRIMARY,
+                        .style(move |_theme: &Theme, status| button::Style {
+                            background: Some(iced::Background::Color(t::accent_fill(status))),
+                            text_color: t::bg_primary(),
                             border: Border {
                                 radius: 4.0.into(),
                                 ..Default::default()
@@ -211,9 +211,9 @@ pub fn view<'a>(
     let modal = container(form_content)
         .padding(28)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::BG_MODAL)),
+            background: Some(iced::Background::Color(t::bg_modal())),
             border: Border {
-                color: t::BORDER,
+                color: t::border(),
                 width: 1.0,
                 radius: 8.0.into(),
             },
@@ -238,7 +238,7 @@ fn labels_section<'a>(form: &'a IssueFormState, labels: &'a [Label]) -> Element<
     let content: Element<'a, Message> = if labels.is_empty() {
         text("No labels yet — press L on a card to create one.")
             .size(12)
-            .color(t::TEXT_MUTED)
+            .color(t::text_muted())
             .into()
     } else {
         labels_view::chip_grid(
@@ -251,7 +251,7 @@ fn labels_section<'a>(form: &'a IssueFormState, labels: &'a [Label]) -> Element<
 
     column![]
         .spacing(6)
-        .push(text("Labels").size(12).color(t::TEXT_MUTED))
+        .push(text("Labels").size(12).color(t::text_muted()))
         .push(content)
         .into()
 }

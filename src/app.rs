@@ -15,6 +15,7 @@ use crate::db::models::{
 use crate::db::events::{self, IssueEvent};
 use crate::db::{connection, queries, sync_queue};
 use crate::display::{self, CardProperty, FilterField, GroupBy, OrderBy, SubGroup, ViewMode};
+use crate::fonts;
 use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
@@ -184,6 +185,10 @@ pub enum Message {
     OpenSettings,
     SettingsBaseUrlChanged(String),
     SettingsTokenChanged(String),
+    /// Theme picked in Settings: applies live and saves to config immediately.
+    SettingsThemeChanged(t::ThemeChoice),
+    /// Font picked in Settings: saves to config; applies after restart.
+    SettingsFontChanged(fonts::FontChoice),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
@@ -1443,8 +1448,21 @@ impl App {
         "JAIT — Issue Tracker".to_string()
     }
 
+    /// Adopt `new_cfg` for this session and persist it, surfacing a save
+    /// failure in the Settings form (and clearing a stale `config_error` on success).
+    fn save_config_change(&mut self, new_cfg: Config) {
+        let saved = config::save(&new_cfg);
+        self.config = new_cfg;
+        if let Some(ref mut form) = self.settings_form {
+            form.status = saved.as_ref().err().map(|e| format!("Error: {}", e));
+        }
+        if saved.is_ok() {
+            self.config_error = None;
+        }
+    }
+
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        t::iced_theme()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -2240,6 +2258,27 @@ impl App {
                 }
             }
 
+            Message::SettingsThemeChanged(choice) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.theme = choice.key.to_string();
+                t::set_by_key(choice.key);
+                if let Some(ref mut form) = self.settings_form {
+                    form.theme = choice;
+                }
+                // Applied for this session even if the save fails.
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SettingsFontChanged(choice) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.font = choice.key.to_string();
+                if let Some(ref mut form) = self.settings_form {
+                    form.font = choice;
+                }
+                // No live apply: Iced fixes the default font at launch.
+                self.save_config_change(new_cfg);
+            }
+
             Message::ExportCsv => {
                 let Some(team) = self.selected_team().cloned() else {
                     return Task::none();
@@ -3001,7 +3040,7 @@ impl App {
             View::MyIssues if my_empty.is_some() => iced::widget::container(
                 iced::widget::text(my_empty.unwrap_or_default())
                     .size(14)
-                    .color(t::TEXT_MUTED),
+                    .color(t::text_muted()),
             )
             .center_x(Length::Fill)
             .center_y(Length::Fill)
@@ -3156,9 +3195,9 @@ impl App {
                     .width(Length::Fixed(220.0))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(t::BG_MENU)),
+                        background: Some(iced::Background::Color(t::bg_menu())),
                         border: iced::Border {
-                            color: t::BORDER,
+                            color: t::border(),
                             width: 0.0,
                             radius: 0.0.into(),
                         },
@@ -3173,7 +3212,7 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BG_PRIMARY)),
+                background: Some(iced::Background::Color(t::bg_primary())),
                 ..Default::default()
             })
             .into();
@@ -3407,14 +3446,14 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
 
     let content = column![]
         .spacing(16)
-        .push(text("Delete Issue?").size(18).color(t::TEXT_PRIMARY))
+        .push(text("Delete Issue?").size(18).color(t::text_primary()))
         .push(
             text(format!(
                 "Are you sure you want to delete \"{}\"?",
                 issue_title
             ))
             .size(14)
-            .color(t::TEXT_SECONDARY),
+            .color(t::text_secondary()),
         )
         .push(
             row![]
@@ -3424,7 +3463,7 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
                         .on_press(Message::DeleteConfirmed)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(t::DANGER)),
+                            background: Some(iced::Background::Color(t::danger())),
                             text_color: iced::Color::WHITE,
                             border: Border {
                                 radius: 4.0.into(),
@@ -3445,9 +3484,9 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
         container(content)
             .padding(28)
             .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BG_MODAL)),
+                background: Some(iced::Background::Color(t::bg_modal())),
                 border: iced::Border {
-                    color: t::BORDER,
+                    color: t::border(),
                     width: 1.0,
                     radius: 8.0.into(),
                 },
@@ -3474,14 +3513,14 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
 
     let content = column![]
         .spacing(16)
-        .push(text("Delete Project?").size(18).color(t::TEXT_PRIMARY))
+        .push(text("Delete Project?").size(18).color(t::text_primary()))
         .push(
             text(format!(
                 "Are you sure you want to delete \"{}\"?",
                 project_name
             ))
             .size(14)
-            .color(t::TEXT_SECONDARY),
+            .color(t::text_secondary()),
         )
         .push(
             row![]
@@ -3491,7 +3530,7 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
                         .on_press(Message::DeleteProjectConfirmed)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(t::DANGER)),
+                            background: Some(iced::Background::Color(t::danger())),
                             text_color: iced::Color::WHITE,
                             border: Border {
                                 radius: 4.0.into(),
@@ -3512,9 +3551,9 @@ fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
         container(content)
             .padding(28)
             .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::BG_MODAL)),
+                background: Some(iced::Background::Color(t::bg_modal())),
                 border: iced::Border {
-                    color: t::BORDER,
+                    color: t::border(),
                     width: 1.0,
                     radius: 8.0.into(),
                 },
