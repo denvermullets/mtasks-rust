@@ -286,16 +286,30 @@ pub struct RecurringIssueRow {
     pub id: String,
     pub title: String,
     pub active: bool,
+    /// Attached labels as `(name, hex color)`, sorted by name.
+    pub labels: Vec<(String, Option<String>)>,
 }
 
 /// Build the display row for one mirrored recurring issue. Column tickets
 /// extend this (they may use `conn` to resolve names).
-fn row_from(_conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
+fn row_from(conn: &Connection, r: &RecurringIssue) -> Result<RecurringIssueRow> {
     Ok(RecurringIssueRow {
         id: r.id.clone(),
         title: r.title.clone(),
         active: r.active,
+        labels: label_chips(conn, &r.id)?,
     })
+}
+
+/// `(name, color)` of a recurring issue's labels, sorted by name.
+fn label_chips(conn: &Connection, id: &str) -> Result<Vec<(String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT l.name, l.color FROM recurring_issue_labels ril
+         JOIN labels l ON l.id = ril.label_id
+         WHERE ril.recurring_issue_id = ?1 ORDER BY l.name, l.id",
+    )?;
+    let rows = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
 }
 
 /// A team's display-ready rows for the Recurring issues view, in a stable
@@ -395,6 +409,26 @@ mod tests {
     fn count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM recurring_issues", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn rows_carry_label_names_and_colors_sorted_by_name() {
+        let conn = setup();
+        conn.execute("UPDATE labels SET name = 'Zed', color = '#ff0000' WHERE id = 'lab1'", [])
+            .unwrap();
+        conn.execute("UPDATE labels SET name = 'Alpha' WHERE id = 'lab2'", []).unwrap();
+        let mut with = rec(5, "With", NOW);
+        with.label_ids = vec![1, 2];
+        apply_pulled(&conn, "t1", &[with, rec(6, "Without", NOW)], None).unwrap();
+        let rows = list_rows(&conn, "t1").unwrap();
+        assert_eq!(
+            rows[0].labels,
+            vec![
+                ("Alpha".to_string(), None),
+                ("Zed".to_string(), Some("#ff0000".to_string()))
+            ]
+        );
+        assert!(rows[1].labels.is_empty());
     }
 
     #[test]

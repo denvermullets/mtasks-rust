@@ -13,6 +13,7 @@ use crate::db::recurring_issues::RecurringIssueRow;
 use crate::theme as t;
 
 const COL_STATE: f32 = 110.0;
+const COL_LABELS: f32 = 200.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
 /// empty state when the team has none.
@@ -22,7 +23,8 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .padding([8, 16])
         .align_y(Alignment::Center)
         .push(header_cell("Title", Length::Fill))
-        .push(header_cell("State", Length::Fixed(COL_STATE)));
+        .push(header_cell("State", Length::Fixed(COL_STATE)))
+        .push(header_cell("Labels", Length::Fixed(COL_LABELS)));
 
     let mut body = column![].width(Length::Fill);
     if rows.is_empty() {
@@ -81,6 +83,23 @@ pub fn state_label(active: bool) -> &'static str {
     }
 }
 
+/// Small colored pill for one label (same look as the board's label chips).
+fn label_chip<'a>(name: &'a str, hex: Option<&str>) -> Element<'a, Message> {
+    let color = crate::views::labels::chip_color(hex);
+    container(text(name).size(11).color(color).wrapping(text::Wrapping::None))
+        .padding([2, 8])
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color { a: 0.22, ..color })),
+            border: iced::Border {
+                color,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     let title = container(
         text(&r.title)
@@ -108,13 +127,20 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     )
     .width(Length::Fixed(COL_STATE));
 
+    let mut chips = row![].spacing(4).align_y(Alignment::Center);
+    for (name, color) in &r.labels {
+        chips = chips.push(label_chip(name, color.as_deref()));
+    }
+    let labels = container(chips).width(Length::Fixed(COL_LABELS));
+
     container(
         row![]
             .spacing(12)
             .padding([10, 16])
             .align_y(Alignment::Center)
             .push(title)
-            .push(state),
+            .push(state)
+            .push(labels),
     )
     .width(Length::Fill)
     .into()
