@@ -439,16 +439,33 @@ fn local_ref_name(conn: &Connection, table: &str, remote_id: i64) -> Option<Stri
 
 /// One line for a dependency entry, worded from this issue's side using
 /// `direction` and `event` (the server description is worded from the blocking
-/// side). JRST-138 adds the relates / duplicates / duplicated_by arms.
+/// side). `relates`, `duplicates` and `duplicated_by` are worded here.
 fn dependency_line(entry: &StoredEntry) -> Option<String> {
-    let kind = match entry.payload["direction"].as_str()? {
-        "blocking" => EventKind::Blocking,
-        "blocked_by" => EventKind::BlockedBy,
-        _ => return None,
-    };
+    let direction = entry.payload["direction"].as_str()?;
     let other = entry.payload["other_issue"]["identifier"]
         .as_str()
         .map(str::to_string);
+    let kind = match direction {
+        "blocking" => EventKind::Blocking,
+        "blocked_by" => EventKind::BlockedBy,
+        "relates" | "duplicates" | "duplicated_by" => {
+            let (added, removed, generic) = match direction {
+                "relates" => ("now related to", "no longer related to", "changed related issues"),
+                "duplicates" => ("now a duplicate of", "no longer a duplicate of", "changed duplicate issues"),
+                _ => ("now duplicated by", "no longer duplicated by", "changed duplicate issues"),
+            };
+            let verb = match entry.payload["event"].as_str()? {
+                "create" => added,
+                "destroy" => removed,
+                _ => return None,
+            };
+            return Some(match other {
+                Some(id) => format!("{verb} {id}"),
+                None => generic.to_string(),
+            });
+        }
+        _ => return None,
+    };
     let (old, new) = match entry.payload["event"].as_str()? {
         "create" => (None, other),
         "destroy" => (other, None),
@@ -861,13 +878,55 @@ mod jrst137_tests {
 
     #[test]
     fn unsupported_direction_or_event_yields_no_line() {
-        assert!(lines("relates", "create", OTHER).is_empty());
+        assert!(lines("sideways", "create", OTHER).is_empty());
         assert!(lines("blocking", "weird", OTHER).is_empty());
+        assert!(lines("relates", "weird", OTHER).is_empty());
     }
 
     #[test]
     fn missing_other_issue_uses_generic_wording() {
         assert_eq!(lines("blocking", "create", r#""other_issue":null"#), ["changed blocking issues"]);
+    }
+}
+
+#[cfg(test)]
+mod jrst138_tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn lines(direction: &str, event: &str, other: &str) -> Vec<String> {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        let body = format!(
+            r#"[{{"type":"dependency","id":1,"cursor":"dependency:1","created_at":"2026-07-06T00:00:00Z",
+            "event":"{event}","kind":"relates","direction":"{direction}",{other},
+            "actor":{{"id":2,"name":"ryan"}},"description":"x"}}]"#
+        );
+        let entries: Vec<ActivityEntry> = serde_json::from_str(&body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        activity_for_issue(&conn, "i1").unwrap().into_iter().skip(1).map(|i| i.text).collect()
+    }
+
+    const OTHER: &str = r#""other_issue":{"id":2,"identifier":"MTK-2","title":"X"}"#;
+
+    #[test]
+    fn all_six_direction_event_combinations() {
+        assert_eq!(lines("relates", "create", OTHER), ["now related to MTK-2"]);
+        assert_eq!(lines("relates", "destroy", OTHER), ["no longer related to MTK-2"]);
+        assert_eq!(lines("duplicates", "create", OTHER), ["now a duplicate of MTK-2"]);
+        assert_eq!(lines("duplicates", "destroy", OTHER), ["no longer a duplicate of MTK-2"]);
+        assert_eq!(lines("duplicated_by", "create", OTHER), ["now duplicated by MTK-2"]);
+        assert_eq!(lines("duplicated_by", "destroy", OTHER), ["no longer duplicated by MTK-2"]);
+    }
+
+    #[test]
+    fn missing_other_issue_uses_generic_wording() {
+        assert_eq!(lines("relates", "create", r#""other_issue":null"#), ["changed related issues"]);
+        assert_eq!(lines("duplicated_by", "destroy", r#""other_issue":null"#), ["changed duplicate issues"]);
     }
 }
 
