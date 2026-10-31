@@ -272,6 +272,8 @@ Body: `{ "label": { "name": "...", "color": "#hex" } }`
 
 `color` optional on create: server picks a random color if omitted. Names are unique per team, case-insensitively (duplicate gives 422). Create returns 201 and update 200 with `{ id, name, color, updated_at }`. `DELETE` returns 204 and touches every carrying issue so it shows up in the next `updated_since` pull.
 
+Desktop use: create and update are used (`label/update` queues `PATCH` with `{label:{name,color}}`; a 422 is dropped and the next label pull restores the server value). Delete is not used yet.
+
 ### Issue dependencies: `/api/v1/teams/:team_id/issues/:issue_id/issue_dependencies`
 
 The URL segment is `issue_dependencies` (NOT `dependencies`).

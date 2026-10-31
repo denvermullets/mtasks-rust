@@ -657,6 +657,58 @@ pub fn insert_label(conn: &Connection, label: &Label) -> Result<()> {
     Ok(())
 }
 
+/// Why a label edit was refused locally, shown inline in the labels panel.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LabelEditError {
+    Blank,
+    Duplicate,
+    Missing,
+}
+
+impl LabelEditError {
+    pub fn message(&self) -> &'static str {
+        match self {
+            LabelEditError::Blank => "Name can't be blank",
+            LabelEditError::Duplicate => "A label with that name already exists",
+            LabelEditError::Missing => "Label no longer exists",
+        }
+    }
+}
+
+/// Rename/recolor a label after the same checks Rails applies (non-blank, unique
+/// per team case-insensitively, excluding the label itself). Returns whether a
+/// `label/update` must be queued: only when the label already has a remote id,
+/// since an unsynced label's pending create re-reads the row and carries the
+/// new values.
+pub fn edit_label(
+    conn: &Connection,
+    label_id: &str,
+    name: &str,
+    color: &str,
+) -> std::result::Result<bool, LabelEditError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(LabelEditError::Blank);
+    }
+    let label = get_label(conn, label_id)
+        .ok()
+        .flatten()
+        .ok_or(LabelEditError::Missing)?;
+    let dup = labels_for_team(conn, &label.team_id)
+        .map_err(|_| LabelEditError::Missing)?
+        .iter()
+        .any(|l| l.id != label.id && l.name.to_lowercase() == name.to_lowercase());
+    if dup {
+        return Err(LabelEditError::Duplicate);
+    }
+    conn.execute(
+        "UPDATE labels SET name = ?1, color = ?2, updated_at = ?3 WHERE id = ?4",
+        params![name, color, crate::db::now_iso(), label_id],
+    )
+    .map_err(|_| LabelEditError::Missing)?;
+    Ok(label.remote_id.is_some())
+}
+
 /// Local UUIDs of the labels currently attached to `issue_id`. Used to preload
 /// the multi-select when editing an issue.
 pub fn label_ids_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<String>> {
@@ -1492,6 +1544,30 @@ mod tests {
             created_at: NOW.to_string(),
             updated_at: NOW.to_string(),
         }
+    }
+
+    #[test]
+    fn edit_label_rejects_blank_and_duplicate_names() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        insert_label(&conn, &make_label("lab2", "ui")).unwrap();
+        assert_eq!(edit_label(&conn, "lab1", "   ", "#000000"), Err(LabelEditError::Blank));
+        assert_eq!(edit_label(&conn, "lab1", "UI", "#000000"), Err(LabelEditError::Duplicate));
+        // Nothing changed.
+        assert_eq!(get_label(&conn, "lab1").unwrap().unwrap().name, "bug");
+        // Keeping its own name (different case) is fine.
+        assert!(edit_label(&conn, "lab1", "BUG", "#3b82f6").is_ok());
+        let l = get_label(&conn, "lab1").unwrap().unwrap();
+        assert_eq!((l.name.as_str(), l.color.as_deref()), ("BUG", Some("#3b82f6")));
+    }
+
+    #[test]
+    fn edit_label_only_asks_for_a_queue_entry_when_synced() {
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        assert_eq!(edit_label(&conn, "lab1", "defect", "#ef4444"), Ok(false));
+        set_label_remote_id(&conn, "lab1", 5).unwrap();
+        assert_eq!(edit_label(&conn, "lab1", "defect2", "#ef4444"), Ok(true));
     }
 
     #[test]

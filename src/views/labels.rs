@@ -25,6 +25,13 @@ pub struct LabelFormState {
     pub selected_label_ids: Vec<String>,
     /// Inline validation message shown under the name input. `None` = valid.
     pub error: Option<String>,
+    /// Local UUID of the label being edited, if edit mode is open.
+    pub editing_id: Option<String>,
+    /// Edit-mode name and color working copies.
+    pub edit_name: String,
+    pub edit_color: String,
+    /// Inline validation message for edit mode.
+    pub edit_error: Option<String>,
 }
 
 impl LabelFormState {
@@ -35,6 +42,10 @@ impl LabelFormState {
             issue_id,
             selected_label_ids,
             error: None,
+            editing_id: None,
+            edit_name: String::new(),
+            edit_color: PALETTE[0].to_string(),
+            edit_error: None,
         }
     }
 }
@@ -113,7 +124,10 @@ pub fn chip_grid<'a>(
     col.into()
 }
 
-fn color_swatches<'a>(selected_hex: &str) -> Element<'a, Message> {
+fn color_swatches<'a>(
+    selected_hex: &str,
+    on_pick: fn(String) -> Message,
+) -> Element<'a, Message> {
     let mut r = row![].spacing(6);
     for hex in PALETTE {
         let color = t::hex_to_color(hex).unwrap_or(t::priority_none());
@@ -138,7 +152,7 @@ fn color_swatches<'a>(selected_hex: &str) -> Element<'a, Message> {
         r = r.push(
             button(swatch)
                 .padding(0)
-                .on_press(Message::LabelColorChanged(hex.to_string()))
+                .on_press(on_pick(hex.to_string()))
                 .style(|_theme: &Theme, _status| button::Style {
                     background: Some(iced::Background::Color(Color::TRANSPARENT)),
                     ..Default::default()
@@ -199,7 +213,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                 .size(13)
                 .width(Length::Fill),
         )
-        .push(color_swatches(&form.color))
+        .push(color_swatches(&form.color, Message::LabelColorChanged))
         .push(
             button(text("Add").size(13).color(t::bg_primary()))
                 .on_press(Message::CreateLabel)
@@ -215,12 +229,67 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                 }),
         );
 
+    // ── Edit section: pick a label, then rename/recolor it ──
+    let edit_section: Element<'a, Message> = if labels.is_empty() {
+        column![].into()
+    } else {
+        let mut col = column![]
+            .spacing(8)
+            .push(text("Edit a label").size(12).color(t::text_muted()))
+            .push(chip_grid(
+                labels,
+                |l| form.editing_id.as_deref() == Some(l.id.as_str()),
+                |l| Message::SelectLabelForEdit(l.id.clone()),
+                4,
+            ));
+        if form.editing_id.is_some() {
+            col = col
+                .push(
+                    row![]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)
+                        .push(
+                            text_input("Label name", &form.edit_name)
+                                .on_input(Message::EditLabelNameChanged)
+                                .on_submit(Message::SaveLabelEdit)
+                                .padding(8)
+                                .size(13)
+                                .width(Length::Fill),
+                        )
+                        .push(color_swatches(&form.edit_color, Message::EditLabelColorChanged))
+                        .push(
+                            button(text("Save").size(13).color(t::bg_primary()))
+                                .on_press(Message::SaveLabelEdit)
+                                .padding([8, 16])
+                                .style(move |_theme: &Theme, status| button::Style {
+                                    background: Some(iced::Background::Color(t::accent_fill(
+                                        status,
+                                    ))),
+                                    text_color: t::bg_primary(),
+                                    border: Border {
+                                        radius: 4.0.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }),
+                        ),
+                )
+                .push_maybe(
+                    form.edit_error
+                        .as_deref()
+                        .map(|e| text(e).size(12).color(t::danger())),
+                );
+        }
+        col.into()
+    };
+
     let mut form_content = column![]
         .spacing(14)
         .width(Length::Fixed(440.0))
         .push(text("Labels").size(18).color(t::text_primary()))
         .push(text(attach_header).size(12).color(t::text_muted()))
         .push(attach_section)
+        .push(edit_section)
         .push(
             container(text(""))
                 .height(Length::Fixed(1.0))

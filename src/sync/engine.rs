@@ -381,6 +381,7 @@ async fn process(
         ("project", "update") => project_update(client, &entry.entity_id).await,
         ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
+        ("label", "update") => label_update(client, &entry.entity_id).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
@@ -1315,6 +1316,62 @@ async fn label_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
     }
     match labels::create(client, prep.team_remote_id, &prep.params).await {
         Ok(dto) => commit_create(entry_id, "labels", &prep.local_id, dto.id),
+        Err(e) => classify_in_team(&e, prep.team_remote_id),
+    }
+}
+
+struct LabelUpdatePrep {
+    team_remote_id: i64,
+    remote_id: i64,
+    params: LabelParams,
+}
+
+fn prep_label_update(entity_id: &str) -> Prep<LabelUpdatePrep> {
+    match open() {
+        Ok(conn) => label_update_prep(&conn, entity_id),
+        Err(e) => Prep::Done(Outcome::LeavePending(e)),
+    }
+}
+
+/// Re-reads the label row so the newest name and color go out, however many
+/// edits were queued.
+fn label_update_prep(conn: &Connection, entity_id: &str) -> Prep<LabelUpdatePrep> {
+    let label = match queries::get_label(conn, entity_id) {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "label {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let Some(remote_id) = label.remote_id else {
+        return Prep::Done(Outcome::LeavePending("label create not yet drained".into()));
+    };
+    let team_remote_id = match queries::remote_id_for(conn, "teams", &label.team_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    Prep::Ready(LabelUpdatePrep {
+        team_remote_id,
+        remote_id,
+        params: LabelParams {
+            name: label.name,
+            color: label.color,
+        },
+    })
+}
+
+async fn label_update(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match prep_label_update(entity_id) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    // A 422 (duplicate name on the server) is dropped; the next label pull
+    // restores the server value.
+    match labels::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
+        Ok(_) => Outcome::Success,
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
@@ -3231,6 +3288,30 @@ mod tests {
             rusqlite::params![id, remote_id, now],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn label_update_prep_rereads_row_and_waits_for_remote_id() {
+        let conn = setup_labels_db();
+        insert_test_label(&conn, "lab1", None);
+        assert!(matches!(
+            label_update_prep(&conn, "lab1"),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        queries::set_label_remote_id(&conn, "lab1", 11).unwrap();
+        queries::edit_label(&conn, "lab1", "renamed", "#3b82f6").unwrap();
+        match label_update_prep(&conn, "lab1") {
+            Prep::Ready(p) => {
+                assert_eq!((p.team_remote_id, p.remote_id), (700, 11));
+                assert_eq!(p.params.name, "renamed");
+                assert_eq!(p.params.color.as_deref(), Some("#3b82f6"));
+            }
+            _ => panic!("expected Ready"),
+        }
+        assert!(matches!(
+            label_update_prep(&conn, "nope"),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
     }
 
     #[test]
