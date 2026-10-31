@@ -1,6 +1,6 @@
 use iced::keyboard::{self, Key, Modifiers};
 
-use crate::app::Message;
+use crate::app::{Message, View};
 
 pub fn handle_key_press(
     key: Key,
@@ -28,6 +28,7 @@ pub fn handle_key_press(
             "f" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
             "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
+            "I" | "i" if modifiers.shift() => Some(Message::NavigateToView(View::Inbox)),
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
             "s" if modifiers.is_empty() => Some(Message::SyncNow),
             "," if modifiers.is_empty() => Some(Message::OpenSettings),
@@ -65,9 +66,98 @@ pub fn handle_key_press(
     }
 }
 
+/// Keys bound only while the Inbox is showing. Checked before the global
+/// handler; `None` falls through to it.
+pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    if modifiers.shift() && !modifiers.command() && !modifiers.control() && !modifiers.alt() {
+        if let Key::Character(c) = key {
+            if c.as_str() == "R" || c.as_str() == "r" {
+                return Some(Message::InboxMarkAllRead);
+            }
+        }
+        return None;
+    }
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match key {
+        Key::Character(c) => match c.as_str() {
+            "j" => Some(Message::InboxMove(1)),
+            "k" => Some(Message::InboxMove(-1)),
+            "r" => Some(Message::InboxMarkRead),
+            "f" => Some(Message::InboxToggleFilter),
+            _ => None,
+        },
+        Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::InboxMove(1)),
+        Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::InboxMove(-1)),
+        Key::Named(keyboard::key::Named::Enter) => Some(Message::InboxOpen),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_jk_move_selection() {
+        let j = Key::Character("j".into());
+        let k = Key::Character("k".into());
+        assert!(matches!(
+            handle_inbox_key(&j, Modifiers::empty()),
+            Some(Message::InboxMove(1))
+        ));
+        assert!(matches!(
+            handle_inbox_key(&k, Modifiers::empty()),
+            Some(Message::InboxMove(-1))
+        ));
+        assert!(handle_inbox_key(&k, Modifiers::COMMAND).is_none());
+    }
+
+    #[test]
+    fn inbox_r_marks_read_only_in_inbox_handler() {
+        let r = Key::Character("r".into());
+        assert!(matches!(
+            handle_inbox_key(&r, Modifiers::empty()),
+            Some(Message::InboxMarkRead)
+        ));
+        assert!(!matches!(press("r", false, false), Some(Message::InboxMarkRead)));
+    }
+
+    #[test]
+    fn inbox_enter_opens_the_issue() {
+        let enter = Key::Named(keyboard::key::Named::Enter);
+        assert!(matches!(
+            handle_inbox_key(&enter, Modifiers::empty()),
+            Some(Message::InboxOpen)
+        ));
+    }
+
+    #[test]
+    fn inbox_shift_r_marks_all_read() {
+        let big = Key::Character("R".into());
+        assert!(matches!(
+            handle_inbox_key(&big, Modifiers::SHIFT),
+            Some(Message::InboxMarkAllRead)
+        ));
+        assert!(!matches!(press("R", false, false), Some(Message::InboxMarkAllRead)));
+    }
+
+    #[test]
+    fn inbox_f_toggles_filter() {
+        let f = Key::Character("f".into());
+        assert!(matches!(
+            handle_inbox_key(&f, Modifiers::empty()),
+            Some(Message::InboxToggleFilter)
+        ));
+    }
+
+    #[test]
+    fn jk_do_nothing_outside_the_inbox() {
+        // The global handler never binds j/k off the board.
+        assert!(press("j", false, false).is_none());
+        assert!(press("k", false, false).is_none());
+    }
 
     fn press(c: &str, modal_open: bool, on_board: bool) -> Option<Message> {
         handle_key_press(
@@ -86,6 +176,31 @@ mod tests {
             Some(Message::MoveFocusedIssueToTeam)
         ));
         assert!(press("t", false, false).is_none());
+    }
+
+    #[test]
+    fn shift_i_opens_inbox_on_any_view() {
+        for on_board in [true, false] {
+            let m = handle_key_press(
+                Key::Character("I".into()),
+                Modifiers::SHIFT,
+                false,
+                false,
+                on_board,
+            );
+            assert!(matches!(m, Some(Message::NavigateToView(View::Inbox))));
+        }
+    }
+
+    #[test]
+    fn shift_i_ignored_while_modal_open() {
+        let m = handle_key_press(Key::Character("I".into()), Modifiers::SHIFT, true, false, true);
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn plain_i_does_nothing() {
+        assert!(press("i", false, true).is_none());
     }
 
     #[test]

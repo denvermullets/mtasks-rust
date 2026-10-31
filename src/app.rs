@@ -19,7 +19,8 @@ use crate::fonts;
 use crate::keys;
 use crate::scroll;
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
-use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Scheduler};
+use crate::sync::notif_poll::{self, PollOutcome, PollReport};
+use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Run, Scheduler};
 use crate::palette_results::{PaletteData, PaletteNav, PaletteState};
 use crate::theme as t;
 use crate::views::toast::{Toast, ToastKind};
@@ -221,6 +222,7 @@ pub enum Message {
     SettingsThemeChanged(t::ThemeChoice),
     /// Font picked in Settings: saves to config; applies after restart.
     SettingsFontChanged(fonts::FontChoice),
+    SettingsNativeNotificationsToggled(bool),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
@@ -235,6 +237,8 @@ pub enum Message {
     WindowFocused,
     WindowUnfocused,
     SyncCompleted(FullSyncReport),
+    /// A Notification poll finished.
+    NotifPollCompleted(PollOutcome),
 
     // Toasts
     /// Dismiss a toast by id (× button).
@@ -299,6 +303,26 @@ pub enum Message {
     ProjectDetailStatusChanged(ProjectStatus),
     ProjectDetailPriorityChanged(Priority),
     ProjectDetailLeadChanged(Option<String>),
+
+    // Inbox
+    /// Move the Inbox selection by a signed step (j/k).
+    InboxMove(isize),
+    /// Select the Inbox row at this index (click).
+    InboxSelect(usize),
+    /// Mark the selected Inbox Notification read (`r`).
+    InboxMarkRead,
+    /// Open the selected Notification's issue and mark it read (Enter).
+    InboxOpen,
+    /// The one-shot fetch for a Notification's un-mirrored issue finished
+    /// (issue remote id, result).
+    InboxIssueFetched(i64, Result<(), String>),
+    /// Leave an issue detail opened from the Inbox and return there.
+    BackToInbox,
+    InboxMarkAllRead,
+    /// Switch the Inbox to the other filter (f).
+    InboxToggleFilter,
+    /// Set the Inbox filter (filter tabs).
+    InboxSetFilter(crate::db::notifications::Filter),
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
@@ -435,6 +459,9 @@ pub enum View {
     ProjectDetail(String),
     Roadmap,
     MyIssues,
+    /// Notification Inbox. Not team-scoped, but unlike `MyIssues` it loads no
+    /// cross-team issue data (the per-team data stays as is).
+    Inbox,
 }
 
 /// Sort key for the Projects table (mirrors the Rails index sort options).
@@ -517,6 +544,8 @@ pub struct App {
     detail_deps: queries::DependencyGroups,
     /// The open issue detail was reached from My Issues, so Back returns there.
     detail_from_my_issues: bool,
+    /// The open issue detail was reached from the Inbox (Back returns there).
+    detail_from_inbox: bool,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -562,6 +591,15 @@ pub struct App {
     /// Token has no write scope: pushes are paused, edits stay local.
     sync_read_only: bool,
     sync_in_progress: bool,
+    /// Unread Notification count (JRST-90 badge). Loaded at startup from the
+    /// mirror, refreshed by every completed poll.
+    notif_unread_count: i64,
+    /// Inbox rows, selection and filter (JRST-91). Reloaded on entering the
+    /// Inbox and after every poll.
+    inbox: crate::inbox::InboxState,
+    /// Report of the most recent successful poll (JRST-95 prune, JRST-96
+    /// banners read `new_unread` + `backfill`).
+    last_notif_poll: Option<PollReport>,
     scheduler: Scheduler,
     /// Delay until the scheduler's next timed check; `None` = no timer armed.
     sync_next_delay: Option<std::time::Duration>,
@@ -699,11 +737,21 @@ impl App {
     fn switch_view(&mut self, view: View) {
         let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
         self.view = view;
+        if self.view == View::Inbox {
+            self.reload_inbox();
+        }
         if crossing {
             self.focused_lane = 0;
             self.focused_issue = 0;
             self.reload_data();
         }
+    }
+
+    /// Re-read the Inbox rows from the mirror, keeping the selection.
+    fn reload_inbox(&mut self) {
+        let conn = self.db();
+        let items = crate::db::notifications::inbox_list(&conn, self.inbox.filter).unwrap_or_default();
+        self.inbox.set_items(items);
     }
 
     /// Resolve dependency edges for the open detail issue so the sidebar can
@@ -911,6 +959,9 @@ impl App {
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "My Issues".into());
         }
+        if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
+            crumbs.insert(0, "Inbox".into());
+        }
         crumbs
     }
 
@@ -1081,6 +1132,28 @@ impl App {
         scrollable::scroll_to(id, scrollable::AbsoluteOffset { x: 0.0, y: new })
     }
 
+    /// Keep the selected Inbox row in view. Rows are fixed-height and sit in
+    /// their own scrollable below the filter tabs, so row `i` starts at
+    /// `i * ROW_HEIGHT`.
+    fn scroll_inbox_to_selection(&mut self) -> Task<Message> {
+        use crate::views::inbox as inbox_view;
+        let top = self.inbox.selected as f32 * inbox_view::ROW_HEIGHT;
+        let (offset, viewport) = self
+            .scroll_state
+            .get(&inbox_view::SCROLL_KEY)
+            .copied()
+            .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+        let new = scroll::offset_to_reveal(top, inbox_view::ROW_HEIGHT, offset, viewport);
+        if (new - offset).abs() < 0.5 {
+            return Task::none();
+        }
+        self.scroll_state.insert(inbox_view::SCROLL_KEY, (new, viewport));
+        scrollable::scroll_to(
+            inbox_view::scroll_id(),
+            scrollable::AbsoluteOffset { x: 0.0, y: new },
+        )
+    }
+
     fn focused_issue(&self) -> Option<&Issue> {
         let lane_issues = self.issues_in_focused_lane();
         lane_issues.get(self.focused_issue).copied()
@@ -1155,6 +1228,30 @@ impl App {
             self.detail_from_my_issues = true;
         }
         self.open_issue_detail(&issue)
+    }
+
+    /// Open `issue` from the Inbox: select its own team (like My Issues) so the
+    /// detail is that team's, and remember to return to the Inbox on Back.
+    fn open_issue_from_inbox(&mut self, issue: Issue) -> Task<Message> {
+        self.selected_team_id = Some(issue.team_id.clone());
+        self.view = View::Board;
+        self.reload_data();
+        self.detail_from_my_issues = false;
+        self.detail_from_inbox = true;
+        self.open_issue_detail(&issue)
+    }
+
+    /// Mark the selected Inbox Notification read in the mirror and refresh the
+    /// badge and rows. Returns the Notification (as it was) if one is selected.
+    fn mark_selected_inbox_read(&mut self) -> Option<crate::db::notifications::Notification> {
+        let selected = self.inbox.selected_item().cloned()?;
+        let conn = self.db();
+        let now = crate::db::now_iso();
+        if crate::db::notifications::mark_read(&conn, selected.remote_id, &now).unwrap_or(false) {
+            self.notif_unread_count = crate::db::notifications::unread_count(&conn).unwrap_or(0);
+            self.reload_inbox();
+        }
+        Some(selected)
     }
 
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
@@ -1369,10 +1466,13 @@ impl App {
                 if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
                     let back = if self.detail_from_my_issues {
                         View::MyIssues
+                    } else if self.detail_from_inbox {
+                        View::Inbox
                     } else {
                         View::Board
                     };
                     self.detail_from_my_issues = false;
+                    self.detail_from_inbox = false;
                     self.issue_detail = None;
                     self.switch_view(back);
                 }
@@ -1643,6 +1743,7 @@ impl App {
             issue_labels,
             detail_deps: Default::default(),
             detail_from_my_issues: false,
+            detail_from_inbox: false,
             detail_comments: Vec::new(),
             detail_events: Vec::new(),
             detail_references: Vec::new(),
@@ -1672,7 +1773,10 @@ impl App {
             inaccessible_teams: queries::inaccessible_team_identifiers(&conn).unwrap_or_default(),
             sync_read_only: false,
             sync_in_progress: false,
-            scheduler: Scheduler::new(std::time::Instant::now()),
+            notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
+            last_notif_poll: None,
+            inbox: Default::default(),
+            scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -1753,9 +1857,27 @@ impl App {
     fn drive_sync(&mut self, event: SchedEvent) -> Task<Message> {
         let decision = self.scheduler.handle(event, std::time::Instant::now());
         self.sync_next_delay = decision.next_delay;
-        match decision.run {
-            Some(kind) => self.start_sync(kind),
+        match decision.action() {
+            Some(Run::Data(kind)) => self.start_sync(kind),
+            Some(Run::Poll) => self.start_poll(),
             None => Task::none(),
+        }
+    }
+
+    /// Start a Notification poll the scheduler already admitted. Reports
+    /// `CycleFinished` through `NotifPollCompleted` (or at once, if no client).
+    fn start_poll(&mut self) -> Task<Message> {
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        match ApiClient::new(base_url, token) {
+            Ok(client) => {
+                self.sync_in_progress = true;
+                Task::perform(
+                    async move { notif_poll::poll(&client).await },
+                    Message::NotifPollCompleted,
+                )
+            }
+            Err(_) => self.drive_sync(SchedEvent::CycleFinished { success: false }),
         }
     }
 
@@ -1788,6 +1910,20 @@ impl App {
         }
         self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
         self.drive_sync(SchedEvent::CycleFinished { success: false })
+    }
+
+    /// The existing 401 path: pause sync and ask for a new token.
+    fn pause_for_auth(&mut self) {
+        self.sync_paused_auth = true;
+        let msg = "Token expired or revoked — please re-enter";
+        if self.settings_form.is_none() {
+            self.settings_form = Some(settings::SettingsFormState::from_config(&self.config));
+        }
+        if let Some(ref mut f) = self.settings_form {
+            f.status = Some(format!("Error: {msg}"));
+        }
+        self.modal = Modal::Settings;
+        self.push_toast(msg, ToastKind::Error, false);
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1830,6 +1966,11 @@ impl App {
                 let modal_open = self.modal != Modal::None;
                 let palette_open = matches!(self.modal, Modal::CommandPalette(_));
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
+                if self.view == View::Inbox && !modal_open {
+                    if let Some(msg) = keys::handle_inbox_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
                 }
@@ -1850,6 +1991,7 @@ impl App {
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
+                self.detail_from_inbox = false;
                 let from_my = self.view == View::MyIssues;
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
                     self.selected_team_id = Some(team_id);
@@ -1861,10 +2003,96 @@ impl App {
                 self.view = view;
             }
 
+            Message::InboxMove(delta) => {
+                self.inbox.step(delta);
+                return self.scroll_inbox_to_selection();
+            }
+            Message::InboxMarkRead => {
+                self.mark_selected_inbox_read();
+            }
+            Message::InboxOpen => {
+                let Some(n) = self.mark_selected_inbox_read() else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                match crate::inbox::resolve_target(&conn, &n) {
+                    crate::inbox::OpenTarget::Local(issue) => {
+                        drop(conn);
+                        return self.open_issue_from_inbox(issue);
+                    }
+                    crate::inbox::OpenTarget::Fetch { team_remote_id, local_team_id, issue_remote_id } => {
+                        let base_url = self.config.api_base_url.trim().to_string();
+                        let token = self.config.api_token.clone().unwrap_or_default();
+                        let Ok(client) = ApiClient::new(base_url, token) else {
+                            self.push_toast("Can't open issue: not signed in", ToastKind::Error, false);
+                            return Task::none();
+                        };
+                        return Task::perform(
+                            async move {
+                                SyncEngine::fetch_issue(&client, team_remote_id, &local_team_id, issue_remote_id)
+                                    .await
+                            },
+                            move |r| Message::InboxIssueFetched(issue_remote_id, r),
+                        );
+                    }
+                    crate::inbox::OpenTarget::Unavailable => {
+                        self.push_toast("This notification has no issue to open", ToastKind::Info, false);
+                    }
+                }
+            }
+            Message::InboxIssueFetched(issue_remote_id, result) => {
+                if self.view != View::Inbox {
+                    return Task::none();
+                }
+                let found = match result {
+                    Ok(()) => queries::find_issue_by_remote_id(&self.db(), issue_remote_id)
+                        .ok()
+                        .flatten(),
+                    Err(_) => None,
+                };
+                match found {
+                    Some(issue) => return self.open_issue_from_inbox(issue),
+                    None => self.push_toast("Couldn't load that issue", ToastKind::Error, false),
+                }
+            }
+            Message::BackToInbox => {
+                self.commit_issue_detail();
+                self.detail_from_inbox = false;
+                self.issue_detail = None;
+                self.switch_view(View::Inbox);
+            }
+            Message::InboxMarkAllRead => {
+                let conn = self.db();
+                let now = crate::db::now_iso();
+                if crate::db::notifications::mark_all_read(&conn, &now).unwrap_or(0) > 0 {
+                    self.notif_unread_count =
+                        crate::db::notifications::unread_count(&conn).unwrap_or(0);
+                    self.reload_inbox();
+                }
+            }
+            Message::InboxSelect(i) => {
+                if i < self.inbox.items.len() {
+                    self.inbox.selected = i;
+                }
+            }
+
+            Message::InboxToggleFilter => {
+                let next = crate::inbox::other_filter(self.inbox.filter);
+                self.inbox.set_filter(next);
+                self.reload_inbox();
+                return self.scroll_inbox_to_selection();
+            }
+            Message::InboxSetFilter(filter) => {
+                self.inbox.set_filter(filter);
+                self.reload_inbox();
+                return self.scroll_inbox_to_selection();
+            }
+
             Message::NavigateToView(view) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
+                self.detail_from_inbox = false;
                 self.switch_view(view);
             }
 
@@ -2634,6 +2862,15 @@ impl App {
                 self.save_config_change(new_cfg);
             }
 
+            Message::SettingsNativeNotificationsToggled(on) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.native_notifications = on;
+                if let Some(ref mut form) = self.settings_form {
+                    form.native_notifications = on;
+                }
+                self.save_config_change(new_cfg);
+            }
+
             Message::ExportCsv => {
                 let Some(team) = self.selected_team().cloned() else {
                     return Task::none();
@@ -2954,17 +3191,7 @@ impl App {
                 self.reload_data();
 
                 if auth_failed {
-                    self.sync_paused_auth = true;
-                    let msg = "Token expired or revoked — please re-enter";
-                    if self.settings_form.is_none() {
-                        self.settings_form =
-                            Some(settings::SettingsFormState::from_config(&self.config));
-                    }
-                    if let Some(ref mut f) = self.settings_form {
-                        f.status = Some(format!("Error: {msg}"));
-                    }
-                    self.modal = Modal::Settings;
-                    self.push_toast(msg, ToastKind::Error, false);
+                    self.pause_for_auth();
                 } else {
                     if clean {
                         self.sync_paused_auth = false;
@@ -2989,6 +3216,34 @@ impl App {
 
                 // Tell the scheduler how the cycle went (backoff / follow-up).
                 let finish = self.drive_sync(SchedEvent::CycleFinished { success: cycle_ok });
+                if self.sync_paused_auth {
+                    return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
+                }
+                return finish;
+            }
+
+            Message::NotifPollCompleted(outcome) => {
+                self.sync_in_progress = false;
+                if outcome.auth_failed() {
+                    self.pause_for_auth();
+                }
+                let ok = outcome.succeeded();
+                if let PollOutcome::Polled(report) = outcome {
+                    self.notif_unread_count = report.unread_count;
+                    if self.view == View::Inbox {
+                        self.reload_inbox();
+                    }
+                    crate::sync::banner::post(crate::db::notifications::banners_to_fire(
+                        &report.new_unread,
+                        self.scheduler.is_focused(),
+                        report.backfill,
+                        self.config.native_notifications,
+                    ));
+                    self.last_notif_poll = Some(report);
+                }
+                let finish = self.drive_sync(SchedEvent::CycleFinished {
+                    success: ok,
+                });
                 if self.sync_paused_auth {
                     return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
                 }
@@ -3460,6 +3715,7 @@ impl App {
             &self.view,
             self.team_menu_open.as_deref(),
             self.show_archived_teams,
+            self.notif_unread_count,
         );
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
@@ -3479,7 +3735,11 @@ impl App {
             .then(|| self.active_filter_count()),
             self.new_action(),
             (self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)))
-                .then_some(Message::BackToMyIssues),
+                .then_some(Message::BackToMyIssues)
+                .or_else(|| {
+                    (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
+                        .then_some(Message::BackToInbox)
+                }),
         );
 
         let columns = if matches!(self.view, View::Board | View::MyIssues) {
@@ -3625,6 +3885,7 @@ impl App {
                 }
             }
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
+            View::Inbox => crate::views::inbox::view(&self.inbox),
         };
 
         let token_configured = self
@@ -3643,6 +3904,7 @@ impl App {
             token_configured,
             &self.inaccessible_teams,
             self.sync_read_only,
+            self.view == View::Inbox,
         );
 
         let main_content = column![]
@@ -3850,6 +4112,9 @@ fn breadcrumb(
     if *view == View::MyIssues {
         return vec!["My Issues".into()];
     }
+    if *view == View::Inbox {
+        return vec!["Inbox".into()];
+    }
     let mut crumbs = vec![team
         .map(|t| t.identifier.clone())
         .unwrap_or_else(|| "JAIT".into())];
@@ -3874,7 +4139,7 @@ fn breadcrumb(
                 crumbs.push("Issues".into());
             }
         }
-        View::MyIssues => {}
+        View::MyIssues | View::Inbox => {}
     }
     crumbs
 }
@@ -4148,6 +4413,7 @@ mod tests {
         assert_eq!(crumbs(View::Roadmap), ["JAIT", "Roadmap"]);
         assert_eq!(crumbs(View::IssueDetail("i1".into())), ["JAIT", "JAIT-184"]);
         assert_eq!(crumbs(View::MyIssues), ["My Issues"]);
+        assert_eq!(crumbs(View::Inbox), ["Inbox"]);
         // Missing project falls back to the list crumb rather than a blank.
         assert_eq!(
             crumbs(View::ProjectDetail("gone".into())),

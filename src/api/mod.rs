@@ -9,6 +9,7 @@ pub mod issues;
 pub mod labels;
 pub mod lanes;
 pub mod members;
+pub mod notifications;
 pub mod projects;
 pub mod teams;
 pub mod users;

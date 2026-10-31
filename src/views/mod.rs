@@ -3,6 +3,7 @@ pub mod command_palette;
 pub mod csv_import;
 pub mod display_panel;
 pub mod header;
+pub mod inbox;
 pub mod issue_detail;
 pub mod issue_form;
 pub mod issue_list;
