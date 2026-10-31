@@ -256,7 +256,11 @@ Server-side behavior:
 - `creator` set from token's user; immutable
 - Lane transitions auto-set `completed_at` (completed lane) or `canceled_at` (canceled lane)
 
-`DELETE` is documented above. There is also `PATCH .../issues/:id/move` (move to another team); unused by the desktop.
+`DELETE` is documented above.
+
+### `PATCH /api/v1/teams/:team_id/issues/:id/move` (used by the desktop)
+
+`:team_id` is the source team. Body: `{ "target_team_id": <rails id> }`. 200 returns the detailed issue (new `identifier`, remapped lane, assignee, parent). 404 when the target team is outside the token; 422 `{ errors: [msg] }` when the issue is already in that team or the user isn't a member of both. The desktop drops the entry on 404/422 and toasts the message.
 
 ### `POST /api/v1/teams/:team_id/projects` / `PATCH /api/v1/teams/:team_id/projects/:id` / `DELETE /api/v1/teams/:team_id/projects/:id`
 
@@ -306,7 +310,7 @@ Response object (index and create):
 
 ## Present but unused by the desktop
 
-`GET /api/v1/users/by_email`, `GET /api/v1/issues/by_identifier/:identifier`, `POST /api/v1/integrations/handshake`, issue and project `decisions` (Hourglass pins), `activity` feeds, attachments / direct uploads, notifications, dashboards, saved views, recurring issues, `PATCH .../issues/:id/move`, and `GET /api/v1/deleted` (user feed).
+`GET /api/v1/users/by_email`, `GET /api/v1/issues/by_identifier/:identifier`, `POST /api/v1/integrations/handshake`, issue and project `decisions` (Hourglass pins), `activity` feeds, attachments / direct uploads, notifications, dashboards, saved views, recurring issues, and `GET /api/v1/deleted` (user feed).
 
 ## Rust mapping
 

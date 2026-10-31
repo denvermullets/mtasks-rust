@@ -339,6 +339,12 @@ pub fn view<'a>(
             )
         }))
         .push(
+            button(text("Move to team…").size(12).color(t::accent()))
+                .on_press(Message::OpenMoveTeamPicker(issue.id.clone()))
+                .padding(0)
+                .style(button::text),
+        )
+        .push(
             column![]
                 .spacing(2)
                 .push(
