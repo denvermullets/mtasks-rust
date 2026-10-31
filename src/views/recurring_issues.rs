@@ -18,6 +18,7 @@ const COL_STATE: f32 = 110.0;
 const COL_ASSIGNEE: f32 = 140.0;
 const COL_PROJECT: f32 = 140.0;
 const COL_LANE: f32 = 130.0;
+const COL_LABELS: f32 = 200.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
 /// empty state when the team has none.
@@ -32,7 +33,8 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
         .push(header_cell("State", Length::Fixed(COL_STATE)))
         .push(header_cell("Assignee", Length::Fixed(COL_ASSIGNEE)))
         .push(header_cell("Project", Length::Fixed(COL_PROJECT)))
-        .push(header_cell("Lane", Length::Fixed(COL_LANE)));
+        .push(header_cell("Lane", Length::Fixed(COL_LANE)))
+        .push(header_cell("Labels", Length::Fixed(COL_LABELS)));
 
     let mut body = column![].width(Length::Fill);
     if rows.is_empty() {
@@ -98,6 +100,23 @@ pub fn next_run_label(r: &RecurringIssueRow) -> String {
         (Some(d), None) => d.clone(),
         (None, _) => "-".to_string(),
     }
+}
+
+/// Small colored pill for one label (same look as the board's label chips).
+fn label_chip<'a>(name: &'a str, hex: Option<&str>) -> Element<'a, Message> {
+    let color = crate::views::labels::chip_color(hex);
+    container(text(name).size(11).color(color).wrapping(text::Wrapping::None))
+        .padding([2, 8])
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color { a: 0.22, ..color })),
+            border: iced::Border {
+                color,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
@@ -167,6 +186,12 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     )
     .width(Length::Fixed(COL_LANE));
 
+    let mut chips = row![].spacing(4).align_y(Alignment::Center);
+    for (name, color) in &r.labels {
+        chips = chips.push(label_chip(name, color.as_deref()));
+    }
+    let labels = container(chips).width(Length::Fixed(COL_LABELS));
+
     container(
         row![]
             .spacing(12)
@@ -178,7 +203,8 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
             .push(state)
             .push(assignee)
             .push(project)
-            .push(lane),
+            .push(lane)
+            .push(labels),
     )
     .width(Length::Fill)
     .into()
