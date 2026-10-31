@@ -11,6 +11,7 @@ use serde::Deserialize;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActivityEntry {
     Version(VersionEntry),
+    Reference(ReferenceEntry),
 }
 
 /// Person behind an entry; the server sends `null` when unknown.
@@ -32,6 +33,31 @@ pub struct VersionEntry {
     pub description: String,
     #[serde(default)]
     pub changes: Vec<FieldChange>,
+}
+
+/// An incoming reference ("mentioned in JRST-12"). Unlike the other variants
+/// the person is `user` (nullable), and the server sends no description.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ReferenceEntry {
+    /// `"reference:<id>"`.
+    pub cursor: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub user: Option<ActivityActor>,
+    /// Where the mention lives, e.g. `"comment"` or `"issue"`.
+    #[serde(default)]
+    pub source_type: String,
+    /// The issue doing the referencing; `null` if it is gone.
+    #[serde(default)]
+    pub source_issue: Option<SourceIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SourceIssue {
+    pub id: i64,
+    pub identifier: String,
+    #[serde(default)]
+    pub title: String,
 }
 
 /// A changed field. `from`/`to` are `None` when the server sent `null`.
@@ -76,7 +102,9 @@ mod tests {
             "changes":[{"field":"priority","from":"high","to":"urgent"}],
             "description":"changed priority from <strong>High</strong> to <strong>Urgent</strong>",
             "cursor":"version:438"}"#;
-        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap();
+        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap() else {
+            panic!("expected a version entry")
+        };
         assert_eq!(v.cursor, "version:438");
         assert_eq!(v.created_at, "2026-07-06T00:40:47Z");
         assert_eq!(v.actor, Some(ActivityActor { id: 2, name: "ryan".into() }));
@@ -98,7 +126,9 @@ mod tests {
               {"field":"project_id","from":{"id":5,"name":null},"to":null},
               {"field":"estimate","from":3,"to":null}],
             "description":"x","cursor":"version:812"}"#;
-        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap();
+        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap() else {
+            panic!("expected a version entry")
+        };
         assert_eq!(v.actor, None);
         let r = |id, name: Option<&str>, identifier: Option<&str>| {
             Some(ChangeValue::Ref(ActivityRef {
@@ -121,7 +151,39 @@ mod tests {
     fn decodes_empty_changes() {
         let body = r#"{"type":"version","id":1,"created_at":"t","actor":null,
             "event":"update","changes":[],"description":"","cursor":"version:1"}"#;
-        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap();
+        let ActivityEntry::Version(v) = serde_json::from_str(body).unwrap() else {
+            panic!("expected a version entry")
+        };
         assert!(v.changes.is_empty());
+    }
+
+    #[test]
+    fn decodes_reference_entry() {
+        let body = r#"{"type":"reference","id":1,"cursor":"reference:1",
+            "created_at":"2026-07-08T13:35:39Z",
+            "source_issue":{"id":2,"identifier":"MTK-2","title":"Add password reset functionality"},
+            "source_type":"comment","user":{"id":2,"name":"ryan"}}"#;
+        let ActivityEntry::Reference(r) = serde_json::from_str(body).unwrap() else {
+            panic!("expected a reference entry")
+        };
+        assert_eq!(r.cursor, "reference:1");
+        assert_eq!(r.created_at, "2026-07-08T13:35:39Z");
+        assert_eq!(r.user, Some(ActivityActor { id: 2, name: "ryan".into() }));
+        assert_eq!(r.source_type, "comment");
+        let src = r.source_issue.unwrap();
+        assert_eq!(src.id, 2);
+        assert_eq!(src.identifier, "MTK-2");
+        assert_eq!(src.title, "Add password reset functionality");
+    }
+
+    #[test]
+    fn decodes_reference_with_null_user() {
+        let body = r#"{"type":"reference","id":7,"cursor":"reference:7",
+            "created_at":"t","source_issue":{"id":3,"identifier":"MTK-3","title":"x"},
+            "source_type":"issue","user":null}"#;
+        let ActivityEntry::Reference(r) = serde_json::from_str(body).unwrap() else {
+            panic!("expected a reference entry")
+        };
+        assert_eq!(r.user, None);
     }
 }
