@@ -1,6 +1,6 @@
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
 
-use super::events::{self, Source};
+use super::activity::{self, Source};
 use super::models::{Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Project, Team};
 
 // ── Teams ──
@@ -144,7 +144,8 @@ pub fn insert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
-    events::record_created(conn, issue, Source::Local)?;
+    // No stored events: Activity derives the "created the issue" line at read
+    // time, and a parent set at creation travels in the create payload.
     Ok(())
 }
 
@@ -152,11 +153,11 @@ fn now_ts() -> String {
     crate::db::now_iso()
 }
 
-/// Record local activity events for a write that turned `old` into the
+/// Record Pending changes for a write that turned `old` into the
 /// current row. No-op when the issue didn't exist beforehand.
 fn record_local_diff(conn: &Connection, old: Option<Issue>, issue_id: &str) -> Result<()> {
     if let (Some(old), Some(new)) = (old, get_issue(conn, issue_id)?) {
-        events::record_changes(conn, &old, &new, Source::Local, &now_ts())?;
+        activity::record_changes(conn, &old, &new, Source::Local, &now_ts())?;
     }
     Ok(())
 }
@@ -243,6 +244,14 @@ fn purge_issue_rows(conn: &Connection, issue_id: &str) -> Result<()> {
         "DELETE FROM issue_events WHERE issue_id = ?1",
         params![issue_id],
     )?;
+    tx.execute(
+        "DELETE FROM issue_activity_entries WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
+    tx.execute(
+        "DELETE FROM issue_activity_state WHERE issue_id = ?1",
+        params![issue_id],
+    )?;
     tx.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
     tx.commit()
 }
@@ -269,6 +278,7 @@ pub fn apply_server_issue_tombstone(
     // The server delete wins whether or not the user had already deleted it
     // locally, so purge without requiring the local marker.
     purge_issue_rows(conn, &local_id)?;
+    crate::db::activity::discard_pending_for_entity(conn, "issue", &local_id)?;
     conn.execute(
         "UPDATE sync_queue SET synced_at = ?2
          WHERE entity_type = 'issue' AND entity_id = ?1 AND synced_at IS NULL",
@@ -281,6 +291,7 @@ pub fn apply_server_issue_tombstone(
 }
 
 fn retire_pending_sync(conn: &Connection, entity_type: &str, local_id: &str) -> Result<()> {
+    crate::db::activity::discard_pending_for_entity(conn, entity_type, local_id)?;
     conn.execute(
         "UPDATE sync_queue SET synced_at = ?3
          WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
@@ -1175,7 +1186,7 @@ pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Resu
             dep.updated_at,
         ],
     )?;
-    events::record_dependency(
+    activity::record_dependency(
         conn,
         &dep.blocking_issue_id,
         &dep.blocked_issue_id,
@@ -1188,7 +1199,7 @@ pub fn insert_issue_dependency(conn: &Connection, dep: &IssueDependency) -> Resu
 
 pub fn delete_issue_dependency(conn: &Connection, dep_id: &str) -> Result<()> {
     if let Some(dep) = get_issue_dependency(conn, dep_id)? {
-        events::record_dependency(
+        activity::record_dependency(
             conn,
             &dep.blocking_issue_id,
             &dep.blocked_issue_id,
@@ -1202,6 +1213,118 @@ pub fn delete_issue_dependency(conn: &Connection, dep_id: &str) -> Result<()> {
         params![dep_id],
     )?;
     Ok(())
+}
+
+/// Run a local issue edit and enqueue its push in ONE transaction. Returns the
+/// new sync-queue entry id; if either the edit or the enqueue fails, neither
+/// is committed.
+pub fn edit_issue_queued(
+    conn: &Connection,
+    issue_id: &str,
+    action: &str,
+    payload: Option<&str>,
+    edit: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let events_before = max_event_id(&tx)?;
+    edit(&tx)?;
+    let id = super::sync_queue::enqueue_returning_id(&tx, "issue", issue_id, action, payload)?;
+    // The edit's new Activity rows are its Pending changes: link them to the
+    // queue entry that will push them.
+    link_new_pending_changes(&tx, events_before, id, Some(issue_id))?;
+    tx.commit()?;
+    Ok(id)
+}
+
+fn max_event_id(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM issue_events", [], |r| r.get(0))?)
+}
+
+/// Link every unlinked locally-written Activity row after `events_before` to
+/// the queue entry that will push it, making them Pending changes. `issue_id`
+/// limits it to one issue; `None` takes all (a dependency change writes one
+/// row on each of its two issues).
+fn link_new_pending_changes(
+    conn: &Connection,
+    events_before: i64,
+    queue_id: i64,
+    issue_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE issue_events SET sync_queue_id = ?1
+         WHERE id > ?2 AND (?3 IS NULL OR issue_id = ?3)
+           AND source = 'local' AND sync_queue_id IS NULL",
+        params![queue_id, events_before, issue_id],
+    )?;
+    Ok(())
+}
+
+/// [`update_issue`] plus its `issue/update` queue entry (payload = the issue
+/// JSON), atomically.
+pub fn update_issue_queued(conn: &Connection, issue: &Issue) -> Result<i64> {
+    let payload = serde_json::to_string(issue).ok();
+    edit_issue_queued(conn, &issue.id, "update", payload.as_deref(), |c| {
+        update_issue(c, issue)
+    })
+}
+
+/// [`insert_issue_dependency`] plus its `dependency/create` queue entry,
+/// atomically. A UNIQUE-constraint failure leaves no queue entry behind.
+pub fn insert_issue_dependency_queued(conn: &Connection, dep: &IssueDependency) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let events_before = max_event_id(&tx)?;
+    insert_issue_dependency(&tx, dep)?;
+    let id = super::sync_queue::enqueue_returning_id(&tx, "dependency", &dep.id, "create", None)?;
+    link_new_pending_changes(&tx, events_before, id, None)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Delete a dependency edge and, when the server knows it, enqueue the
+/// `dependency/delete` push (carrying the remote ids captured before the row
+/// goes), atomically. Returns the queue entry id, or None when nothing needed
+/// pushing (unknown edge, never synced, or ids unresolvable).
+pub fn delete_issue_dependency_queued(conn: &Connection, dep_id: &str) -> Result<Option<i64>> {
+    let Some(dep) = get_issue_dependency(conn, dep_id)? else {
+        return Ok(None);
+    };
+    let tx = conn.unchecked_transaction()?;
+    // The Rails edge lives under the BLOCKING issue's endpoint.
+    let mut payload = None;
+    if let (Some(remote_id), Some(blocking)) =
+        (dep.remote_id, get_issue(&tx, &dep.blocking_issue_id)?)
+    {
+        if let (Some(issue_remote_id), Some(team_remote_id)) = (
+            blocking.remote_id,
+            remote_id_for(&tx, "teams", &blocking.team_id)?,
+        ) {
+            payload = Some(
+                serde_json::json!({
+                    "team_remote_id": team_remote_id,
+                    "issue_remote_id": issue_remote_id,
+                    "remote_id": remote_id,
+                })
+                .to_string(),
+            );
+        }
+    }
+    let queued = match &payload {
+        Some(p) => Some(super::sync_queue::enqueue_returning_id(
+            &tx,
+            "dependency",
+            dep_id,
+            "delete",
+            Some(p),
+        )?),
+        None => None,
+    };
+    let events_before = max_event_id(&tx)?;
+    delete_issue_dependency(&tx, dep_id)?;
+    if let Some(qid) = queued {
+        link_new_pending_changes(&tx, events_before, qid, None)?;
+    }
+    tx.commit()?;
+    Ok(queued)
 }
 
 /// A resolved dependency edge for the issue-detail sidebar: the dependency row's
@@ -1670,7 +1793,6 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     if tombstoned > 0 {
         return Ok(());
     }
-    let old = get_issue(conn, &issue.id)?;
     conn.execute(
         "INSERT INTO issues
             (id, title, description, priority, team_number, due_date, estimate,
@@ -1721,14 +1843,6 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
-    // Local-only activity history: a new row gets a "created" event, an
-    // existing one gets an event per tracked field the pull changed.
-    match old {
-        Some(old) => {
-            events::record_changes(conn, &old, issue, Source::Sync, &issue.updated_at)?;
-        }
-        None => events::record_created(conn, issue, Source::Sync)?,
-    }
     Ok(())
 }
 
@@ -1910,6 +2024,106 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn edit_and_queue_entry_commit_together_and_return_the_entry_id() {
+        let conn = setup();
+        let mut issue = get_issue(&conn, "i1").unwrap().unwrap();
+        issue.title = "Renamed".into();
+        let id = update_issue_queued(&conn, &issue).unwrap();
+        assert_eq!(get_issue(&conn, "i1").unwrap().unwrap().title, "Renamed");
+        let entries = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, Some(id));
+        assert_eq!(entries[0].entity_type, "issue");
+        assert_eq!(entries[0].action, "update");
+    }
+
+    #[test]
+    fn failed_edit_leaves_no_queue_entry() {
+        let conn = setup();
+        let r = edit_issue_queued(&conn, "i1", "update", None, |c| {
+            c.execute("UPDATE issues SET title = 'half' WHERE id = 'i1'", [])?;
+            c.execute("UPDATE no_such_table SET x = 1", [])?;
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert_eq!(get_issue(&conn, "i1").unwrap().unwrap().title, "Issue");
+        assert!(crate::db::sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_enqueue_rolls_back_the_edit() {
+        let conn = setup();
+        conn.execute_batch(
+            "CREATE TRIGGER no_queue BEFORE INSERT ON sync_queue
+             BEGIN SELECT RAISE(ABORT, 'nope'); END;",
+        )
+        .unwrap();
+        let mut issue = get_issue(&conn, "i1").unwrap().unwrap();
+        issue.title = "Renamed".into();
+        assert!(update_issue_queued(&conn, &issue).is_err());
+        assert_eq!(get_issue(&conn, "i1").unwrap().unwrap().title, "Issue");
+    }
+
+    fn two_issue_dep(conn: &Connection) -> IssueDependency {
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+             VALUES ('i2', 'Two', 0, 'l1', 't1', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+        IssueDependency {
+            id: "d1".into(),
+            remote_id: None,
+            blocking_issue_id: "i1".into(),
+            blocked_issue_id: "i2".into(),
+            kind: "blocks".into(),
+            direction: "blocks".into(),
+            created_at: NOW.into(),
+            updated_at: NOW.into(),
+        }
+    }
+
+    #[test]
+    fn dependency_add_queues_atomically_and_duplicate_queues_nothing() {
+        let conn = setup();
+        let dep = two_issue_dep(&conn);
+        let id = insert_issue_dependency_queued(&conn, &dep).unwrap();
+        let entries = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, Some(id));
+        assert_eq!(entries[0].entity_type, "dependency");
+
+        let dup = IssueDependency { id: "d2".into(), ..dep };
+        assert!(insert_issue_dependency_queued(&conn, &dup).is_err());
+        assert_eq!(crate::db::sync_queue::pending_entries(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dependency_remove_queues_only_when_the_server_knows_the_edge() {
+        let conn = setup();
+        let dep = two_issue_dep(&conn);
+        insert_issue_dependency_queued(&conn, &dep).unwrap();
+        // Never synced: deleted locally, nothing queued beyond the create.
+        assert_eq!(delete_issue_dependency_queued(&conn, "d1").unwrap(), None);
+        assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
+        assert_eq!(crate::db::sync_queue::pending_entries(&conn).unwrap().len(), 1);
+
+        // Synced edge: delete is queued with the captured remote ids.
+        conn.execute("UPDATE teams SET remote_id = 9 WHERE id = 't1'", []).unwrap();
+        conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
+        insert_issue_dependency(&conn, &IssueDependency { remote_id: Some(77), ..dep }).unwrap();
+        let id = delete_issue_dependency_queued(&conn, "d1").unwrap().unwrap();
+        let entry = crate::db::sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == Some(id))
+            .unwrap();
+        assert_eq!(entry.action, "delete");
+        assert!(entry.payload.unwrap().contains("\"remote_id\":77"));
+        assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
     }
 
     #[test]
@@ -2550,16 +2764,37 @@ mod tests {
         assert!(get_issue_dependency(&conn, "d1").unwrap().is_none());
     }
 
+    /// Wording of the issue's Pending changes, as Activity shows them. Activity
+    /// only shows events linked to a queue entry, so this links every local
+    /// one first (linking itself is covered by the `*_queued` tests).
     fn event_lines(conn: &Connection, issue_id: &str) -> Vec<String> {
-        events::events_for_issue(conn, issue_id)
+        conn.execute(
+            "UPDATE issue_events SET sync_queue_id = 1
+             WHERE source = 'local' AND sync_queue_id IS NULL",
+            [],
+        )
+        .unwrap();
+        activity::activity_for_issue(conn, issue_id)
             .unwrap()
-            .iter()
-            .map(|e| e.description())
+            .into_iter()
+            .filter(|i| i.origin == activity::ItemOrigin::Pending)
+            .map(|i| i.text)
             .collect()
     }
 
     #[test]
-    fn local_writes_record_events_and_not_sync_queue() {
+    fn local_insert_shows_only_the_derived_created_line() {
+        let conn = setup();
+        insert_issue(&conn, &make_issue("n0", None, None)).unwrap();
+        assert!(event_lines(&conn, "n0").is_empty());
+        let stored: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_events WHERE issue_id = 'n0'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 0);
+    }
+
+    #[test]
+    fn local_writes_record_pending_changes() {
         let conn = setup();
         conn.execute(
             "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
@@ -2579,39 +2814,27 @@ mod tests {
         assert_eq!(
             event_lines(&conn, "n1"),
             vec![
-                "created the issue",
                 "changed status from Backlog to In Progress",
                 "changed priority from None to High",
                 "changed the title",
                 "changed estimate from none to 2",
             ]
         );
-        let queued: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(queued, 0);
     }
 
     #[test]
-    fn pull_upsert_records_created_then_diffs() {
+    fn pull_upsert_records_no_events() {
         let conn = setup();
         let mut issue = make_issue("p1", None, None);
         issue.created_at = "2026-03-01T00:00:00.000Z".into();
         issue.updated_at = "2026-03-01T00:00:00.000Z".into();
         upsert_issue(&conn, &issue).unwrap();
-        // Re-pulling an unchanged row adds nothing.
-        upsert_issue(&conn, &issue).unwrap();
         issue.priority = 0;
         issue.updated_at = "2026-03-02T00:00:00.000Z".into();
         upsert_issue(&conn, &issue).unwrap();
 
-        let evs = events::events_for_issue(&conn, "p1").unwrap();
-        assert_eq!(evs.len(), 2);
-        assert_eq!(evs[0].created_at, "2026-03-01T00:00:00.000Z");
-        assert_eq!(evs[0].source, "sync");
-        assert_eq!(evs[1].description(), "changed priority from None to Urgent");
-        assert_eq!(evs[1].created_at, "2026-03-02T00:00:00.000Z");
-        assert_eq!(evs[1].default_actor(), "Someone");
+        assert!(event_lines(&conn, "p1").is_empty());
+        assert_eq!(get_issue(&conn, "p1").unwrap().unwrap().priority, 0);
     }
 
     #[test]
@@ -2624,16 +2847,16 @@ mod tests {
         let i2 = event_lines(&conn, "i2");
         assert!(i1[i1.len() - 2].starts_with("now blocks "));
         assert!(i1[i1.len() - 1].starts_with("no longer blocks "));
-        assert!(i2[1].starts_with("now blocked by "));
-        assert!(i2[2].starts_with("no longer blocked by "));
+        assert!(i2[0].starts_with("now blocked by "));
+        assert!(i2[1].starts_with("no longer blocked by "));
 
-        // Born with a parent -> parent event, and the column is persisted.
+        // Born with a parent: the column is persisted, no event is stored.
         let mut child = make_issue("c1", None, None);
         child.parent_issue_id = Some("i1".into());
         insert_issue(&conn, &child).unwrap();
         let stored = get_issue(&conn, "c1").unwrap().unwrap();
         assert_eq!(stored.parent_issue_id.as_deref(), Some("i1"));
-        assert!(event_lines(&conn, "c1")[1].starts_with("set parent to "));
+        assert!(event_lines(&conn, "c1").is_empty());
 
         // Renamed lanes show their current name when resolved.
         conn.execute(
@@ -2645,9 +2868,7 @@ mod tests {
         move_issue_to_lane(&conn, "c1", "l2").unwrap();
         conn.execute("UPDATE lanes SET name = 'Active' WHERE id = 'l2'", [])
             .unwrap();
-        let evs = events::events_for_issue_resolved(&conn, "c1", None).unwrap();
-        assert!(evs[2].description().ends_with("to Active"));
-        assert_eq!(evs[2].actor_name, None);
+        assert_eq!(event_lines(&conn, "c1"), vec!["changed status from Backlog to Doing"]);
     }
 
     // ── move_issue_to_team ──

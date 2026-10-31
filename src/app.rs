@@ -12,8 +12,9 @@ use crate::db::models::{
     Comment, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
-use crate::db::events::{self, IssueEvent};
+use crate::db::activity::{activity_for_issue, ActivityItem};
 use crate::db::{connection, queries, sync_queue};
+use crate::sync::activity::{self as activity_sync, FetchOutcome};
 use crate::display::{
     self, CardProperty, DisplayOptions, FilterField, Filters, GroupBy, OrderBy, SubGroup, ViewMode,
 };
@@ -117,6 +118,9 @@ pub enum Message {
     MoveSuggestion(i32),
     /// Comments fetched from Rails for a local issue UUID; merged into SQLite.
     CommentsFetched(String, Result<Vec<CommentDto>, String>),
+    /// Activity fetch for an issue's detail finished (JRST-149); `true` when entries were stored.
+    /// Issue id and how many Activity entries the fetch stored.
+    ActivityFetched(String, usize),
     ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
@@ -591,8 +595,8 @@ pub struct App {
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
-    /// Local change history for the open issue (see `db::events`).
-    detail_events: Vec<IssueEvent>,
+    /// Local change history for the open issue (see `db::activity`).
+    detail_activity: Vec<ActivityItem>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
     /// Search + direction state for the open issue-dependency picker modal.
@@ -824,20 +828,21 @@ impl App {
             self.detail_deps =
                 queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_comments = queries::comments_for_issue(conn, issue_id).unwrap_or_default();
-            self.detail_events = events::events_for_issue_resolved(conn, issue_id, self.config.current_user_remote_id).unwrap_or_default();
+            self.detail_activity =
+                activity_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
         } else if let View::ProjectDetail(ref project_id) = self.view {
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments =
                 queries::comments_for_project(conn, project_id).unwrap_or_default();
-            self.detail_events.clear();
+            self.detail_activity.clear();
             return;
         } else {
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments.clear();
-            self.detail_events.clear();
+            self.detail_activity.clear();
         }
     }
 
@@ -1503,8 +1508,48 @@ impl App {
         self.load_detail_dependencies(&conn);
         Task::batch([
             self.fetch_comments_task(&conn, issue),
+            self.fetch_activity_task(issue),
             self.fetch_issue_task(&conn, issue),
         ])
+    }
+
+    /// Activity fetch for the issue whose detail is open, or `Task::none()`
+    /// when no detail is open (or the issue is gone).
+    fn refetch_open_issue_activity(&self) -> Task<Message> {
+        let View::IssueDetail(id) = &self.view else {
+            return Task::none();
+        };
+        let conn = self.db();
+        match queries::get_issue(&conn, id) {
+            Ok(Some(issue)) => self.fetch_activity_task(&issue),
+            _ => Task::none(),
+        }
+    }
+
+    /// Build the async task that fetches an issue's Activity into the local
+    /// cache. `Task::none()` when no client can be built; the fetch itself skips
+    /// issues that are not synced yet.
+    fn fetch_activity_task(&self, issue: &Issue) -> Task<Message> {
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            return Task::none();
+        };
+        let issue_id = issue.id.clone();
+        Task::perform(
+            async move {
+                let stored = match activity_sync::fetch(&client, &issue_id).await {
+                    FetchOutcome::Fetched { stored } => stored,
+                    FetchOutcome::Skipped => 0,
+                    FetchOutcome::Failed(msg) => {
+                        eprintln!("Activity fetch for {issue_id} failed: {msg}");
+                        0
+                    }
+                };
+                (issue_id, stored)
+            },
+            |(id, stored)| Message::ActivityFetched(id, stored),
+        )
     }
 
     /// Build the async task that does the one fresh fetch of `issue` (with
@@ -1626,9 +1671,7 @@ impl App {
             mutate(&mut issue);
             issue.updated_at = crate::db::now_iso();
             let conn = self.db();
-            let _ = queries::update_issue(&conn, &issue);
-            let payload = serde_json::to_string(&issue).ok();
-            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
+            let _ = queries::update_issue_queued(&conn, &issue);
             self.reload_data();
         }
     }
@@ -1671,9 +1714,8 @@ impl App {
             created_at: now.clone(),
             updated_at: now,
         };
-        match queries::insert_issue_dependency(&conn, &dep) {
-            Ok(()) => {
-                self.enqueue_sync("dependency", &dep.id, "create", None);
+        match queries::insert_issue_dependency_queued(&conn, &dep) {
+            Ok(_) => {
                 self.reload_data();
             }
             Err(_) => {
@@ -1728,35 +1770,7 @@ impl App {
     /// enqueued — there is nothing on the server to remove.
     fn remove_dependency(&mut self, dep_id: &str) {
         let conn = self.db();
-        let dep = match queries::get_issue_dependency(&conn, dep_id) {
-            Ok(Some(d)) => d,
-            _ => return,
-        };
-        if let Some(remote_id) = dep.remote_id {
-            // The Rails edge lives under the BLOCKING issue's endpoint.
-            let payload = queries::get_issue(&conn, &dep.blocking_issue_id)
-                .ok()
-                .flatten()
-                .and_then(|blocking| {
-                    let issue_remote_id = blocking.remote_id?;
-                    let team_remote_id =
-                        queries::remote_id_for(&conn, "teams", &blocking.team_id)
-                            .ok()
-                            .flatten()?;
-                    Some(
-                        serde_json::json!({
-                            "team_remote_id": team_remote_id,
-                            "issue_remote_id": issue_remote_id,
-                            "remote_id": remote_id,
-                        })
-                        .to_string(),
-                    )
-                });
-            if let Some(p) = &payload {
-                self.enqueue_sync("dependency", dep_id, "delete", Some(p.as_str()));
-            }
-        }
-        let _ = queries::delete_issue_dependency(&conn, dep_id);
+        let _ = queries::delete_issue_dependency_queued(&conn, dep_id);
         self.reload_data();
     }
 
@@ -1810,9 +1824,7 @@ impl App {
             issue.due_date = due_date;
             issue.updated_at = crate::db::now_iso();
             let conn = self.db();
-            let _ = queries::update_issue(&conn, &issue);
-            let payload = serde_json::to_string(&issue).ok();
-            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
+            let _ = queries::update_issue_queued(&conn, &issue);
             self.reload_data();
         }
     }
@@ -1996,7 +2008,7 @@ impl App {
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_comments: Vec::new(),
-            detail_events: Vec::new(),
+            detail_activity: Vec::new(),
             detail_references: Vec::new(),
             issue_picker: None,
             focused_lane: 0,
@@ -2838,15 +2850,21 @@ impl App {
                             issue.priority = form.priority.to_i32();
                             issue.lane_id = form.lane_id.clone();
                             issue.updated_at = now;
-                            let _ = queries::update_issue(&conn, &issue);
-                            let _ = queries::set_issue_labels(
+                            let payload = serde_json::to_string(&issue).ok();
+                            let _ = queries::edit_issue_queued(
                                 &conn,
                                 &issue.id,
-                                &form.selected_label_ids,
+                                "update",
+                                payload.as_deref(),
+                                |c| {
+                                    queries::update_issue(c, &issue)?;
+                                    queries::set_issue_labels(
+                                        c,
+                                        &issue.id,
+                                        &form.selected_label_ids,
+                                    )
+                                },
                             );
-
-                            let payload = serde_json::to_string(&issue).ok();
-                            self.enqueue_sync("issue", &issue.id, "update", payload.as_deref());
                         }
                     } else {
                         // Create new
@@ -2973,6 +2991,14 @@ impl App {
             }
             Message::IssueFetched(result) => {
                 if result.is_ok() {
+                    self.reload_data();
+                }
+            }
+            Message::ActivityFetched(issue_id, stored) => {
+                // Only refresh when entries landed and that issue is still open.
+                if stored > 0
+                    && matches!(&self.view, View::IssueDetail(id) if *id == issue_id)
+                {
                     self.reload_data();
                 }
             }
@@ -3146,8 +3172,9 @@ impl App {
                     if current_lane_idx + 1 < self.lanes.len() {
                         let target = &self.lanes[current_lane_idx + 1];
                         let conn = self.db();
-                        let _ = queries::move_issue_to_lane(&conn, &issue.id, &target.id);
-                        self.enqueue_sync("issue", &issue.id, "update", None);
+                        let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
+                            queries::move_issue_to_lane(c, &issue.id, &target.id)
+                        });
                         self.focused_lane = current_lane_idx + 1;
                         self.reload_data();
                     }
@@ -3173,8 +3200,9 @@ impl App {
                     if current_lane_idx > 0 {
                         let target = &self.lanes[current_lane_idx - 1];
                         let conn = self.db();
-                        let _ = queries::move_issue_to_lane(&conn, &issue.id, &target.id);
-                        self.enqueue_sync("issue", &issue.id, "update", None);
+                        let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
+                            queries::move_issue_to_lane(c, &issue.id, &target.id)
+                        });
                         self.focused_lane = current_lane_idx - 1;
                         self.reload_data();
                     }
@@ -3184,8 +3212,9 @@ impl App {
             Message::SetFocusedPriority(p) => {
                 if let Some(issue) = self.focused_issue().cloned() {
                     let conn = self.db();
-                    let _ = queries::set_issue_priority(&conn, &issue.id, p);
-                    self.enqueue_sync("issue", &issue.id, "update", None);
+                    let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
+                        queries::set_issue_priority(c, &issue.id, p)
+                    });
                     self.reload_data();
                 }
             }
@@ -3828,10 +3857,21 @@ impl App {
 
                 // Tell the scheduler how the cycle went (backoff / follow-up).
                 let finish = self.drive_sync(SchedEvent::CycleFinished { success: cycle_ok });
+                // A Data sync just refreshed the mirror: re-fetch the open
+                // issue's Activity so new server entries show up.
+                let refetch = if report.push_only || auth_failed {
+                    Task::none()
+                } else {
+                    self.refetch_open_issue_activity()
+                };
                 if self.sync_paused_auth {
-                    return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
+                    return Task::batch([
+                        finish,
+                        self.drive_sync(SchedEvent::AuthPaused(true)),
+                        refetch,
+                    ]);
                 }
-                return finish;
+                return Task::batch([finish, refetch]);
             }
 
             Message::NotifPollCompleted(outcome) => {
@@ -4305,9 +4345,9 @@ impl App {
                 if let Some(ref form) = self.label_form {
                     if let Some(ref issue_id) = form.issue_id {
                         let conn = self.db();
-                        let _ =
-                            queries::set_issue_labels(&conn, issue_id, &form.selected_label_ids);
-                        self.enqueue_sync("issue", issue_id, "update", None);
+                        let _ = queries::edit_issue_queued(&conn, issue_id, "update", None, |c| {
+                            queries::set_issue_labels(c, issue_id, &form.selected_label_ids)
+                        });
                     }
                 }
                 self.modal = Modal::None;
@@ -4489,7 +4529,7 @@ impl App {
                             project_name,
                             &self.detail_deps,
                             &self.detail_comments,
-                            &self.detail_events,
+                            &self.detail_activity,
                             &self.detail_references,
                             &self.issues,
                             parent,

@@ -19,13 +19,24 @@ pub fn enqueue(
     action: &str,
     payload: Option<&str>,
 ) -> Result<()> {
+    enqueue_returning_id(conn, entity_type, entity_id, action, payload).map(|_| ())
+}
+
+/// Like [`enqueue`], but returns the new queue entry's id.
+pub fn enqueue_returning_id(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    payload: Option<&str>,
+) -> Result<i64> {
     let now = crate::db::now_iso();
     conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, action, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![entity_type, entity_id, action, payload, now],
     )?;
     LOCAL_WRITE.store(true, Ordering::SeqCst);
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 pub fn pending_entries(conn: &Connection) -> Result<Vec<SyncQueueEntry>> {
@@ -82,6 +93,15 @@ pub fn begin_attempt(conn: &Connection, entry_id: i64) -> Result<Option<String>>
         )?;
     }
     Ok(previous)
+}
+
+/// Retire an entry that will never be pushed (dropped or rejected): marks it
+/// done and removes its Pending changes, atomically.
+pub fn discard(conn: &Connection, entry_id: i64) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    crate::db::activity::discard_pending_for_entry(&tx, entry_id)?;
+    mark_synced(&tx, entry_id)?;
+    tx.commit()
 }
 
 pub fn mark_synced(conn: &Connection, entry_id: i64) -> Result<()> {
