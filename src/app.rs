@@ -1510,6 +1510,19 @@ impl App {
         ])
     }
 
+    /// Activity fetch for the issue whose detail is open, or `Task::none()`
+    /// when no detail is open (or the issue is gone).
+    fn refetch_open_issue_activity(&self) -> Task<Message> {
+        let View::IssueDetail(id) = &self.view else {
+            return Task::none();
+        };
+        let conn = self.db();
+        match queries::get_issue(&conn, id) {
+            Ok(Some(issue)) => self.fetch_activity_task(&conn, &issue),
+            _ => Task::none(),
+        }
+    }
+
     /// Build the async task that fetches an issue's Activity into the local
     /// cache. `Task::none()` unless the issue + team are synced and a client
     /// can be built (the fetch itself also skips local-only issues).
@@ -3840,10 +3853,21 @@ impl App {
 
                 // Tell the scheduler how the cycle went (backoff / follow-up).
                 let finish = self.drive_sync(SchedEvent::CycleFinished { success: cycle_ok });
+                // A Data sync just refreshed the mirror: re-fetch the open
+                // issue's Activity so new server entries show up.
+                let refetch = if report.push_only || auth_failed {
+                    Task::none()
+                } else {
+                    self.refetch_open_issue_activity()
+                };
                 if self.sync_paused_auth {
-                    return Task::batch([finish, self.drive_sync(SchedEvent::AuthPaused(true))]);
+                    return Task::batch([
+                        finish,
+                        self.drive_sync(SchedEvent::AuthPaused(true)),
+                        refetch,
+                    ]);
                 }
-                return finish;
+                return Task::batch([finish, refetch]);
             }
 
             Message::NotifPollCompleted(outcome) => {
