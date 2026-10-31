@@ -511,6 +511,28 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE issue_events ADD COLUMN sync_queue_id INTEGER;
         ",
     },
+    Migration {
+        version: 27,
+        name: "activity_upgrade_clear_guessed_events",
+        up: "
+            -- Activity now comes from the server. Drop every guessed row
+            -- (sync-derived rows, backfilled/created rows) except local edits
+            -- whose issue still has an unsynced `issue` queue entry: those
+            -- become Pending changes. Link rule: each survivor points at the
+            -- LATEST (highest id) unsynced `issue` entry for its issue.
+            UPDATE issue_events
+               SET sync_queue_id = (
+                   SELECT MAX(q.id) FROM sync_queue q
+                    WHERE q.entity_type = 'issue'
+                      AND q.entity_id = issue_events.issue_id
+                      AND q.synced_at IS NULL)
+             WHERE source = 'local' AND kind <> 'created';
+            DELETE FROM issue_events
+             WHERE kind = 'created'
+                OR source <> 'local'
+                OR sync_queue_id IS NULL;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -710,12 +732,81 @@ mod tests {
         conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1', 'B', 0, 't1', ?1, ?1)", [now]).unwrap();
         conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1', 'i', 4, 'l1', 't1', ?1, ?1)", [now]).unwrap();
         conn.execute("INSERT INTO issue_events (issue_id, kind, old_value, new_value, created_at) VALUES ('i1', 'title', 'a', 'b', ?1)", [now]).unwrap();
-        run(&conn).unwrap();
+        // Apply only v26 (v27 would clear this unqueued row).
+        conn.execute_batch(MIGRATIONS.iter().find(|m| m.version == 26).unwrap().up).unwrap();
         let row: (String, String, Option<i64>) = conn
             .query_row("SELECT kind, new_value, sync_queue_id FROM issue_events WHERE issue_id = 'i1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap();
         assert_eq!(row, ("title".to_string(), "b".to_string(), None));
         conn.execute("UPDATE issue_events SET sync_queue_id = 5", []).unwrap();
+    }
+
+    #[test]
+    fn upgrade_keeps_only_queued_local_events_linked_to_latest_entry() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 27) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)", [now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1', 'B', 0, 't1', ?1, ?1)", [now]).unwrap();
+        for id in ["queued", "multi", "unqueued", "synced_only"] {
+            conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES (?1, 'i', 4, 'l1', 't1', ?2, ?2)", [id, now]).unwrap();
+        }
+        conn.execute("DELETE FROM issue_events", []).unwrap();
+        let ev = |issue: &str, source: &str, kind: &str| {
+            conn.execute(
+                "INSERT INTO issue_events (issue_id, source, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+                [issue, source, kind, now],
+            )
+            .unwrap();
+        };
+        let q = |issue: &str, entity: &str, synced: Option<&str>| -> i64 {
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id, action, created_at, synced_at) VALUES (?1, ?2, 'update', ?3, ?4)",
+                rusqlite::params![entity, issue, now, synced],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        // queued: local edit + a sync row + a created row; one pending entry.
+        ev("queued", "local", "title");
+        ev("queued", "sync", "title");
+        ev("queued", "local", "created");
+        let q_queued = q("queued", "issue", None);
+        // multi: two pending entries (plus a comment entry); link the latest issue one.
+        ev("multi", "local", "priority");
+        q("multi", "issue", None);
+        let q_multi = q("multi", "issue", None);
+        q("multi", "comment", None);
+        // unqueued: local edit but nothing pending.
+        ev("unqueued", "local", "title");
+        // synced_only: local edit whose only entry is already synced.
+        ev("synced_only", "local", "title");
+        q("synced_only", "issue", Some(now));
+
+        run(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT issue_id, source, kind, sync_queue_id FROM issue_events ORDER BY issue_id")
+            .unwrap();
+        let rows: Vec<(String, String, String, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("multi".into(), "local".into(), "priority".into(), Some(q_multi)),
+                ("queued".into(), "local".into(), "title".into(), Some(q_queued)),
+            ]
+        );
     }
 
     #[test]
@@ -788,15 +879,12 @@ mod tests {
             .unwrap();
         assert_eq!(issue_title, "Old Issue");
 
-        // v10 backfills a 'created' event for pre-existing issues.
-        let (kind, at): (String, String) = conn
-            .query_row(
-                "SELECT kind, created_at FROM issue_events WHERE issue_id='i1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        // v10 backfills a 'created' event, but v27 clears it: Activity now
+        // comes from the server.
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issue_events WHERE issue_id='i1'", [], |row| row.get(0))
             .unwrap();
-        assert_eq!((kind.as_str(), at.as_str()), ("created", now));
+        assert_eq!(events, 0);
 
         // New columns exist and default to NULL on legacy rows.
         let archived: Option<String> = conn
