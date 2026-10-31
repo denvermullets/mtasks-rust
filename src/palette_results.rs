@@ -20,6 +20,9 @@ pub enum PaletteNav {
     Issue(String),
     /// Open a project's detail, switching to `team_id` first when needed.
     Project { project_id: String, team_id: String },
+    /// Open a Saved view by local id, switching team when needed
+    /// (`Message::OpenSavedView`).
+    SavedView(String),
 }
 
 impl PaletteNav {
@@ -30,6 +33,7 @@ impl PaletteNav {
             PaletteNav::Team(_) => "Team",
             PaletteNav::Issue(_) => "Issue",
             PaletteNav::Project { .. } => "Project",
+            PaletteNav::SavedView(_) => "View",
         }
     }
 }
@@ -39,6 +43,15 @@ pub struct PaletteRow {
     pub primary: String,
     pub secondary: String,
     pub nav: PaletteNav,
+}
+
+/// A Saved view as the palette searches it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchableSavedView {
+    pub id: String,
+    pub team_id: String,
+    pub team_name: String,
+    pub name: String,
 }
 
 /// Local data the palette searches, owned so `PaletteState` can keep it and
@@ -51,6 +64,7 @@ pub struct PaletteData {
     pub current_team_id: Option<String>,
     pub teams: Vec<Team>,
     pub projects: Vec<SearchableProject>,
+    pub saved_views: Vec<SearchableSavedView>,
 }
 
 /// Most rows the palette ever shows.
@@ -65,6 +79,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     push_views(&needle, &mut rows);
     push_teams(&needle, data, &mut rows);
     push_projects(&needle, data, &mut rows);
+    push_saved_views(&needle, data, &mut rows);
     // After ordering, so the best matches survive.
     rows.truncate(MAX_ROWS);
     rows
@@ -187,6 +202,18 @@ fn push_projects(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
                     project_id: p.id.clone(),
                     team_id: p.team_id.clone(),
                 },
+            });
+        }
+    }
+}
+
+fn push_saved_views(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    for v in &data.saved_views {
+        if name_matches(needle, &v.name) {
+            rows.push(PaletteRow {
+                primary: v.name.clone(),
+                secondary: v.team_name.clone(),
+                nav: PaletteNav::SavedView(v.id.clone()),
             });
         }
     }
@@ -478,6 +505,50 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].nav.label(), "View");
         assert_eq!(rows[0].nav, PaletteNav::View(View::MyIssues));
+    }
+
+    fn sv(id: &str, team: &str, team_name: &str, name: &str) -> SearchableSavedView {
+        SearchableSavedView {
+            id: id.into(),
+            team_id: team.into(),
+            team_name: team_name.into(),
+            name: name.into(),
+        }
+    }
+
+    fn saved_view_data() -> PaletteData {
+        PaletteData {
+            saved_views: vec![
+                sv("v1", "t1", "JAIT App", "Bugs this week"),
+                sv("v2", "t2", "Rails API", "Bugs this week"),
+            ],
+            ..PaletteData::default()
+        }
+    }
+
+    #[test]
+    fn saved_view_matches_on_name_and_shows_team_name() {
+        let rows = palette_results("BUGS", &saved_view_data());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].nav.label(), "View");
+        assert_eq!(rows[0].primary, "Bugs this week");
+        assert_eq!(rows[0].secondary, "JAIT App");
+        assert_eq!(rows[1].secondary, "Rails API");
+        assert!(palette_results("zzz", &saved_view_data()).is_empty());
+    }
+
+    #[test]
+    fn same_named_saved_views_open_their_own_view() {
+        let mut state = PaletteState::new(saved_view_data());
+        state.set_query("bugs".into());
+        assert_eq!(state.chosen(), Some(PaletteNav::SavedView("v1".into())));
+        state.move_selection(1);
+        assert_eq!(state.chosen(), Some(PaletteNav::SavedView("v2".into())));
+    }
+
+    #[test]
+    fn saved_views_do_not_match_on_team_name() {
+        assert!(palette_results("rails", &saved_view_data()).is_empty());
     }
 
     #[test]
