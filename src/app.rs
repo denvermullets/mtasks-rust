@@ -593,7 +593,7 @@ pub struct App {
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
-    /// Local change history for the open issue (see `db::events`).
+    /// Local change history for the open issue (see `db::activity`).
     detail_activity: Vec<ActivityItem>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,

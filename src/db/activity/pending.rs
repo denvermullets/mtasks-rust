@@ -1,10 +1,11 @@
-//! Local-only issue activity history. The Rails API exposes no versions
-//! endpoint, so changes are recorded here as they are written (desktop edits)
-//! or pulled (sync). Never enqueued to `sync_queue`.
+//! Recording of Pending changes (local edits to an issue, written to
+//! `issue_events` until the server's Activity replaces them) and the wording
+//! shared with the display layer. Private to the Activity module. Rows are
+//! never enqueued to `sync_queue` themselves.
 
-use rusqlite::{params, Connection, OptionalExtension, Result, Row};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
-use super::models::{Comment, Issue, Priority};
+use crate::db::models::{Issue, Priority};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
@@ -72,55 +73,6 @@ impl Source {
     fn as_str(self) -> &'static str {
         match self {
             Source::Local => "local",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct IssueEvent {
-    pub id: i64,
-    pub issue_id: String,
-    pub actor_id: Option<String>,
-    pub source: String,
-    pub kind: String,
-    pub old_value: Option<String>,
-    pub new_value: Option<String>,
-    /// Ids behind `old_value`/`new_value` (lane/member/project/issue), so the
-    /// current name can be shown even after a rename. The values stay as the
-    /// frozen fallback.
-    pub old_ref: Option<String>,
-    pub new_ref: Option<String>,
-    pub created_at: String,
-    /// Resolved actor name, filled by `resolve_events`.
-    pub actor_name: Option<String>,
-}
-
-impl IssueEvent {
-    pub fn from_row(row: &Row<'_>) -> Result<Self> {
-        Ok(Self {
-            id: row.get("id")?,
-            issue_id: row.get("issue_id")?,
-            actor_id: row.get("actor_id")?,
-            source: row.get("source")?,
-            kind: row.get("kind")?,
-            old_value: row.get("old_value")?,
-            new_value: row.get("new_value")?,
-            old_ref: row.get("old_ref")?,
-            new_ref: row.get("new_ref")?,
-            created_at: row.get("created_at")?,
-            actor_name: None,
-        })
-    }
-
-    /// Fallback actor label when no member name resolves.
-    pub fn default_actor(&self) -> &'static str {
-        "You"
-    }
-
-    pub fn description(&self) -> String {
-        match EventKind::parse(&self.kind) {
-            Some(kind) => describe(kind, self.old_value.as_deref(), self.new_value.as_deref()),
-            None => "updated the issue".to_string(),
         }
     }
 }
@@ -366,36 +318,6 @@ fn insert_event(
     Ok(())
 }
 
-/// Record a "created" event for an issue, dated its `created_at`.
-pub fn record_created(conn: &Connection, issue: &Issue, source: Source) -> Result<()> {
-    insert_event(
-        conn,
-        &issue.id,
-        issue.creator_id.as_deref(),
-        source,
-        &Change::plain(EventKind::Created, None, None),
-        &issue.created_at,
-    )?;
-    record_initial_parent(conn, issue, source)
-}
-
-/// Record the "set parent" event for an issue born with a parent (sub-issue
-/// created from the form). Local create uses this alone: its "created the
-/// issue" line is derived at read time.
-pub fn record_initial_parent(conn: &Connection, issue: &Issue, source: Source) -> Result<()> {
-    if let Some(parent) = &issue.parent_issue_id {
-        let change = ref_change(
-            EventKind::Parent,
-            Lookup::Issue,
-            None,
-            Some(parent),
-            &|l, id| lookup_name(conn, l, id),
-        );
-        insert_event(conn, &issue.id, None, source, &change, &issue.created_at)?;
-    }
-    Ok(())
-}
-
 /// Record a dependency edge being added/removed on both issues it touches.
 /// `blocking` blocks `blocked`; each side gets its own wording.
 pub fn record_dependency(
@@ -436,104 +358,6 @@ pub fn record_changes(
         insert_event(conn, &new.id, None, source, c, created_at)?;
     }
     Ok(changes.len())
-}
-
-pub fn events_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<IssueEvent>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, issue_id, actor_id, source, kind, old_value, new_value, old_ref, new_ref,
-                created_at
-         FROM issue_events WHERE issue_id = ?1 ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map(params![issue_id], IssueEvent::from_row)?;
-    rows.collect()
-}
-
-/// Swap frozen names for current ones where the referenced entity still
-/// exists (falls back to the frozen string otherwise), and resolve actors:
-/// a recorded member, else for local changes the signed-in user.
-pub fn resolve_events(
-    conn: &Connection,
-    events: &mut [IssueEvent],
-    current_user_remote_id: Option<i64>,
-) {
-    let me = current_user_remote_id
-        .and_then(|rid| {
-            super::queries::find_member_by_remote_id(conn, rid)
-                .ok()
-                .flatten()
-        })
-        .map(|m| m.name);
-    for e in events {
-        let lookup = match EventKind::parse(&e.kind) {
-            Some(EventKind::Status) => Some(Lookup::Lane),
-            Some(EventKind::Assignee) => Some(Lookup::Member),
-            Some(EventKind::Project) => Some(Lookup::Project),
-            Some(EventKind::Parent | EventKind::Blocking | EventKind::BlockedBy) => {
-                Some(Lookup::Issue)
-            }
-            _ => None,
-        };
-        if let Some(l) = lookup {
-            if let Some(n) = e.old_ref.as_deref().and_then(|id| lookup_name(conn, l, id)) {
-                e.old_value = Some(n);
-            }
-            if let Some(n) = e.new_ref.as_deref().and_then(|id| lookup_name(conn, l, id)) {
-                e.new_value = Some(n);
-            }
-        }
-        e.actor_name = match &e.actor_id {
-            Some(aid) => lookup_name(conn, Lookup::Member, aid),
-            None if e.source == "local" => me.clone(),
-            None => None,
-        };
-    }
-}
-
-/// `events_for_issue` with names/actors resolved for display.
-pub fn events_for_issue_resolved(
-    conn: &Connection,
-    issue_id: &str,
-    current_user_remote_id: Option<i64>,
-) -> Result<Vec<IssueEvent>> {
-    let mut evs = events_for_issue(conn, issue_id)?;
-    resolve_events(conn, &mut evs, current_user_remote_id);
-    Ok(evs)
-}
-
-/// One entry of the merged activity stream.
-#[derive(Debug)]
-pub enum TimelineItem<'a> {
-    Event(&'a IssueEvent),
-    /// A top-level comment with all its replies, as `(depth, comment)` in
-    /// display order. Kept together so reply nesting isn't broken.
-    Thread(Vec<(usize, &'a Comment)>),
-}
-
-impl TimelineItem<'_> {
-    fn sort_key(&self) -> &str {
-        match self {
-            TimelineItem::Event(e) => &e.created_at,
-            TimelineItem::Thread(t) => &t[0].1.created_at,
-        }
-    }
-}
-
-/// Interleave events with comment threads, oldest first (stable: events come
-/// before a thread with an identical timestamp).
-pub fn timeline<'a>(events: &'a [IssueEvent], comments: &'a [Comment]) -> Vec<TimelineItem<'a>> {
-    let mut items: Vec<TimelineItem<'a>> = events.iter().map(TimelineItem::Event).collect();
-    let mut current: Vec<(usize, &Comment)> = Vec::new();
-    for (depth, c) in Comment::thread_order(comments) {
-        if depth == 0 && !current.is_empty() {
-            items.push(TimelineItem::Thread(std::mem::take(&mut current)));
-        }
-        current.push((depth, c));
-    }
-    if !current.is_empty() {
-        items.push(TimelineItem::Thread(current));
-    }
-    items.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
-    items
 }
 
 #[cfg(test)]
@@ -640,58 +464,5 @@ mod tests {
         let mut new = issue();
         new.description = Some(String::new());
         assert!(diff(&issue(), &new, &names).is_empty());
-    }
-
-    fn ev(id: i64, at: &str) -> IssueEvent {
-        IssueEvent {
-            id,
-            issue_id: "i1".into(),
-            actor_id: None,
-            source: "local".into(),
-            kind: "created".into(),
-            old_value: None,
-            new_value: None,
-            old_ref: None,
-            new_ref: None,
-            created_at: at.into(),
-            actor_name: None,
-        }
-    }
-
-    fn cm(id: &str, parent: Option<&str>, at: &str) -> Comment {
-        Comment {
-            id: id.into(),
-            remote_id: None,
-            issue_id: Some("i1".into()),
-            project_id: None,
-            author_id: None,
-            body: String::new(),
-            parent_id: parent.map(str::to_string),
-            created_at: at.into(),
-            updated_at: at.into(),
-        }
-    }
-
-    #[test]
-    fn timeline_interleaves_and_keeps_threads_whole() {
-        let events = vec![ev(1, "2026-01-01"), ev(2, "2026-01-03")];
-        let comments = vec![
-            cm("a", None, "2026-01-02"),
-            cm("a1", Some("a"), "2026-01-04"),
-            cm("b", None, "2026-01-05"),
-        ];
-        let items = timeline(&events, &comments);
-        let shape: Vec<String> = items
-            .iter()
-            .map(|i| match i {
-                TimelineItem::Event(e) => format!("e{}", e.id),
-                TimelineItem::Thread(t) => t
-                    .iter()
-                    .map(|(_, c)| c.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join("+"),
-            })
-            .collect();
-        assert_eq!(shape, vec!["e1", "a+a1", "e2", "b"]);
     }
 }
