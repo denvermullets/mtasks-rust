@@ -274,7 +274,57 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
             });
         }
     }
+    merge_pending(conn, issue_id, &mut items)?;
     Ok(items)
+}
+
+/// Add the issue's Pending changes (local edits linked to a sync-queue entry),
+/// attributed to "You", each after the last item not later than itself. A
+/// local-only issue (no remote id) also gets its created line, since the
+/// server has no entry for it.
+fn merge_pending(conn: &Connection, issue_id: &str, items: &mut Vec<ActivityItem>) -> Result<()> {
+    let local_only: bool = conn
+        .query_row(
+            "SELECT remote_id IS NULL FROM issues WHERE id = ?1",
+            params![issue_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, old_value, new_value, created_at, sync_queue_id IS NOT NULL
+         FROM issue_events WHERE issue_id = ?1 AND source = 'local'
+         ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map(params![issue_id], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, bool>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, kind, old, new, at, linked) = row?;
+        let Some(kind) = EventKind::parse(&kind) else {
+            continue;
+        };
+        let created = kind == EventKind::Created;
+        if !(linked || (created && local_only)) {
+            continue;
+        }
+        let item = ActivityItem {
+            key: format!("pending:{id}#0"),
+            text: events::describe(kind, old.as_deref(), new.as_deref()),
+            at,
+            actor: ActorSlot { remote_id: None, name: Some("You".to_string()) },
+            origin: ItemOrigin::Pending,
+        };
+        let pos = items.iter().rposition(|i| i.at <= item.at).map_or(0, |p| p + 1);
+        items.insert(pos, item);
+    }
+    Ok(())
 }
 
 /// One line per change in a version entry. Changes this layer can't word yet
@@ -530,5 +580,88 @@ mod display_tests {
         let conn = mem();
         store(&conn, r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-07-06T00:00:00Z","actor":null,"event":"update","description":"","changes":[]}]"#);
         assert!(activity_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod jrst141_tests {
+    use super::*;
+    use crate::db::{migrations, queries};
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute("INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1','T','T',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at) VALUES ('i1','i',4,'l1','t1',?1,?1)", params![now]).unwrap();
+        conn
+    }
+
+    fn edit_priority(conn: &Connection) -> i64 {
+        let mut issue = queries::get_issue(conn, "i1").unwrap().unwrap();
+        issue.priority = 1;
+        queries::update_issue_queued(conn, &issue).unwrap()
+    }
+
+    #[test]
+    fn edit_links_pending_change_to_its_queue_entry() {
+        let conn = mem();
+        let qid = edit_priority(&conn);
+        let linked: i64 = conn
+            .query_row("SELECT sync_queue_id FROM issue_events WHERE issue_id='i1' AND kind='priority'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(linked, qid);
+    }
+
+    #[test]
+    fn pending_item_shows_as_you_with_server_wording() {
+        let conn = mem();
+        edit_priority(&conn);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].origin, ItemOrigin::Pending);
+        assert_eq!(items[0].actor.name.as_deref(), Some("You"));
+        assert_eq!(items[0].text, "changed priority from None to High");
+    }
+
+    #[test]
+    fn unqueued_local_events_are_not_pending() {
+        let conn = mem();
+        let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
+        issue.priority = 1;
+        queries::update_issue(&conn, &issue).unwrap();
+        assert!(activity_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_merges_by_time_after_server_entries() {
+        let conn = mem();
+        let body = r#"[{"type":"version","id":1,"cursor":"version:1","created_at":"2026-01-02T00:00:00Z","actor":null,"event":"update","description":"",
+          "changes":[{"field":"title","from":"a","to":"b"}]}]"#;
+        let entries: Vec<ActivityEntry> = serde_json::from_str(body).unwrap();
+        store_batch(&conn, "i1", &entries, None, false).unwrap();
+        edit_priority(&conn);
+        let items = activity_for_issue(&conn, "i1").unwrap();
+        assert_eq!(items[0].origin, ItemOrigin::Server);
+        assert_eq!(items[1].origin, ItemOrigin::Pending);
+    }
+
+    #[test]
+    fn local_only_issue_reads_as_created_plus_pending() {
+        let conn = mem();
+        let mut issue = queries::get_issue(&conn, "i1").unwrap().unwrap();
+        issue.id = "i2".into();
+        issue.remote_id = None;
+        issue.team_number = Some(2);
+        queries::insert_issue(&conn, &issue).unwrap();
+        let mut issue = queries::get_issue(&conn, "i2").unwrap().unwrap();
+        issue.priority = 1;
+        queries::update_issue_queued(&conn, &issue).unwrap();
+        let got: Vec<_> = activity_for_issue(&conn, "i2").unwrap().into_iter().map(|i| (i.text, i.origin)).collect();
+        assert_eq!(got, [
+            ("created the issue".to_string(), ItemOrigin::Pending),
+            ("changed priority from None to High".to_string(), ItemOrigin::Pending),
+        ]);
     }
 }
