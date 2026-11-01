@@ -20,6 +20,7 @@ use crate::document::{self, Block};
 use crate::db::models::{Issue, Member, Team};
 use crate::files::images::{ImageState, ImageStore};
 use crate::files::inline;
+use crate::fonts;
 use crate::document::Inline;
 use crate::mentions::{self, body_segments, LinkTarget, BodySegment, ImageBlock, ImageKind};
 use crate::theme as t;
@@ -228,23 +229,36 @@ enum Run {
     Reference { text: String, target: Option<LinkTarget> },
     /// An external link.
     Link { text: String, url: String },
+    /// A run drawn bold. Wraps the run it styles, so it composes with
+    /// other styles (a bold link, a bold mention).
+    Bold(Box<Run>),
 }
 
 /// Map inlines to runs. `resolve` turns an `IDENT-n` token into a link target.
 fn runs(inlines: &[Inline], resolve: impl Fn(&str) -> Option<LinkTarget>) -> Vec<Run> {
-    inlines
-        .iter()
-        .map(|i| match i {
-            Inline::Text(s) => Run::Plain(s.clone()),
-            Inline::HardBreak => Run::Plain("\n".to_string()),
-            Inline::Mention(s) => Run::Mention(s.clone()),
-            Inline::IssueRef { text, prefix, number } => Run::Reference {
+    let mut out = Vec::new();
+    push_runs(inlines, &resolve, &mut out);
+    out
+}
+
+fn push_runs(inlines: &[Inline], resolve: &impl Fn(&str) -> Option<LinkTarget>, out: &mut Vec<Run>) {
+    for i in inlines {
+        match i {
+            Inline::Text(s) => out.push(Run::Plain(s.clone())),
+            Inline::HardBreak => out.push(Run::Plain("\n".to_string())),
+            Inline::Mention(s) => out.push(Run::Mention(s.clone())),
+            Inline::IssueRef { text, prefix, number } => out.push(Run::Reference {
                 text: text.clone(),
                 target: resolve(&format!("{prefix}-{number}")),
-            },
-            Inline::Link { text, url } => Run::Link { text: text.clone(), url: url.clone() },
-        })
-        .collect()
+            }),
+            Inline::Link { text, url } => out.push(Run::Link { text: text.clone(), url: url.clone() }),
+            Inline::Strong(inner) => {
+                let mut runs = Vec::new();
+                push_runs(inner, resolve, &mut runs);
+                out.extend(runs.into_iter().map(|r| Run::Bold(Box::new(r))));
+            }
+        }
+    }
 }
 
 fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> {
@@ -256,6 +270,11 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
         }
         Run::Reference { text, target: None } => span(text).color(t::accent()),
         Run::Link { text, url } => span(text).color(t::accent()).link(LinkTarget::External(url)),
+        Run::Bold(inner) => {
+            let mut s = span_for(*inner, plain);
+            s.font = Some(fonts::bold(s.font.unwrap_or_else(fonts::active)));
+            s
+        }
     }
 }
 
@@ -418,6 +437,33 @@ mod tests {
                 Run::Plain(" next".into()),
             ]
         );
+    }
+
+    #[test]
+    fn strong_inlines_map_to_bold_runs_keeping_their_tokens() {
+        let doc = document::parse_with("a **b @Ann [l](https://a.b)** c", "", &["Ann"]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        let bold = |r| Run::Bold(Box::new(r));
+        assert_eq!(
+            runs(inl, resolve),
+            [
+                Run::Plain("a ".into()),
+                bold(Run::Plain("b ".into())),
+                bold(Run::Mention("@Ann".into())),
+                bold(Run::Plain(" ".into())),
+                bold(Run::Link { text: "l".into(), url: "https://a.b".into() }),
+                Run::Plain(" c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bold_spans_use_the_bold_weight_and_keep_their_color() {
+        let s = span_for(Run::Bold(Box::new(Run::Plain("x".into()))), Color::WHITE);
+        assert_eq!(s.font.map(|f| f.weight), Some(iced::font::Weight::Bold));
+        assert_eq!(s.color, Some(Color::WHITE));
+        let plain = span_for(Run::Plain("x".into()), Color::WHITE);
+        assert_eq!(plain.font, None);
     }
 
     #[test]

@@ -35,7 +35,8 @@ fn main() -> iced::Result {
     for bytes in fonts::FONT_BYTES {
         app = app.font(bytes);
     }
-    app.default_font(fonts::font_for_key(&font_key))
+    fonts::set_active(fonts::font_for_key(&font_key));
+    app.default_font(fonts::active())
         .subscription(app::App::subscription)
         .theme(app::App::theme)
         .window(window::Settings {
