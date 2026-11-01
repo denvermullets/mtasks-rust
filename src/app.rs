@@ -6402,15 +6402,18 @@ impl App {
                         issue_labels: &self.issue_labels,
                         display: DisplayOptions::dashboard_rows(),
                     },
-                    self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
-                    self.focused_lane,
-                    self.focused_issue,
                     self.dashboard_header.clone(),
-                    self.sync_read_only,
-                    self.dashboards
-                        .iter()
-                        .find(|d| d.id == *id)
-                        .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
+                    &crate::views::dashboard::ViewState {
+                        collapsed: self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
+                        focused_group: self.focused_lane,
+                        focused_issue: self.focused_issue,
+                        read_only: self.sync_read_only,
+                        is_home: self
+                            .dashboards
+                            .iter()
+                            .find(|d| d.id == *id)
+                            .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
+                    },
                 )
             }
         };

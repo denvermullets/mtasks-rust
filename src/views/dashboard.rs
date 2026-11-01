@@ -1,5 +1,6 @@
-//! The dashboard view: a toolbar, then one colored section per group. Rows are
-//! the list-mode issue rows, so the visible-property toggles apply.
+//! The dashboard view: a toolbar, then one colored block per group. Rows are
+//! the list-mode issue rows with a fixed display (`DisplayOptions::dashboard_rows`),
+//! so the board's visible-property toggles don't apply.
 //!
 //! Focus uses the same `(group index, issue index in group)` pair as the list.
 
@@ -61,17 +62,24 @@ pub fn focused_span(groups: &[SpanGroup], group: usize, issue: usize) -> (f32, f
     (scroll::item_top(&heights, target, LIST_SPACING, LIST_PAD_TOP), scroll::LIST_ROW_H)
 }
 
+/// What the open dashboard's view needs beyond its content: which groups are
+/// collapsed, where focus is, and whether writes and the Home marker apply.
+pub struct ViewState<'a> {
+    pub collapsed: &'a HashSet<String>,
+    pub focused_group: usize,
+    pub focused_issue: usize,
+    pub read_only: bool,
+    pub is_home: bool,
+}
+
 pub fn view<'a>(
     dashboard: Option<&'a Dashboard>,
     evaluation: &Evaluation<'a>,
     data: CardData<'a>,
-    collapsed: &HashSet<String>,
-    focused_group: usize,
-    focused_issue: usize,
     header: Header,
-    read_only: bool,
-    is_home: bool,
+    state: &ViewState<'_>,
 ) -> Element<'a, Message> {
+    let ViewState { collapsed, focused_group, focused_issue, read_only, .. } = *state;
     let Some(dashboard) = dashboard else {
         return centered("Dashboard not found");
     };
@@ -106,7 +114,7 @@ pub fn view<'a>(
 
     container(
         column![]
-            .push(controls(dashboard, header, evaluation, read_only, is_home))
+            .push(controls(dashboard, header, evaluation, state))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
             .push(
@@ -137,9 +145,9 @@ fn controls<'a>(
     dashboard: &'a Dashboard,
     header: Header,
     evaluation: &Evaluation<'a>,
-    read_only: bool,
-    is_home: bool,
+    state: &ViewState<'_>,
 ) -> Element<'a, Message> {
+    let ViewState { read_only, is_home, .. } = *state;
     container(
         row![]
             .spacing(12)
@@ -149,10 +157,10 @@ fn controls<'a>(
             .push(mine_toggle(header.mine))
             .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
-            .push(team_picker(evaluation, header.team.as_deref()))
+            .push(team_picker(evaluation, header.team.as_ref()))
             .push(assignee_picker(evaluation, header.assignee))
-            .push(label_picker(evaluation, header.label.as_deref()))
-            .push(status_picker(evaluation, header.status.as_deref()))
+            .push(label_picker(evaluation, header.label.as_ref()))
+            .push(status_picker(evaluation, header.status.as_ref()))
             .push(reset_button())
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
@@ -179,104 +187,82 @@ fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
     pick_list(Sort::ALL, Some(active), Message::SetDashboardSort).text_size(13).into()
 }
 
-/// The team picker, listing the dashboard's source teams. Hidden when there
-/// is only one to pick; "All teams" clears the filter.
-fn team_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Message> {
-    if e.source_teams.len() < 2 {
+/// One entry of a header picker. `value: None` is the clearing choice ("All
+/// teams", "Anyone", ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Choice<T> {
+    value: Option<T>,
+    label: String,
+}
+
+impl<T> std::fmt::Display for Choice<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// A pick list over `options` (the clearing choice first), with the entry
+/// whose value equals `active` selected. Sends the picked value, `None` for
+/// the clearing choice. Hidden (zero-width) when `options` has fewer than
+/// `min_options` entries, i.e. nothing real to pick.
+fn picker<'a, T>(
+    options: Vec<Choice<T>>,
+    active: Option<&T>,
+    min_options: usize,
+    on_pick: impl Fn(Option<T>) -> Message + 'a,
+) -> Element<'a, Message>
+where
+    T: Clone + PartialEq + 'a,
+{
+    if options.len() < min_options {
         return horizontal_space().width(0).into();
     }
-    let mut options = vec![TeamChoice { id: None, label: "All teams".into() }];
-    options.extend(e.source_teams.iter().map(|t| TeamChoice {
-        id: Some(t.id.clone()),
-        label: t.name.clone(),
-    }));
-    let selected = options.iter().find(|o| o.id.as_deref() == active).cloned();
-    pick_list(options, selected, |c| Message::SetDashboardTeam(c.id)).text_size(13).into()
+    let selected = options.iter().find(|o| o.value.as_ref() == active).cloned();
+    pick_list(options, selected, move |c| on_pick(c.value)).text_size(13).into()
+}
+
+fn choice<T>(value: T, label: impl Into<String>) -> Choice<T> {
+    Choice { value: Some(value), label: label.into() }
+}
+
+fn clearing<T>(label: &str) -> Choice<T> {
+    Choice { value: None, label: label.to_string() }
+}
+
+/// The team picker, listing the dashboard's source teams. Hidden when there
+/// is only one to pick; "All teams" clears the filter.
+fn team_picker<'a>(e: &Evaluation<'a>, active: Option<&String>) -> Element<'a, Message> {
+    let mut options = vec![clearing("All teams")];
+    options.extend(e.source_teams.iter().map(|t| choice(t.id.clone(), t.name.clone())));
+    // "All teams" plus at least two teams.
+    picker(options, active, 3, Message::SetDashboardTeam)
 }
 
 /// The status picker: lane names across the source teams. "Any status" clears it.
-fn status_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Message> {
-    if e.status_options.is_empty() {
-        return horizontal_space().width(0).into();
-    }
-    let mut options = vec![StatusChoice(None)];
-    options.extend(e.status_options.iter().map(|s| StatusChoice(Some(s.clone()))));
-    let selected = options.iter().find(|o| o.0.as_deref() == active).cloned();
-    pick_list(options, selected, |c| Message::SetDashboardStatus(c.0)).text_size(13).into()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StatusChoice(Option<String>);
-
-impl std::fmt::Display for StatusChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0.as_deref().unwrap_or("Any status"))
-    }
+fn status_picker<'a>(e: &Evaluation<'a>, active: Option<&String>) -> Element<'a, Message> {
+    let mut options = vec![clearing("Any status")];
+    options.extend(e.status_options.iter().map(|s| choice(s.clone(), s.clone())));
+    picker(options, active, 2, Message::SetDashboardStatus)
 }
 
 /// The assignee picker: members of the source teams plus "Unassigned".
 /// Hidden when no member is known.
-fn assignee_picker<'a>(
-    e: &Evaluation<'a>,
-    active: Option<AssigneeFilter>,
-) -> Element<'a, Message> {
-    if e.assignees.is_empty() {
-        return horizontal_space().width(0).into();
+fn assignee_picker<'a>(e: &Evaluation<'a>, active: Option<AssigneeFilter>) -> Element<'a, Message> {
+    let mut options = vec![clearing("Anyone")];
+    options.extend(
+        e.assignees.iter().map(|a| choice(AssigneeFilter::User(a.remote_id), a.name.clone())),
+    );
+    if !e.assignees.is_empty() {
+        options.push(choice(AssigneeFilter::Unassigned, "Unassigned"));
     }
-    let mut options = vec![AssigneeChoice { pick: None, label: "Anyone".into() }];
-    options.extend(e.assignees.iter().map(|a| AssigneeChoice {
-        pick: Some(AssigneeFilter::User(a.remote_id)),
-        label: a.name.clone(),
-    }));
-    options.push(AssigneeChoice { pick: Some(AssigneeFilter::Unassigned), label: "Unassigned".into() });
-    let selected = options.iter().find(|o| o.pick == active).cloned();
-    pick_list(options, selected, |c| Message::SetDashboardAssignee(c.pick))
-        .text_size(13)
-        .into()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AssigneeChoice {
-    pick: Option<AssigneeFilter>,
-    label: String,
-}
-
-impl std::fmt::Display for AssigneeChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.label)
-    }
+    picker(options, active.as_ref(), 2, Message::SetDashboardAssignee)
 }
 
 /// The label picker, by name across the source teams. Hidden when no labels exist.
-fn label_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Message> {
-    if e.label_names.is_empty() {
-        return horizontal_space().width(0).into();
-    }
-    let mut options = vec![LabelChoice(None)];
-    options.extend(e.label_names.iter().map(|n| LabelChoice(Some(n.clone()))));
-    let selected = options.iter().find(|o| o.0.as_deref() == active).cloned();
-    pick_list(options, selected, |c| Message::SetDashboardLabel(c.0)).text_size(13).into()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LabelChoice(Option<String>);
-
-impl std::fmt::Display for LabelChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0.as_deref().unwrap_or("All labels"))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TeamChoice {
-    id: Option<String>,
-    label: String,
-}
-
-impl std::fmt::Display for TeamChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.label)
-    }
+fn label_picker<'a>(e: &Evaluation<'a>, active: Option<&String>) -> Element<'a, Message> {
+    let mut options = vec![clearing("All labels")];
+    options.extend(e.label_names.iter().map(|n| choice(n.clone(), n.clone())));
+    picker(options, active, 2, Message::SetDashboardLabel)
 }
 
 /// "Reset": back to the default filter, sort, search and pickers.
@@ -372,7 +358,7 @@ fn empty_message(g: &GroupResult<'_>) -> &'static str {
     }
 }
 
-/// A group's section header: color swatch, name, description and issue count.
+/// A group's header row: color swatch, name, description and issue count.
 fn group_header<'a>(
     g: &GroupResult<'a>,
     index: usize,
