@@ -112,3 +112,55 @@ pub fn mark_synced(conn: &Connection, entry_id: i64) -> Result<()> {
     )?;
     Ok(())
 }
+
+/// The Rails id of the team a queue entry belongs to, or `None` for user-level
+/// entries and for ones whose row or payload no longer says.
+pub fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64> {
+    let team_remote = |team_id: &str| {
+        crate::db::queries::remote_id_for(conn, "teams", team_id)
+            .ok()
+            .flatten()
+    };
+    let id = entry.entity_id.as_str();
+    match (entry.entity_type.as_str(), entry.action.as_str()) {
+        (_, "delete") => {
+            let v: serde_json::Value = serde_json::from_str(entry.payload.as_deref()?).ok()?;
+            v.get("team_remote_id")?.as_i64()
+        }
+        ("issue", _) => team_remote(&crate::db::queries::get_issue(conn, id).ok()??.team_id),
+        ("project", _) => team_remote(&crate::db::queries::get_project(conn, id).ok()??.team_id),
+        ("label", _) => team_remote(&crate::db::queries::get_label(conn, id).ok()??.team_id),
+        ("recurring_issue", _) => {
+            team_remote(&crate::db::recurring_issues::get(conn, id).ok()??.team_id)
+        }
+        ("saved_view", _) => {
+            let team_id: String = conn
+                .query_row("SELECT team_id FROM saved_views WHERE id = ?1", [id], |r| r.get(0))
+                .ok()?;
+            team_remote(&team_id)
+        }
+        (crate::db::attachments::UPLOAD_ENTITY, _) | (crate::db::attachments::ATTACHMENT_ENTITY, _) => {
+            let a = crate::db::attachments::get(conn, id).ok()??;
+            team_remote(&crate::db::attachments::owner_ref(conn, &a).ok()??.team_id)
+        }
+        (crate::db::attachments::COMMENT_ENTITY, _) => {
+            let c = crate::db::queries::get_comment(conn, id).ok()??;
+            let team_id = match (&c.issue_id, &c.project_id) {
+                (Some(i), _) => crate::db::queries::get_issue(conn, i).ok()??.team_id,
+                (None, Some(p)) => crate::db::queries::get_project(conn, p).ok()??.team_id,
+                (None, None) => return None,
+            };
+            team_remote(&team_id)
+        }
+        ("dependency", _) => {
+            let d = crate::db::queries::get_issue_dependency(conn, id).ok()??;
+            team_remote(
+                &crate::db::queries::get_issue(conn, &d.blocking_issue_id)
+                    .ok()??
+                    .team_id,
+            )
+        }
+        _ => None,
+    }
+}
+

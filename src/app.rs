@@ -1009,6 +1009,38 @@ impl App {
         });
     }
 
+    /// Stop showing anything that belonged to teams that were just removed.
+    /// `reload_data` then picks a new team if the selected one went.
+    fn leave_deleted_teams(&mut self, deleted: &[String]) {
+        if deleted.is_empty() {
+            return;
+        }
+        let selected_gone = self
+            .selected_team_id
+            .as_ref()
+            .is_some_and(|id| deleted.contains(id));
+        if selected_gone {
+            self.selected_team_id = None;
+            self.open_view = None;
+            self.modal = Modal::None;
+            self.focused_lane = 0;
+            self.focused_issue = 0;
+            if !self.view.is_cross_team() && self.view != View::Inbox {
+                self.view = View::Board;
+            }
+        }
+        // A detail view can be open on another team's row, e.g. from My Issues.
+        let conn = self.db();
+        let detail_gone = match &self.view {
+            View::IssueDetail(id) => matches!(queries::get_issue(&conn, id), Ok(None)),
+            View::ProjectDetail(id) => matches!(queries::get_project(&conn, id), Ok(None)),
+            _ => false,
+        };
+        if detail_gone {
+            self.view = View::Board;
+        }
+    }
+
     fn reload_data(&mut self) {
         let conn = self.db();
         self.teams = queries::all_teams(&conn).unwrap_or_default();
@@ -5649,16 +5681,7 @@ impl App {
                 self.inaccessible_teams =
                     queries::inaccessible_team_identifiers(&self.db()).unwrap_or_default();
 
-                // If pull deleted the orphan seed team and that's what was
-                // selected, drop the now-dangling selection. reload_data will
-                // pick the first available team (likely a Rails-backed one).
-                if let Some(deleted) = &report.deleted_orphan_team {
-                    if self.selected_team_id.as_deref() == Some(deleted.as_str()) {
-                        self.selected_team_id = None;
-                        self.focused_lane = 0;
-                        self.focused_issue = 0;
-                    }
-                }
+                self.leave_deleted_teams(&report.deleted_teams);
 
                 // Classify failures before touching UI state (ends the borrow of
                 // `report` before we mutate `self`). A 401 outranks everything:

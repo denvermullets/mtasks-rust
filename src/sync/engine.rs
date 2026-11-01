@@ -31,7 +31,7 @@ use crate::api::{
     LabelParams, MeDto, ProjectParams, RecurringIssueParams,
 };
 use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
-use crate::db::{connection, dashboards, queries, sync_queue};
+use crate::db::{connection, dashboards, queries, sync_queue, team_purge};
 use crate::sync::cursor;
 
 #[derive(Debug, Default, Clone)]
@@ -123,10 +123,10 @@ impl SyncErrorKind {
 pub struct FullSyncReport {
     pub pull: SyncReport,
     pub push: SyncReport,
-    /// Local UUID of the orphan seed team that was cleaned up during this
-    /// pull, if any. The app uses this to repoint `selected_team_id` so the
-    /// board doesn't render against a row that no longer exists.
-    pub deleted_orphan_team: Option<String>,
+    /// Local UUIDs of teams this pull removed (purged, or the orphan seed team).
+    /// The app uses this to repoint `selected_team_id` and any open view so
+    /// nothing renders against a row that no longer exists.
+    pub deleted_teams: Vec<String>,
     /// Signed-in user's `(rails_id, name)` from the pull's `/me` call. The app
     /// persists this to config for stamping `creator_id` on new issues.
     pub current_user: Option<(i64, String)>,
@@ -336,7 +336,7 @@ where
         return FullSyncReport {
             pull: SyncReport::default(),
             push,
-            deleted_orphan_team: None,
+            deleted_teams: Vec::new(),
             current_user: None,
             can_write: preflight_can_write,
             push_only: false,
@@ -346,7 +346,7 @@ where
     FullSyncReport {
         pull: outcome.report,
         push,
-        deleted_orphan_team: outcome.deleted_orphan_team,
+        deleted_teams: outcome.deleted_teams,
         current_user: outcome.current_user,
         can_write: outcome.can_write.or(preflight_can_write),
         push_only: false,
@@ -3654,58 +3654,9 @@ fn classify_in_team(err: &ApiError, team_remote_id: i64) -> Outcome {
 /// True when the entry belongs to a team currently flagged inaccessible.
 fn entry_team_is_inaccessible(entry: &SyncQueueEntry) -> bool {
     let Ok(conn) = open() else { return false };
-    match entry_team_remote_id(&conn, entry) {
+    match sync_queue::entry_team_remote_id(&conn, entry) {
         Some(rid) => queries::team_access_lost(&conn, rid).unwrap_or(false),
         None => false,
-    }
-}
-
-fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64> {
-    let team_remote = |team_id: &str| {
-        queries::remote_id_for(conn, "teams", team_id)
-            .ok()
-            .flatten()
-    };
-    let id = entry.entity_id.as_str();
-    match (entry.entity_type.as_str(), entry.action.as_str()) {
-        (_, "delete") => {
-            let v: serde_json::Value = serde_json::from_str(entry.payload.as_deref()?).ok()?;
-            v.get("team_remote_id")?.as_i64()
-        }
-        ("issue", _) => team_remote(&queries::get_issue(conn, id).ok()??.team_id),
-        ("project", _) => team_remote(&queries::get_project(conn, id).ok()??.team_id),
-        ("label", _) => team_remote(&queries::get_label(conn, id).ok()??.team_id),
-        ("recurring_issue", _) => {
-            team_remote(&crate::db::recurring_issues::get(conn, id).ok()??.team_id)
-        }
-        ("saved_view", "create") => {
-            let team_id: String = conn
-                .query_row("SELECT team_id FROM saved_views WHERE id = ?1", [id], |r| r.get(0))
-                .ok()?;
-            team_remote(&team_id)
-        }
-        (attachments::UPLOAD_ENTITY, _) | (attachments::ATTACHMENT_ENTITY, _) => {
-            let a = attachments::get(conn, id).ok()??;
-            team_remote(&attachments::owner_ref(conn, &a).ok()??.team_id)
-        }
-        (attachments::COMMENT_ENTITY, _) => {
-            let c = queries::get_comment(conn, id).ok()??;
-            let team_id = match (&c.issue_id, &c.project_id) {
-                (Some(i), _) => queries::get_issue(conn, i).ok()??.team_id,
-                (None, Some(p)) => queries::get_project(conn, p).ok()??.team_id,
-                (None, None) => return None,
-            };
-            team_remote(&team_id)
-        }
-        ("dependency", _) => {
-            let d = queries::get_issue_dependency(conn, id).ok()??;
-            team_remote(
-                &queries::get_issue(conn, &d.blocking_issue_id)
-                    .ok()??
-                    .team_id,
-            )
-        }
-        _ => None,
     }
 }
 
@@ -3782,7 +3733,7 @@ fn decide(local_updated: &str, remote_updated: &str, has_pending: bool) -> Merge
 /// Result of a pull that includes optional bookkeeping outside the row counts.
 pub struct PullOutcome {
     pub report: SyncReport,
-    pub deleted_orphan_team: Option<String>,
+    pub deleted_teams: Vec<String>,
     /// Signed-in user's `(rails_id, name)` from `/me`, when the call succeeded.
     /// The app persists this to config to stamp `creator_id` on new issues.
     pub current_user: Option<(i64, String)>,
@@ -3805,7 +3756,7 @@ impl SyncEngine {
     /// (the caller uses this to repoint `selected_team_id`).
     pub async fn pull(client: &ApiClient, ctx: &CycleCtx) -> PullOutcome {
         let mut report = SyncReport::default();
-        let mut deleted_orphan_team = None;
+        let mut deleted_teams = Vec::new();
 
         // Phase 1: the token's scope, from the cycle's single `/me` call.
         let me = match &ctx.me {
@@ -3818,7 +3769,7 @@ impl SyncEngine {
                 report.last_error = Some(msg);
                 return PullOutcome {
                     report,
-                    deleted_orphan_team,
+                    deleted_teams,
                     current_user: None,
                     can_write: None,
                 };
@@ -3835,8 +3786,8 @@ impl SyncEngine {
 
         // Phase 2: refresh teams (and discover any new ones the token can see).
         match pull_teams(client).await {
-            Ok(orphan) => {
-                deleted_orphan_team = orphan;
+            Ok(deleted) => {
+                deleted_teams = deleted;
                 report.processed += 1;
             }
             Err(msg) => {
@@ -3845,7 +3796,7 @@ impl SyncEngine {
                 report.last_error = Some(msg);
                 return PullOutcome {
                     report,
-                    deleted_orphan_team,
+                    deleted_teams,
                     current_user,
                     can_write,
                 };
@@ -3891,7 +3842,7 @@ impl SyncEngine {
                 report.failed += 1;
                 return PullOutcome {
                     report,
-                    deleted_orphan_team,
+                    deleted_teams,
                     current_user,
                     can_write,
                 };
@@ -3902,7 +3853,7 @@ impl SyncEngine {
             // we couldn't find locally after pull_teams — shouldn't happen).
             return PullOutcome {
                 report,
-                deleted_orphan_team,
+                deleted_teams,
                 current_user,
                 can_write,
             };
@@ -3973,7 +3924,7 @@ impl SyncEngine {
 
         PullOutcome {
             report,
-            deleted_orphan_team,
+            deleted_teams,
             current_user,
             can_write,
         }
@@ -4021,8 +3972,8 @@ fn select_pull_targets(
         .collect())
 }
 
-/// Returns the local UUID of the orphan seed team if one was cleaned up.
-async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
+/// Returns the local UUIDs of the teams this pull removed.
+async fn pull_teams(client: &ApiClient) -> Result<Vec<String>, String> {
     let dtos = teams::list(client)
         .await
         .map_err(|e| format!("teams: {e}"))?;
@@ -4031,10 +3982,6 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
     let inserted_any_remote_team = !dtos.is_empty();
 
     let conn = open()?;
-    // A team Rails lists is accessible again: lift any inaccessible flag.
-    for id in &active_ids {
-        let _ = queries::set_team_access_lost(&conn, *id, false);
-    }
     for dto in dtos {
         let existing = queries::find_team_by_remote_id(&conn, dto.id)
             .map_err(|e| format!("db (find team): {e}"))?;
@@ -4073,24 +4020,60 @@ async fn pull_teams(client: &ApiClient) -> Result<Option<String>, String> {
     drop(conn);
 
     let conn = open()?;
-    let _ = queries::archive_missing_teams(&conn, &active_ids);
+    let mut deleted = reconcile_teams(&conn, &active_ids);
 
     // Once we've confirmed Rails has at least one team for this token, the
     // locally-seeded "My Project" placeholder is redundant. Cleanup is gated
     // on "no issues attached" so we never destroy real local-only work.
-    let deleted_orphan = if inserted_any_remote_team {
+    if inserted_any_remote_team {
         match queries::cleanup_orphan_seed_team(&conn) {
-            Ok(opt) => opt,
+            Ok(orphan) => deleted.extend(orphan),
             Err(e) => {
                 sync_log("phase=pull_teams", "cleanup_orphan_failed", &format!("db: {e}"));
-                None
             }
         }
-    } else {
-        None
-    };
+    }
 
-    Ok(deleted_orphan)
+    Ok(deleted)
+}
+
+/// Apply a successful `/teams` response: restore listed teams, purge unlisted
+/// ones and clear the files they leave behind. Returns the purged local ids.
+fn reconcile_teams(conn: &Connection, listed: &[i64]) -> Vec<String> {
+    let reconciled = match team_purge::reconcile_listed_teams(conn, listed) {
+        Ok(r) => r,
+        Err(e) => {
+            sync_log("phase=pull_teams", "reconcile_failed", &format!("db: {e}"));
+            return Vec::new();
+        }
+    };
+    for (team_id, reason) in &reconciled.failed {
+        sync_log("phase=pull_teams", "purge_failed", &format!("team={team_id} db: {reason}"));
+    }
+    remove_purged_files(conn, reconciled.purged)
+}
+
+/// Delete what a purge leaves on disk: staged uploads, and the file cache so
+/// cached bytes don't stay reachable. The cache isn't indexed by team, so all of
+/// it goes; anything still needed downloads again. Returns the purged local ids.
+fn remove_purged_files(conn: &Connection, purged: Vec<team_purge::PurgedTeam>) -> Vec<String> {
+    if purged.is_empty() {
+        return Vec::new();
+    }
+    if let Err(e) = crate::files::cache::FileCache::at_default_root().clear(conn) {
+        sync_log("phase=pull_teams", "cache_clear_failed", &e.to_string());
+    }
+    purged
+        .into_iter()
+        .map(|team| {
+            for path in &team.outbox_paths {
+                if let Err(e) = crate::files::outbox::remove(path) {
+                    sync_log("phase=pull_teams", "outbox_remove_failed", &e.to_string());
+                }
+            }
+            team.team_id
+        })
+        .collect()
 }
 
 /// Conditional (ETag) pull shared by the lane, label and member lists: send
@@ -5168,7 +5151,7 @@ mod tests {
         let r = push_only_report(Some(true), SyncReport::default());
         assert!(r.push_only);
         assert_eq!(r.pull.failed, 0);
-        assert!(r.deleted_orphan_team.is_none() && r.current_user.is_none());
+        assert!(r.deleted_teams.is_empty() && r.current_user.is_none());
         assert!(r.cycle_succeeded());
         // A read-only token never pushes and shows the banner.
         let ro = push_only_report(Some(false), read_only_report());
@@ -5552,7 +5535,7 @@ mod tests {
         let mk = |can_write, push: SyncReport| FullSyncReport {
             pull: SyncReport::default(),
             push,
-            deleted_orphan_team: None,
+            deleted_teams: Vec::new(),
             current_user: None,
             can_write,
             push_only: false,
@@ -5674,11 +5657,11 @@ mod tests {
             synced_at: None,
         };
         assert_eq!(
-            entry_team_remote_id(&conn, &mk("issue", "i1", "update", None)),
+            sync_queue::entry_team_remote_id(&conn, &mk("issue", "i1", "update", None)),
             Some(700)
         );
         assert_eq!(
-            entry_team_remote_id(
+            sync_queue::entry_team_remote_id(
                 &conn,
                 &mk("issue", "i1", "delete", Some("{\"team_remote_id\":700}"))
             ),
@@ -7905,7 +7888,7 @@ mod tests {
         report.processed = processed;
         PullOutcome {
             report,
-            deleted_orphan_team: None,
+            deleted_teams: Vec::new(),
             current_user: None,
             can_write: None,
         }

@@ -1908,32 +1908,6 @@ pub fn archive_missing_issues(
     conn.execute(&sql, params_from_iter(bound))
 }
 
-/// Archive teams whose `remote_id` is NOT in `active_remote_ids`. Rails returns
-/// only teams the current token sees, so this is a per-token view of "active".
-/// Intentionally conservative: only flips `archived_at` when the column is NULL,
-/// never resurrects.
-pub fn archive_missing_teams(conn: &Connection, active_remote_ids: &[i64]) -> Result<usize> {
-    let now = crate::db::now_iso();
-    if active_remote_ids.is_empty() {
-        return conn.execute(
-            "UPDATE teams SET archived_at = ?1
-             WHERE remote_id IS NOT NULL AND archived_at IS NULL",
-            params![now],
-        );
-    }
-    let placeholders: Vec<String> = (0..active_remote_ids.len())
-        .map(|i| format!("?{}", i + 2))
-        .collect();
-    let sql = format!(
-        "UPDATE teams SET archived_at = ?1
-         WHERE remote_id IS NOT NULL AND remote_id NOT IN ({}) AND archived_at IS NULL",
-        placeholders.join(",")
-    );
-    let mut bound: Vec<Value> = vec![now.into()];
-    bound.extend(active_remote_ids.iter().map(|id| (*id).into()));
-    conn.execute(&sql, params_from_iter(bound))
-}
-
 /// Flag (or clear) a team as inaccessible after Rails answered a push with a
 /// team-access 404. Pending edits stay queued; pushes for the team are skipped.
 pub fn set_team_access_lost(conn: &Connection, remote_id: i64, lost: bool) -> Result<usize> {
