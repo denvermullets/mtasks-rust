@@ -35,6 +35,10 @@ pub enum Block {
     List(List),
     /// A `>` quote: any blocks, including lists and further quotes.
     Quote(Vec<Block>),
+    /// A heading, level 1 to 6.
+    Heading(u8, Vec<Inline>),
+    /// A horizontal rule (`---`).
+    Rule,
     /// A fenced or indented code block: verbatim text, never tokenized.
     Code(CodeBlock),
     /// A pipe table.
@@ -265,6 +269,8 @@ struct Builder {
     /// Open wrappers (strong), innermost last: the buffer each one wraps into
     /// and its constructor. The wrapper's own content is in `current`.
     wrappers: Vec<(Vec<Inline>, fn(Vec<Inline>) -> Inline)>,
+    /// Level of the heading being read; its text flushes as `Block::Heading`.
+    heading: Option<u8>,
     /// The code block being read: (language, text so far).
     code: Option<(Option<String>, String)>,
 }
@@ -455,6 +461,18 @@ impl Builder {
                 };
                 self.code = Some((lang, String::new()));
             }
+            Event::Start(Tag::Heading { level, .. }) => {
+                self.flush();
+                self.heading = Some(level as u8);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                self.flush();
+                self.heading = None;
+            }
+            Event::Rule => {
+                self.flush();
+                self.push_block(Block::Rule);
+            }
             Event::Start(Tag::BlockQuote(_)) => self.open(Frame::Quote(Vec::new())),
             Event::End(TagEnd::BlockQuote(_)) => self.close(),
             Event::Start(Tag::Table(_)) => self.open(Frame::Table(Table::default())),
@@ -554,7 +572,10 @@ impl Builder {
         }
         if !self.current.is_empty() {
             let runs = std::mem::take(&mut self.current);
-            self.push_block(Block::Paragraph(runs));
+            self.push_block(match self.heading {
+                Some(level) => Block::Heading(level, runs),
+                None => Block::Paragraph(runs),
+            });
         }
     }
 
@@ -634,6 +655,41 @@ mod tests {
                 "html comment dropped",
                 "a <!-- hidden --> b",
                 vec![para(vec![text("a  b")])],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    fn heading(level: u8, runs: Vec<Inline>) -> Block {
+        Block::Heading(level, runs)
+    }
+
+    #[test]
+    fn parses_headings_and_rules() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("h1", "# Title", vec![heading(1, vec![text("Title")])]),
+            ("h6", "###### Small", vec![heading(6, vec![text("Small")])]),
+            (
+                "between paragraphs",
+                "before\n\n## Mid\n\nafter",
+                vec![para(vec![text("before")]), heading(2, vec![text("Mid")]), para(vec![text("after")])],
+            ),
+            (
+                "inline styles kept",
+                "### a **b**",
+                vec![heading(3, vec![text("a "), Inline::Strong(vec![text("b")])])],
+            ),
+            ("not a heading without a space", "#nope", vec![para(vec![text("#nope")])]),
+            ("heading in a quote", "> # Q", vec![Block::Quote(vec![heading(1, vec![text("Q")])])]),
+            ("rule", "a\n\n---\n\nb", vec![para(vec![text("a")]), Block::Rule, para(vec![text("b")])]),
+            ("star rule", "***", vec![Block::Rule]),
+            ("rule in a quote", "> a\n>\n> ---", vec![Block::Quote(vec![para(vec![text("a")]), Block::Rule])]),
+            (
+                "text after a heading is a paragraph",
+                "# H\ntext",
+                vec![heading(1, vec![text("H")]), para(vec![text("text")])],
             ),
         ];
         for (name, body, want) in cases {

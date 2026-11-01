@@ -20,6 +20,10 @@ pub fn overlay<'a>(content: &CardContent, anchor: Rectangle) -> Element<'a, Mess
     let card = match content {
         CardContent::Issue(issue) => issue_card(issue),
     };
+    // The card reports the pointer so moving from the anchor onto it keeps it open.
+    let card = iced::widget::mouse_area(card)
+        .on_enter(Message::HoverCardEntered)
+        .on_exit(Message::HoverCardLeft);
     container(card)
         .padding(Padding {
             top: anchor.y + anchor.height + t::space::S1,
