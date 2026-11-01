@@ -7,6 +7,7 @@ pub mod dashboard;
 pub mod group_form;
 pub mod display_panel;
 pub mod header;
+pub mod hover_card_view;
 pub mod hover_rich;
 pub mod inbox;
 pub mod issue_detail;

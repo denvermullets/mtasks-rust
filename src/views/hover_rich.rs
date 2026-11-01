@@ -59,7 +59,10 @@ impl HoverTracker {
 }
 
 type OnLink<'a, Link, Message> = Box<dyn Fn(Link) -> Message + 'a>;
-type OnHover<'a, Link, Message> = Box<dyn Fn(Option<Hover<Link>>) -> Message + 'a>;
+type OnHover<'a, Link, Message> = Box<dyn Fn(u64, Option<Hover<Link>>) -> Message + 'a>;
+
+/// Source of widget owner ids; see [`HoverRich::on_hover`].
+static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub struct HoverRich<'a, Link, Message>
 where
@@ -91,7 +94,12 @@ where
     }
 
     /// Called when the hovered span changes; `None` when the pointer leaves.
-    pub fn on_hover(mut self, f: impl Fn(Option<Hover<Link>>) -> Message + 'a) -> Self {
+    /// The first argument identifies this widget instance: it is stable while
+    /// the widget stays in the tree and unique among live widgets. Several
+    /// widgets can sit side by side, so a `None` from one widget may arrive
+    /// after a `Some` from the next; the owner lets the receiver tell whose
+    /// `None` it is.
+    pub fn on_hover(mut self, f: impl Fn(u64, Option<Hover<Link>>) -> Message + 'a) -> Self {
         self.on_hover = Some(Box::new(f));
         self
     }
@@ -101,6 +109,7 @@ struct State<Link> {
     spans: Vec<Span<'static, Link, iced::Font>>,
     span_pressed: Option<usize>,
     hover: HoverTracker,
+    owner: u64,
     paragraph: Paragraph,
 }
 
@@ -118,6 +127,7 @@ where
             spans: Vec::new(),
             span_pressed: None,
             hover: HoverTracker::default(),
+            owner: NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             paragraph: Paragraph::default(),
         })
     }
@@ -284,7 +294,7 @@ where
                         viewport: *viewport,
                     }
                 });
-                shell.publish(on_hover(hover));
+                shell.publish(on_hover(state.owner, hover));
             }
         }
 

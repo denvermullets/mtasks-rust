@@ -218,7 +218,14 @@ pub enum Message {
     /// Click on a link in rendered body text, carrying its typed target.
     OpenBodyLink(crate::mentions::LinkTarget),
     /// The hovered body span changed (`None` = pointer left). JRST-299 consumes it.
-    BodyHover(Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// A body paragraph's hovered span changed. The id is the reporting
+    /// widget's owner id (see `hover_rich::HoverRich::on_hover`).
+    BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// The pointer moved (window coordinates). Only subscribed while a body
+    /// is on screen; feeds `window_cursor`.
+    WindowCursor(iced::Point),
+    /// A hover-card timer elapsed (see `hover_card::Effect`).
+    HoverTimer(u64),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -885,6 +892,10 @@ pub struct App {
     sync_next_delay: Option<std::time::Duration>,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
+    /// Hover card over body references (JRST-299).
+    body_hover: crate::body_hover::BodyHover,
+    /// Last pointer position in window coordinates, for placing hover cards.
+    window_cursor: Option<iced::Point>,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
     next_toast_id: u64,
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
@@ -2928,6 +2939,8 @@ impl App {
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
+            body_hover: crate::body_hover::BodyHover::new(),
+            window_cursor: None,
             next_toast_id: 0,
             sync_paused_auth: false,
         };
@@ -2995,6 +3008,16 @@ impl App {
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
 
         let mut subs = vec![keys, activity, banner_clicks];
+        // Hover cards are placed from the window pointer position. Tracking it
+        // rebuilds the view on every move, so only views that draw bodies pay.
+        if self.issue_detail.is_some() || matches!(self.view, View::ProjectDetail(_)) {
+            subs.push(event::listen_with(|event, _status, _id| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::WindowCursor(position))
+                }
+                _ => None,
+            }));
+        }
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(
@@ -3009,6 +3032,16 @@ impl App {
             );
         }
         Subscription::batch(subs)
+    }
+
+    /// Turn a hover-card effect into the delayed message the machine asked for.
+    fn hover_timer(effect: Option<crate::hover_card::Effect>) -> Task<Message> {
+        match effect {
+            Some(e) => Task::perform(tokio::time::sleep(e.delay), move |_| {
+                Message::HoverTimer(e.generation)
+            }),
+            None => Task::none(),
+        }
     }
 
     /// Feed the sync scheduler an event, re-arm its timer, and start the cycle
@@ -4457,7 +4490,25 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
-            Message::BodyHover(_) => {}
+            Message::WindowCursor(p) => self.window_cursor = Some(p),
+            Message::BodyHover(owner, hover) => {
+                let span = hover.map(|h| {
+                    let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
+                    // Without a known pointer the card would land at the origin;
+                    // fall back to the content-space rectangle.
+                    let rect = match self.window_cursor {
+                        Some(w) => crate::body_hover::window_rect(h.bounds, h.cursor, w),
+                        None => h.bounds,
+                    };
+                    (anchor, rect)
+                });
+                let effect = self.body_hover.body_hover(owner, span);
+                return Self::hover_timer(effect);
+            }
+            Message::HoverTimer(generation) => {
+                let effect = self.body_hover.event(crate::hover_card::Event::TimerFired(generation));
+                return Self::hover_timer(effect);
+            }
             Message::OpenBodyLink(target) => match target {
                 crate::mentions::LinkTarget::Issue(id) => {
                     return self.update(Message::OpenIssueDetail(id));
@@ -6215,6 +6266,13 @@ impl App {
         Task::none()
     }
 
+    /// The hover card for the current anchor, positioned under its span.
+    fn hover_card_overlay(&self) -> Option<Element<'_, Message>> {
+        let (anchor, rect) = self.body_hover.current()?;
+        let content = crate::body_hover::content_for(anchor, &self.issues, &self.teams)?;
+        Some(crate::views::hover_card_view::overlay(&content, rect))
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let team_sidebar = team_list::view(team_list::SidebarState {
             teams: &self.teams,
@@ -6783,6 +6841,11 @@ impl App {
                 iced::widget::stack![base, command_palette::view(palette)].into()
             }
             Modal::None => base,
+        };
+
+        let content = match self.hover_card_overlay() {
+            Some(card) => iced::widget::stack![content, card].into(),
+            None => content,
         };
 
         // Toasts sit above everything, including any open modal.

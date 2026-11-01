@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod body_hover;
 mod config;
 mod csv_io;
 mod dashboard_eval;
@@ -9,7 +10,7 @@ mod display;
 mod document;
 mod files;
 mod fonts;
-#[allow(dead_code)] // wired in by later hover-card tickets
+#[allow(dead_code)] // click, scroll, escape and card events arrive with later tickets
 mod hover_card;
 mod inbox;
 mod issue_match;
