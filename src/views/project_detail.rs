@@ -5,7 +5,7 @@ use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::{Message, View};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
-use crate::theme as t;
+use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::issue_detail::{new_comment_composer, push_thread, CommentAttachments, ThreadCtx};
 use crate::display::{CardProperty, DisplayOptions};
 use crate::views::util;
@@ -98,37 +98,38 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
-        .spacing(6)
+        .spacing(space::S2)
         .align_y(Alignment::Center)
         .push(
-            button(text("← Projects").size(13).color(t::text_secondary()))
+            button(text("← Projects").size(type_scale::SM).color(t::text_secondary()))
                 .on_press(Message::NavigateToView(View::ProjectList))
                 .padding(0)
                 .style(button::text),
         )
-        .push(text("›").size(13).color(t::text_muted()))
-        .push(text(&project.name).size(13).color(t::text_muted()));
+        .push(text("›").size(type_scale::SM).color(t::text_muted()))
+        .push(text(&project.name).size(type_scale::SM).color(t::text_secondary()));
 
     // ---- Header: status dot + buffered title ----
+    let status_color = project
+        .status
+        .map_or(t::text_muted(), t::project_status_color);
     let header = row![]
-        .spacing(10)
+        .spacing(space::S3)
         .align_y(Alignment::Center)
         .push(
             container(
-                text("\u{25CF}").size(14).color(
-                    project
-                        .status
-                        .map_or(t::text_muted(), t::project_status_color),
-                ),
+                text("\u{25CF}").size(type_scale::LG).color(status_color),
             )
-                .center_x(Length::Fixed(28.0))
-                .center_y(Length::Fixed(28.0))
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(t::bg_card())),
+                .center_x(Length::Fixed(space::S10))
+                .center_y(Length::Fixed(space::S10))
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(iced::Color {
+                        a: STATUS_TILE_ALPHA,
+                        ..status_color
+                    })),
                     border: Border {
-                        color: t::border(),
-                        width: 1.0,
-                        radius: 6.0.into(),
+                        radius: radius::SM.into(),
+                        ..Default::default()
                     },
                     ..Default::default()
                 }),
@@ -137,23 +138,27 @@ pub fn view<'a>(
             text_input("Project name", &detail.name)
                 .on_input(Message::ProjectDetailNameChanged)
                 .on_submit(Message::CommitProjectDetail)
-                .size(22)
-                .padding(4)
+                .size(type_scale::XXL)
+                .font(crate::fonts::bold_active())
+                .padding(space::S1)
                 .style(title_input_style),
         );
 
-    let left = column![]
-        .spacing(16)
-        .padding(24)
-        .width(Length::Fill)
+    let head = column![]
+        .spacing(space::S4)
         .push(breadcrumb)
         .push(header)
         .push_maybe(
             detail
                 .error
                 .as_deref()
-                .map(|e| text(e).size(12).color(t::danger())),
-        )
+                .map(|e| text(e).size(type_scale::XS).color(t::danger())),
+        );
+
+    // Title-to-body gap is S6; the sections below are S8 apart. The attach
+    // button stays close to the description it belongs to.
+    let description = column![]
+        .spacing(space::S2)
         .push(description_section(detail, &crate::views::body::BodyCtx {
             teams,
             issues,
@@ -164,11 +169,14 @@ pub fn view<'a>(
             on_image: Some(Message::OpenInlineImage),
         }))
         .push(
-            button(text("+ Attach file").size(12).color(t::accent()))
+            button(text("+ Attach file").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::PickAttachmentFiles)
                 .padding(0)
                 .style(button::text),
-        )
+        );
+    let sections = column![]
+        .spacing(space::S8)
+        .push(description)
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
@@ -176,6 +184,12 @@ pub fn view<'a>(
             comments, detail, members, teams, issues, comment_attachments, images, host,
             pending_paths,
         ));
+    let left = column![]
+        .spacing(space::S6)
+        .padding(space::S8)
+        .width(Length::Fill)
+        .push(head)
+        .push(sections);
 
     // ---- Right sidebar: properties ----
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
@@ -193,76 +207,84 @@ pub fn view<'a>(
         .cloned();
 
     let sidebar = column![]
-        .spacing(18)
-        .padding(20)
+        .spacing(space::S6)
+        .padding(space::S6)
         .width(Length::Fill)
-        .push(text("Properties").size(11).color(t::text_muted()))
-        .push(section(
+        .push(util::sidebar_heading("Properties"))
+        .push(util::sidebar_field(
             "Status",
             pick_list(
                 STATUSES.as_slice(),
                 project.status,
                 Message::ProjectDetailStatusChanged,
             )
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .padding(util::SIDEBAR_CONTROL_PADDING)
+            .text_size(type_scale::SM)
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
-        .push(section(
+        .push(util::sidebar_field(
             "Priority",
             pick_list(
                 PRIORITIES.as_slice(),
                 Some(project.priority_enum()),
                 Message::ProjectDetailPriorityChanged,
             )
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .padding(util::SIDEBAR_CONTROL_PADDING)
+            .text_size(type_scale::SM)
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
-        .push(section(
+        .push(util::sidebar_field(
             "Lead",
             pick_list(member_options, selected_lead, |o: MemberOption| {
                 Message::ProjectDetailLeadChanged(o.id)
             })
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .padding(util::SIDEBAR_CONTROL_PADDING)
+            .text_size(type_scale::SM)
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
         // Project labels aren't wired into the data layer yet (see JAIT-181
         // notes); render read-only until the follow-up ticket lands.
-        .push(section("Labels", placeholder_value()))
-        .push(section(
+        .push(util::sidebar_field("Labels", placeholder_value()))
+        .push(util::sidebar_field(
             "Start date",
             text_input("YYYY-MM-DD", &detail.start_date)
                 .on_input(Message::ProjectDetailStartDateChanged)
                 .on_submit(Message::CommitProjectDetail)
-                .padding(8)
-                .size(13),
+                .padding(util::SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(util::sidebar_input_style),
         ))
-        .push(section(
+        .push(util::sidebar_field(
             "Due date",
             text_input("YYYY-MM-DD", &detail.due_date)
                 .on_input(Message::ProjectDetailDueDateChanged)
                 .on_submit(Message::CommitProjectDetail)
-                .padding(8)
-                .size(13),
+                .padding(util::SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(util::sidebar_input_style),
         ))
         .push(
             column![]
-                .spacing(2)
+                .spacing(space::S0_5)
                 .push(
                     text(format!("Created {}", project.created_at))
-                        .size(11)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 )
                 .push(
                     text(format!("Updated {}", project.updated_at))
-                        .size(11)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 ),
         );
 
-    let sidebar_panel = container(scrollable(sidebar))
-        .width(Length::Fixed(300.0))
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_secondary())),
-            ..Default::default()
-        });
+    let sidebar_panel = util::sidebar_panel(scrollable(sidebar));
 
     let divider = container(column![])
         .width(Length::Fixed(1.0))
@@ -300,11 +322,9 @@ fn discussion_section<'a>(
     host: &'a str,
     pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
-    let mut col = column![]
-        .spacing(12)
-        .push(text("Discussion").size(13).color(t::text_secondary()));
+    let mut col = column![].spacing(space::S1);
     if comments.is_empty() {
-        col = col.push(text("No comments yet").size(12).color(t::text_muted()));
+        col = col.push(text("No comments yet").size(type_scale::SM).color(t::text_muted()));
     }
     let ctx = ThreadCtx {
         members,
@@ -320,13 +340,15 @@ fn discussion_section<'a>(
         host,
         pending_paths,
     };
-    push_thread(col, Comment::thread_order(comments), &ctx)
-        .push(new_comment_composer(
+    let col = push_thread(col, Comment::thread_order(comments), &ctx).push(
+        container(new_comment_composer(
             &detail.comment_composer,
             detail.suggest.as_ref(),
             &detail.composer_files.files,
         ))
-        .into()
+        .padding(iced::Padding::ZERO.top(space::S4)),
+    );
+    util::with_heading("Discussion", col)
 }
 
 /// Burndown / progress chart: scope, started, completed over time against the
@@ -342,44 +364,44 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
     let data = progress_chart::compute(project, issues, progress_chart::today());
     let behind = data.behind;
     let body: Element<'a, Message> = if data.snapshots.is_empty() {
-        text("No data yet").size(12).color(t::text_muted()).into()
+        text("No data yet").size(type_scale::XS).color(t::text_muted()).into()
     } else {
         let legend = row![]
-            .spacing(14)
+            .spacing(space::S3)
             .align_y(Alignment::Center)
             .push(legend_item("Scope", t::chart_scope()))
             .push(legend_item("Started", t::chart_started()))
             .push(legend_item("Completed", t::chart_completed()))
             .push(legend_item("Expected", t::danger()));
         column![]
-            .spacing(8)
+            .spacing(space::S2)
             .push(legend)
             .push(progress_chart::view(data))
             .into()
     };
     container(
         column![]
-            .spacing(6)
+            .spacing(space::S1_5)
             .push(
                 row![]
-                    .spacing(10)
+                    .spacing(space::S3)
                     .align_y(Alignment::Center)
-                    .push(text("Burndown").size(12).color(t::text_secondary()))
-                    .push_maybe(
-                        behind.then(|| text("Behind schedule").size(11).color(t::danger())),
-                    ),
+                    .push(text("Burndown").size(type_scale::SM).color(t::text_secondary()))
+                    .push_maybe(behind.then(|| {
+                        text("Behind schedule").size(type_scale::XS).color(t::danger())
+                    })),
             )
-            .push(text(summary).size(12).color(t::text_muted()))
+            .push(text(summary).size(type_scale::XS).color(t::text_muted()))
             .push(body),
     )
     .width(Length::Fill)
-    .padding(16)
+    .padding(space::S4)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_card())),
+        background: Some(iced::Background::Color(t::bg_secondary())),
         border: Border {
             color: t::border(),
             width: 1.0,
-            radius: 6.0.into(),
+            radius: radius::MD.into(),
         },
         ..Default::default()
     })
@@ -388,10 +410,10 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
 
 fn legend_item<'a>(label: &'a str, color: iced::Color) -> Element<'a, Message> {
     row![]
-        .spacing(5)
+        .spacing(space::S1)
         .align_y(Alignment::Center)
-        .push(text("\u{25CF}").size(9).color(color))
-        .push(text(label).size(11).color(t::text_secondary()))
+        .push(text("\u{25CF}").size(type_scale::XS).color(color))
+        .push(text(label).size(type_scale::XS).color(t::text_secondary()))
         .into()
 }
 
@@ -404,21 +426,18 @@ fn issues_section<'a>(
     lanes: &'a [Lane],
     members: &'a [Member],
 ) -> Element<'a, Message> {
-    let mut col = column![].spacing(8).push(
-        text(format!("Issues ({})", scoped.len()))
-            .size(13)
-            .color(t::text_secondary()),
-    );
+    let heading = format!("Issues ({})", scoped.len());
+    let mut col = column![].spacing(space::S1);
 
     if scoped.is_empty() {
-        col = col.push(text("No issues to show").size(12).color(t::text_muted()));
+        col = col.push(text("No issues to show").size(type_scale::SM).color(t::text_muted()));
     } else {
         for issue in scoped {
             col = col.push(issue_row(issue, display, team, lanes, members));
         }
     }
 
-    col.into()
+    util::with_heading(heading, col)
 }
 
 fn issue_row<'a>(
@@ -428,7 +447,7 @@ fn issue_row<'a>(
     lanes: &'a [Lane],
     members: &'a [Member],
 ) -> Element<'a, Message> {
-    let mut content = row![].spacing(10).align_y(Alignment::Center);
+    let mut content = row![].spacing(space::S3).align_y(Alignment::Center);
     if d.shows(CardProperty::Id) {
         let identifier = match team {
             Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
@@ -436,21 +455,22 @@ fn issue_row<'a>(
         };
         content = content.push(
             text(identifier)
-                .size(12)
+                .size(type_scale::XS)
+                .font(crate::fonts::code())
                 .color(t::text_muted())
-                .width(Length::Fixed(90.0)),
+                .width(Length::Fixed(space::S16 + space::S4)),
         );
     }
     if d.shows(CardProperty::Priority) {
         content = content.push(
             text(format!("\u{25B3} {}", issue.priority))
-                .size(12)
+                .size(type_scale::XS)
                 .color(t::priority_color(Priority::from_i32(issue.priority))),
         );
     }
     content = content.push(
         text(&issue.title)
-            .size(13)
+            .size(type_scale::SM)
             .color(t::text_primary())
             .width(Length::Fill),
     );
@@ -488,37 +508,29 @@ fn issue_row<'a>(
         facts.push(format!("Updated {}", util::short_date(&issue.updated_at)));
     }
     for f in facts {
-        content = content.push(text(f).size(12).color(t::text_secondary()));
+        content = content.push(text(f).size(type_scale::XS).color(t::text_secondary()));
     }
 
     button(content)
         .on_press(Message::OpenIssueDetail(issue.id.clone()))
-        .padding([8, 10])
+        .padding([space::S2, space::S3])
         .width(Length::Fill)
         .style(|_theme: &Theme, _status| button::Style {
-            background: Some(iced::Background::Color(t::bg_card())),
+            background: Some(iced::Background::Color(t::bg_secondary())),
             text_color: t::text_primary(),
             border: Border {
                 color: t::border(),
                 width: 1.0,
-                radius: 6.0.into(),
+                radius: radius::MD.into(),
             },
             ..Default::default()
         })
         .into()
 }
 
-/// A labelled sidebar row: small muted label above its control.
-fn section<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![]
-        .spacing(6)
-        .push(text(label).size(12).color(t::text_muted()))
-        .push(control.into())
-        .into()
-}
 
 fn placeholder_value<'a>() -> Element<'a, Message> {
-    text("—").size(13).color(t::text_muted()).into()
+    text("—").size(type_scale::SM).color(t::text_muted()).into()
 }
 
 /// Borderless, transparent style so the title input reads as an inline heading.
@@ -532,7 +544,7 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
         },
         icon: t::text_muted(),
         placeholder: t::text_muted(),
-        value: t::text_primary(),
+        value: t::text_strong(),
         selection: t::accent(),
     }
 }
@@ -556,12 +568,12 @@ fn description_section<'a>(
                     text_editor::Binding::from_key_press,
                     Message::PasteImageIntoProjectDescription,
                 ))
-                .padding(10)
-                .size(14)
+                .padding(space::S2_5)
+                .size(type_scale::SM)
                 .height(Length::Fixed(160.0));
             (editor.into(), None)
         },
-        || crate::views::body::view(&text_now, 14.0, t::text_secondary(), ctx),
+        || crate::views::body::view(&text_now, type_scale::SM, t::text_body(), ctx),
     )
 }
 
@@ -569,3 +581,6 @@ fn description_section<'a>(
 pub(crate) fn description_editor_id() -> container::Id {
     container::Id::new("project-description-editor")
 }
+
+/// Alpha of the status tile fill (web `bg-accent/20`).
+const STATUS_TILE_ALPHA: f32 = 0.2;

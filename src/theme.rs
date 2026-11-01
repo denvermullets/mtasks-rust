@@ -128,7 +128,7 @@ pub const THEMES: [Tokens; 15] = [
         0x98a6b4,
         0xb8bfc9,
         0x1a8aaa,
-        0x1a7a9a,
+        0x197492,
         0xd0d4dc,
         [
             0x040915, 0x121a27, 0x212c38, 0x364452, 0x4a5866, 0x6a7a8a, 0x8a9aaa, 0xb8bfc9,
@@ -236,7 +236,7 @@ pub const THEMES: [Tokens; 15] = [
     ),
     dark!(
         "ash", "Ash", 0x1e1e1e, 0x282828, 0x2c2c2c, 0x303030, 0xb0b0b0, 0x484848, 0xff5a3c,
-        0xe04830, 0x333333
+        0xc53f2a, 0x333333
     ),
     light!(
         "chalk",
@@ -248,7 +248,7 @@ pub const THEMES: [Tokens; 15] = [
         0x7a7870,
         0xd0cec8,
         0x0a6870,
-        0x208088,
+        0x1e7a81,
         0xeae8e4,
         [
             0x0a0808, 0x141210, 0x2a2820, 0x3a3830, 0x5c5850, 0x7a7870, 0x9a9890, 0xc0beb8,
@@ -300,6 +300,41 @@ pub fn accent_fill(status: button::Status) -> Color {
         button::Status::Hovered => accent_hover(),
         _ => accent(),
     }
+}
+
+fn luminance(c: Color) -> f32 {
+    let lin = |v: f32| {
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG contrast ratio between two opaque colors (1.0 to 21.0).
+pub fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Label color on an accent fill: whichever of the page background and
+/// `text_strong` contrasts more with the fill. That is the dark page
+/// background on Default's light accent, and the dark `gray[0]` on Warm
+/// Paper's orange, where the light page background falls short of 4.5:1.
+pub fn on_accent_for(t: &Tokens, hovered: bool) -> Color {
+    let fill = if hovered { t.accent_hover } else { t.accent };
+    if contrast_ratio(t.background, fill) >= contrast_ratio(t.gray[0], fill) {
+        t.background
+    } else {
+        t.gray[0]
+    }
+}
+
+/// Label color for an accent-filled button in `status`.
+pub fn on_accent(status: button::Status) -> Color {
+    on_accent_for(tok(), matches!(status, button::Status::Hovered))
 }
 
 /// A catalog entry for pick lists: displays as the theme name, carries the key.
@@ -368,7 +403,11 @@ token_fn! {
     border => |t: &Tokens| t.stroke;
     accent => |t: &Tokens| t.accent;
     accent_hover => |t: &Tokens| t.accent_hover;
+    /// Web `text-gray-100`: titles and emphasised text.
+    text_strong => |t: &Tokens| t.gray[0];
     text_primary => |t: &Tokens| t.gray[1];
+    /// Web `text-gray-300`: markdown and running body text.
+    text_body => |t: &Tokens| t.gray[2];
     text_secondary => |t: &Tokens| t.gray[3];
     text_muted => |t: &Tokens| t.gray[4];
     dep_blocks => |t: &Tokens| t.dep[0];
@@ -475,9 +514,11 @@ pub fn hex_to_color(hex: &str) -> Option<Color> {
     ))
 }
 
-/// The web's Tailwind v4 default type scale, in logical pixels (rem * 16).
-/// Each size pairs with the web's line height as a multiple of the size.
-// Whole Tailwind scale kept; the polish tickets (JRST-315 to 320) will use the rest.
+/// The web's Tailwind v4 default type scale from `text-xs` to `text-4xl`, in logical
+/// pixels (rem * 16); larger steps are not included. Each size has a matching
+/// `LH_*` line height as a multiple of the size.
+// The full Tailwind scale is kept to mirror the web, so steps no view uses yet
+// (and any a view stops using) are not dead-code warnings.
 #[allow(dead_code)]
 pub mod type_scale {
     pub const XS: f32 = 12.0;
@@ -502,7 +543,8 @@ pub mod type_scale {
 
 /// The web's Tailwind v4 spacing scale: `N` steps of 0.25rem (4px), named by the Tailwind step.
 /// Use for padding, gaps and margins.
-// Whole Tailwind scale kept; the polish tickets (JRST-315 to 320) will use the rest.
+// The full Tailwind scale is kept to mirror the web, so steps no view uses yet
+// (and any a view stops using) are not dead-code warnings.
 #[allow(dead_code)]
 pub mod space {
     pub const S0_5: f32 = 2.0;
@@ -522,7 +564,8 @@ pub mod space {
 
 /// The web's Tailwind v4 corner radii in logical pixels (rounded-sm = 0.25rem, md = 0.375rem,
 /// lg = 0.5rem, xl = 0.75rem, 2xl = 1rem). `FULL` is `rounded-full`: large enough to make a pill.
-// Whole Tailwind scale kept; the polish tickets (JRST-315 to 320) will use the rest.
+// The full Tailwind scale is kept to mirror the web, so steps no view uses yet
+// (and any a view stops using) are not dead-code warnings.
 #[allow(dead_code)]
 pub mod radius {
     pub const XS: f32 = 2.0;
@@ -537,6 +580,39 @@ pub mod radius {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tokens_for(key: &str) -> &'static Tokens {
+        THEMES.iter().find(|t| t.key == key).unwrap()
+    }
+
+    #[test]
+    fn label_on_accent_fill_meets_4_5_to_1() {
+        for t in THEMES.iter() {
+            for hovered in [false, true] {
+                let fill = if hovered { t.accent_hover } else { t.accent };
+                let ratio = contrast_ratio(on_accent_for(t, hovered), fill);
+                assert!(ratio >= 4.5, "{} hovered={hovered}: {ratio:.2}:1", t.name);
+            }
+        }
+    }
+
+    #[test]
+    fn warm_paper_accent_label_is_dark_not_the_page_background() {
+        let t = tokens_for("warm-paper");
+        assert_eq!(on_accent_for(t, false), t.gray[0]);
+        assert!(contrast_ratio(t.background, t.accent) < 4.5);
+    }
+
+    #[test]
+    fn default_accent_label_stays_the_dark_page_background() {
+        let t = tokens_for("default");
+        assert_eq!(on_accent_for(t, false), t.background);
+    }
+
+    #[test]
+    fn contrast_ratio_of_black_on_white_is_21() {
+        assert!((contrast_ratio(hx(0x000000), hx(0xffffff)) - 21.0).abs() < 0.01);
+    }
 
     #[test]
     fn radius_values_match_the_webs_tailwind_radii() {
@@ -682,6 +758,22 @@ mod tests {
         assert_eq!(p.danger, danger());
         set_by_key(DEFAULT_THEME_KEY);
         assert_ne!(iced_theme().palette().background, p.background);
+
+        // Text strength: strong >= body > secondary in contrast against the
+        // background, on every theme.
+        for t in THEMES.iter() {
+            set_by_key(t.key);
+            let contrast = |c: Color| (lum(c) - lum(bg_primary())).abs();
+            let (strong, primary, body, secondary) =
+                (text_strong(), text_primary(), text_body(), text_secondary());
+            assert_eq!(strong, t.gray[0], "{}", t.key);
+            assert_eq!(body, t.gray[2], "{}", t.key);
+            assert!(contrast(strong) >= contrast(primary), "{} strong", t.key);
+            assert!(contrast(primary) >= contrast(body), "{} body", t.key);
+            assert!(contrast(body) >= contrast(secondary), "{} secondary", t.key);
+            assert!(contrast(body) > 0.4, "{} body readable", t.key);
+        }
+        set_by_key(DEFAULT_THEME_KEY);
 
         set_by_key("no-such-theme");
         assert_eq!(tok().key, DEFAULT_THEME_KEY);

@@ -8,7 +8,9 @@
 
 /// Fixed heights of list-mode elements; the view renders with these exact
 /// heights so the offsets computed here match what is drawn.
-pub const LIST_ROW_H: f32 = 34.0;
+/// A row is one `SM` line plus the web row's `py-2.5`.
+pub const LIST_ROW_H: f32 =
+    crate::theme::type_scale::SM * crate::theme::type_scale::LH_SM + 2.0 * crate::theme::space::S2_5;
 pub const LIST_HEADER_H: f32 = 40.0;
 pub const LIST_SUBHEAD_H: f32 = 26.0;
 pub const LIST_SPACING: f32 = 2.0;
@@ -16,8 +18,8 @@ pub const LIST_PAD_TOP: f32 = 4.0;
 
 /// Fixed height of a board sub-group heading and the board lane spacing/padding.
 pub const BOARD_SUBHEAD_H: f32 = 24.0;
-pub const BOARD_SPACING: f32 = 6.0;
-pub const BOARD_PAD_TOP: f32 = 4.0;
+pub const BOARD_SPACING: f32 = crate::theme::space::S1_5;
+pub const BOARD_PAD_TOP: f32 = crate::theme::space::S1;
 
 /// Breathing room kept between the focused item and the viewport edge.
 pub const MARGIN: f32 = 8.0;
@@ -76,22 +78,31 @@ pub fn list_row_span(sections: &[ListSection], section: usize, issue: usize) -> 
     (top, LIST_ROW_H)
 }
 
-/// Height of a board card from which optional lines it renders.
+/// Height of a board card from which optional lines it renders. Line heights
+/// come from the type scale (the card texts set the same `LH_*` multiples), and
+/// the gaps are the web card's: id to title `S2`, title to chips `S2`, and a
+/// `S3` gap before the meta line.
 pub fn board_card_height(show_id: bool, has_chips: bool, has_meta: bool) -> f32 {
-    const PAD: f32 = 20.0; // 10 top + 10 bottom
-    const SPACING: f32 = 4.0;
-    let mut lines = vec![18.2]; // title, size 14
+    use crate::theme::{space, type_scale};
+    const TITLE: f32 = type_scale::SM * type_scale::LH_SM;
+    const SMALL: f32 = type_scale::XS * type_scale::LH_XS;
+    let mut h = 2.0 * space::S2_5 + TITLE;
     if show_id {
-        lines.push(15.6); // size 12
+        h += SMALL + space::S2;
     }
     if has_chips {
-        lines.push(20.0); // fixed chip row
+        h += space::S2 + CARD_CHIP_ROW_H;
     }
     if has_meta {
-        lines.push(14.3); // size 11
+        h += space::S3 + SMALL;
     }
-    PAD + lines.iter().sum::<f32>() + SPACING * (lines.len() as f32 - 1.0)
+    h
 }
+
+/// Fixed height of the chip row on a board card: one label pill, which is an XS
+/// line plus `S0_5` padding above and below (see `views::labels::pill`).
+pub const CARD_CHIP_ROW_H: f32 =
+    crate::theme::type_scale::XS * crate::theme::type_scale::LH_XS + 2.0 * crate::theme::space::S0_5;
 
 /// `(top, height)` of card `issue` in a board lane. `card_heights` is the
 /// card height per issue; `subhead_starts` are flat indices preceded by a
@@ -166,6 +177,14 @@ mod tests {
     }
 
     #[test]
+    fn list_row_matches_the_drawn_row() {
+        // One SM line (20) plus the row's vertical padding of 2 * S2_5.
+        assert_eq!(LIST_ROW_H, 40.0);
+        let secs = vec![ListSection { len: 2, subhead_starts: vec![], collapsed: false }];
+        assert_eq!(list_row_span(&secs, 0, 1).0, 4.0 + 40.0 + 2.0 + 40.0 + 2.0);
+    }
+
+    #[test]
     fn board_span_and_card_height() {
         let hs = [50.0, 60.0, 70.0];
         let (top, h) = board_card_span(&hs, &[1], 2);
@@ -175,5 +194,26 @@ mod tests {
         );
         assert_eq!(h, 70.0);
         assert!(board_card_height(true, true, true) > board_card_height(false, false, false));
+    }
+
+    #[test]
+    fn chip_row_is_one_label_pill_tall() {
+        assert_eq!(CARD_CHIP_ROW_H, 20.0);
+    }
+
+    #[test]
+    fn board_card_height_follows_the_web_card_spacing() {
+        // (show_id, has_chips, has_meta) -> padding 2 * 10, title line 20, id line 16
+        // + 8 gap, chip row 20 + 8 gap, meta line 16 + 12 gap.
+        let cases = [
+            ((false, false, false), 40.0),
+            ((true, false, false), 64.0),
+            ((false, true, false), 68.0),
+            ((false, false, true), 68.0),
+            ((true, true, true), 120.0),
+        ];
+        for ((id, chips, meta), want) in cases {
+            assert_eq!(board_card_height(id, chips, meta), want, "{id} {chips} {meta}");
+        }
     }
 }

@@ -135,6 +135,11 @@ pub fn active() -> Font {
     ACTIVE.get().copied().unwrap_or(Font::DEFAULT)
 }
 
+/// The UI font in bold (see `bold`).
+pub fn bold_active() -> Font {
+    bold(active())
+}
+
 /// Families that have a bundled Bold face (and Bold Italic, where they have an
 /// Italic). Add a family here when its Bold file joins `FONT_BYTES`.
 const BOLD_FAMILIES: [&str; 9] = [

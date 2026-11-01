@@ -2,17 +2,21 @@
 //! are bold with a dot; the selected row is highlighted. Selection and the
 //! filter live in `crate::inbox::InboxState`.
 
-use iced::font::Weight;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Column};
-use iced::{Alignment, Border, Element, Font, Length, Theme};
+use iced::widget::text::LineHeight;
+use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::notifications::{Filter, Notification};
 use crate::inbox::{empty_message, InboxState};
-use crate::theme as t;
+use crate::fonts;
+use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::util::relative_time;
 
-pub const ROW_HEIGHT: f32 = 52.0;
+/// Height of one row: a `LH_SM` headline line (20), `space::S1`, a `LH_XS` issue
+/// line (16) and `space::S3` padding above and below. Keyboard navigation and
+/// scroll-to-selected multiply by it; `row_height_matches_its_parts` pins it.
+pub const ROW_HEIGHT: f32 = 64.0;
 
 /// Key for the Inbox list in `App::scroll_state` (distinct from the board
 /// lane indices and `issue_list::SCROLL_KEY`).
@@ -25,13 +29,13 @@ pub fn scroll_id() -> scrollable::Id {
 fn filter_tab<'a>(label: &'a str, filter: Filter, active: Filter) -> Element<'a, Message> {
     let on = filter == active;
     let color = if on { t::text_primary() } else { t::text_muted() };
-    button(text(label).size(13).color(color))
-        .padding([4, 10])
+    button(text(label).size(type_scale::XS).color(color))
+        .padding([space::S1_5, space::S3])
         .style(move |_theme: &Theme, _status| button::Style {
             background: on.then(|| iced::Background::Color(t::bg_card_focused())),
             text_color: color,
             border: Border {
-                radius: 4.0.into(),
+                radius: radius::SM.into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -44,11 +48,11 @@ pub fn view<'a>(state: &'a InboxState) -> Element<'a, Message> {
     let tabs = row![
         filter_tab("Unread", Filter::Unread, state.filter),
         filter_tab("All", Filter::All, state.filter),
-        text("[f] switch").size(12).color(t::text_muted()),
+        text("[f] switch").size(type_scale::XS).color(t::text_muted()),
     ]
-    .spacing(6)
+    .spacing(space::S1_5)
     .align_y(Alignment::Center)
-    .padding([8, 14]);
+    .padding([space::S2, space::S4]);
     column![tabs, list(state)].into()
 }
 
@@ -56,7 +60,7 @@ fn list<'a>(state: &'a InboxState) -> Element<'a, Message> {
     if state.items.is_empty() {
         return container(
             text(empty_message(state.filter))
-                .size(14)
+                .size(type_scale::SM)
                 .color(t::text_muted()),
         )
         .center_x(Length::Fill)
@@ -78,20 +82,24 @@ fn list<'a>(state: &'a InboxState) -> Element<'a, Message> {
 
 fn notification_row<'a>(index: usize, n: &'a Notification, selected: bool) -> Element<'a, Message> {
     let unread = n.is_unread();
-    let font = if unread {
-        Font {
-            weight: Weight::Bold,
-            ..Font::DEFAULT
-        }
+    let (font, primary) = if unread {
+        (fonts::bold_active(), t::text_body())
     } else {
-        Font::DEFAULT
+        let body = t::text_body();
+        (fonts::active(), iced::Color { a: body.a * 0.6, ..body })
     };
-    let primary = if unread { t::text_primary() } else { t::text_secondary() };
 
-    let dot = text(if unread { "\u{25CF}" } else { "" })
-        .size(10)
-        .color(t::accent())
-        .width(Length::Fixed(14.0));
+    let dot = container(text(""))
+        .width(Length::Fixed(space::S3))
+        .height(Length::Fixed(space::S3))
+        .style(move |_theme: &Theme| container::Style {
+            background: unread.then(|| iced::Background::Color(t::accent())),
+            border: Border {
+                radius: radius::FULL.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
     let headline = match n.actor_name.as_deref() {
         Some(actor) if !actor.is_empty() => format!("{actor} {}", n.message),
@@ -106,30 +114,32 @@ fn notification_row<'a>(index: usize, n: &'a Notification, selected: bool) -> El
 
     let body = column![
         text(headline)
-            .size(13)
+            .size(type_scale::SM)
+            .line_height(LineHeight::Relative(type_scale::LH_SM))
             .font(font)
             .color(primary)
             .wrapping(text::Wrapping::None),
         text(issue)
-            .size(12)
+            .size(type_scale::XS)
+            .line_height(LineHeight::Relative(type_scale::LH_XS))
             .color(t::text_muted())
             .wrapping(text::Wrapping::None),
     ]
-    .spacing(3)
+    .spacing(space::S1)
     .width(Length::Fill);
 
     let line = row![
         dot,
         body,
         text(relative_time(&n.created_at))
-            .size(12)
+            .size(type_scale::XS)
             .color(t::text_muted()),
     ]
-    .spacing(8)
+    .spacing(space::S3)
     .align_y(Alignment::Center);
 
     let card = container(line)
-        .padding([0, 14])
+        .padding([space::S3, space::S4])
         .height(Length::Fixed(ROW_HEIGHT))
         .center_y(Length::Fixed(ROW_HEIGHT))
         .width(Length::Fill)
@@ -144,4 +154,19 @@ fn notification_row<'a>(index: usize, n: &'a Notification, selected: bool) -> El
         });
 
     mouse_area(card).on_press(Message::InboxOpenAt(index)).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_height_matches_its_parts() {
+        let parts = type_scale::LH_SM * type_scale::SM
+            + space::S1
+            + type_scale::LH_XS * type_scale::XS
+            + 2.0 * space::S3;
+        assert!((ROW_HEIGHT - parts).abs() < 0.5, "{ROW_HEIGHT} vs {parts}");
+        assert_eq!(ROW_HEIGHT, 64.0);
+    }
 }

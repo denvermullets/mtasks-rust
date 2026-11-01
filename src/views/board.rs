@@ -3,13 +3,15 @@ use std::collections::HashMap;
 use iced::widget::{
     column, container, horizontal_rule, mouse_area, row, scrollable, text, Column, Row,
 };
+use iced::widget::text::LineHeight;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
 use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
 use crate::scroll;
-use crate::theme as t;
+use crate::fonts;
+use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::labels as labels_view;
 use crate::views::lane_icon;
 use crate::views::util;
@@ -40,7 +42,7 @@ pub fn view<'a>(
         } else {
             "No columns to show"
         };
-        return container(text(msg).size(14).color(t::text_muted()))
+        return container(text(msg).size(type_scale::SM).color(t::text_muted()))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into();
@@ -56,17 +58,21 @@ pub fn view<'a>(
         };
 
         let header = row![]
-            .spacing(6)
+            .spacing(space::S2)
             .align_y(iced::Alignment::Center)
             .push_maybe(col.lane_icon.map(lane_icon::view))
-            .push(text(col.title.clone()).size(14).color(name_color))
+            .push(
+                text(col.title.clone())
+                    .size(type_scale::SM)
+                    .color(name_color),
+            )
             .push(
                 text(format!("{}", col.issues.len()))
-                    .size(13)
+                    .size(type_scale::XS)
                     .color(t::text_muted()),
             );
 
-        header_row = header_row.push(container(header).padding([10, 12]).width(Length::Fill));
+        header_row = header_row.push(container(header).padding([space::S2_5, space::S3]).width(Length::Fill));
     }
 
     // Columns with cards
@@ -76,7 +82,10 @@ pub fn view<'a>(
         let is_focused_lane = col_idx == focused_lane;
 
         let mut issue_cards: Column<'_, Message> =
-            column![].spacing(6).width(Length::Fill).padding([4, 8]);
+            column![]
+                .spacing(space::S1_5)
+                .width(Length::Fill)
+                .padding([space::S1, space::S2]);
 
         for (issue_idx, issue) in col.issues.iter().copied().enumerate() {
             // Sub-group heading before the first card of each section.
@@ -84,19 +93,19 @@ pub fn view<'a>(
                 issue_cards = issue_cards.push(
                     container(
                         row![]
-                            .spacing(6)
+                            .spacing(space::S2)
                             .push(
                                 text(section.title.clone())
-                                    .size(12)
+                                    .size(type_scale::XS)
                                     .color(t::text_secondary()),
                             )
                             .push(
                                 text(format!("{}", section.end - section.start))
-                                    .size(12)
+                                    .size(type_scale::XS)
                                     .color(t::text_muted()),
                             ),
                     )
-                    .padding([4, 2])
+                    .padding([space::S1, space::S0_5])
                     .height(Length::Fixed(scroll::BOARD_SUBHEAD_H)),
                 );
             }
@@ -231,7 +240,7 @@ fn issue_card<'a>(
     let d = data.display;
     let priority_color = t::priority_color(issue.priority_enum());
 
-    let mut card_content = column![].spacing(4);
+    let mut card_content = column![].spacing(0);
 
     if d.shows(CardProperty::Id) {
         let ident = data
@@ -244,11 +253,21 @@ fn issue_card<'a>(
             .team_number
             .map(|n| format!("{ident}-{n}"))
             .unwrap_or_default();
-        card_content = card_content.push(text(tag).size(12).color(t::text_muted()));
+        card_content = card_content.push(
+            container(
+                text(tag)
+                    .size(type_scale::XS)
+                    .line_height(LineHeight::Relative(type_scale::LH_XS))
+                    .font(fonts::code())
+                    .color(t::text_muted()),
+            )
+            .padding(iced::Padding::ZERO.bottom(space::S2)),
+        );
     }
     card_content = card_content.push(
         text(&issue.title)
-            .size(14)
+            .size(type_scale::SM)
+            .line_height(LineHeight::Relative(type_scale::LH_SM))
             .color(t::text_primary())
             .wrapping(text::Wrapping::None),
     );
@@ -259,31 +278,40 @@ fn issue_card<'a>(
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
     if d.shows(CardProperty::Labels) && !labels.is_empty() {
-        let mut chips: Row<'a, Message> = row![].spacing(4);
+        let mut chips: Row<'a, Message> = row![].spacing(space::S1);
         for label in labels {
             chips = chips.push(labels_view::static_chip(label));
         }
         card_content = card_content.push(
-            container(chips)
-                .height(Length::Fixed(20.0))
-                .align_y(iced::alignment::Vertical::Center),
+            container(
+                container(chips)
+                    .height(Length::Fixed(scroll::CARD_CHIP_ROW_H))
+                    .align_y(iced::alignment::Vertical::Center),
+            )
+            .padding(iced::Padding::ZERO.top(space::S2)),
         );
     }
 
     // Meta line: small muted facts, only the enabled ones.
     let facts = card_facts(issue, data);
 
-    let mut meta: Row<'a, Message> = row![].spacing(10).align_y(iced::Alignment::Center);
+    let mut meta: Row<'a, Message> = row![].spacing(space::S1_5).align_y(iced::Alignment::Center);
     if d.shows(CardProperty::Priority) {
         // Priority indicator: triangle + number like the Rails app
         meta = meta.push(
             row![]
-                .spacing(4)
+                .spacing(space::S1)
                 .align_y(iced::Alignment::Center)
-                .push(text("△").size(11).color(priority_color))
+                .push(
+                    text("△")
+                        .size(type_scale::XS)
+                        .line_height(LineHeight::Relative(type_scale::LH_XS))
+                        .color(priority_color),
+                )
                 .push(
                     text(format!("{}", issue.priority))
-                        .size(11)
+                        .size(type_scale::XS)
+                        .line_height(LineHeight::Relative(type_scale::LH_XS))
                         .color(t::text_muted()),
                 ),
         );
@@ -292,25 +320,27 @@ fn issue_card<'a>(
     for f in facts {
         meta = meta.push(
             text(f)
-                .size(11)
+                .size(type_scale::XS)
+                .line_height(LineHeight::Relative(type_scale::LH_XS))
                 .color(t::text_muted())
                 .wrapping(text::Wrapping::None),
         );
     }
     if has_meta {
-        card_content = card_content.push(meta);
+        card_content = card_content
+            .push(container(meta).padding(iced::Padding::ZERO.top(space::S3)));
     }
 
     let bg = if focused {
         t::bg_card_focused()
     } else {
-        t::bg_card()
+        t::bg_secondary()
     };
 
     let border_color = if focused { t::accent() } else { t::border() };
 
     let card = container(card_content)
-        .padding([10, 12])
+        .padding([space::S2_5, space::S3])
         .width(Length::Fill)
         .height(Length::Fixed(card_height(issue, data)))
         .clip(true)
@@ -319,7 +349,7 @@ fn issue_card<'a>(
             border: Border {
                 color: border_color,
                 width: 1.0,
-                radius: 6.0.into(),
+                radius: radius::SM.into(),
             },
             ..Default::default()
         });

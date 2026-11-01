@@ -11,12 +11,15 @@ use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{EditorTarget, Reference, SuggestState};
-use crate::theme as t;
+use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::body::BodyCtx;
 use crate::views::issue_form::LaneOption;
 use crate::views::lane_icon;
 use crate::views::projects::MemberOption;
-use crate::views::util::relative_time;
+use crate::views::util::{
+    relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_menu_style,
+    sidebar_panel, sidebar_pick_list_style, with_heading, SIDEBAR_CONTROL_PADDING,
+};
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
 /// estimate and due date live here and are committed (on Enter or on nav-away)
@@ -148,40 +151,44 @@ pub fn view<'a>(
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
     let breadcrumb = row![]
-        .spacing(6)
+        .spacing(space::S2)
         .align_y(Alignment::Center)
         .push(
-            button(text("← Issues").size(13).color(t::text_secondary()))
+            button(text("← Issues").size(type_scale::SM).color(t::text_secondary()))
                 .on_press(Message::NavigateToView(View::Board))
                 .padding(0)
                 .style(button::text),
         )
-        .push(text("›").size(13).color(t::text_muted()))
-        .push_maybe(project_name.map(|n| text(n).size(13).color(t::text_secondary())))
-        .push_maybe(project_name.map(|_| text("›").size(13).color(t::text_muted())))
-        .push(text(identifier).size(13).color(t::text_muted()));
+        .push(text("›").size(type_scale::SM).color(t::text_muted()))
+        .push_maybe(project_name.map(|n| text(n).size(type_scale::SM).color(t::text_secondary())))
+        .push_maybe(project_name.map(|_| text("›").size(type_scale::SM).color(t::text_muted())))
+        .push(text(identifier).size(type_scale::SM).color(t::text_secondary()));
 
     // ---- Left column: title, description, activity stub ----
-    let left = column![]
-        .spacing(16)
-        .padding(24)
-        .width(Length::Fill)
+    let head = column![]
+        .spacing(space::S4)
         .push(breadcrumb)
         .push_maybe(recurring_origin.map(|title| origin_line(title, &issue.team_id)))
         .push(
             text_input("Title", &detail.title)
                 .on_input(Message::IssueDetailTitleChanged)
                 .on_submit(Message::CommitIssueDetail)
-                .size(22)
-                .padding(4)
+                .size(type_scale::XXL)
+                .font(crate::fonts::bold_active())
+                .padding(space::S1)
                 .style(title_input_style),
         )
         .push_maybe(
             detail
                 .error
                 .as_deref()
-                .map(|e| text(e).size(12).color(t::danger())),
-        )
+                .map(|e| text(e).size(type_scale::XS).color(t::danger())),
+        );
+
+    // Title-to-body gap is S6; the sections below are S8 apart. The attach
+    // button stays close to the description it belongs to.
+    let description = column![]
+        .spacing(space::S2)
         .push(description_section(
             detail,
             &BodyCtx {
@@ -195,11 +202,14 @@ pub fn view<'a>(
             },
         ))
         .push(
-            button(text("+ Attach file").size(12).color(t::accent()))
+            button(text("+ Attach file").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::PickAttachmentFiles)
                 .padding(0)
                 .style(button::text),
-        )
+        );
+    let sections = column![]
+        .spacing(space::S8)
+        .push(description)
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
@@ -230,6 +240,12 @@ pub fn view<'a>(
                 pending_paths,
             },
         ));
+    let left = column![]
+        .spacing(space::S6)
+        .padding(space::S8)
+        .width(Length::Fill)
+        .push(head)
+        .push(sections);
 
     // ---- Right sidebar: properties ----
     let lane_options: Vec<LaneOption> = lanes
@@ -282,104 +298,116 @@ pub fn view<'a>(
     });
 
     let sidebar = column![]
-        .spacing(18)
-        .padding(20)
+        .spacing(space::S6)
+        .padding(space::S6)
         .width(Length::Fill)
-        .push(text("Properties").size(11).color(t::text_muted()))
-        .push_maybe(parent.map(|p| section("Parent", parent_link(p, team))))
-        .push(section(
+        .push(sidebar_heading("Properties"))
+        .push_maybe(parent.map(|p| sidebar_field("Parent", parent_link(p, team))))
+        .push(sidebar_field(
             "Status",
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .align_y(Alignment::Center)
                 .push_maybe(selected_icon.map(lane_icon::view))
                 .push(
                     pick_list(lane_options, selected_lane, |o: LaneOption| {
                         Message::IssueDetailStatusChanged(o.id)
                     })
-                    .width(Length::Fill),
+                    .width(Length::Fill)
+                    .text_size(type_scale::SM)
+                    .padding(SIDEBAR_CONTROL_PADDING)
+                    .style(sidebar_pick_list_style)
+                    .menu_style(sidebar_menu_style),
                 ),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Priority",
             pick_list(
                 PRIORITIES.as_slice(),
                 Some(issue.priority_enum()),
                 Message::IssueDetailPriorityChanged,
             )
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .text_size(type_scale::SM)
+            .padding(SIDEBAR_CONTROL_PADDING)
+            .style(sidebar_pick_list_style)
+            .menu_style(sidebar_menu_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Assignee",
             pick_list(member_options, selected_assignee, |o: MemberOption| {
                 Message::IssueDetailAssigneeChanged(o.id)
             })
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .text_size(type_scale::SM)
+            .padding(SIDEBAR_CONTROL_PADDING)
+            .style(sidebar_pick_list_style)
+            .menu_style(sidebar_menu_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Creator",
             match creator_name {
-                Some(name) => text(name).size(13).color(t::text_secondary()).into(),
+                Some(name) => text(name).size(type_scale::SM).color(t::text_secondary()).into(),
                 None => placeholder_value(),
             },
         ))
-        .push(section(
+        .push(sidebar_field(
             "Estimate",
             text_input("No estimate", &detail.estimate)
                 .on_input(Message::IssueDetailEstimateChanged)
                 .on_submit(Message::CommitIssueDetail)
-                .padding(8)
-                .size(13),
+                .padding(SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(sidebar_input_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Due date",
             text_input("YYYY-MM-DD", &detail.due_date)
                 .on_input(Message::IssueDetailDueDateChanged)
                 .on_submit(Message::CommitIssueDetail)
-                .padding(8)
-                .size(13),
+                .padding(SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(sidebar_input_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Project",
             pick_list(project_options, selected_project, |o: ProjectOption| {
                 Message::IssueDetailProjectChanged(o.id)
             })
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .text_size(type_scale::SM)
+            .padding(SIDEBAR_CONTROL_PADDING)
+            .style(sidebar_pick_list_style)
+            .menu_style(sidebar_menu_style),
         ))
-        .push(section("Labels", placeholder_value()))
+        .push(sidebar_field("Labels", placeholder_value()))
         .push(dependency_block(DepKind::Blocking, &deps.blocking))
         .push(dependency_block(DepKind::BlockedBy, &deps.blocked_by))
         .push_maybe(optional_dependency_block(DepKind::Related, &deps.related))
         .push_maybe(optional_dependency_block(DepKind::Duplicates, &deps.duplicates))
         .push_maybe(optional_dependency_block(DepKind::DuplicatedBy, &deps.duplicated_by))
         .push(
-            button(text("Move to team…").size(12).color(t::accent()))
+            button(text("Move to team…").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenMoveTeamPicker(issue.id.clone()))
                 .padding(0)
                 .style(button::text),
         )
         .push(
             column![]
-                .spacing(2)
+                .spacing(space::S0_5)
                 .push(
                     text(format!("Created {}", issue.created_at))
-                        .size(11)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 )
                 .push(
                     text(format!("Updated {}", issue.updated_at))
-                        .size(11)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 ),
         );
 
-    let sidebar_panel = container(scrollable(sidebar))
-        .width(Length::Fixed(300.0))
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_secondary())),
-            ..Default::default()
-        });
+    let sidebar_panel = sidebar_panel(scrollable(sidebar));
 
     // Thin vertical rule standing in for a `border-l` between panes.
     let divider = container(column![])
@@ -411,9 +439,9 @@ fn issue_identifier(issue: &Issue, team: Option<&Team>) -> String {
 fn origin_line<'a>(title: &'a str, team_id: &str) -> Element<'a, Message> {
     button(
         row![]
-            .spacing(4)
-            .push(text("From recurring issue:").size(12).color(t::text_muted()))
-            .push(text(title).size(12).color(t::text_secondary())),
+            .spacing(space::S1)
+            .push(text("From recurring issue:").size(type_scale::XS).color(t::text_muted()))
+            .push(text(title).size(type_scale::XS).color(t::text_secondary())),
     )
     .on_press(Message::SelectTeamView(
         team_id.to_string(),
@@ -428,13 +456,13 @@ fn origin_line<'a>(title: &'a str, team_id: &str) -> Element<'a, Message> {
 fn parent_link<'a>(parent: &'a Issue, team: Option<&'a Team>) -> Element<'a, Message> {
     button(
         row![]
-            .spacing(6)
+            .spacing(space::S1_5)
             .push(
                 text(issue_identifier(parent, team))
-                    .size(12)
+                    .size(type_scale::XS)
                     .color(t::text_muted()),
             )
-            .push(text(&parent.title).size(12).color(t::text_secondary())),
+            .push(text(&parent.title).size(type_scale::XS).color(t::text_secondary())),
     )
     .on_press(Message::OpenIssueDetail(parent.id.clone()))
     .padding(0)
@@ -451,19 +479,17 @@ fn sub_issues_section<'a>(
     team: Option<&'a Team>,
     lanes: &'a [Lane],
 ) -> Element<'a, Message> {
-    let mut col = column![]
-        .spacing(8)
-        .push(text("Sub-issues").size(13).color(t::text_secondary()));
+    let mut col = column![].spacing(space::S2);
     for child in sub_issues {
         col = col.push(sub_issue_row(child, team, lanes));
     }
-    col.push(
-        button(text("+ Add sub-issue").size(12).color(t::accent()))
+    let col = col.push(
+        button(text("+ Add sub-issue").size(type_scale::XS).color(t::accent()))
             .on_press(Message::CreateSubIssue(issue.id.clone()))
             .padding(0)
             .style(button::text),
-    )
-    .into()
+    );
+    with_heading("Sub-issues", col)
 }
 
 /// One sub-issue: `IDENT  title` with its lane name as a colored badge on the right.
@@ -481,12 +507,12 @@ fn sub_issue_row<'a>(
             .unwrap_or(t::text_muted());
         container(
             row![]
-                .spacing(4)
+                .spacing(space::S1)
                 .align_y(Alignment::Center)
                 .push(lane_icon::view(crate::lane_icon::icon_for(l.category.as_deref())))
                 .push(text(&l.name).size(11).color(color)),
         )
-            .padding([2, 8])
+            .padding([space::S0_5, space::S2])
             .style(move |_theme: &Theme| container::Style {
                 border: Border {
                     color,
@@ -499,11 +525,11 @@ fn sub_issue_row<'a>(
 
     button(
         row![]
-            .spacing(8)
+            .spacing(space::S2)
             .align_y(Alignment::Center)
             .push(
                 text(issue_identifier(child, team))
-                    .size(12)
+                    .size(type_scale::XS)
                     .color(t::text_muted()),
             )
             .push(
@@ -515,25 +541,16 @@ fn sub_issue_row<'a>(
             .push_maybe(badge),
     )
     .on_press(Message::OpenIssueDetail(child.id.clone()))
-    .padding([6, 8])
+    .padding([space::S1_5, space::S2])
     .width(Length::Fill)
     .style(button::text)
     .into()
 }
 
-/// A labelled sidebar row: small muted label above its control.
-fn section<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![]
-        .spacing(6)
-        .push(text(label).size(12).color(t::text_muted()))
-        .push(control.into())
-        .into()
-}
-
 /// Em-dash placeholder for sidebar sections filled in by later tickets
 /// (Assignee JAIT-113, Labels JAIT-112).
 fn placeholder_value<'a>() -> Element<'a, Message> {
-    text("—").size(13).color(t::text_muted()).into()
+    text("—").size(type_scale::SM).color(t::text_muted()).into()
 }
 
 /// The dependency sidebar sections. Blocking / blocked-by are editable (they
@@ -578,7 +595,7 @@ impl DepKind {
 
 /// A titled sidebar section for `kind`.
 fn dependency_block<'a>(kind: DepKind, links: &'a [DependencyLink]) -> Element<'a, Message> {
-    section(kind.title(), dependency_section(links, kind))
+    sidebar_field(kind.title(), dependency_section(links, kind))
 }
 
 /// Like [`dependency_block`], but absent when there are no links.
@@ -593,13 +610,13 @@ fn optional_dependency_block<'a>(
 /// text "+ Add …" button that opens the picker.
 fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element<'a, Message> {
     let color = kind.color();
-    let mut col = column![].spacing(6);
+    let mut col = column![].spacing(space::S1_5);
     for link in links {
         col = col.push(dependency_row(link, color));
     }
     if let Some((add_label, direction)) = kind.add() {
         col = col.push(
-            button(text(add_label).size(12).color(t::accent()))
+            button(text(add_label).size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenDependencyPicker(direction))
                 .padding(0)
                 .style(button::text),
@@ -613,14 +630,14 @@ fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element
 /// tinted with the section's dependency color.
 fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Element<'a, Message> {
     let line = row![]
-        .spacing(6)
+        .spacing(space::S1_5)
         .align_y(Alignment::Center)
         .push(
             button(
                 row![]
-                    .spacing(6)
-                    .push(text(&link.identifier).size(12).color(relation_color))
-                    .push(text(&link.title).size(12).color(t::text_secondary())),
+                    .spacing(space::S1_5)
+                    .push(text(&link.identifier).size(type_scale::XS).color(relation_color))
+                    .push(text(&link.title).size(type_scale::XS).color(t::text_secondary())),
             )
             .on_press(Message::OpenIssueDetail(link.issue_id.clone()))
             .padding(0)
@@ -628,7 +645,7 @@ fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Elemen
             .style(button::text),
         )
         .push(
-            button(text("×").size(14).color(t::text_muted()))
+            button(text("×").size(type_scale::SM).color(t::text_muted()))
                 .on_press(Message::RemoveDependency(link.dep_id.clone()))
                 .padding(0)
                 .style(button::text),
@@ -745,9 +762,9 @@ fn suggestion_list<'a>(
 /// replaces the partial `@query`/`#query` with the full token. Rendered inline
 /// under the editor (not a floating popover).
 pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, Message> {
-    let mut col = column![].spacing(2).push(
+    let mut col = column![].spacing(space::S0_5).push(
         text("↑↓ to move · Enter/Tab or click to insert · Esc to dismiss")
-            .size(10)
+            .size(type_scale::XS)
             .color(t::text_muted()),
     );
     for (i, item) in s.items.iter().enumerate() {
@@ -755,12 +772,12 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         col = col.push(
             button(
                 row![]
-                    .spacing(8)
-                    .push(text(&item.label).size(12).color(t::accent()))
-                    .push(text(&item.detail).size(12).color(t::text_secondary())),
+                    .spacing(space::S2)
+                    .push(text(&item.label).size(type_scale::SM).color(t::accent()))
+                    .push(text(&item.detail).size(type_scale::SM).color(t::text_secondary())),
             )
             .on_press(Message::PickSuggestion(i))
-            .padding([3, 8])
+            .padding([space::S2, space::S3])
             .width(Length::Fill)
             .style(move |theme: &Theme, status| {
                 let mut st = button::text(theme, status);
@@ -772,14 +789,14 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         );
     }
     container(col)
-        .padding(6)
+        .padding(space::S1_5)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_card())),
+            background: Some(iced::Background::Color(t::bg_secondary())),
             border: Border {
                 color: t::border(),
                 width: 1.0,
-                radius: 6.0.into(),
+                radius: radius::MD.into(),
             },
             ..Default::default()
         })
@@ -936,12 +953,12 @@ fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> E
                     ),
                     Message::PasteImageIntoDescription,
                 ))
-                .padding(10)
-                .size(14)
+                .padding(space::S2_5)
+                .size(type_scale::SM)
                 .height(Length::Fixed(220.0));
             (editor.into(), suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
         },
-        || crate::views::body::view(&text_now, 14.0, t::text_secondary(), ctx),
+        || crate::views::body::view(&text_now, type_scale::SM, t::text_body(), ctx),
     )
 }
 
@@ -964,15 +981,15 @@ pub(crate) fn description_block<'a>(
                 .into()
         }
         DescriptionDisplay::Empty => iced::widget::mouse_area(
-            container(text("Add description…").size(14).color(t::text_muted()))
-                .padding(10)
+            container(text("Add description…").size(type_scale::SM).color(t::text_muted()))
+                .padding(space::S2_5)
                 .width(Length::Fill),
         )
         .on_press(edit)
         .interaction(iced::mouse::Interaction::Text)
         .into(),
         DescriptionDisplay::Rendered => {
-            iced::widget::mouse_area(container(rendered()).padding(10).width(Length::Fill))
+            iced::widget::mouse_area(container(rendered()).padding(space::S2_5).width(Length::Fill))
                 .on_press(edit)
                 .interaction(iced::mouse::Interaction::Text)
                 .into()
@@ -1001,9 +1018,7 @@ fn referenced_in_section<'a>(
     issues: &'a [Issue],
     team: Option<&'a Team>,
 ) -> Element<'a, Message> {
-    let mut col = column![]
-        .spacing(4)
-        .push(text("Referenced in").size(13).color(t::text_secondary()));
+    let mut col = column![].spacing(space::S1);
     for r in references {
         let Some(src) = issues.iter().find(|i| i.id == r.source_issue_id) else {
             continue;
@@ -1015,11 +1030,11 @@ fn referenced_in_section<'a>(
         };
         let row_button = button(
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .align_y(Alignment::Center)
                 .push(
                     text(issue_identifier(src, team))
-                        .size(12)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 )
                 .push(
@@ -1031,12 +1046,12 @@ fn referenced_in_section<'a>(
                 .push(text(via).size(11).color(t::text_muted())),
         )
         .on_press(Message::OpenIssueDetail(src.id.clone()))
-        .padding([6, 8])
+        .padding([space::S1_5, space::S2])
         .width(Length::Fill)
         .style(button::text);
         col = col.push(issue_row_anchor(row_button, &src.id));
     }
-    col.into()
+    with_heading("Referenced in", col)
 }
 
 /// Activity timeline: change events interleaved with threaded comments
@@ -1048,13 +1063,11 @@ fn comments_section<'a>(
     detail: &'a IssueDetailState,
     ctx: &ThreadCtx<'a, '_>,
 ) -> Element<'a, Message> {
-    let mut col = column![]
-        .spacing(12)
-        .push(text("Activity").size(13).color(t::text_secondary()));
+    let mut col = column![].spacing(space::S1);
 
     let items = activity::timeline(activity, comments);
     if items.is_empty() {
-        col = col.push(text("No activity yet").size(12).color(t::text_muted()));
+        col = col.push(text("No activity yet").size(type_scale::XS).color(t::text_muted()));
     }
     for item in items {
         match item {
@@ -1065,12 +1078,27 @@ fn comments_section<'a>(
         }
     }
 
-    col.push(new_comment_composer(
-        &detail.comment_composer,
-        detail.suggest.as_ref(),
-        &detail.composer_files.files,
-    ))
-    .into()
+    let col = col.push(
+        container(new_comment_composer(
+            &detail.comment_composer,
+            detail.suggest.as_ref(),
+            &detail.composer_files.files,
+        ))
+        .padding(iced::Padding::ZERO.top(space::S4)),
+    );
+    with_heading("Activity", col)
+}
+
+/// Small action button (web `px-3 py-1.5 text-xs rounded`): the theme's
+/// button style with the polished radius.
+fn small_button_style(
+    base: fn(&Theme, button::Status) -> button::Style,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = base(theme, status);
+        style.border.radius = radius::SM.into();
+        style
+    }
 }
 
 /// What `push_thread` needs besides the comments themselves: lookups for
@@ -1125,7 +1153,7 @@ pub fn new_comment_composer<'a>(
     staged: &'a [Attachment],
 ) -> Element<'a, Message> {
     column![]
-        .spacing(8)
+        .spacing(space::S2)
         .push(
             text_editor(content)
                 .placeholder("Leave a comment…  (Cmd+Enter to send)")
@@ -1137,26 +1165,26 @@ pub fn new_comment_composer<'a>(
                     ),
                     Message::PasteImageIntoComment,
                 ))
-                .padding(10)
-                .size(14)
+                .padding(space::S2_5)
+                .size(type_scale::SM)
                 .height(Length::Fixed(80.0)),
         )
         .push_maybe(suggestion_list(suggest, EditorTarget::Comment))
         .push_maybe((!staged.is_empty()).then(|| staged_chips(staged)))
         .push(
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .push(
-                    button(text("Comment").size(13))
+                    button(text("Comment").size(type_scale::XS))
                         .on_press(Message::SubmitComment)
-                        .padding([6, 14])
-                        .style(button::primary),
+                        .padding([space::S1_5, space::S3])
+                        .style(small_button_style(button::primary)),
                 )
                 .push(
-                    button(text("+ Attach file").size(13))
+                    button(text("+ Attach file").size(type_scale::XS))
                         .on_press(Message::PickCommentFiles)
-                        .padding([6, 14])
-                        .style(button::secondary),
+                        .padding([space::S1_5, space::S3])
+                        .style(small_button_style(button::secondary)),
                 ),
         )
         .into()
@@ -1164,7 +1192,7 @@ pub fn new_comment_composer<'a>(
 
 /// One removable chip per file staged on the composer.
 fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
-    let mut chips = row![].spacing(6).align_y(Alignment::Center);
+    let mut chips = row![].spacing(space::S1_5).align_y(Alignment::Center);
     for a in staged {
         chips = chips.push(
             button(
@@ -1173,10 +1201,10 @@ fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
                     a.filename,
                     crate::views::attachments::format_size(a.byte_size)
                 ))
-                .size(12),
+                .size(type_scale::XS),
             )
             .on_press(Message::RemoveStagedFile(a.id.clone()))
-            .padding([3, 8])
+            .padding([space::S1, space::S2])
             .style(button::secondary),
         );
     }
@@ -1188,20 +1216,20 @@ fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
 fn activity_row<'a>(item: &'a ActivityItem) -> Element<'a, Message> {
     let pending = item.origin == ItemOrigin::Pending;
     let line = row![]
-        .spacing(6)
+        .spacing(space::S1_5)
         .align_y(Alignment::Center)
-        .push(text("•").size(11).color(t::text_muted()))
+        .push(text("•").size(type_scale::XS).color(t::text_muted()))
         .push_maybe(
             item.actor
                 .name
                 .as_deref()
-                .map(|n| text(n).size(12).color(t::text_secondary())),
+                .map(|n| text(n).size(type_scale::XS).color(t::text_secondary())),
         )
-        .push(text(item.text.as_str()).size(12).color(t::text_muted()))
-        .push_maybe(pending.then(|| text("(pending)").size(11).color(t::text_muted())))
+        .push(text(item.text.as_str()).size(type_scale::XS).color(t::text_muted()))
+        .push_maybe(pending.then(|| text("(pending)").size(type_scale::XS).color(t::text_muted())))
         .push(
             text(relative_time(&item.at))
-                .size(11)
+                .size(type_scale::XS)
                 .color(t::text_muted()),
         );
     // Only an incoming reference with a cached source issue has a card.
@@ -1232,7 +1260,7 @@ fn reply_composer<'a>(
     suggest: Option<&'a SuggestState>,
 ) -> Element<'a, Message> {
     let body = column![]
-        .spacing(6)
+        .spacing(space::S1_5)
         .push(
             text_editor(content)
                 .placeholder("Write a reply…  (Cmd+Enter to send)")
@@ -1244,24 +1272,24 @@ fn reply_composer<'a>(
                     ),
                     Message::PasteImageIntoReply,
                 ))
-                .padding(8)
-                .size(13)
+                .padding(space::S2)
+                .size(type_scale::SM)
                 .height(Length::Fixed(64.0)),
         )
         .push(
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .push(
-                    button(text("Reply").size(12))
+                    button(text("Reply").size(type_scale::XS))
                         .on_press(Message::SubmitReply)
-                        .padding([4, 12])
-                        .style(button::primary),
+                        .padding([space::S1_5, space::S3])
+                        .style(small_button_style(button::primary)),
                 )
                 .push(
-                    button(text("Cancel").size(12))
+                    button(text("Cancel").size(type_scale::XS))
                         .on_press(Message::CancelReply)
-                        .padding([4, 12])
-                        .style(button::secondary),
+                        .padding([space::S1_5, space::S3])
+                        .style(small_button_style(button::secondary)),
                 ),
         );
     container(body)
@@ -1292,21 +1320,21 @@ fn comment_row<'a>(
         .map(|m| m.name.as_str())
         .unwrap_or("Unknown");
 
-    let mut col = column![].spacing(4).push(
+    let mut col = column![].spacing(space::S1).push(
         row![]
-            .spacing(8)
+            .spacing(space::S2)
             .align_y(Alignment::Center)
-            .push(text(author).size(12).color(t::text_secondary()))
+            .push(text(author).size(type_scale::SM).color(t::text_body()))
             .push(
                 text(relative_time(&comment.created_at))
-                    .size(11)
+                    .size(type_scale::XS)
                     .color(t::text_muted()),
             ),
     );
     col = col.push(crate::views::body::view(
         &comment.body,
-        13.0,
-        t::text_primary(),
+        type_scale::SM,
+        t::text_body(),
         &BodyCtx {
             teams,
             issues,
@@ -1330,11 +1358,11 @@ fn comment_row<'a>(
             .get(&comment.id)
             .and_then(|files| crate::views::attachments::section_with(files, ctx.images, can_delete)),
     );
-    let mut actions = row![].spacing(10);
+    let mut actions = row![].spacing(space::S2_5);
     let can_reply = can_reply && Comment::can_reply_at(depth);
     if can_reply {
         actions = actions.push(
-            button(text("Reply").size(11).color(t::text_muted()))
+            button(text("Reply").size(type_scale::XS).color(t::text_muted()))
                 .on_press(Message::StartReply(comment.id.clone()))
                 .padding(0)
                 .style(button::text),
@@ -1342,7 +1370,7 @@ fn comment_row<'a>(
     }
     if can_delete {
         actions = actions.push(
-            button(text("Delete").size(11).color(t::text_muted()))
+            button(text("Delete").size(type_scale::XS).color(t::text_muted()))
                 .on_press(Message::ConfirmDeleteComment(comment.id.clone()))
                 .padding(0)
                 .style(button::text),
@@ -1352,22 +1380,24 @@ fn comment_row<'a>(
         col = col.push(actions);
     }
 
-    if depth == 0 {
-        return col.into();
-    }
+    // Each comment is a card; replies keep their `INDENT_PX` indent. The
+    // vertical padding makes the gap between cards `space::S5`.
     container(
         container(col)
-            .padding([4, 10])
+            .padding(space::S4)
+            .width(Length::Fill)
             .style(|_theme: &Theme| container::Style {
+                background: Some(t::bg_secondary().into()),
                 border: Border {
-                    color: t::text_muted(),
-                    width: 1.0,
-                    radius: 4.0.into(),
+                    radius: radius::LG.into(),
+                    ..Default::default()
                 },
                 ..Default::default()
             }),
     )
-    .padding(iced::Padding::ZERO.left(INDENT_PX * depth as f32))
+    .padding(
+        iced::Padding::from([space::S2_5, 0.0]).left(INDENT_PX * depth as f32),
+    )
     .into()
 }
 
@@ -1382,7 +1412,7 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
         },
         icon: t::text_muted(),
         placeholder: t::text_muted(),
-        value: t::text_primary(),
+        value: t::text_strong(),
         selection: t::accent(),
     }
 }
