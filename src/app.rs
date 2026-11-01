@@ -6487,6 +6487,7 @@ impl App {
                     &self.group_form.draft,
                     &self.teams,
                     &self.projects,
+                    &self.labels,
                     self.group_form.error
                 )
             ]
