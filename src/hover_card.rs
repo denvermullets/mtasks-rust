@@ -59,6 +59,7 @@ impl<A> Default for HoverCard<A> {
 }
 
 impl<A: Clone + PartialEq> HoverCard<A> {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }

@@ -50,7 +50,12 @@ fn collect_code(blocks: &[Block], out: &mut CodeMap) {
             }
             Block::List(l) => l.items.iter().for_each(|i| collect_code(i, out)),
             Block::Quote(inner) => collect_code(inner, out),
-            Block::Paragraph(_) | Block::Image(_) => {}
+            Block::Table(t) => t
+                .header
+                .iter()
+                .chain(t.rows.iter().flatten())
+                .for_each(|cell| collect_code(cell, out)),
+            Block::Paragraph(_) | Block::Heading(..) | Block::Rule | Block::Image(_) => {}
         }
     }
 }
