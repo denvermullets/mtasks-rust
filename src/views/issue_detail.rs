@@ -5,6 +5,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
+use crate::db::attachments::Attachment;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
@@ -105,6 +106,7 @@ pub fn view<'a>(
     comments: &'a [Comment],
     activity: &'a [ActivityItem],
     references: &'a [Reference],
+    attachments: &'a [Attachment],
     issues: &'a [Issue],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
@@ -168,6 +170,7 @@ pub fn view<'a>(
             issues,
             members,
         ))
+        .push_maybe(crate::views::attachments::section(attachments))
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
