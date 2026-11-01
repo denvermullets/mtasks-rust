@@ -466,6 +466,7 @@ pub fn delete_local(conn: &Connection, dashboard_id: &str) -> Result<Option<Stri
     // Groups and their sources go with the row (ON DELETE CASCADE).
     tx.execute("DELETE FROM dashboards WHERE id = ?1", params![dashboard_id])?;
     tx.commit()?;
+    super::home_page::clear_if_local_dashboard(conn, dashboard_id)?;
     Ok(dashboard
         .remote_id
         .map(|id| serde_json::json!({ "remote_id": id }).to_string()))
@@ -484,6 +485,7 @@ pub fn adopt_created(conn: &Connection, id: &str, dto: &DashboardIn) -> Result<(
         "UPDATE dashboards SET remote_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
         params![id, dto.id, dto.position, dto.updated_at],
     )?;
+    super::home_page::adopt_dashboard(conn, id, dto.id)?;
     Ok(())
 }
 
