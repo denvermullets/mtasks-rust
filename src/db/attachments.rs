@@ -714,8 +714,9 @@ mod tests {
     fn strip_inline_placeholder_cleans_owner_body() {
         let c = conn();
         let uuid = "123e4567-e89b-12d3-a456-426614174000";
+        c.execute("PRAGMA foreign_keys=OFF", []).ok();
         c.execute(
-            "INSERT INTO issues (id, title, description, team_id) VALUES ('i1','t',?1,'tm')",
+            "INSERT INTO issues (id, title, description, lane_id, team_id, created_at, updated_at) VALUES ('i1','t',?1,'l','t','x','x')",
             params![format!("a ![image](jait-pending://{uuid}) b")],
         )
         .unwrap();
