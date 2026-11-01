@@ -2685,6 +2685,25 @@ struct DashboardGroupCreatePrep {
     sources: Vec<dashboards::GroupSource>,
 }
 
+/// The group's dashboard's server id, or the outcome that ends the prep: wait
+/// while the dashboard's create hasn't drained, drop if it is gone locally.
+/// Shared by the group create and update preps, which differ in everything else.
+fn group_parent_remote_id(
+    conn: &Connection,
+    entity_id: &str,
+    group: &dashboards::DashboardGroup,
+) -> Result<i64, Outcome> {
+    match dashboards::get(conn, &group.dashboard_id) {
+        Ok(Some(d)) => d
+            .remote_id
+            .ok_or_else(|| Outcome::LeavePending("dashboard create not yet drained".into())),
+        Ok(None) => Err(Outcome::DropAndLog(format!(
+            "dashboard group {entity_id}: dashboard missing locally"
+        ))),
+        Err(e) => Err(Outcome::LeavePending(format!("db: {e}"))),
+    }
+}
+
 /// Re-read the group and its parent. Waits (`LeavePending`) while the parent
 /// dashboard has no server id; its create entry is earlier in the queue and
 /// drains first. Sources are read as stored, so edits made while waiting go out.
@@ -2702,17 +2721,9 @@ fn dashboard_group_create_prep(conn: &Connection, entity_id: &str) -> Prep<Dashb
     if group.remote_id.is_some() {
         return Prep::Done(Outcome::Success);
     }
-    let parent = match dashboards::get(conn, &group.dashboard_id) {
-        Ok(Some(d)) => d,
-        Ok(None) => {
-            return Prep::Done(Outcome::DropAndLog(format!(
-                "dashboard group {entity_id}: dashboard missing locally"
-            )))
-        }
-        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
-    };
-    let Some(dashboard_remote_id) = parent.remote_id else {
-        return Prep::Done(Outcome::LeavePending("dashboard create not yet drained".into()));
+    let dashboard_remote_id = match group_parent_remote_id(conn, entity_id, &group) {
+        Ok(id) => id,
+        Err(o) => return Prep::Done(o),
     };
     let sources = match dashboards::sources_for(conn, &group.id) {
         Ok(s) => s,
@@ -2816,19 +2827,9 @@ fn dashboard_group_update_prep(conn: &Connection, entity_id: &str) -> Prep<Dashb
     let Some(remote_id) = group.remote_id else {
         return Prep::Done(Outcome::LeavePending("dashboard group create not yet drained".into()));
     };
-    let dashboard_remote_id = match dashboards::get(conn, &group.dashboard_id) {
-        Ok(Some(d)) => match d.remote_id {
-            Some(r) => r,
-            None => {
-                return Prep::Done(Outcome::LeavePending("dashboard create not yet drained".into()))
-            }
-        },
-        Ok(None) => {
-            return Prep::Done(Outcome::DropAndLog(format!(
-                "dashboard group {entity_id}: dashboard missing locally"
-            )))
-        }
-        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    let dashboard_remote_id = match group_parent_remote_id(conn, entity_id, &group) {
+        Ok(id) => id,
+        Err(o) => return Prep::Done(o),
     };
     let sources = match dashboards::sources_for(conn, &group.id) {
         Ok(s) => s,
@@ -3162,17 +3163,12 @@ async fn dashboard_delete(client: &ApiClient, payload: Option<&str>) -> Outcome 
 
 /// `DELETE /dashboards/:dashboard_id/groups/:id`. A 404 means it is already gone: done.
 async fn dashboard_group_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
-    let Some((dashboard_remote_id, remote_id)) = group_delete_ids(payload) else {
+    let Some(p) = dashboards::GroupDeletePayload::parse(payload) else {
         return Outcome::DropAndLog("dashboard group delete: bad payload".into());
     };
     dashboard_delete_outcome(
-        crate::api::dashboards::delete_group(client, dashboard_remote_id, remote_id).await,
+        crate::api::dashboards::delete_group(client, p.dashboard_remote_id, p.remote_id).await,
     )
-}
-
-fn group_delete_ids(payload: Option<&str>) -> Option<(i64, i64)> {
-    let v: serde_json::Value = serde_json::from_str(payload?).ok()?;
-    Some((v.get("dashboard_remote_id")?.as_i64()?, v.get("remote_id")?.as_i64()?))
 }
 
 fn dashboard_delete_outcome(result: Result<(), ApiError>) -> Outcome {
@@ -6309,12 +6305,13 @@ mod tests {
 
     #[test]
     fn group_delete_payload_needs_both_remote_ids() {
+        let parse = dashboards::GroupDeletePayload::parse;
         assert_eq!(
-            group_delete_ids(Some(r#"{"dashboard_remote_id":5,"remote_id":10}"#)),
-            Some((5, 10))
+            parse(Some(r#"{"dashboard_remote_id":5,"remote_id":10}"#)),
+            Some(dashboards::GroupDeletePayload { dashboard_remote_id: 5, remote_id: 10 })
         );
-        assert_eq!(group_delete_ids(Some(r#"{"remote_id":10}"#)), None);
-        assert_eq!(group_delete_ids(None), None);
+        assert_eq!(parse(Some(r#"{"remote_id":10}"#)), None);
+        assert_eq!(parse(None), None);
     }
 
     #[test]

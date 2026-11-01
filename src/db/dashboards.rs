@@ -592,12 +592,29 @@ pub fn delete_group_local(conn: &Connection, group_id: &str) -> Result<Option<St
     }
     tx.commit()?;
     Ok(match (group.remote_id, dashboard.and_then(|d| d.remote_id)) {
-        (Some(remote_id), Some(dashboard_remote_id)) => Some(
-            serde_json::json!({ "dashboard_remote_id": dashboard_remote_id, "remote_id": remote_id })
-                .to_string(),
-        ),
+        (Some(remote_id), Some(dashboard_remote_id)) => {
+            Some(GroupDeletePayload { dashboard_remote_id, remote_id }.to_json())
+        }
         _ => None,
     })
+}
+
+/// Payload of a queued `dashboard_group` delete: where the group lives on the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroupDeletePayload {
+    pub dashboard_remote_id: i64,
+    pub remote_id: i64,
+}
+
+impl GroupDeletePayload {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("two integers serialize")
+    }
+
+    /// None for a missing payload or one lacking either id.
+    pub fn parse(payload: Option<&str>) -> Option<Self> {
+        serde_json::from_str(payload?).ok()
+    }
 }
 
 /// After a successful `POST`: the local row takes the server's id, position
