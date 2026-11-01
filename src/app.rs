@@ -363,6 +363,9 @@ pub enum Message {
     /// Cmd+V with an image-only clipboard in the issue description editor.
     PasteImageIntoDescription,
     PasteImageIntoProjectDescription,
+    /// Cmd+V with an image-only clipboard in the comment / inline reply composer.
+    PasteImageIntoComment,
+    PasteImageIntoReply,
     /// A file dropped on the window; routed by `files::drop::drop_target`.
     FileDropped(std::path::PathBuf),
     /// The batch window after the first `FileDropped` closed: route the whole
@@ -1048,6 +1051,11 @@ impl App {
         let ids: Vec<&str> = self.detail_comments.iter().map(|c| c.id.as_str()).collect();
         self.detail_comment_attachments =
             crate::db::attachments::list_for_comments(conn, &ids).unwrap_or_default();
+        // Pasted-but-unsent images in comments render from the outbox too.
+        for files in self.detail_comment_attachments.values() {
+            self.detail_pending_paths
+                .extend(crate::views::issue_detail::pending_inline_paths(files));
+        }
     }
 
     /// Local "Referenced In": scan the open issue's team (descriptions in
@@ -2017,11 +2025,13 @@ impl App {
             _ => return false,
         };
         // A top-level comment takes the id its staged files are owned by.
-        let staged_id = match (&parent_id, self.comment_drafts_mut()) {
-            (None, Some(d)) if !d.files.files.is_empty() => Some(d.files.comment_id.clone()),
-            _ => None,
+        // (and pasted images); a reply takes the id its pasted images were owned by.
+        let (local_id, staged) = match (&parent_id, self.comment_drafts_mut()) {
+            (None, Some(d)) => (Some(d.files.comment_id.clone()), !d.files.files.is_empty()),
+            (Some(_), Some(d)) => (Some(d.files.reply_id.clone()), false),
+            _ => (None, false),
         };
-        if !comment_has_content(&body, staged_id.is_some()) {
+        if !comment_has_content(&body, staged) {
             return false;
         }
         if let Some(pid) = &parent_id {
@@ -2044,7 +2054,7 @@ impl App {
         });
         let now = crate::db::now_iso();
         let comment = Comment {
-            id: staged_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id: local_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             remote_id: None,
             issue_id,
             project_id,
@@ -2059,9 +2069,13 @@ impl App {
         }
         drop(conn);
         self.enqueue_sync("comment", &comment.id, "create", None);
-        if staged_id.is_some() {
-            if let Some(d) = self.comment_drafts_mut() {
-                *d.files = Default::default();
+        if let Some(d) = self.comment_drafts_mut() {
+            // Fresh owner id for the next comment / reply (the old ones now belong to this one).
+            if comment.parent_id.is_none() {
+                d.files.files.clear();
+                d.files.comment_id = uuid::Uuid::new_v4().to_string();
+            } else {
+                d.files.reply_id = uuid::Uuid::new_v4().to_string();
             }
         }
         self.reload_data();
@@ -4187,6 +4201,36 @@ impl App {
                             ));
                         }
                         self.load_detail_dependencies(&conn);
+                        self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+                    }
+                    Err(reason) => self.push_toast(reason, ToastKind::Error, false),
+                }
+            }
+
+            Message::PasteImageIntoComment | Message::PasteImageIntoReply => {
+                let reply = matches!(message, Message::PasteImageIntoReply);
+                let crate::files::paste::ClipboardPaste::Image(png) =
+                    crate::files::paste::read_clipboard()
+                else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                let Some(d) = self.comment_drafts_mut() else {
+                    return Task::none();
+                };
+                let owner = if reply { d.files.reply_id.clone() } else { d.files.comment_id.clone() };
+                match crate::files::paste::paste_image_placeholder(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Comment,
+                    &owner,
+                    &png,
+                ) {
+                    Ok(text) => {
+                        let editor = if reply { d.reply } else { d.comment };
+                        editor.perform(iced::widget::text_editor::Action::Edit(
+                            iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)),
+                        ));
                         self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
                     }
                     Err(reason) => self.push_toast(reason, ToastKind::Error, false),

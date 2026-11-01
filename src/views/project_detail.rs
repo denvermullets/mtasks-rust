@@ -187,6 +187,7 @@ pub fn view<'a>(
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(
             comments, detail, members, team, teams, issues, comment_attachments, images, host,
+            pending_paths,
         ));
 
     // ---- Right sidebar: properties ----
@@ -311,6 +312,7 @@ fn discussion_section<'a>(
     comment_attachments: &'a CommentAttachments,
     images: &'a crate::files::images::ImageStore,
     host: &'a str,
+    pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
@@ -331,6 +333,7 @@ fn discussion_section<'a>(
         comment_attachments,
         images,
         host,
+        pending_paths,
     };
     push_thread(col, Comment::thread_order(comments), &ctx)
         .push(new_comment_composer(

@@ -51,11 +51,17 @@ pub struct IssueDetailState {
 pub struct ComposerFiles {
     pub comment_id: String,
     pub files: Vec<Attachment>,
+    /// Id the open inline reply will be inserted with (owns its pasted images).
+    pub reply_id: String,
 }
 
 impl Default for ComposerFiles {
     fn default() -> Self {
-        Self { comment_id: uuid::Uuid::new_v4().to_string(), files: Vec::new() }
+        Self {
+            comment_id: uuid::Uuid::new_v4().to_string(),
+            files: Vec::new(),
+            reply_id: uuid::Uuid::new_v4().to_string(),
+        }
     }
 }
 
@@ -236,6 +242,7 @@ pub fn view<'a>(
                 comment_attachments,
                 images,
                 host,
+                pending_paths,
             },
         ));
 
@@ -950,6 +957,8 @@ pub struct ThreadCtx<'a, 'b> {
     pub images: &'a ImageStore,
     /// Configured JAIT base URL (resolves inline image URLs).
     pub host: &'a str,
+    /// Unsent pasted images (placeholder uuid -> outbox file), comments included.
+    pub pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 /// Comment local id -> its files (absent when it has none).
@@ -986,9 +995,12 @@ pub fn new_comment_composer<'a>(
             text_editor(content)
                 .placeholder("Leave a comment…  (Cmd+Enter to send)")
                 .on_action(Message::CommentComposerChanged)
-                .key_binding(editor_binding(
-                    Some(Message::SubmitComment),
-                    suggesting(suggest, EditorTarget::Comment),
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        Some(Message::SubmitComment),
+                        suggesting(suggest, EditorTarget::Comment),
+                    ),
+                    Message::PasteImageIntoComment,
                 ))
                 .padding(10)
                 .size(14)
@@ -1081,9 +1093,12 @@ fn reply_composer<'a>(
             text_editor(content)
                 .placeholder("Write a reply…  (Cmd+Enter to send)")
                 .on_action(Message::ReplyComposerChanged)
-                .key_binding(editor_binding(
-                    Some(Message::SubmitReply),
-                    suggesting(suggest, EditorTarget::Reply),
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        Some(Message::SubmitReply),
+                        suggesting(suggest, EditorTarget::Reply),
+                    ),
+                    Message::PasteImageIntoReply,
                 ))
                 .padding(8)
                 .size(13)
@@ -1156,7 +1171,7 @@ fn comment_row<'a>(
             members,
             images: ctx.images,
             host: ctx.host,
-            pending_paths: None,
+            pending_paths: Some(ctx.pending_paths),
             on_image: Some(Message::OpenInlineImage),
         },
     ));
