@@ -69,16 +69,23 @@ pub const FONTS: [FontDef; 10] = [
 ];
 
 /// Font files embedded in the binary, registered at launch. Regular weight
-/// for every family, plus Inter Bold (a static instance of the bundled
-/// variable Inter at wght 700, opsz 14: Iced 0.13 cannot drive the weight axis)
-/// and Inter Italic (Inter 4.001's variable italic, instanced at wght 400, opsz 14
-/// and renamed to family "Inter", style "Italic").
-pub const FONT_BYTES: [&[u8]; 11] = [
+/// for every family, plus a Bold face for each (and Italic and Bold Italic
+/// where upstream has them). Iced 0.13 cannot drive a weight axis, so the
+/// faces are static files: official static TTFs where upstream ships them
+/// (Inter 4.1 release, IBM Plex Mono), otherwise instances of the Google Fonts
+/// variable fonts at wght 700 (and wdth 100, opsz 14 for Inter), keeping the
+/// family name. Provenance is recorded on JRST-267, -268, -270 and -271.
+pub const FONT_BYTES: [&[u8]; 16] = [
     include_bytes!("../assets/fonts/Inter-Regular.ttf"),
     include_bytes!("../assets/fonts/Inter-Bold.ttf"),
     include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+    include_bytes!("../assets/fonts/Inter-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-Bold.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/SpaceGrotesk-Regular.ttf"),
+    include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf"),
     include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
     include_bytes!("../assets/fonts/FiraCode-Regular.ttf"),
@@ -112,9 +119,9 @@ pub fn active() -> Font {
     ACTIVE.get().copied().unwrap_or(Font::DEFAULT)
 }
 
-/// Families that have a bundled Bold face. Add a family here when its Bold
-/// file joins `FONT_BYTES`.
-const BOLD_FAMILIES: [&str; 1] = ["Inter"];
+/// Families that have a bundled Bold face (and Bold Italic, where they have an
+/// Italic). Add a family here when its Bold file joins `FONT_BYTES`.
+const BOLD_FAMILIES: [&str; 3] = ["Inter", "IBM Plex Sans", "Space Grotesk"];
 
 /// `font` at bold weight, if its family has a bundled Bold face. Without one,
 /// Iced's text stack does not fall back to the nearest weight of the same
@@ -123,25 +130,31 @@ const BOLD_FAMILIES: [&str; 1] = ["Inter"];
 pub fn bold(font: Font) -> Font {
     match font.family {
         iced::font::Family::Name(n) if !BOLD_FAMILIES.contains(&n) => font,
-        // No bold italic face yet: an italic font stays regular weight.
-        _ if font.style != iced::font::Style::Normal => font,
         _ => Font { weight: iced::font::Weight::Bold, ..font },
     }
 }
 
-/// Families that have a bundled Italic face (regular weight). Add a family
-/// here when its Italic file joins `FONT_BYTES`.
-const ITALIC_FAMILIES: [&str; 1] = ["Inter"];
+/// Families that have a bundled Italic face. Add a family here when its Italic
+/// file joins `FONT_BYTES`.
+const ITALIC_FAMILIES: [&str; 2] = ["Inter", "IBM Plex Sans"];
 
-/// `font` in italic style, if its family has a bundled Italic face; other
-/// families stay upright for the same reason as in [`bold`]. Italic and bold
-/// together currently draw as regular-weight italic, in either order: Inter
-/// has no bold italic file yet (JRST-270).
+/// Families whose upstream release has no italic, with the bundled family
+/// whose italic stands in for it.
+const ITALIC_SUBSTITUTES: [(&str, &str); 1] = [("Space Grotesk", "Inter")];
+
+/// `font` in italic style, if its family has a bundled Italic face, or the
+/// substitute family's italic if upstream ships none; other families stay
+/// upright for the same reason as in [`bold`]. Composes with [`bold`] in either
+/// order: every family that has an italic also has a bold italic.
 pub fn italic(font: Font) -> Font {
+    let style = iced::font::Style::Italic;
     match font.family {
-        iced::font::Family::Name(n) if !ITALIC_FAMILIES.contains(&n) => font,
-        // Dropping the weight too: bold italic would draw another family.
-        _ => Font { style: iced::font::Style::Italic, weight: iced::font::Weight::Normal, ..font },
+        iced::font::Family::Name(n) if ITALIC_FAMILIES.contains(&n) => Font { style, ..font },
+        iced::font::Family::Name(n) => match ITALIC_SUBSTITUTES.iter().find(|(from, _)| *from == n) {
+            Some((_, to)) => Font { family: iced::font::Family::Name(to), style, ..font },
+            None => font,
+        },
+        _ => Font { style, ..font },
     }
 }
 
@@ -206,26 +219,16 @@ pub fn choice_for_key(key: &str) -> FontChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The weight of the bundled face the text stack picks for a family and
-    /// weight, through the same font system Iced draws with.
-    fn face_weight(family: &'static str, weight: iced::font::Weight) -> (String, u16) {
-        let (family, weight, _) = face(family, weight, iced::font::Style::Normal);
-        (family, weight)
-    }
-
-    /// Family, weight and whether it is italic, for the face picked.
-    fn face(
-        family: &'static str,
-        weight: iced::font::Weight,
-        style: iced::font::Style,
-    ) -> (String, u16, bool) {
+    /// Family, weight and whether it is italic, for the face the text stack
+    /// picks for `font`, through the same font system Iced draws with. A
+    /// missing face does not fail: the stack silently picks another family,
+    /// so every bundled face needs an assertion on this.
+    fn face(font: Font) -> (String, u16, bool) {
         use iced::advanced::graphics::text::{cosmic_text as ct, font_system, to_attributes};
         let mut fs = font_system().write().unwrap();
         for bytes in FONT_BYTES {
             fs.load_font(std::borrow::Cow::Borrowed(bytes));
         }
-        let font = Font { weight, style, ..Font::with_name(family) };
         let mut buf = ct::Buffer::new(fs.raw(), ct::Metrics::new(16.0, 20.0));
         buf.set_text(fs.raw(), "Bold", to_attributes(font), ct::Shaping::Advanced);
         buf.shape_until_scroll(fs.raw(), false);
@@ -234,57 +237,64 @@ mod tests {
         (face.families[0].0.clone(), face.weight.0, face.style != ct::fontdb::Style::Normal)
     }
 
-    #[test]
-    fn bold_request_picks_the_bold_face_where_one_is_bundled() {
-        use iced::font::Weight;
-        assert_eq!(face_weight("Inter", Weight::Bold), ("Inter".into(), 700));
-        assert_eq!(face_weight("Inter", Weight::Normal), ("Inter".into(), 400));
-        // Why `bold` leaves other families alone: with no bold face of their
-        // own, the stack picks another family's bold (here a system font).
-        assert_ne!(face_weight("IBM Plex Sans", Weight::Bold).0, "IBM Plex Sans");
+    /// What `bold` and `italic` turn a catalog font into, as the face drawn.
+    fn styled(key: &str, bold_it: bool, italic_it: bool) -> (String, u16, bool) {
+        let mut f = font_for_key(key);
+        if bold_it {
+            f = bold(f);
+        }
+        if italic_it {
+            f = italic(f);
+        }
+        face(f)
     }
 
     #[test]
-    fn italic_request_picks_the_italic_face_where_one_is_bundled() {
-        use iced::font::{Style, Weight};
-        assert_eq!(face("Inter", Weight::Normal, Style::Italic), ("Inter".into(), 400, true));
-        assert_eq!(face("Inter", Weight::Normal, Style::Normal), ("Inter".into(), 400, false));
-        // Bold italic has no face of its own yet, and asking for one draws
-        // another family's face (Menlo here): `bold` and `italic` avoid it.
-        assert_ne!(face("Inter", Weight::Bold, Style::Italic).0, "Inter");
-        // Why `italic` leaves other families alone: with no italic file of
-        // their own, the stack may pick another family.
-        let (family, _, italic) = face("IBM Plex Sans", Weight::Normal, Style::Italic);
-        assert!(family != "IBM Plex Sans" || !italic);
+    fn sans_families_draw_their_own_bold_and_italic_faces() {
+        // (key, family, has its own italic). Bold, italic and bold italic all
+        // land on a face of the same family with the right weight and slant.
+        for (key, family) in [("inter", "Inter"), ("ibm-plex-sans", "IBM Plex Sans")] {
+            assert_eq!(styled(key, false, false), (family.into(), 400, false), "{key} regular");
+            assert_eq!(styled(key, true, false), (family.into(), 700, false), "{key} bold");
+            assert_eq!(styled(key, false, true), (family.into(), 400, true), "{key} italic");
+            assert_eq!(styled(key, true, true), (family.into(), 700, true), "{key} bold italic");
+        }
+        assert_eq!(styled("space-grotesk", false, false), ("Space Grotesk".into(), 400, false));
+        assert_eq!(styled("space-grotesk", true, false), ("Space Grotesk".into(), 700, false));
     }
 
     #[test]
-    fn italic_applies_only_to_families_with_an_italic_face() {
-        for (key, italicised) in [("inter", true), ("system", true), ("ibm-plex-sans", false), ("jetbrains-mono", false)] {
-            let f = italic(font_for_key(key));
-            assert_eq!(f.family, font_for_key(key).family, "{key} keeps its family");
-            assert_eq!(f.style == iced::font::Style::Italic, italicised, "{key}");
+    fn space_grotesk_has_no_italic_so_italic_uses_inter_italic() {
+        // Upstream Space Grotesk ships no italic: the substitute is Inter's.
+        assert_eq!(styled("space-grotesk", false, true), ("Inter".into(), 400, true));
+        assert_eq!(styled("space-grotesk", true, true), ("Inter".into(), 700, true));
+    }
+
+    #[test]
+    fn bold_and_italic_compose_in_either_order() {
+        for key in ["inter", "ibm-plex-sans", "space-grotesk"] {
+            let a = italic(bold(font_for_key(key)));
+            let b = bold(italic(font_for_key(key)));
+            assert_eq!(face(a), face(b), "{key}");
+            assert_eq!((a.weight, a.style), (iced::font::Weight::Bold, iced::font::Style::Italic), "{key}");
         }
     }
 
     #[test]
-    fn bold_and_italic_together_fall_back_to_italic_in_either_order() {
-        for (name, f) in [
-            ("bold then italic", italic(bold(font_for_key("inter")))),
-            ("italic then bold", bold(italic(font_for_key("inter")))),
-        ] {
-            assert_eq!(f.style, iced::font::Style::Italic, "{name}");
-            assert_eq!(f.weight, iced::font::Weight::Normal, "{name}");
-        }
+    fn system_font_bold_and_italic_draw_distinct_faces() {
+        let regular = face(Font::DEFAULT);
+        let (_, w, i) = face(bold(Font::DEFAULT));
+        assert!(w >= 700 && !i, "system bold");
+        let (_, w, i) = face(italic(Font::DEFAULT));
+        assert!(w < 700 && i, "system italic");
+        assert_eq!(regular.1, 400);
     }
 
     #[test]
-    fn bold_applies_only_to_families_with_a_bold_face() {
-        for (key, bolded) in [("inter", true), ("system", true), ("ibm-plex-sans", false), ("jetbrains-mono", false)] {
-            let f = bold(font_for_key(key));
-            assert_eq!(f.family, font_for_key(key).family, "{key} keeps its family");
-            assert_eq!(f.weight == iced::font::Weight::Bold, bolded, "{key}");
-        }
+    fn unbundled_named_families_are_left_alone() {
+        let f = Font::with_name("Comic Sans");
+        assert_eq!(bold(f), f);
+        assert_eq!(italic(f), f);
     }
 
     #[test]
@@ -334,8 +344,6 @@ mod tests {
                 "system"
             ]
         );
-        // One regular face per bundled family, plus Inter Bold and Inter Italic.
-        assert_eq!(FONT_BYTES.len(), FONTS.len() + 1);
     }
 
     #[test]
