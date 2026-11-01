@@ -172,12 +172,13 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
         Block::Image(img) => image_block(img, ctx),
         Block::List(list) => list_block(list, size, plain, ctx),
-        Block::Quote(blocks) => quote_block(blocks, size, plain, ctx),
+        Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx),
     }
 }
 
 /// A quote: a muted left rule beside the content column. Nested quotes get
-/// their own rule, so they read as stacked bars.
+/// their own rule, so they read as stacked bars. Callers pass the muted text
+/// color (web: `.markdown blockquote { color: gray-400 }`, token `text_muted`).
 fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     let mut content = column![].spacing(t::space::S2).width(iced::Length::Fill);
     for b in blocks {
