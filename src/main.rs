@@ -6,7 +6,6 @@ mod dashboard_eval;
 mod dashboard_session;
 mod db;
 mod display;
-#[allow(dead_code)] // consumed by the renderer in later tickets
 mod document;
 mod files;
 mod fonts;
