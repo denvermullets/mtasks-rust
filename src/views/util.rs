@@ -117,6 +117,19 @@ pub fn sidebar_pick_list_style(_theme: &Theme, status: pick_list::Status) -> pic
     }
 }
 
+/// Dropdown menu style to pair with `sidebar_pick_list_style`: same fill, stroke
+/// border and `radius::MD` as the closed control, accent for the highlighted
+/// option. Use as `.menu_style(util::sidebar_menu_style)`.
+pub fn sidebar_menu_style(_theme: &Theme) -> iced::overlay::menu::Style {
+    iced::overlay::menu::Style {
+        background: iced::Background::Color(t::bg_secondary()),
+        border: control_border(false),
+        text_color: t::text_body(),
+        selected_text_color: t::on_accent(iced::widget::button::Status::Active),
+        selected_background: iced::Background::Color(t::accent()),
+    }
+}
+
 /// `text_input` style for sidebar controls; the focused border is the accent.
 /// Use as `.style(util::sidebar_input_style)`.
 pub fn sidebar_input_style(_theme: &Theme, status: text_input::Status) -> text_input::Style {

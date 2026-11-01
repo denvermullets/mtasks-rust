@@ -221,7 +221,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
-            .style(util::sidebar_pick_list_style),
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
         .push(util::sidebar_field(
             "Priority",
@@ -233,7 +234,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
-            .style(util::sidebar_pick_list_style),
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
         .push(util::sidebar_field(
             "Lead",
@@ -243,7 +245,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
-            .style(util::sidebar_pick_list_style),
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
         // Project labels aren't wired into the data layer yet (see JAIT-181
         // notes); render read-only until the follow-up ticket lands.

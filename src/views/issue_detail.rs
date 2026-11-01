@@ -17,8 +17,8 @@ use crate::views::issue_form::LaneOption;
 use crate::views::lane_icon;
 use crate::views::projects::MemberOption;
 use crate::views::util::{
-    relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_panel,
-    sidebar_pick_list_style, SIDEBAR_CONTROL_PADDING,
+    relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_menu_style,
+    sidebar_panel, sidebar_pick_list_style, SIDEBAR_CONTROL_PADDING,
 };
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
@@ -316,7 +316,8 @@ pub fn view<'a>(
                     .width(Length::Fill)
                     .text_size(type_scale::SM)
                     .padding(SIDEBAR_CONTROL_PADDING)
-                    .style(sidebar_pick_list_style),
+                    .style(sidebar_pick_list_style)
+                    .menu_style(sidebar_menu_style),
                 ),
         ))
         .push(sidebar_field(
@@ -329,7 +330,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .text_size(type_scale::SM)
             .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style),
+            .style(sidebar_pick_list_style)
+            .menu_style(sidebar_menu_style),
         ))
         .push(sidebar_field(
             "Assignee",
@@ -339,7 +341,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .text_size(type_scale::SM)
             .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style),
+            .style(sidebar_pick_list_style)
+            .menu_style(sidebar_menu_style),
         ))
         .push(sidebar_field(
             "Creator",
@@ -374,7 +377,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .text_size(type_scale::SM)
             .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style),
+            .style(sidebar_pick_list_style)
+            .menu_style(sidebar_menu_style),
         ))
         .push(sidebar_field("Labels", placeholder_value()))
         .push(dependency_block(DepKind::Blocking, &deps.blocking))
