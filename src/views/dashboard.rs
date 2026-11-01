@@ -147,6 +147,7 @@ fn controls<'a>(
             .push(team_picker(evaluation, header.team.as_deref()))
             .push(assignee_picker(evaluation, header.assignee))
             .push(label_picker(evaluation, header.label.as_deref()))
+            .push(status_picker(evaluation, header.status.as_deref()))
             .push(reset_button())
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
@@ -186,6 +187,26 @@ fn team_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Mess
     }));
     let selected = options.iter().find(|o| o.id.as_deref() == active).cloned();
     pick_list(options, selected, |c| Message::SetDashboardTeam(c.id)).text_size(13).into()
+}
+
+/// The status picker: lane names across the source teams. "Any status" clears it.
+fn status_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Message> {
+    if e.status_options.is_empty() {
+        return horizontal_space().width(0).into();
+    }
+    let mut options = vec![StatusChoice(None)];
+    options.extend(e.status_options.iter().map(|s| StatusChoice(Some(s.clone()))));
+    let selected = options.iter().find(|o| o.0.as_deref() == active).cloned();
+    pick_list(options, selected, |c| Message::SetDashboardStatus(c.0)).text_size(13).into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusChoice(Option<String>);
+
+impl std::fmt::Display for StatusChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_deref().unwrap_or("Any status"))
+    }
 }
 
 /// The assignee picker: members of the source teams plus "Unassigned".

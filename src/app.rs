@@ -102,6 +102,7 @@ pub enum Message {
     SetDashboardSort(crate::dashboard_eval::Sort),
     /// Local team id, or None for all teams.
     SetDashboardTeam(Option<String>),
+    SetDashboardStatus(Option<String>),
     /// Dashboard header: pick an assignee (or Unassigned); None clears it.
     SetDashboardAssignee(Option<crate::dashboard_eval::AssigneeFilter>),
     SetDashboardLabel(Option<String>),
@@ -3859,6 +3860,12 @@ impl App {
 
             Message::SetDashboardTeam(team) => {
                 self.dashboard_header.team = team;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardStatus(status) => {
+                self.dashboard_header.status = status;
                 self.focused_lane = 0;
                 self.focused_issue = 0;
             }
