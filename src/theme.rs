@@ -469,6 +469,30 @@ pub fn hex_to_color(hex: &str) -> Option<Color> {
     ))
 }
 
+/// The web's Tailwind v4 default type scale, in logical pixels (rem * 16).
+/// Each size pairs with the web's line height as a multiple of the size.
+#[allow(dead_code)]
+pub mod type_scale {
+    pub const XS: f32 = 12.0;
+    pub const SM: f32 = 14.0;
+    pub const BASE: f32 = 16.0;
+    pub const LG: f32 = 18.0;
+    pub const XL: f32 = 20.0;
+    pub const XXL: f32 = 24.0;
+    pub const XXXL: f32 = 30.0;
+    pub const XXXXL: f32 = 36.0;
+
+    /// Line height multiples (Tailwind v4: 16/12, 20/14, 24/16, 28/18, 28/20, 32/24, 36/30, 40/36).
+    pub const LH_XS: f32 = 16.0 / 12.0;
+    pub const LH_SM: f32 = 20.0 / 14.0;
+    pub const LH_BASE: f32 = 1.5;
+    pub const LH_LG: f32 = 28.0 / 18.0;
+    pub const LH_XL: f32 = 28.0 / 20.0;
+    pub const LH_XXL: f32 = 32.0 / 24.0;
+    pub const LH_XXXL: f32 = 1.2;
+    pub const LH_XXXXL: f32 = 40.0 / 36.0;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,5 +613,19 @@ mod tests {
         set_by_key("no-such-theme");
         assert_eq!(tok().key, DEFAULT_THEME_KEY);
         assert_eq!(accent(), dark_acc);
+    }
+
+    #[test]
+    fn type_scale_matches_the_webs_tailwind_sizes() {
+        use type_scale::*;
+        let sizes = [XS, SM, BASE, LG, XL, XXL, XXXL, XXXXL];
+        assert_eq!(sizes, [12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 30.0, 36.0]);
+        let lines = [LH_XS, LH_SM, LH_BASE, LH_LG, LH_XL, LH_XXL, LH_XXXL, LH_XXXXL];
+        let px = [16.0, 20.0, 24.0, 28.0, 28.0, 32.0, 36.0, 40.0];
+        for ((s, l), want) in sizes.iter().zip(lines).zip(px) {
+            assert!((s * l - want).abs() < 0.01, "{s}px line height");
+        }
+        // The web's markdown headings: h1 1.5rem, h2 1.25rem, h3 1.125rem, h4+ 1rem.
+        assert_eq!([XXL, XL, LG, BASE], [24.0, 20.0, 18.0, 16.0]);
     }
 }
