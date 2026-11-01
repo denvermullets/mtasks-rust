@@ -362,6 +362,7 @@ pub enum Message {
     FilesPicked(Vec<std::path::PathBuf>),
     /// Cmd+V with an image-only clipboard in the issue description editor.
     PasteImageIntoDescription,
+    PasteImageIntoProjectDescription,
     /// A file dropped on the window; routed by `files::drop::drop_target`.
     FileDropped(std::path::PathBuf),
     /// The batch window after the first `FileDropped` closed: route the whole
@@ -986,6 +987,8 @@ impl App {
                 project_id,
             )
             .unwrap_or_default();
+            self.detail_pending_paths =
+                crate::views::issue_detail::pending_inline_paths(&self.detail_attachments);
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments =
@@ -4122,6 +4125,37 @@ impl App {
                 }
             }
 
+            Message::PasteImageIntoProjectDescription => {
+                let View::ProjectDetail(ref project_id) = self.view else {
+                    return Task::none();
+                };
+                let project_id = project_id.clone();
+                let crate::files::paste::ClipboardPaste::Image(png) =
+                    crate::files::paste::read_clipboard()
+                else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                match crate::files::paste::paste_image_placeholder(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Project,
+                    &project_id,
+                    &png,
+                ) {
+                    Ok(text) => {
+                        if let Some(d) = &mut self.project_detail {
+                            d.description.perform(iced::widget::text_editor::Action::Edit(
+                                iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)),
+                            ));
+                        }
+                        self.load_detail_dependencies(&conn);
+                        self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+                    }
+                    Err(reason) => self.push_toast(reason, ToastKind::Error, false),
+                }
+            }
+
             // A multi-file drop arrives as one event per file: buffer them and
             // route the batch once the window closes.
             Message::FileDropped(path) => {
@@ -5356,6 +5390,7 @@ impl App {
                             &self.detail_comment_attachments,
                             &self.images,
                             &self.config.api_base_url,
+                            &self.detail_pending_paths,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
