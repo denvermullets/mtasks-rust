@@ -360,6 +360,9 @@ pub enum Message {
     PasteImageIntoDescription,
     /// A file dropped on the window; routed by `files::drop::drop_target`.
     FileDropped(std::path::PathBuf),
+    /// The batch window after the first `FileDropped` closed: route the whole
+    /// buffered drop at once.
+    FlushDrops,
     /// "+ Attach file" on a comment composer (issue or project detail).
     PickCommentFiles,
     /// Files chosen for the open detail view's comment composer (picker now;
@@ -682,6 +685,8 @@ pub struct App {
     /// The top-level comment composer was the last editor touched; a file drop
     /// then stages onto it (JRST-208). Cleared on view change.
     composer_focused: bool,
+    /// Files of an in-progress multi-file drop, flushed by `Message::FlushDrops`.
+    drop_buffer: crate::files::drop::DropBuffer,
     /// Fetch state per blob key for images shown in the UI (thumbnails now;
     /// inline images and the lightbox reuse it). Bytes live in the file cache.
     images: crate::files::images::ImageStore,
@@ -2361,6 +2366,7 @@ impl App {
             detail_attachments: Vec::new(),
             detail_pending_paths: Default::default(),
             composer_focused: false,
+            drop_buffer: Default::default(),
             images: Default::default(),
             detail_comment_attachments: Default::default(),
             detail_references: Vec::new(),
@@ -4019,7 +4025,7 @@ impl App {
             },
 
             Message::PickAttachmentFiles => {
-                if !matches!(self.view, View::IssueDetail(_)) {
+                if !matches!(self.view, View::IssueDetail(_) | View::ProjectDetail(_)) {
                     return Task::none();
                 }
                 return Task::perform(
@@ -4065,31 +4071,48 @@ impl App {
                 }
             }
 
+            // A multi-file drop arrives as one event per file: buffer them and
+            // route the batch once the window closes.
             Message::FileDropped(path) => {
+                if self.drop_buffer.push(path) {
+                    return Task::perform(
+                        async { tokio::time::sleep(crate::files::drop::BATCH_WINDOW).await },
+                        |_| Message::FlushDrops,
+                    );
+                }
+            }
+
+            Message::FlushDrops => {
                 use crate::files::drop::{drop_target, DropTarget};
+                let paths = self.drop_buffer.take();
                 match drop_target(&self.view, &self.modal, self.composer_focused) {
-                    DropTarget::Issue => return self.update(Message::FilesPicked(vec![path])),
+                    DropTarget::Issue | DropTarget::Project => {
+                        return self.update(Message::FilesPicked(paths))
+                    }
                     DropTarget::CommentComposer => {
-                        return self.update(Message::CommentFilesPicked(vec![path]))
+                        return self.update(Message::CommentFilesPicked(paths))
                     }
                     DropTarget::Ignore => {}
                 }
             }
 
             Message::FilesPicked(paths) => {
-                let View::IssueDetail(ref issue_id) = self.view else {
-                    return Task::none();
+                let (owner_kind, owner_id) = match &self.view {
+                    View::IssueDetail(id) => (crate::db::attachments::OwnerKind::Issue, id.clone()),
+                    View::ProjectDetail(id) => {
+                        (crate::db::attachments::OwnerKind::Project, id.clone())
+                    }
+                    _ => return Task::none(),
                 };
                 if paths.is_empty() {
                     return Task::none();
                 }
-                let issue_id = issue_id.clone();
                 let conn = self.db();
                 let intake = crate::files::intake::queue_files(
                     &conn,
                     &crate::files::outbox::default_root(),
-                    crate::db::attachments::OwnerKind::Issue,
-                    &issue_id,
+                    owner_kind,
+                    &owner_id,
                     &paths,
                 );
                 if let Some(toast) = intake.refusal_toast() {

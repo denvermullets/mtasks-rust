@@ -10,6 +10,8 @@ pub enum DropTarget {
     Issue,
     /// Stage on the focused comment composer (routes to `Message::CommentFilesPicked`).
     CommentComposer,
+    /// Attach to the open project (routes to `Message::FilesPicked`).
+    Project,
     /// Nothing to attach to; the drop is ignored.
     Ignore,
 }
@@ -22,13 +24,55 @@ pub fn drop_target(view: &View, modal: &Modal, composer_focused: bool) -> DropTa
             DropTarget::CommentComposer
         }
         (View::IssueDetail(_), Modal::None) => DropTarget::Issue,
+        (View::ProjectDetail(_), Modal::None) => DropTarget::Project,
         _ => DropTarget::Ignore,
     }
 }
 
+/// Collects the per-file `FileDropped` events of one multi-file drop so they
+/// reach the target as a single batch (one refusal toast, spec story 46).
+#[derive(Debug, Default)]
+pub struct DropBuffer {
+    paths: Vec<std::path::PathBuf>,
+}
+
+impl DropBuffer {
+    /// Add a dropped file. True for the first file of a batch: the caller must
+    /// then schedule a flush.
+    pub fn push(&mut self, path: std::path::PathBuf) -> bool {
+        let first = self.paths.is_empty();
+        self.paths.push(path);
+        first
+    }
+
+    /// Take the whole batch, in arrival order.
+    pub fn take(&mut self) -> Vec<std::path::PathBuf> {
+        std::mem::take(&mut self.paths)
+    }
+}
+
+/// How long to wait for the rest of a multi-file drop.
+pub const BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drop_on_open_project_attaches_to_it() {
+        assert_eq!(drop_target(&View::ProjectDetail("p".into()), &Modal::None, false), DropTarget::Project);
+        assert_eq!(drop_target(&View::ProjectDetail("p".into()), &Modal::Settings, false), DropTarget::Ignore);
+    }
+
+    #[test]
+    fn a_multi_file_drop_flushes_as_one_ordered_batch() {
+        let mut b = DropBuffer::default();
+        assert!(b.push("a".into()));
+        assert!(!b.push("b".into()));
+        assert_eq!(b.take(), vec![std::path::PathBuf::from("a"), "b".into()]);
+        assert!(b.take().is_empty());
+        assert!(b.push("c".into())); // a new batch needs a new flush
+    }
 
     #[test]
     fn drop_on_open_issue_attaches_to_it() {
