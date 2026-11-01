@@ -3137,8 +3137,9 @@ impl App {
         sync_queue::take_local_write();
         let view_before = self.view.clone();
         let mut task = self.update_inner(message);
-        // The one place that closes hover cards on a view change, whatever message caused it (keyboard included).
-        if self.view != view_before {
+        // The one place that closes hover cards on a view change or modal
+        // open, whatever message caused it (keyboard included).
+        if self.view != view_before || self.modal != Modal::None {
             let effect = self.body_hover.event(crate::hover_card::Event::ViewChanged);
             task = Task::batch([task, Self::hover_timer(effect)]);
         }
@@ -3166,6 +3167,13 @@ impl App {
         }
         match message {
             Message::KeyPressed(key, modifiers) => {
+                // Esc with a hover card open only closes the card.
+                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                    && self.body_hover.is_open()
+                {
+                    let effect = self.body_hover.event(crate::hover_card::Event::Escape);
+                    return Self::hover_timer(effect);
+                }
                 // Esc with an autocomplete list open only closes the list.
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
                     if let Some(slot) = self.open_suggest_mut() {
@@ -4529,6 +4537,8 @@ impl App {
                 let effect = self.body_hover.event(crate::hover_card::Event::Scrolled);
                 return Self::hover_timer(effect);
             }
+            // No cards behind a modal.
+            Message::BodyHover(..) if self.modal != Modal::None => {}
             Message::BodyHover(owner, hover) => {
                 let span = hover.map(|h| {
                     let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
@@ -6315,6 +6325,9 @@ impl App {
 
     /// The hover card for the current anchor, positioned under its span.
     fn hover_card_overlay(&self) -> Option<Element<'_, Message>> {
+        if self.modal != Modal::None {
+            return None;
+        }
         let (anchor, rect) = self.body_hover.current()?;
         let content = crate::body_hover::content_for(anchor, &self.issues, &self.teams)?;
         Some(crate::views::hover_card_view::overlay(&content, rect))
