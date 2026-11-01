@@ -28,6 +28,7 @@ pub fn view<'a>(
     focused_issue: usize,
     header: Header,
     read_only: bool,
+    is_home: bool,
 ) -> Element<'a, Message> {
     let Some(dashboard) = dashboard else {
         return centered("Dashboard not found");
@@ -53,7 +54,7 @@ pub fn view<'a>(
 
     container(
         column![]
-            .push(controls(dashboard, header, evaluation, read_only))
+            .push(controls(dashboard, header, evaluation, read_only, is_home))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
             .push(scrollable(list).height(Length::Fill)),
@@ -74,6 +75,7 @@ fn controls<'a>(
     header: Header,
     evaluation: &Evaluation<'a>,
     read_only: bool,
+    is_home: bool,
 ) -> Element<'a, Message> {
     container(
         row![]
@@ -85,7 +87,9 @@ fn controls<'a>(
             .push(sort_picker(header.sort))
             .push(reset_button())
             .push(add_group_button(read_only))
-            .push(edit_button(dashboard, read_only)),
+            .push(edit_button(dashboard, read_only))
+            .push(set_home_button(dashboard, read_only, is_home))
+            .push(delete_dashboard_button(&dashboard.id, read_only)),
     )
     .padding([8, 16])
     .width(Length::Fill)
@@ -129,6 +133,25 @@ fn add_group_button<'a>(read_only: bool) -> Element<'a, Message> {
 fn edit_button<'a>(dashboard: &Dashboard, read_only: bool) -> Element<'a, Message> {
     button(text("Edit").size(13))
         .on_press_maybe((!read_only).then(|| Message::OpenEditDashboard(dashboard.id.clone())))
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
+}
+
+/// "Set as Home page": disabled while read-only; shows "Home page" once set.
+fn set_home_button<'a>(dashboard: &Dashboard, read_only: bool, is_home: bool) -> Element<'a, Message> {
+    let label = if is_home { "Home page" } else { "Set as Home page" };
+    button(text(label).size(13))
+        .on_press_maybe((!read_only && !is_home).then(|| Message::SetDashboardAsHome(dashboard.id.clone())))
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
+}
+
+/// "Delete" for the dashboard (asks to confirm): disabled while read-only.
+fn delete_dashboard_button<'a>(id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Delete").size(13))
+        .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteDashboard(id.to_string())))
         .padding([4, 10])
         .style(button::secondary)
         .into()

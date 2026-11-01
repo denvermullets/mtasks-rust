@@ -83,6 +83,8 @@ pub enum Message {
     RevertSavedView,
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
+    ConfirmDeleteDashboard(String),
+    DeleteDashboardConfirmed,
     OpenRenameSavedView(String),
     DeleteSavedViewConfirmed,
     /// Make a Saved view (local id) the user's Home page.
@@ -102,6 +104,8 @@ pub enum Message {
     ToggleTeamMenu(String),
     /// Make a team's board the user's Home page (local UUID).
     SetTeamAsHome(String),
+    /// Make a dashboard the user's Home page (local UUID).
+    SetDashboardAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
     /// Open the read-only members panel for a team (local UUID).
@@ -500,6 +504,7 @@ pub enum Modal {
     DeleteRecurringConfirm(String),
     /// Confirm deleting a Saved view (local id) from the sidebar.
     DeleteSavedViewConfirm(String),
+    DeleteDashboardConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
     SaveView,
     /// "New dashboard" form; state in `App::dashboard_form`.
@@ -1075,6 +1080,23 @@ impl App {
 
     /// Switch to `view`, reloading data when crossing in or out of the
     /// cross-team views (their data replaces the per-team data).
+    /// Remove a dashboard locally and queue its server delete if it was pushed.
+    fn delete_dashboard(&mut self, id: &str) {
+        match crate::db::dashboards::delete_local(&self.db(), id) {
+            Ok(Some(payload)) => {
+                self.enqueue_sync(
+                    crate::db::dashboards::ENTITY_TYPE,
+                    id,
+                    "delete",
+                    Some(payload.as_str()),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[dashboards] delete failed: {e}"),
+        }
+        self.reload_data();
+    }
+
     fn switch_view(&mut self, view: View) {
         let crossing = self.view.is_cross_team() != view.is_cross_team()
             || matches!(view, View::Dashboard(_));
@@ -3502,6 +3524,30 @@ impl App {
                 }
             }
 
+            Message::ConfirmDeleteDashboard(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteDashboardConfirm(id);
+                }
+            }
+
+            Message::DeleteDashboardConfirmed => {
+                let Modal::DeleteDashboardConfirm(id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                self.delete_dashboard(&id);
+                if self.view == View::Dashboard(id) {
+                    return self.update_inner(Message::NavigateToView(View::Board));
+                }
+            }
+
             Message::DeleteSavedViewConfirmed => {
                 let Modal::DeleteSavedViewConfirm(view_id) =
                     std::mem::replace(&mut self.modal, Modal::None)
@@ -3759,6 +3805,24 @@ impl App {
                     self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
                 } else {
                     self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
+                }
+            }
+
+            Message::SetDashboardAsHome(dashboard_id) => {
+                let found = self.dashboards.iter().find(|d| d.id == dashboard_id).map(|d| d.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(Some(rid)) = found {
+                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "dashboard", rid) {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
+                } else if found.is_some() {
+                    self.push_toast("This dashboard hasn't synced yet", ToastKind::Error, false);
                 }
             }
 
@@ -6187,6 +6251,10 @@ impl App {
                     self.focused_issue,
                     self.dashboard_header.clone(),
                     self.sync_read_only,
+                    self.dashboards
+                        .iter()
+                        .find(|d| d.id == *id)
+                        .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
                 )
             }
         };
@@ -6371,6 +6439,22 @@ impl App {
                 save_view_modal("Rename view", &self.save_view_name, self.save_view_error)
             ]
             .into(),
+            Modal::DeleteDashboardConfirm(id) => {
+                let name = self
+                    .dashboards
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default();
+                let body = format!(
+                    "Delete the dashboard \"{name}\" and its groups? Issues are not affected."
+                );
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Dashboard?", body, Message::DeleteDashboardConfirmed)
+                ]
+                .into()
+            }
             Modal::DeleteSavedViewConfirm(view_id) => {
                 let name = self
                     .saved_views

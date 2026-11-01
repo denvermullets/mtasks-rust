@@ -425,6 +425,9 @@ async fn process(
             dashboard_create(client, &entry.entity_id, entry_id).await
         }
         (dashboards::ENTITY_TYPE, "update") => dashboard_update(client, &entry.entity_id).await,
+        (dashboards::ENTITY_TYPE, "delete") => {
+            dashboard_delete(client, entry.payload.as_deref()).await
+        }
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -2867,6 +2870,18 @@ fn saved_view_delete_id(payload: Option<&str>) -> Option<i64> {
 }
 
 fn saved_view_delete_outcome(result: Result<(), ApiError>) -> Outcome {
+    done_if_gone(result, |()| {})
+}
+
+/// `DELETE /dashboards/:id`. A 404 means it is already gone: done.
+async fn dashboard_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let Some(remote_id) = saved_view_delete_id(payload) else {
+        return Outcome::DropAndLog("dashboard delete: bad payload".into());
+    };
+    dashboard_delete_outcome(crate::api::dashboards::delete(client, remote_id).await)
+}
+
+fn dashboard_delete_outcome(result: Result<(), ApiError>) -> Outcome {
     done_if_gone(result, |()| {})
 }
 
@@ -5996,6 +6011,19 @@ mod tests {
         for bad in [None, Some("nope"), Some("{}")] {
             assert_eq!(saved_view_delete_id(bad), None);
         }
+    }
+
+    #[test]
+    fn dashboard_delete_treats_success_and_404_as_done_and_retries_the_rest() {
+        assert!(matches!(dashboard_delete_outcome(Ok(())), Outcome::Success));
+        assert!(matches!(
+            dashboard_delete_outcome(Err(ApiError::NotFound("gone".into()))),
+            Outcome::Success
+        ));
+        assert!(matches!(
+            dashboard_delete_outcome(Err(ApiError::MissingToken)),
+            Outcome::LeavePending(_)
+        ));
     }
 
     #[test]
