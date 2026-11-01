@@ -428,6 +428,9 @@ async fn process(
         (dashboards::ENTITY_TYPE, "delete") => {
             dashboard_delete(client, entry.payload.as_deref()).await
         }
+        (dashboards::GROUP_ORDER_ENTITY_TYPE, "update") => {
+            dashboard_group_order(client, &entry.entity_id, entry_id).await
+        }
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -2661,6 +2664,52 @@ async fn dashboard_update(client: &ApiClient, entity_id: &str) -> Outcome {
     let result =
         crate::api::dashboards::update(client, prep.remote_id, &prep.name, &prep.description).await;
     done_if_gone(result, |_| {})
+}
+
+// Group order: one coalesced entry per dashboard (see `dashboards::move_group`).
+
+fn dashboard_group_order_prep(
+    conn: &Connection,
+    entry_id: i64,
+    dashboard_id: &str,
+) -> Prep<dashboards::OrderPlan> {
+    match dashboards::plan_order_push(conn, entry_id, dashboard_id) {
+        Ok(dashboards::OrderPlan::Waiting(why)) => Prep::Done(Outcome::LeavePending(why.into())),
+        Ok(dashboards::OrderPlan::Gone) => Prep::Done(Outcome::DropAndLog(format!(
+            "dashboard {dashboard_id} or its groups missing locally"
+        ))),
+        Ok(ready) => Prep::Ready(ready),
+        Err(e) => Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    }
+}
+
+/// `PATCH /dashboards/:id/groups/reorder`. The response's order becomes the
+/// local positions. A 404 means the dashboard is gone: done.
+async fn dashboard_group_order(client: &ApiClient, dashboard_id: &str, entry_id: i64) -> Outcome {
+    let plan = match open() {
+        Ok(conn) => match dashboard_group_order_prep(&conn, entry_id, dashboard_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let dashboards::OrderPlan::Ready { dashboard_remote_id, group_remote_ids, payload } = plan else {
+        return Outcome::LeavePending("group order not ready".into());
+    };
+    match crate::api::dashboards::reorder_groups(client, dashboard_remote_id, &group_remote_ids).await {
+        Ok(returned) => match open() {
+            Ok(conn) => {
+                match dashboards::finish_order_push(&conn, entry_id, dashboard_id, &payload, &returned) {
+                    Ok(true) => Outcome::Success,
+                    Ok(false) => Outcome::LeavePending("group order changed while pushing".into()),
+                    Err(e) => Outcome::LeavePending(format!("db: {e}")),
+                }
+            }
+            Err(e) => Outcome::LeavePending(e),
+        },
+        Err(ApiError::NotFound(_)) => Outcome::Success,
+        Err(e) => classify(&e),
+    }
 }
 
 struct SavedViewCreatePrep {
