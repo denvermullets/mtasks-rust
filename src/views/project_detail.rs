@@ -6,7 +6,7 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::{Message, View};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme as t;
-use crate::views::issue_detail::{new_comment_composer, push_thread, ThreadCtx};
+use crate::views::issue_detail::{new_comment_composer, push_thread, CommentAttachments, ThreadCtx};
 use crate::display::{CardProperty, DisplayOptions};
 use crate::views::util;
 use crate::views::progress_chart;
@@ -84,6 +84,8 @@ pub fn view<'a>(
     lanes: &'a [Lane],
     teams: &'a [Team],
     comments: &'a [Comment],
+    attachments: &'a [crate::db::attachments::Attachment],
+    comment_attachments: &'a CommentAttachments,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -151,10 +153,11 @@ pub fn view<'a>(
                 .size(14)
                 .height(Length::Fixed(160.0)),
         )
+        .push_maybe(crate::views::attachments::section(attachments))
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(
-            comments, detail, members, team, teams, issues,
+            comments, detail, members, team, teams, issues, comment_attachments,
         ));
 
     // ---- Right sidebar: properties ----
@@ -276,6 +279,7 @@ fn discussion_section<'a>(
     team: Option<&'a Team>,
     teams: &'a [Team],
     issues: &'a [Issue],
+    comment_attachments: &'a CommentAttachments,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
@@ -293,6 +297,7 @@ fn discussion_section<'a>(
         reply_to: detail.reply_to.as_deref(),
         reply_composer: &detail.reply_composer,
         suggest: detail.suggest.as_ref(),
+        comment_attachments,
     };
     push_thread(col, Comment::thread_order(comments), &ctx)
         .push(new_comment_composer(
