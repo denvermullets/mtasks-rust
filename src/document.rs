@@ -521,6 +521,38 @@ mod tests {
                 vec![list(vec![vec![para(vec![text("a")])]]), ordered(1, vec![vec![para(vec![text("b")])]])],
             ),
             (
+                "nested bullets three deep",
+                "- a\n  - b\n    - c",
+                vec![list(vec![vec![
+                    para(vec![text("a")]),
+                    list(vec![vec![para(vec![text("b")]), list(vec![vec![para(vec![text("c")])]])]]),
+                ]])],
+            ),
+            (
+                "numbered list nested in bullets",
+                "- a\n  1. x\n  2. y",
+                vec![list(vec![vec![
+                    para(vec![text("a")]),
+                    ordered(1, vec![vec![para(vec![text("x")])], vec![para(vec![text("y")])]]),
+                ]])],
+            ),
+            (
+                "bullets nested in a numbered list, siblings after",
+                "1. a\n   - b\n2. c",
+                vec![ordered(1, vec![
+                    vec![para(vec![text("a")]), list(vec![vec![para(vec![text("b")])]])],
+                    vec![para(vec![text("c")])],
+                ])],
+            ),
+            (
+                "dedent returns to the outer list",
+                "- a\n  - b\n- c",
+                vec![list(vec![
+                    vec![para(vec![text("a")]), list(vec![vec![para(vec![text("b")])]])],
+                    vec![para(vec![text("c")])],
+                ])],
+            ),
+            (
                 "quote inside an item stays flat",
                 "- a\n  > q",
                 vec![list(vec![vec![para(vec![text("a")]), para(vec![text("q")])]])],
