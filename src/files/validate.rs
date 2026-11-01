@@ -60,6 +60,7 @@ pub enum Validation {
 }
 
 impl Validation {
+    #[allow(dead_code)] // test-only helper until a caller needs it
     pub fn is_ok(&self) -> bool {
         matches!(self, Validation::Ok)
     }
