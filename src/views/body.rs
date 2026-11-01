@@ -155,17 +155,6 @@ pub fn view<'a>(body: &str, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Eleme
     col.into()
 }
 
-/// True when the body has anything beyond plain text (a token or an image).
-pub fn has_rich_content(body: &str, host: &str, member_names: &[&str]) -> bool {
-    let doc = document::parse_with(body, host, member_names);
-    doc.blocks.iter().any(|b| match b {
-        Block::Paragraph(inlines) => inlines
-            .iter()
-            .any(|i| !matches!(i, Inline::Text(_) | Inline::HardBreak)),
-        _ => true,
-    })
-}
-
 /// Draw one block.
 fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     match b {
@@ -517,19 +506,6 @@ mod tests {
                 Run::Plain(" or no".into()),
             ]
         );
-    }
-
-    #[test]
-    fn rich_content_means_tokens_or_images_and_raw_html_is_gone() {
-        for (body, want) in [
-            ("plain\ntext", false),
-            ("<b>hi</b>", false),
-            ("ping @Ann", true),
-            ("see PROJ-7", true),
-            ("![a](https://x.test/a.png)", true),
-        ] {
-            assert_eq!(has_rich_content(body, "", &["Ann"]), want, "{body}");
-        }
     }
 
     #[test]
