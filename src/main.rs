@@ -46,6 +46,14 @@ fn main() -> iced::Result {
         .window(window::Settings {
             size: Size::new(1100.0, 700.0),
             min_size: Some(Size::new(800.0, 500.0)),
+            #[cfg(target_os = "macos")]
+            platform_specific: window::settings::PlatformSpecific {
+                // The app paints its own title strip (`header::titlebar`) in
+                // the theme's colors; only the traffic lights stay native.
+                title_hidden: true,
+                titlebar_transparent: true,
+                fullsize_content_view: true,
+            },
             ..Default::default()
         })
         .run_with(app::App::new)

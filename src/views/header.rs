@@ -65,6 +65,29 @@ pub fn delete_view_button<'a>(view_id: &str, read_only: bool) -> Element<'a, Mes
         .into()
 }
 
+/// Height of the macOS title bar, which the window draws its traffic lights in.
+const TITLEBAR_HEIGHT: f32 = 28.0;
+
+/// Themed strip behind the transparent macOS title bar (see `main.rs`). The
+/// title bar sits above this and handles window dragging and double-click zoom,
+/// so the strip has no interaction of its own.
+pub fn titlebar<'a>(title: String) -> Element<'a, Message> {
+    let bar = container(text(title).size(t::type_scale::XS).color(t::text_muted()))
+        .center_x(Length::Fill)
+        .center_y(Length::Fixed(TITLEBAR_HEIGHT))
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_menu())),
+            ..Default::default()
+        });
+    let rule = container(iced::widget::Space::with_height(1.0))
+        .width(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::border())),
+            ..Default::default()
+        });
+    iced::widget::column![bar, rule].into()
+}
+
 /// The dashboard's top bar (web `h-14 bg-menu border-b`): breadcrumb on the
 /// left, the dashboard's menu on the right.
 pub fn dashboard_bar<'a>(

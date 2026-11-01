@@ -7108,6 +7108,14 @@ impl App {
             Modal::None => base,
         };
 
+        // The title strip goes outside the modals so they don't cover it, but
+        // inside the stacks below: the hover card is placed in window coordinates.
+        let content: Element<'_, Message> = if cfg!(target_os = "macos") {
+            column![header::titlebar(self.title()), content].into()
+        } else {
+            content
+        };
+
         let content = match self.hover_card_overlay() {
             Some(card) => iced::widget::stack![content, card].into(),
             None => content,
