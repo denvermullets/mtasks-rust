@@ -16,7 +16,9 @@ use iced::widget::{button, column, container, image, row, scrollable, span, text
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
+use crate::body_cache::Parsed;
 use crate::document::{self, Block};
+use crate::highlight::Role;
 use crate::db::models::{Issue, Member, Team};
 use crate::files::images::{ImageState, ImageStore};
 use crate::files::inline;
@@ -151,13 +153,13 @@ pub fn view<'a>(body: &str, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Eleme
     let doc = &parsed.doc;
     let mut col = column![].spacing(t::space::S2);
     for b in &doc.blocks {
-        col = col.push(block(b, size, plain, ctx));
+        col = col.push(block(b, size, plain, ctx, &parsed));
     }
     col.into()
 }
 
 /// Draw one block.
-fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>, parsed: &Parsed) -> Element<'a, Message> {
     match b {
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
         // Never fetched: an alt-text link that opens in the browser.
@@ -165,9 +167,9 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
             paragraph(&[document::foreign_image_inline(img, ctx.host)], size, plain, ctx)
         }
         Block::Image(img) => image_block(img, ctx),
-        Block::List(list) => list_block(list, size, plain, ctx),
-        Block::Code(code) => code_block(code, size),
-        Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx),
+        Block::List(list) => list_block(list, size, plain, ctx, parsed),
+        Block::Code(code) => code_block(parsed, code, size),
+        Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx, parsed),
     }
 }
 
@@ -180,29 +182,64 @@ struct CodeSpan {
 }
 
 /// A color role inside a code block, resolved to a real color at draw time.
+/// Monokai, as on the web; the frame is the same dark on every theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodeColor {
     Plain,
+    Comment,
+    Keyword,
+    Str,
+    Number,
+    Function,
+    Type,
+    Parameter,
 }
 
 impl CodeColor {
     fn color(self) -> Color {
         match self {
             CodeColor::Plain => t::CODE_BLOCK_TEXT,
+            CodeColor::Comment => Color::from_rgb8(0x75, 0x71, 0x5e),
+            CodeColor::Keyword => Color::from_rgb8(0xf9, 0x26, 0x72),
+            CodeColor::Str => Color::from_rgb8(0xe6, 0xdb, 0x74),
+            CodeColor::Number => Color::from_rgb8(0xae, 0x81, 0xff),
+            CodeColor::Function => Color::from_rgb8(0xa6, 0xe2, 0x2e),
+            CodeColor::Type => Color::from_rgb8(0x66, 0xd9, 0xef),
+            CodeColor::Parameter => Color::from_rgb8(0xfd, 0x97, 0x1f),
         }
     }
 }
 
-/// Split a code block into colored spans. Concatenating the span texts gives
-/// back `text` exactly. Today everything is `Plain`; a highlighter keyed on
-/// `lang` replaces the body (add `CodeColor` roles as it needs them).
-fn code_spans(_lang: Option<&str>, text: &str) -> Vec<CodeSpan> {
-    vec![CodeSpan { text: text.to_string(), color: CodeColor::Plain }]
+impl From<Role> for CodeColor {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::Plain => CodeColor::Plain,
+            Role::Comment => CodeColor::Comment,
+            Role::Keyword => CodeColor::Keyword,
+            Role::String => CodeColor::Str,
+            Role::Number => CodeColor::Number,
+            Role::Function => CodeColor::Function,
+            Role::Type => CodeColor::Type,
+            Role::Parameter => CodeColor::Parameter,
+        }
+    }
+}
+
+/// Split a code block into colored spans from the cached highlight. Concatenating
+/// the span texts gives back `text` exactly; a block the cache doesn't know is plain.
+fn code_spans(parsed: &Parsed, lang: Option<&str>, text: &str) -> Vec<CodeSpan> {
+    match parsed.code_spans(lang, text) {
+        Some(runs) => runs
+            .iter()
+            .map(|r| CodeSpan { text: r.text.clone(), color: r.role.into() })
+            .collect(),
+        None => vec![CodeSpan { text: text.to_string(), color: CodeColor::Plain }],
+    }
 }
 
 /// A code block: monospace text in a fixed dark frame. Lines never wrap.
-fn code_block<'a>(code: &document::CodeBlock, size: f32) -> Element<'a, Message> {
-    let spans: Vec<text::Span<'a, Message, iced::Font>> = code_spans(code.lang.as_deref(), &code.text)
+fn code_block<'a>(parsed: &Parsed, code: &document::CodeBlock, size: f32) -> Element<'a, Message> {
+    let spans: Vec<text::Span<'a, Message, iced::Font>> = code_spans(parsed, code.lang.as_deref(), &code.text)
         .into_iter()
         .map(|s| span(s.text).color(s.color.color()))
         .collect();
@@ -241,10 +278,10 @@ fn code_block<'a>(code: &document::CodeBlock, size: f32) -> Element<'a, Message>
 /// A quote: a muted left rule beside the content column. Nested quotes get
 /// their own rule, so they read as stacked bars. Callers pass the muted text
 /// color (web: `.markdown blockquote { color: gray-400 }`, token `text_muted`).
-fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>, parsed: &Parsed) -> Element<'a, Message> {
     let mut content = column![].spacing(t::space::S2).width(iced::Length::Fill);
     for b in blocks {
-        content = content.push(block(b, size, plain, ctx));
+        content = content.push(block(b, size, plain, ctx, parsed));
     }
     let rule = container(iced::widget::Space::new(0, 0))
         .width(3)
@@ -271,7 +308,7 @@ fn task_marker(done: Option<bool>) -> Option<&'static str> {
 /// Gutter holding the marker; item content sits in its own column beside it,
 /// so wrapped lines hang under the first line rather than under the marker.
 /// A numbered gutter is as wide as its widest label so items stay aligned.
-fn list_block<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+fn list_block<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<'a>, parsed: &Parsed) -> Element<'a, Message> {
     let mut col = column![].spacing(t::space::S1);
     let labels: Vec<String> = (0..list.items.len()).map(|i| list_marker(list.start, i)).collect();
     let gutter = match list.start {
@@ -281,7 +318,7 @@ fn list_block<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<
     for ((item, label), done) in list.items.iter().zip(labels).zip(&list.checked) {
         let mut content = column![].spacing(t::space::S1).width(iced::Length::Fill);
         for b in item {
-            content = content.push(block(b, size, plain, ctx));
+            content = content.push(block(b, size, plain, ctx, parsed));
         }
         col = col.push(
             row![container(text(task_marker(*done).map(str::to_string).unwrap_or(label)).size(size).color(plain)).width(gutter), content]
@@ -603,7 +640,7 @@ mod tests {
     #[test]
     fn code_spans_keep_the_text_exactly() {
         for text in ["", "a", "if a {\n    b();\n\n\tc();\n}", "ABC-12 @Ann ![x](y)"] {
-            let joined: String = code_spans(Some("rust"), text).into_iter().map(|s| s.text).collect();
+            let joined: String = code_spans(&crate::body_cache::parsed("", "", &[]), Some("rust"), text).into_iter().map(|s| s.text).collect();
             assert_eq!(joined, text);
         }
     }

@@ -10,18 +10,49 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::document::{self, Document};
+use crate::document::{self, Block, Document};
+use crate::highlight::{self, Span};
 
 /// Most bodies kept. A long thread fits; memory stays bounded.
 pub const CAPACITY: usize = 256;
 
-/// A parsed body.
+/// Highlighted runs per code block, keyed by (language, text).
+type CodeMap = HashMap<(Option<String>, String), Vec<Span>>;
+
+/// A parsed body plus the highlighted output of its code blocks (JRST-282).
 pub struct Parsed {
     pub doc: Document,
+    code: CodeMap,
+}
+
+impl Parsed {
+    /// Highlighted runs for a code block of this document.
+    pub fn code_spans(&self, lang: Option<&str>, text: &str) -> Option<&[Span]> {
+        self.code
+            .get(&(lang.map(str::to_string), text.to_string()))
+            .map(Vec::as_slice)
+    }
 }
 
 fn build(body: &str, host: &str, names: &[&str]) -> Parsed {
-    Parsed { doc: document::parse_with(body, host, names) }
+    let doc = document::parse_with(body, host, names);
+    let mut code = CodeMap::new();
+    collect_code(&doc.blocks, &mut code);
+    Parsed { doc, code }
+}
+
+fn collect_code(blocks: &[Block], out: &mut CodeMap) {
+    for b in blocks {
+        match b {
+            Block::Code(c) => {
+                out.entry((c.lang.clone(), c.text.clone()))
+                    .or_insert_with(|| highlight::highlight(c.lang.as_deref(), &c.text));
+            }
+            Block::List(l) => l.items.iter().for_each(|i| collect_code(i, out)),
+            Block::Quote(inner) => collect_code(inner, out),
+            Block::Paragraph(_) | Block::Image(_) => {}
+        }
+    }
 }
 
 type Key = (String, String, Vec<String>);
@@ -124,6 +155,16 @@ mod tests {
         let b = parsed("second", "", &[]);
         assert_ne!(a.doc.blocks, b.doc.blocks);
         assert_eq!(parsed("first", "", &[]).doc.blocks, a.doc.blocks);
+    }
+
+    #[test]
+    fn code_blocks_are_highlighted_with_the_parsed_body() {
+        let p = parsed("> ```rust\n> fn a() {}\n> ```\n\n```text\nfn a() {}\n```", "", &[]);
+        let rust = p.code_spans(Some("rust"), "fn a() {}").expect("nested block cached");
+        assert!(rust.iter().any(|s| s.role != highlight::Role::Plain));
+        let text = p.code_spans(Some("text"), "fn a() {}").expect("cached");
+        assert!(text.iter().all(|s| s.role == highlight::Role::Plain));
+        assert!(p.code_spans(Some("rust"), "other").is_none());
     }
 
     #[test]

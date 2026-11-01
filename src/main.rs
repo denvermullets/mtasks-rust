@@ -13,6 +13,7 @@ mod files;
 mod fonts;
 #[allow(dead_code)] // click, scroll, escape and card events arrive with later tickets
 mod hover_card;
+mod highlight;
 mod inbox;
 mod issue_match;
 mod keys;
