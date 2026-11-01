@@ -354,6 +354,8 @@ pub enum Message {
     /// Files chosen for the open issue (picker, drag-and-drop, shortcut all
     /// send this). Each is validated, copied to the outbox and queued.
     FilesPicked(Vec<std::path::PathBuf>),
+    /// A file dropped on the window; routed by `files::drop::drop_target`.
+    FileDropped(std::path::PathBuf),
 
     // CSV import / export (sidebar footer)
     /// Export the selected team's issues via a native save dialog.
@@ -2386,6 +2388,9 @@ impl App {
             | iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
                 Some(Message::UserInput)
             }
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                Some(Message::FileDropped(path))
+            }
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused),
             _ => None,
@@ -3927,6 +3932,14 @@ impl App {
                     },
                     Message::FilesPicked,
                 );
+            }
+
+            Message::FileDropped(path) => {
+                use crate::files::drop::{drop_target, DropTarget};
+                match drop_target(&self.view, &self.modal) {
+                    DropTarget::Issue => return self.update(Message::FilesPicked(vec![path])),
+                    DropTarget::Ignore => {}
+                }
             }
 
             Message::FilesPicked(paths) => {
