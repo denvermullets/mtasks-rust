@@ -6352,7 +6352,16 @@ impl App {
                     .ok()
                     .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
             }
-            crate::body_hover::Anchor::Mention(_) => None,
+            // Mentions count open issues from the loaded issues, which the
+            // card needs in full, so they use the in-memory lists.
+            crate::body_hover::Anchor::Mention(_) => crate::body_hover::content_for(
+                &anchor,
+                &crate::body_hover::Records {
+                    issues: &self.issues,
+                    members: &self.members,
+                    ..Default::default()
+                },
+            ),
         };
         self.hover_content = Some((anchor, content));
     }
