@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod config;
 mod csv_io;
+mod dashboard_eval;
 mod db;
 mod display;
 mod files;

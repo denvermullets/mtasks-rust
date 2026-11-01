@@ -3,6 +3,7 @@ pub mod board;
 pub mod body;
 pub mod command_palette;
 pub mod csv_import;
+pub mod dashboard;
 pub mod display_panel;
 pub mod header;
 pub mod inbox;
