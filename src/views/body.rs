@@ -164,7 +164,22 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
         Block::Image(img) => image_block(img, ctx),
         Block::List(list) => list_block(list, size, plain, ctx),
+        Block::Quote(blocks) => quote_block(blocks, size, plain, ctx),
     }
+}
+
+/// A quote: a muted left rule beside the content column. Nested quotes get
+/// their own rule, so they read as stacked bars.
+fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let mut content = column![].spacing(t::space::S2).width(iced::Length::Fill);
+    for b in blocks {
+        content = content.push(block(b, size, plain, ctx));
+    }
+    let rule = container(iced::widget::Space::new(0, 0))
+        .width(3)
+        .height(iced::Length::Fill)
+        .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() });
+    row![rule, content].spacing(t::space::S3).height(iced::Length::Shrink).into()
 }
 
 /// Marker for item `index` (0-based): a bullet, or the number counted from
