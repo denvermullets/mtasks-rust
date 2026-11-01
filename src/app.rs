@@ -4633,6 +4633,8 @@ impl App {
                 self.modal = Modal::None;
             }
             Message::RemoveDependency(dep_id) => {
+                // The row (and its hover anchor) is about to vanish.
+                self.body_hover.event(crate::hover_card::Event::Clicked);
                 self.remove_dependency(&dep_id);
             }
             Message::OpenMoveTeamPicker(issue_id) => {

@@ -614,7 +614,7 @@ fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element
 /// issue, plus a trailing `×` that removes the relationship. The identifier is
 /// tinted with the section's dependency color.
 fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Element<'a, Message> {
-    row![]
+    let line = row![]
         .spacing(6)
         .align_y(Alignment::Center)
         .push(
@@ -634,8 +634,9 @@ fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Elemen
                 .on_press(Message::RemoveDependency(link.dep_id.clone()))
                 .padding(0)
                 .style(button::text),
-        )
-        .into()
+        );
+    // The wrapper never captures events, so the × still removes the edge.
+    issue_row_anchor(line, &link.issue_id)
 }
 
 /// Editor key bindings: Cmd/Ctrl+Enter submits (when `on_submit` is given).
