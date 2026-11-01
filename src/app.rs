@@ -85,6 +85,8 @@ pub enum Message {
     ConfirmDeleteSavedView(String),
     ConfirmDeleteDashboard(String),
     DeleteDashboardConfirmed,
+    ConfirmDeleteDashboardGroup(String),
+    DeleteDashboardGroupConfirmed,
     OpenRenameSavedView(String),
     DeleteSavedViewConfirmed,
     /// Make a Saved view (local id) the user's Home page.
@@ -510,6 +512,7 @@ pub enum Modal {
     /// Confirm deleting a Saved view (local id) from the sidebar.
     DeleteSavedViewConfirm(String),
     DeleteDashboardConfirm(String),
+    DeleteDashboardGroupConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
     SaveView,
     /// "New dashboard" form; state in `App::dashboard_form`.
@@ -1099,6 +1102,25 @@ impl App {
             Ok(None) => {}
             Err(e) => eprintln!("[dashboards] delete failed: {e}"),
         }
+        self.reload_data();
+    }
+
+    /// Remove a dashboard group locally and queue its server delete if it was pushed.
+    fn delete_dashboard_group(&mut self, id: &str) {
+        match crate::db::dashboards::delete_group_local(&self.db(), id) {
+            Ok(Some(payload)) => {
+                self.enqueue_sync(
+                    crate::db::dashboards::GROUP_ENTITY_TYPE,
+                    id,
+                    "delete",
+                    Some(payload.as_str()),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[dashboards] delete group failed: {e}"),
+        }
+        self.focused_lane = 0;
+        self.focused_issue = 0;
         self.reload_data();
     }
 
@@ -3598,6 +3620,27 @@ impl App {
                 }
             }
 
+            Message::ConfirmDeleteDashboardGroup(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteDashboardGroupConfirm(id);
+                }
+            }
+
+            Message::DeleteDashboardGroupConfirmed => {
+                let Modal::DeleteDashboardGroupConfirm(id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                self.delete_dashboard_group(&id);
+            }
+
             Message::DeleteSavedViewConfirmed => {
                 let Modal::DeleteSavedViewConfirm(view_id) =
                     std::mem::replace(&mut self.modal, Modal::None)
@@ -3884,13 +3927,13 @@ impl App {
                         ToastKind::Error,
                         false,
                     );
-                } else if let Some(Some(rid)) = found {
-                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "dashboard", rid) {
+                } else if let Some(remote_id) = found {
+                    if let Err(e) =
+                        crate::db::home_page::set_dashboard_local(&self.db(), &dashboard_id, remote_id)
+                    {
                         eprintln!("[home_page] set failed: {e}");
                     }
                     self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
-                } else if found.is_some() {
-                    self.push_toast("This dashboard hasn't synced yet", ToastKind::Error, false);
                 }
             }
 
@@ -6494,6 +6537,7 @@ impl App {
                     &self.group_form.draft,
                     &self.teams,
                     &self.projects,
+                    &self.labels,
                     self.group_form.error
                 )
             ]
@@ -6521,6 +6565,20 @@ impl App {
                 iced::widget::stack![
                     base,
                     delete_modal("Delete Dashboard?", body, Message::DeleteDashboardConfirmed)
+                ]
+                .into()
+            }
+            Modal::DeleteDashboardGroupConfirm(id) => {
+                let name = self
+                    .dashboard_groups
+                    .iter()
+                    .find(|c| c.group.id == *id)
+                    .map(|c| c.group.name.clone())
+                    .unwrap_or_default();
+                let body = format!("Delete the group \"{name}\"? Issues are not affected.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Group?", body, Message::DeleteDashboardGroupConfirmed)
                 ]
                 .into()
             }

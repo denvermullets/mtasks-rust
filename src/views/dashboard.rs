@@ -338,7 +338,10 @@ fn group_header<'a>(
     if !g.group.description.is_empty() {
         r = r.push(text(g.group.description.clone()).size(12).color(t::text_secondary()));
     }
-    r = r.push(horizontal_space()).push(move_buttons(&g.group.id, index, count, read_only));
+    r = r
+        .push(horizontal_space())
+        .push(move_buttons(&g.group.id, index, count, read_only))
+        .push(delete_group_button(&g.group.id, read_only));
     mouse_area(
         container(r)
             .padding([6, 4])
@@ -361,6 +364,15 @@ pub fn toggle_group(collapsed: &mut CollapsedGroups, dashboard_id: &str, group_i
         set.insert(group_id.to_string());
         true
     }
+}
+
+/// "Delete" on a group header (asks to confirm): disabled while read-only.
+fn delete_group_button<'a>(group_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Delete").size(12))
+        .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteDashboardGroup(group_id.to_string())))
+        .padding([2, 8])
+        .style(button::text)
+        .into()
 }
 
 /// Move-up / move-down buttons; disabled at the edges and when read-only.

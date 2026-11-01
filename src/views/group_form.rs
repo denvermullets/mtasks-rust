@@ -10,7 +10,7 @@ use iced::{Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::dashboards::{GroupDraft, SourceType, GROUP_SWATCHES};
-use crate::db::models::{Project, ProjectStatus, Team};
+use crate::db::models::{Label, Project, ProjectStatus, Team};
 use crate::theme as t;
 
 pub fn name_input_id() -> text_input::Id {
@@ -26,6 +26,7 @@ pub fn modal<'a>(
     draft: &'a GroupDraft,
     teams: &'a [Team],
     projects: &'a [Project],
+    labels: &'a [Label],
     error: Option<&'static str>,
 ) -> Element<'a, Message> {
     let mut content = column![]
@@ -54,7 +55,7 @@ pub fn modal<'a>(
         )
         .push(swatches(&draft.color))
         .push(text("Sources").size(13).color(t::text_secondary()))
-        .push(scrollable(source_picker(draft, teams, projects)).height(Length::Fixed(200.0)))
+        .push(scrollable(source_picker(draft, teams, projects, labels)).height(Length::Fixed(200.0)))
         .push(
             row![]
                 .spacing(8)
@@ -118,10 +119,12 @@ fn source_picker<'a>(
     draft: &'a GroupDraft,
     teams: &'a [Team],
     projects: &'a [Project],
+    labels: &'a [Label],
 ) -> Element<'a, Message> {
     let mut col: Column<'a, Message> = column![].spacing(6);
     col = col.push(team_sources(draft, teams));
     col = col.push(project_sources(draft, teams, projects));
+    col = col.push(label_sources(draft, teams, labels));
     col.into()
 }
 
@@ -143,6 +146,50 @@ pub fn pickable_projects<'a>(
         })
         .collect()
 }
+
+/// Labels the picker offers under one team: those Rails knows (a remote id),
+/// sorted by name. Labels have no "all issues" switch.
+pub fn pickable_labels<'a>(labels: &'a [Label], team_id: &str) -> Vec<&'a Label> {
+    let mut v: Vec<&Label> =
+        labels.iter().filter(|l| l.team_id == team_id && l.remote_id.is_some()).collect();
+    v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.name.cmp(&b.name)));
+    v
+}
+
+fn label_sources<'a>(
+    draft: &'a GroupDraft,
+    teams: &'a [Team],
+    labels: &'a [Label],
+) -> Element<'a, Message> {
+    let mut col: Column<'a, Message> = column![].spacing(4);
+    let mut any = false;
+    for team in pickable_teams(teams) {
+        let offered = pickable_labels(labels, &team.id);
+        if offered.is_empty() {
+            continue;
+        }
+        if !any {
+            col = col.push(text("Labels").size(12).color(t::text_muted()));
+            col = col.push(
+                text(LABEL_HINT).size(11).color(t::text_muted()),
+            );
+            any = true;
+        }
+        col = col.push(text(team.name.as_str()).size(12).color(t::text_secondary()));
+        for label in offered {
+            let remote_id = label.remote_id.expect("filtered to labels with a remote id");
+            col = col.push(
+                checkbox(label.name.as_str(), draft.is_selected(SourceType::Label, remote_id))
+                    .on_toggle(move |_| Message::GroupToggleSource(SourceType::Label, remote_id))
+                    .size(16)
+                    .text_size(13),
+            );
+        }
+    }
+    col.into()
+}
+
+const LABEL_HINT: &str = "With no team or project selected, a label pulls in every matching issue. Alongside them, it narrows the group.";
 
 fn project_sources<'a>(
     draft: &'a GroupDraft,
@@ -272,6 +319,22 @@ mod tests {
         let names: Vec<_> =
             pickable_projects(&ps, "t", &draft).iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["open", "nostatus", "done_used"]);
+    }
+
+    #[test]
+    fn labels_are_synced_per_team_and_sorted_by_name() {
+        let l = |n: &str, t: &str, r: Option<i64>| Label {
+            id: n.into(),
+            remote_id: r,
+            team_id: t.into(),
+            name: n.into(),
+            color: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let ls = [l("bug", "t", Some(1)), l("Aardvark", "t", Some(2)), l("local", "t", None), l("x", "u", Some(3))];
+        let names: Vec<_> = pickable_labels(&ls, "t").iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Aardvark", "bug"]);
     }
 
     #[test]
