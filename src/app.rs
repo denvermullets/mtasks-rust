@@ -1790,6 +1790,10 @@ impl App {
             );
             return Task::none();
         };
+        if !self.files_unlocked() {
+            self.push_toast("Sign in to open files", ToastKind::Error, false);
+            return Task::none();
+        }
         let cache = crate::files::cache::FileCache::at_default_root();
         if let Ok(Some(path)) = cache.get(&self.db(), &key) {
             self.open_cached_attachment(&att, &key, &path);
@@ -1826,6 +1830,10 @@ impl App {
         if !self.images.begin(&key) {
             return Task::none();
         }
+        if !self.files_unlocked() {
+            self.images.set_failed(&key);
+            return Task::none();
+        }
         let cache = crate::files::cache::FileCache::at_default_root();
         if let Ok(Some(path)) = cache.get(&self.db(), &key) {
             self.images.set_ready(&key, path);
@@ -1855,6 +1863,10 @@ impl App {
             return Task::none();
         };
         if !self.images.begin(&key) {
+            return Task::none();
+        }
+        if !self.files_unlocked() {
+            self.images.set_failed(&key);
             return Task::none();
         }
         let cache = crate::files::cache::FileCache::at_default_root();
@@ -2691,8 +2703,22 @@ impl App {
         self.drive_sync(SchedEvent::CycleFinished { success: false })
     }
 
+    /// Cached attachment/inline files are only served while an API token is
+    /// configured (spec story 68).
+    fn files_unlocked(&self) -> bool {
+        self.config.api_token.as_deref().is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// The token lost access: delete the file cache (never the outbox) and
+    /// forget what is on screen, so cached files are no longer reachable.
+    fn lock_files(&mut self) {
+        let _ = crate::files::cache::FileCache::at_default_root().clear(&self.db());
+        self.images.clear();
+    }
+
     /// The existing 401 path: pause sync and ask for a new token.
     fn pause_for_auth(&mut self) {
+        self.lock_files();
         self.sync_paused_auth = true;
         let msg = "Token expired or revoked — please re-enter";
         if self.settings_form.is_none() {
@@ -4545,6 +4571,12 @@ impl App {
                     match config::save(&new_cfg) {
                         Ok(()) => {
                             self.config = new_cfg;
+                            if self.files_unlocked() {
+                                // Failed fetches (no token before) may retry.
+                                self.images.clear();
+                            } else {
+                                self.lock_files();
+                            }
                             self.config_error = None;
                             self.modal = Modal::None;
                             self.settings_form = None;

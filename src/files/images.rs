@@ -53,6 +53,11 @@ impl ImageStore {
         self.states.insert(key.to_string(), ImageState::Failed);
     }
 
+    /// Forget every image (token lost access, or a new token to retry with).
+    pub fn clear(&mut self) {
+        self.states.clear();
+    }
+
     /// Drop what we know (e.g. after cache eviction) so `begin` can retry.
     pub fn forget(&mut self, key: &str) {
         self.states.remove(key);

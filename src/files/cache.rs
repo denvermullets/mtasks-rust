@@ -109,6 +109,30 @@ impl FileCache {
         Ok(removed)
     }
 
+    /// Delete every cached file and the index (the outbox is never touched).
+    /// Used when the token loses access: cached bytes must not stay reachable.
+    /// Returns the number of entries removed.
+    pub fn clear(&self, conn: &Connection) -> Result<usize> {
+        let rows: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT path FROM file_cache")?;
+            let mapped = stmt.query_map([], |r| r.get(0))?;
+            mapped.collect::<std::result::Result<_, _>>()?
+        };
+        let cache_dir = self.cache_dir();
+        for path in &rows {
+            let path = PathBuf::from(path);
+            if path.starts_with(&cache_dir) {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        conn.execute("DELETE FROM file_cache", [])?;
+        Ok(rows.len())
+    }
+
     pub(crate) fn put_at(
         &self,
         conn: &Connection,
@@ -190,6 +214,20 @@ mod tests {
 
     fn row_count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM file_cache", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn clear_removes_cached_files_but_not_the_outbox() {
+        let (_t, conn, cache) = setup(1000);
+        let p = cache.put(&conn, "abc", b"hello").unwrap();
+        fs::create_dir_all(cache.outbox_dir()).unwrap();
+        let queued = cache.outbox_dir().join("pending.bin");
+        fs::write(&queued, b"x").unwrap();
+        assert_eq!(cache.clear(&conn).unwrap(), 1);
+        assert!(!p.exists());
+        assert_eq!(row_count(&conn), 0);
+        assert_eq!(cache.get(&conn, "abc").unwrap(), None);
+        assert!(queued.exists());
     }
 
     #[test]
