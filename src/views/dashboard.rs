@@ -17,7 +17,49 @@ use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header, Sort};
 use crate::db::dashboards::{Dashboard, MoveDirection};
 use crate::theme as t;
 use crate::views::board::CardData;
+use crate::scroll;
 use crate::views::issue_list;
+
+/// Layout constants the scroll-to-focus math relies on: group headers and
+/// empty-state rows have fixed heights, and the list column a fixed gap/padding.
+const LIST_SPACING: f32 = 8.0;
+const LIST_PAD_TOP: f32 = 8.0;
+const HEADER_H: f32 = 32.0;
+const EMPTY_H: f32 = 28.0;
+
+/// Scrollable id of the dashboard's group list.
+pub fn scroll_id() -> scrollable::Id {
+    scrollable::Id::new("dashboard-list")
+}
+
+/// What the scroll math needs to know about one group.
+pub struct SpanGroup {
+    pub len: usize,
+    pub collapsed: bool,
+}
+
+/// `(top, height)` of the row `(group, issue)`: every group is a header, then
+/// either its rows or (when expanded and empty) one empty-state line.
+pub fn focused_span(groups: &[SpanGroup], group: usize, issue: usize) -> (f32, f32) {
+    let mut heights: Vec<f32> = Vec::new();
+    let mut target = 0;
+    for (i, g) in groups.iter().enumerate() {
+        heights.push(HEADER_H);
+        if g.collapsed {
+            continue;
+        }
+        if g.len == 0 {
+            heights.push(EMPTY_H);
+        }
+        for r in 0..g.len {
+            if i == group && r == issue {
+                target = heights.len();
+            }
+            heights.push(scroll::LIST_ROW_H);
+        }
+    }
+    (scroll::item_top(&heights, target, LIST_SPACING, LIST_PAD_TOP), scroll::LIST_ROW_H)
+}
 
 pub fn view<'a>(
     dashboard: Option<&'a Dashboard>,
@@ -34,7 +76,10 @@ pub fn view<'a>(
         return centered("Dashboard not found");
     };
 
-    let mut list: Column<'a, Message> = column![].spacing(8).width(Length::Fill).padding([8, 12]);
+    let mut list: Column<'a, Message> = column![]
+        .spacing(LIST_SPACING)
+        .width(Length::Fill)
+        .padding([LIST_PAD_TOP, 12.0]);
     for (group_idx, g) in evaluation.groups.iter().enumerate() {
         let is_collapsed = collapsed.contains(&g.group.id);
         list = list.push(group_header(g, group_idx, evaluation.groups.len(), read_only, is_collapsed));
@@ -43,7 +88,9 @@ pub fn view<'a>(
         }
         if g.issues.is_empty() {
             list = list.push(
-                container(text(empty_message(g)).size(13).color(t::text_muted())).padding([4, 16]),
+                container(text(empty_message(g)).size(13).color(t::text_muted()))
+                    .padding([4, 16])
+                    .height(Length::Fixed(EMPTY_H)),
             );
         }
         for (issue_idx, issue) in g.issues.iter().copied().enumerate() {
@@ -57,7 +104,18 @@ pub fn view<'a>(
             .push(controls(dashboard, header, evaluation, read_only, is_home))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
-            .push(scrollable(list).height(Length::Fill)),
+            .push(
+                scrollable(list)
+                    .id(scroll_id())
+                    .on_scroll(|vp| {
+                        Message::Scrolled(
+                            issue_list::SCROLL_KEY,
+                            vp.absolute_offset().y,
+                            vp.bounds().height,
+                        )
+                    })
+                    .height(Length::Fill),
+            ),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -83,9 +141,11 @@ fn controls<'a>(
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
             .push(filter_tabs(header.filter))
+            .push(mine_toggle(header.mine))
             .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
             .push(team_picker(evaluation, header.team.as_deref()))
+            .push(reset_button())
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
             .push(set_home_button(dashboard, read_only, is_home))
@@ -136,6 +196,15 @@ impl std::fmt::Display for TeamChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)
     }
+}
+
+/// "Reset": back to the default filter, sort, search and pickers.
+fn reset_button<'a>() -> Element<'a, Message> {
+    button(text("Reset").size(13))
+        .on_press(Message::ResetDashboard)
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
 }
 
 /// "Add group": disabled while the token is read-only.
@@ -196,6 +265,21 @@ fn filter_tabs<'a>(active: Filter) -> Element<'a, Message> {
     r.into()
 }
 
+/// The Mine toggle; highlighted while on.
+fn mine_toggle<'a>(on: bool) -> Element<'a, Message> {
+    let color = if on { t::text_primary() } else { t::text_muted() };
+    button(text("Mine").size(13).color(color))
+        .padding([2, 8])
+        .style(move |_theme: &Theme, _status| button::Style {
+            background: on.then(|| iced::Background::Color(t::bg_card_focused())),
+            text_color: color,
+            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .on_press(Message::ToggleDashboardMine)
+        .into()
+}
+
 /// Why a group shows no rows: no sources, unreachable sources, or no matches.
 fn empty_message(g: &GroupResult<'_>) -> &'static str {
     if g.no_sources {
@@ -234,7 +318,12 @@ fn group_header<'a>(
         r = r.push(text(g.group.description.clone()).size(12).color(t::text_secondary()));
     }
     r = r.push(horizontal_space()).push(move_buttons(&g.group.id, index, count, read_only));
-    mouse_area(container(r).padding([6, 4]).width(Length::Fill))
+    mouse_area(
+        container(r)
+            .padding([6, 4])
+            .width(Length::Fill)
+            .center_y(Length::Fixed(HEADER_H)),
+    )
         .on_press(Message::ToggleDashboardGroup(g.group.id.clone()))
         .into()
 }
@@ -291,5 +380,17 @@ mod tests {
         assert!(!toggle_group(&mut c, "d1", "g1"));
         assert!(!c["d1"].contains("g1"));
         assert!(c["d2"].contains("g1"));
+    }
+
+    #[test]
+    fn span_skips_collapsed_and_counts_empty_lines() {
+        let g = |len, collapsed| SpanGroup { len, collapsed };
+        // header, row 0, row 1
+        let (top, h) = focused_span(&[g(2, false)], 0, 1);
+        assert_eq!(h, scroll::LIST_ROW_H);
+        assert_eq!(top, 8.0 + (32.0 + 8.0) + (34.0 + 8.0));
+        // collapsed group contributes only its header; empty one header + line
+        let (top, _) = focused_span(&[g(5, true), g(0, false), g(1, false)], 2, 0);
+        assert_eq!(top, 8.0 + 40.0 + 40.0 + 36.0 + 40.0);
     }
 }

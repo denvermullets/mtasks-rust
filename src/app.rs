@@ -210,6 +210,8 @@ pub enum Message {
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
+    /// Restore the open dashboard's header and focus to the defaults.
+    ResetDashboard,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
     /// Step the open picker's link kind (Tab forward, Shift+Tab back).
@@ -278,6 +280,8 @@ pub enum Message {
     // Header bar
     /// Header search box changed; filters the current view's items.
     HeaderSearchChanged(String),
+    /// Dashboard header: flip the Mine toggle.
+    ToggleDashboardMine,
     /// Focus the header search box (Cmd+F).
     FocusSearch,
     /// "Display" button: open the display-options popover.
@@ -737,6 +741,8 @@ pub struct App {
     dashboard_header: crate::dashboard_eval::Header,
     /// Collapsed group ids per dashboard, for the session.
     collapsed_dashboard_groups: crate::views::dashboard::CollapsedGroups,
+    /// Header state and focus parked per dashboard (session only).
+    dashboard_sessions: crate::dashboard_session::Sessions,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -1113,6 +1119,37 @@ impl App {
             self.focused_issue = 0;
             self.reload_data();
         }
+        self.restore_dashboard_session();
+    }
+
+    /// Park the open dashboard's header (with its search text) and focus.
+    fn stash_dashboard_session(&mut self) {
+        let View::Dashboard(id) = &self.view else {
+            return;
+        };
+        let session = crate::dashboard_session::Session {
+            header: crate::dashboard_eval::Header {
+                search: self.active_search().to_string(),
+                ..self.dashboard_header.clone()
+            },
+            focused_lane: self.focused_lane,
+            focused_issue: self.focused_issue,
+        };
+        let id = id.clone();
+        self.dashboard_sessions.save(&id, session);
+    }
+
+    /// Entering a dashboard: load its parked header, search text and focus.
+    fn restore_dashboard_session(&mut self) {
+        let View::Dashboard(id) = &self.view else {
+            return;
+        };
+        let session = self.dashboard_sessions.restore(id);
+        self.search_query = session.header.search.clone();
+        self.search_view = self.view.clone();
+        self.dashboard_header = session.header;
+        self.focused_lane = session.focused_lane;
+        self.focused_issue = session.focused_issue;
     }
 
     /// Re-read the selected team's Recurring issue rows from the mirror.
@@ -1715,6 +1752,12 @@ impl App {
         }
     }
 
+    /// Whether j/k/h/l use list-mode navigation: the list display mode, or a
+    /// dashboard (always a list of groups).
+    fn list_nav_active(&self) -> bool {
+        matches!(self.view, View::Dashboard(_)) || self.board_display().view_mode == ViewMode::List
+    }
+
     /// Per-section counts for list-mode navigation: collapsed sections count
     /// as empty so j/k and h/l skip their hidden rows.
     fn list_nav_counts(&self) -> Vec<usize> {
@@ -1749,6 +1792,40 @@ impl App {
     /// view. Positions come from fixed element heights (see `scroll`); the
     /// current offset and viewport height come from `Message::Scrolled`.
     fn scroll_to_focus(&mut self) -> Task<Message> {
+        if let View::Dashboard(did) = &self.view {
+            let collapsed = self.collapsed_dashboard_groups.get(did);
+            let groups: Vec<crate::views::dashboard::SpanGroup> = self
+                .dashboard_evaluation()
+                .groups
+                .iter()
+                .map(|g| crate::views::dashboard::SpanGroup {
+                    len: g.issues.len(),
+                    collapsed: collapsed.is_some_and(|c| c.contains(&g.group.id)),
+                })
+                .collect();
+            if self.focused_issue >= groups.get(self.focused_lane).map_or(0, |g| g.len)
+                || groups[self.focused_lane].collapsed
+            {
+                return Task::none();
+            }
+            let (top, height) =
+                crate::views::dashboard::focused_span(&groups, self.focused_lane, self.focused_issue);
+            let key = issue_list::SCROLL_KEY;
+            let (offset, viewport) = self
+                .scroll_state
+                .get(&key)
+                .copied()
+                .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+            let new = scroll::offset_to_reveal(top, height, offset, viewport);
+            if (new - offset).abs() < 0.5 {
+                return Task::none();
+            }
+            self.scroll_state.insert(key, (new, viewport));
+            return scrollable::scroll_to(
+                crate::views::dashboard::scroll_id(),
+                scrollable::AbsoluteOffset { x: 0.0, y: new },
+            );
+        }
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
@@ -2808,6 +2885,7 @@ impl App {
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
             collapsed_dashboard_groups: Default::default(),
+            dashboard_sessions: Default::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -2995,6 +3073,7 @@ impl App {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
         let task = self.update_inner(message);
+        self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
         let task = Task::batch([task, self.request_visible_images()]);
@@ -3046,6 +3125,11 @@ impl App {
                 }
                 if matches!(self.view, View::IssueDetail(_)) && !modal_open {
                     if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
+                if matches!(self.view, View::Dashboard(_)) && !modal_open {
+                    if let Some(msg) = keys::handle_dashboard_key(&key, modifiers) {
                         return self.update(msg);
                     }
                 }
@@ -3714,6 +3798,13 @@ impl App {
                 self.switch_view(View::Dashboard(id));
             }
 
+            Message::ResetDashboard => {
+                if let View::Dashboard(id) = self.view.clone() {
+                    self.dashboard_sessions.reset(&id);
+                    self.restore_dashboard_session();
+                }
+            }
+
             Message::SetDashboardSort(sort) => {
                 self.dashboard_header.sort = sort;
                 self.focused_lane = 0;
@@ -3722,6 +3813,12 @@ impl App {
 
             Message::SetDashboardTeam(team) => {
                 self.dashboard_header.team = team;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::ToggleDashboardMine => {
+                self.dashboard_header.mine = !self.dashboard_header.mine;
                 self.focused_lane = 0;
                 self.focused_issue = 0;
             }
@@ -4405,7 +4502,7 @@ impl App {
             }
 
             Message::FocusNextIssue | Message::FocusPrevIssue
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: j/k walk rows top-to-bottom across sections.
                 let counts = self.list_nav_counts();
@@ -4419,7 +4516,7 @@ impl App {
                 return self.scroll_to_focus();
             }
             Message::FocusNextLane | Message::FocusPrevLane
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: h/l jump to the next/previous non-empty section.
                 let counts = self.list_nav_counts();

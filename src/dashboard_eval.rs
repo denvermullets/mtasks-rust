@@ -97,6 +97,8 @@ pub struct Header {
     /// Local id of the team the picker narrows to. A value that isn't one of
     /// the dashboard's source teams is ignored (see `source_teams`).
     pub team: Option<String>,
+    /// Mine: only issues assigned to the current user (any of their member rows).
+    pub mine: bool,
 }
 
 pub struct Input<'a> {
@@ -174,7 +176,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
             let pool = pool(cfg, m, &accessible, &my_members);
             let pool = apply_label_sources(cfg, m, &accessible, pool);
             // The refined base set: counts read this, rows narrow it further.
-            let base = base_set(input, &pool);
+            let base = base_set(input, &pool, &my_members);
             counted.extend(base.iter().map(|i| i.id.as_str()));
             let mut issues: Vec<&Issue> = base
                 .into_iter()
@@ -198,14 +200,26 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
 /// Refinements (Mine, team, assignee, label, status) plug in here, so rows and
 /// counts narrow together. The status picker swaps `is_active` for a
 /// lane-name match in this function.
-fn base_set<'a>(input: &Input<'a>, pool: &HashSet<&'a str>) -> Vec<&'a Issue> {
+fn base_set<'a>(
+    input: &Input<'a>,
+    pool: &HashSet<&'a str>,
+    my_members: &HashSet<&str>,
+) -> Vec<&'a Issue> {
     let m = &input.mirror;
     m.issues
         .iter()
         .filter(|i| pool.contains(i.id.as_str()) && is_active(i, m.lanes))
+        .filter(|i| passes_mine(i, input.header.mine, my_members))
         .filter(|i| passes_team(i, input.header.team.as_deref()))
         .collect()
 }
+
+
+/// Mine off keeps everything; on keeps issues assigned to one of my member rows.
+fn passes_mine(i: &Issue, mine: bool, my_members: &HashSet<&str>) -> bool {
+    !mine || i.assignee_id.as_deref().is_some_and(|a| my_members.contains(a))
+}
+
 
 /// The team picker: no team means no narrowing. `evaluate` has already
 /// dropped a value that isn't a source team.
@@ -1300,5 +1314,49 @@ mod tests {
         let ev = fx.eval(&groups, Some(99));
         let ids: Vec<&str> = ev.source_teams.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["a", "b"]);
+    }
+
+    fn mine_fx() -> Fx {
+        let mut fx = Fx::new();
+        let mut mine_due = issue("mine", "a", "la");
+        mine_due.assignee_id = Some("ma".into());
+        mine_due.due_date = Some("2026-11-01".into());
+        let mut other_due = issue("other", "a", "la");
+        other_due.assignee_id = Some("other".into());
+        other_due.due_date = Some("2026-10-30".into());
+        let mut mine_b = issue("mine_b", "b", "lb");
+        mine_b.assignee_id = Some("mb".into());
+        fx.issues = vec![mine_due, other_due, mine_b];
+        fx
+    }
+
+    #[test]
+    fn mine_off_shows_everything_and_counts_all() {
+        let fx = mine_fx();
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        let e = fx.eval(&groups, Some(99));
+        let got: Vec<&str> = e.groups[0].issues.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(got.len(), 3);
+        assert_eq!((e.due_today, e.overdue), (1, 1));
+    }
+
+    #[test]
+    fn mine_on_narrows_rows_across_teams_and_counts() {
+        let fx = mine_fx();
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        let h = Header { filter: Filter::Open, mine: true, ..Header::default() };
+        let e = fx.eval_with(&groups, Some(99), h);
+        let mut got: Vec<&str> = e.groups[0].issues.iter().map(|i| i.id.as_str()).collect();
+        got.sort();
+        assert_eq!(got, vec!["mine", "mine_b"]);
+        assert_eq!((e.due_today, e.overdue), (1, 0));
+    }
+
+    #[test]
+    fn mine_without_a_current_user_shows_nothing() {
+        let fx = mine_fx();
+        let groups = vec![cfg("g", vec![team_src(1, true)])];
+        let h = Header { filter: Filter::Open, mine: true, ..Header::default() };
+        assert!(fx.eval_with(&groups, None, h).groups[0].issues.is_empty());
     }
 }
