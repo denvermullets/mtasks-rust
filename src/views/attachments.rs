@@ -1,7 +1,7 @@
 //! Reusable file-card list for an owner's attachments (issue, project or
 //! comment). Callers load the rows with `db::attachments::list_for_owner`.
 
-use iced::widget::{column, container, text};
+use iced::widget::{button, column, container, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
@@ -36,7 +36,7 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
         type_label(&a.content_type, &a.filename),
         format_size(a.byte_size)
     );
-    container(
+    let body = container(
         column![]
             .spacing(2)
             .push(text(&a.filename).size(13).color(t::text_primary()))
@@ -52,8 +52,14 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
             radius: 6.0.into(),
         },
         ..Default::default()
-    })
-    .into()
+    });
+    // Clicking the card opens the file in its default app.
+    button(body)
+        .padding(0)
+        .width(Length::Fill)
+        .on_press(Message::OpenAttachment(a.clone()))
+        .style(|_theme: &Theme, _status| button::Style::default())
+        .into()
 }
 
 /// Byte count as "999 B", "1.5 KB", "1.2 MB", "3.0 GB" (1024-based, one decimal).
