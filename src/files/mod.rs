@@ -9,6 +9,7 @@
 
 pub mod cache;
 pub mod images;
+pub mod lightbox;
 pub mod open;
 pub mod outbox;
 pub mod validate;

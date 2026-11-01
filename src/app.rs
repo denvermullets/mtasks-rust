@@ -154,6 +154,8 @@ pub enum Message {
     ActivityFetched(String, usize),
     /// A file card was clicked: open the Attachment in its default app (JRST-186).
     OpenAttachment(crate::db::attachments::Attachment),
+    /// An image Attachment card was clicked: open the lightbox on it.
+    OpenLightbox(crate::db::attachments::Attachment),
     /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
     AttachmentDownloaded(crate::db::attachments::Attachment, Result<Vec<u8>, String>),
     /// Bytes for an image fetched into the cache for display (JRST-187), keyed by blob key.
@@ -415,6 +417,8 @@ pub enum Modal {
     DeleteCommentConfirm(String),
     /// Confirm deleting a synced attachment (local attachment id).
     DeleteAttachmentConfirm(String),
+    /// Full-size image viewer over an ordered list of images (see `files::lightbox`).
+    Lightbox(crate::files::lightbox::LightboxState),
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
@@ -3218,6 +3222,26 @@ impl App {
                 }
             }
             Message::OpenAttachment(att) => return self.open_attachment(att),
+            Message::OpenLightbox(att) => {
+                // Siblings in the same list (issue/project files, or one comment's) form the set.
+                let group: &[crate::db::attachments::Attachment] =
+                    if self.detail_attachments.iter().any(|a| a.id == att.id) {
+                        &self.detail_attachments
+                    } else {
+                        self.detail_comment_attachments
+                            .values()
+                            .find(|v| v.iter().any(|a| a.id == att.id))
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[])
+                    };
+                if let Some(state) =
+                    crate::files::lightbox::LightboxState::for_attachment(group, &att.id)
+                {
+                    self.modal = Modal::Lightbox(state);
+                    return self.request_visible_images();
+                }
+                return self.open_attachment(att);
+            }
             Message::AttachmentDownloaded(att, result) => match result {
                 Ok(bytes) => {
                     let conn = self.db();
@@ -5183,6 +5207,9 @@ impl App {
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
+            }
+            Modal::Lightbox(state) => {
+                iced::widget::stack![base, crate::views::lightbox::view(state, &self.images)].into()
             }
             Modal::DeleteAttachmentConfirm(id) => {
                 let name = crate::db::attachments::get(&self.db(), id)

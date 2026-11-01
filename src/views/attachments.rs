@@ -69,11 +69,18 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Messag
         },
         ..Default::default()
     });
-    // Clicking the card opens the file in its default app.
+    // Clicking opens an image in the lightbox, any other file in its default app.
+    let on_press = if crate::files::images::is_thumbnailable(&a.content_type)
+        && crate::files::open::blob_key(a).is_some()
+    {
+        Message::OpenLightbox(a.clone())
+    } else {
+        Message::OpenAttachment(a.clone())
+    };
     button(body)
         .padding(0)
         .width(Length::Fill)
-        .on_press(Message::OpenAttachment(a.clone()))
+        .on_press(on_press)
         .style(|_theme: &Theme, _status| button::Style::default())
         .into()
 }
