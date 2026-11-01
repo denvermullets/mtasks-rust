@@ -75,7 +75,7 @@ pub const FONTS: [FontDef; 10] = [
 /// (Inter 4.1 release, IBM Plex Mono), otherwise instances of the Google Fonts
 /// variable fonts at wght 700 (and wdth 100, opsz 14 for Inter), keeping the
 /// family name. Provenance is recorded on JRST-267, -268, -270 and -271.
-pub const FONT_BYTES: [&[u8]; 16] = [
+pub const FONT_BYTES: [&[u8]; 32] = [
     include_bytes!("../assets/fonts/Inter-Regular.ttf"),
     include_bytes!("../assets/fonts/Inter-Bold.ttf"),
     include_bytes!("../assets/fonts/Inter-Italic.ttf"),
@@ -87,11 +87,27 @@ pub const FONT_BYTES: [&[u8]; 16] = [
     include_bytes!("../assets/fonts/SpaceGrotesk-Regular.ttf"),
     include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf"),
     include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/FiraCode-Regular.ttf"),
+    include_bytes!("../assets/fonts/FiraCode-Bold.ttf"),
     include_bytes!("../assets/fonts/SUSEMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/SUSEMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/SUSEMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/SUSEMono-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/RobotoMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/RobotoMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/RobotoMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/RobotoMono-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/AtkinsonHyperlegibleMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/AtkinsonHyperlegibleMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/AtkinsonHyperlegibleMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/AtkinsonHyperlegibleMono-BoldItalic.ttf"),
 ];
 
 fn lookup(key: &str) -> &'static FontDef {
@@ -121,7 +137,17 @@ pub fn active() -> Font {
 
 /// Families that have a bundled Bold face (and Bold Italic, where they have an
 /// Italic). Add a family here when its Bold file joins `FONT_BYTES`.
-const BOLD_FAMILIES: [&str; 3] = ["Inter", "IBM Plex Sans", "Space Grotesk"];
+const BOLD_FAMILIES: [&str; 9] = [
+    "Inter",
+    "IBM Plex Sans",
+    "Space Grotesk",
+    "IBM Plex Mono",
+    "JetBrains Mono",
+    "Fira Code",
+    "SUSE Mono",
+    "Roboto Mono",
+    "Atkinson Hyperlegible Mono",
+];
 
 /// `font` at bold weight, if its family has a bundled Bold face. Without one,
 /// Iced's text stack does not fall back to the nearest weight of the same
@@ -136,11 +162,19 @@ pub fn bold(font: Font) -> Font {
 
 /// Families that have a bundled Italic face. Add a family here when its Italic
 /// file joins `FONT_BYTES`.
-const ITALIC_FAMILIES: [&str; 2] = ["Inter", "IBM Plex Sans"];
+const ITALIC_FAMILIES: [&str; 7] = [
+    "Inter",
+    "IBM Plex Sans",
+    "IBM Plex Mono",
+    "JetBrains Mono",
+    "SUSE Mono",
+    "Roboto Mono",
+    "Atkinson Hyperlegible Mono",
+];
 
 /// Families whose upstream release has no italic, with the bundled family
 /// whose italic stands in for it.
-const ITALIC_SUBSTITUTES: [(&str, &str); 1] = [("Space Grotesk", "Inter")];
+const ITALIC_SUBSTITUTES: [(&str, &str); 2] = [("Space Grotesk", "Inter"), ("Fira Code", "JetBrains Mono")];
 
 /// `font` in italic style, if its family has a bundled Italic face, or the
 /// substitute family's italic if upstream ships none; other families stay
@@ -271,8 +305,34 @@ mod tests {
     }
 
     #[test]
+    fn mono_families_draw_their_own_bold_and_italic_faces() {
+        for (key, family) in [
+            ("ibm-plex-mono", "IBM Plex Mono"),
+            ("jetbrains-mono", "JetBrains Mono"),
+            ("suse-mono", "SUSE Mono"),
+            ("roboto-mono", "Roboto Mono"),
+            ("atkinson-hyperlegible-mono", "Atkinson Hyperlegible Mono"),
+        ] {
+            assert_eq!(styled(key, false, false), (family.into(), 400, false), "{key} regular");
+            assert_eq!(styled(key, true, false), (family.into(), 700, false), "{key} bold");
+            assert_eq!(styled(key, false, true), (family.into(), 400, true), "{key} italic");
+            assert_eq!(styled(key, true, true), (family.into(), 700, true), "{key} bold italic");
+        }
+        assert_eq!(styled("fira-code", false, false), ("Fira Code".into(), 400, false));
+        assert_eq!(styled("fira-code", true, false), ("Fira Code".into(), 700, false));
+    }
+
+    #[test]
+    fn fira_code_has_no_italic_so_italic_uses_jetbrains_mono_italic() {
+        // Upstream Fira Code ships no italic: the monospace substitute is
+        // JetBrains Mono's, so code stays monospace.
+        assert_eq!(styled("fira-code", false, true), ("JetBrains Mono".into(), 400, true));
+        assert_eq!(styled("fira-code", true, true), ("JetBrains Mono".into(), 700, true));
+    }
+
+    #[test]
     fn bold_and_italic_compose_in_either_order() {
-        for key in ["inter", "ibm-plex-sans", "space-grotesk"] {
+        for key in FONTS.iter().map(|f| f.key) {
             let a = italic(bold(font_for_key(key)));
             let b = bold(italic(font_for_key(key)));
             assert_eq!(face(a), face(b), "{key}");
