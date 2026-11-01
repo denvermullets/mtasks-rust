@@ -778,6 +778,17 @@ pub fn card_records(conn: &Connection, issue_id: &str) -> Result<crate::body_hov
     Ok(out)
 }
 
+/// Records for a mention card in a body that belongs to `team_id`: that team's
+/// members and issues (the issues give the open count). The body's team, not
+/// the selected one, so a body opened from My Issues resolves its own people.
+pub fn mention_records(conn: &Connection, team_id: &str) -> Result<crate::body_hover::OwnedRecords> {
+    Ok(crate::body_hover::OwnedRecords {
+        members: members_for_team(conn, team_id)?,
+        issues: issues_for_team(conn, team_id)?,
+        ..Default::default()
+    })
+}
+
 pub fn get_project(conn: &Connection, project_id: &str) -> Result<Option<Project>> {
     conn.query_row(
         "SELECT id, remote_id, team_id, name, description, status, priority,
@@ -2043,6 +2054,50 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn mention_card_resolves_on_the_bodys_team_not_a_same_named_member_elsewhere() {
+        let conn = setup(); // team t1 is the "selected" one in the app
+        for sql in [
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t2', 'Other', 'OTH', '2026-01-01', '2026-01-01')",
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l2', 'Doing', 0, 't2', '2026-01-01', '2026-01-01')",
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at) VALUES ('m1', 't1', 'Ann', 'ann@one.io', '2026-01-01', '2026-01-01')",
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at) VALUES ('m2', 't2', 'Ann', 'ann@two.io', '2026-01-01', '2026-01-01')",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, assignee_id, team_number, created_at, updated_at)
+             VALUES ('a1', 'one', 1, 'l1', 't1', 'm1', 1, '2026-01-01', '2026-01-01')",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, assignee_id, team_number, created_at, updated_at)
+             VALUES ('b1', 'two', 1, 'l2', 't2', 'm2', 1, '2026-01-01', '2026-01-01')",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, assignee_id, team_number, created_at, updated_at)
+             VALUES ('b2', 'two more', 1, 'l2', 't2', 'm2', 2, '2026-01-01', '2026-01-01')",
+        ] {
+            conn.execute(sql, []).unwrap();
+        }
+        let card = |team: &str| {
+            let rec = mention_records(&conn, team).unwrap();
+            match crate::body_hover::content_for(
+                &crate::body_hover::Anchor::Mention("@Ann".into()),
+                &rec.records(),
+            ) {
+                Some(crate::body_hover::CardContent::Member(m)) => (m.email, m.open_issues),
+                other => panic!("{other:?}"),
+            }
+        };
+        // A body on t2 (t1 selected) gets t2's Ann, with t2's open issues.
+        assert_eq!(card("t2"), ("ann@two.io".to_string(), 2));
+        assert_eq!(card("t1"), ("ann@one.io".to_string(), 1));
+        // A team with nobody by that name draws no card.
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t3', 'Empty', 'EMP', '2026-01-01', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        let rec = mention_records(&conn, "t3").unwrap();
+        assert!(crate::body_hover::content_for(
+            &crate::body_hover::Anchor::Mention("@Ann".into()),
+            &rec.records()
+        )
+        .is_none());
     }
 
     #[test]

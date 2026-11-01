@@ -4,7 +4,8 @@
 //! clicks but never tells the app about hover. This is a trimmed copy of it
 //! (iced_widget 0.13.4 `text/rich.rs`) that keeps layout, drawing and click
 //! handling and adds hover reporting. A message goes out only when the hovered
-//! span changes, never for movement within a span.
+//! anchor (a span's link) changes, never for movement within or between spans
+//! that share it, or across unlinked text.
 //!
 //! Inside a `scrollable` the layout is NOT translated. The scrollable lays its
 //! content out unscrolled and hands children a cursor shifted by the scroll
@@ -58,19 +59,28 @@ fn takes_press(span_is_link: Option<bool>) -> bool {
     span_is_link == Some(true)
 }
 
-/// Remembers the hovered span so only changes are reported. Pure.
-#[derive(Debug, Default)]
-pub struct HoverTracker {
-    current: Option<usize>,
+/// Remembers the hovered anchor (the link of the span under the pointer) so
+/// only changes are reported. Crossing bold or code inside plain text, or
+/// moving between spans of the same link, is not a change. Pure.
+#[derive(Debug)]
+pub struct HoverTracker<Link> {
+    current: Option<Link>,
 }
 
-impl HoverTracker {
-    /// Feed the span under the pointer (`None` = none). `Some(change)` only
-    /// when it differs from the last observation; `change` is the new state.
-    pub fn observe(&mut self, hit: Option<usize>) -> Option<Option<usize>> {
-        (self.current != hit).then(|| {
-            self.current = hit;
-            hit
+impl<Link> Default for HoverTracker<Link> {
+    fn default() -> Self {
+        Self { current: None }
+    }
+}
+
+impl<Link: Clone + PartialEq> HoverTracker<Link> {
+    /// Feed the link of the span under the pointer (`None` = plain text or no
+    /// span). `Some(change)` only when it differs from the last observation;
+    /// `change` is the new state.
+    pub fn observe(&mut self, anchor: Option<Link>) -> Option<Option<Link>> {
+        (self.current != anchor).then(|| {
+            self.current = anchor.clone();
+            anchor
         })
     }
 }
@@ -103,12 +113,16 @@ static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 
 pub struct HoverRich<'a, Link, Message>
 where
-    Link: Clone + 'static,
+    Link: Clone + PartialEq + 'static,
 {
     spans: Vec<Span<'a, Link, iced::Font>>,
     size: Option<Pixels>,
     on_link: OnLink<'a, Link, Message>,
     on_hover: Option<OnHover<'a, Link, Message>>,
+    /// Which linked spans act as links (underline on hover, pointer cursor,
+    /// captured press, `on_link`). A linked span that isn't clickable still
+    /// reports hover, so it can anchor a card without behaving like a link.
+    clickable: fn(&Link) -> bool,
 }
 
 pub fn hover_rich<'a, Link, Message>(
@@ -116,17 +130,27 @@ pub fn hover_rich<'a, Link, Message>(
     on_link: impl Fn(Link) -> Message + 'a,
 ) -> HoverRich<'a, Link, Message>
 where
-    Link: Clone + 'static,
+    Link: Clone + PartialEq + 'static,
 {
-    HoverRich { spans, size: None, on_link: Box::new(on_link), on_hover: None }
+    HoverRich { spans, size: None, on_link: Box::new(on_link), on_hover: None, clickable: |_| true }
 }
 
 impl<'a, Link, Message> HoverRich<'a, Link, Message>
 where
-    Link: Clone + 'static,
+    Link: Clone + PartialEq + 'static,
 {
     pub fn size(mut self, size: impl Into<Pixels>) -> Self {
         self.size = Some(size.into());
+        self
+    }
+
+    fn is_clickable(&self, index: usize) -> bool {
+        self.spans.get(index).and_then(|s| s.link.as_ref()).is_some_and(|l| (self.clickable)(l))
+    }
+
+    /// Decide which linked spans are clickable; the default is all of them.
+    pub fn clickable(mut self, f: fn(&Link) -> bool) -> Self {
+        self.clickable = f;
         self
     }
 
@@ -145,7 +169,7 @@ where
 struct State<Link> {
     spans: Vec<Span<'static, Link, iced::Font>>,
     span_pressed: Option<usize>,
-    hover: HoverTracker,
+    hover: HoverTracker<Link>,
     owner: u64,
     /// Last pointer position seen in a raw `CursorMoved` (window space).
     window_cursor: Option<Point>,
@@ -154,7 +178,7 @@ struct State<Link> {
 
 impl<'a, Link, Message> Widget<Message, Theme, iced::Renderer> for HoverRich<'a, Link, Message>
 where
-    Link: Clone + 'static,
+    Link: Clone + PartialEq + 'static,
     Message: 'a,
 {
     fn tag(&self) -> tree::Tag {
@@ -235,7 +259,7 @@ where
             .and_then(|p| state.paragraph.hit_span(p));
 
         for (index, span) in self.spans.iter().enumerate() {
-            let is_hovered_link = span.link.is_some() && Some(index) == hovered_span;
+            let is_hovered_link = self.is_clickable(index) && Some(index) == hovered_span;
             if span.highlight.is_some() || span.underline || span.strikethrough || is_hovered_link {
                 let translation = layout.position() - Point::ORIGIN;
                 let regions = state.paragraph.span_bounds(index);
@@ -316,13 +340,14 @@ where
             state.window_cursor = Some(*position);
         }
 
-        // Hover: checked on every mouse event, but only a changed span is published.
+        // Hover: checked on every mouse event, but only a changed anchor is published.
         if let Some(on_hover) = &self.on_hover {
             let hit = cursor
                 .position_in(layout.bounds())
                 .and_then(|p| state.paragraph.hit_span(p));
-            if let Some(change) = state.hover.observe(hit) {
-                let hover = change.zip(cursor.position()).map(|(span, at)| {
+            let anchor = hit.and_then(|i| self.spans.get(i)).and_then(|s| s.link.clone());
+            if let Some(change) = state.hover.observe(anchor) {
+                let hover = hit.filter(|_| change.is_some()).zip(cursor.position()).map(|(span, at)| {
                     let origin = layout.position() - Point::ORIGIN;
                     let line = state
                         .paragraph
@@ -350,7 +375,7 @@ where
                     // Only a link takes the press; plain text lets it reach
                     // an enclosing click area (the description's click-to-edit).
                     let hit = state.paragraph.hit_span(p);
-                    if let Some(span) = hit.filter(|&s| takes_press(self.spans.get(s).map(|s| s.link.is_some()))) {
+                    if let Some(span) = hit.filter(|&s| takes_press(Some(self.is_clickable(s)))) {
                         state.span_pressed = Some(span);
                         return event::Status::Captured;
                     }
@@ -360,7 +385,7 @@ where
                 if let Some(pressed) = state.span_pressed.take() {
                     if let Some(p) = cursor.position_in(layout.bounds()) {
                         if state.paragraph.hit_span(p) == Some(pressed) {
-                            if let Some(link) = self.spans.get(pressed).and_then(|s| s.link.clone()) {
+                            if let Some(link) = self.spans.get(pressed).and_then(|s| s.link.clone()).filter(|l| (self.clickable)(l)) {
                                 shell.publish((self.on_link)(link));
                             }
                         }
@@ -384,15 +409,14 @@ where
         let linked = cursor
             .position_in(layout.bounds())
             .and_then(|p| state.paragraph.hit_span(p))
-            .and_then(|i| self.spans.get(i))
-            .is_some_and(|s| s.link.is_some());
+            .is_some_and(|i| self.is_clickable(i));
         if linked { mouse::Interaction::Pointer } else { mouse::Interaction::None }
     }
 }
 
 impl<'a, Link, Message> From<HoverRich<'a, Link, Message>> for Element<'a, Message>
 where
-    Link: Clone + 'static,
+    Link: Clone + PartialEq + 'static,
     Message: 'a,
 {
     fn from(w: HoverRich<'a, Link, Message>) -> Self {
@@ -415,18 +439,21 @@ mod tests {
     #[test]
     fn tracker_reports_only_changes_of_the_hovered_span() {
         let mut t = HoverTracker::default();
+        // Each row is the link of the span under the pointer. Plain text,
+        // bold and code spans all have none, so crossing them reports nothing.
         let cases = [
             (None, None),
-            (Some(2), Some(Some(2))),
-            (Some(2), None),
-            (Some(2), None),
-            (Some(0), Some(Some(0))),
+            (None, None),
+            (Some("a"), Some(Some("a"))),
+            (Some("a"), None),
+            (Some("a"), None),
+            (Some("b"), Some(Some("b"))),
             (None, Some(None)),
             (None, None),
-            (Some(0), Some(Some(0))),
+            (Some("b"), Some(Some("b"))),
         ];
-        for (hit, want) in cases {
-            assert_eq!(t.observe(hit), want, "hit {hit:?}");
+        for (anchor, want) in cases {
+            assert_eq!(t.observe(anchor), want, "anchor {anchor:?}");
         }
     }
 }

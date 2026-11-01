@@ -31,6 +31,7 @@ mod views;
 use iced::{window, Size};
 
 fn main() -> iced::Result {
+    highlight::preload();
     let cfg = config::load().0;
     theme::set_by_key(&cfg.theme);
     let font_key = cfg.font;

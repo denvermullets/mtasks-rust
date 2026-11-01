@@ -811,6 +811,10 @@ pub struct App {
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
+    /// Members of the open detail's own team: what its bodies and comments
+    /// resolve mentions against. Not `members`, which is the selected team's
+    /// (or every team's in My Issues). Empty outside a detail view.
+    detail_members: Vec<Member>,
     /// The open issue detail was reached from My Issues, so Back returns there.
     detail_from_my_issues: bool,
     /// The open issue detail was reached from the Inbox (Back returns there).
@@ -1239,6 +1243,10 @@ impl App {
     /// Resolve dependency edges for the open detail issue so the sidebar can
     /// render them; other views don't need this, so keep it cheap.
     fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
+        self.detail_members = self
+            .detail_team_id()
+            .map(|team_id| queries::members_for_team(conn, team_id).unwrap_or_default())
+            .unwrap_or_default();
         if let View::IssueDetail(ref issue_id) = self.view {
             self.detail_deps =
                 queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
@@ -1513,6 +1521,21 @@ impl App {
                 Self::insert_suggestion(content, &s, idx);
             }
         }
+    }
+
+    /// The team the open detail's issue or project belongs to. Its bodies are
+    /// resolved against this team, whichever team is selected.
+    fn detail_team_id(&self) -> Option<&str> {
+        match &self.view {
+            View::IssueDetail(id) => self.issues.iter().find(|i| i.id == *id).map(|i| i.team_id.as_str()),
+            View::ProjectDetail(id) => self.projects.iter().find(|p| p.id == *id).map(|p| p.team_id.as_str()),
+            _ => None,
+        }
+    }
+
+    fn detail_team(&self) -> Option<&Team> {
+        let id = self.detail_team_id()?;
+        self.teams.iter().find(|t| t.id == id)
     }
 
     fn selected_team(&self) -> Option<&Team> {
@@ -2889,6 +2912,7 @@ impl App {
             labels,
             issue_labels,
             detail_deps: Default::default(),
+            detail_members: Vec::new(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_from_dashboard: None,
@@ -3025,7 +3049,11 @@ impl App {
 
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
 
-        let mut subs = vec![keys, activity, scrolls, banner_clicks];
+        let mut subs = vec![keys, activity, banner_clicks];
+        // Only listen for wheel events while a card is pending or showing.
+        if self.body_hover.is_active() {
+            subs.push(scrolls);
+        }
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(
@@ -3140,14 +3168,44 @@ impl App {
         self.push_toast(msg, ToastKind::Error, false);
     }
 
+    /// Apply a detail-view key message. Leaving a description editor is
+    /// skipped when another editor (the comment composer) has focus, so
+    /// Escape there doesn't also close the description. Focus is read with
+    /// an operation, then the stop is sent.
+    fn update_unless_focus_elsewhere(&mut self, msg: Message) -> Task<Message> {
+        let (editor, stop): (_, fn() -> Message) = match msg {
+            Message::StopEditingIssueDescription => {
+                (issue_detail::description_editor_id(), || Message::StopEditingIssueDescription)
+            }
+            Message::StopEditingProjectDescription => {
+                (project_detail::description_editor_id(), || Message::StopEditingProjectDescription)
+            }
+            other => return self.update(other),
+        };
+        iced::advanced::widget::operate(issue_detail::FocusedOutside::new(editor)).then(move |elsewhere| {
+            if elsewhere { Task::none() } else { Task::done(stop()) }
+        })
+    }
+
+    /// Whether either detail view has its description editor open.
+    fn editing_description(&self) -> bool {
+        self.issue_detail.as_ref().is_some_and(|d| d.editing_description)
+            || self.project_detail.as_ref().is_some_and(|d| d.editing_description)
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
         let view_before = self.view.clone();
+        let editing_before = self.editing_description();
         let mut task = self.update_inner(message);
-        // The one place that closes hover cards on a view change or modal
-        // open, whatever message caused it (keyboard included).
-        if self.view != view_before || self.modal != Modal::None {
+        // The one place that closes hover cards on a view change, modal open
+        // or description editor toggle, whatever message caused it (keyboard
+        // included).
+        if self.view != view_before
+            || self.modal != Modal::None
+            || self.editing_description() != editing_before
+        {
             let effect = self.body_hover.event(crate::hover_card::Event::ViewChanged);
             task = Task::batch([task, Self::hover_timer(effect)]);
         }
@@ -3212,14 +3270,14 @@ impl App {
                     let editing_description =
                         self.issue_detail.as_ref().is_some_and(|d| d.editing_description);
                     if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers, editing_description) {
-                        return self.update(msg);
+                        return self.update_unless_focus_elsewhere(msg);
                     }
                 }
                 if matches!(self.view, View::ProjectDetail(_)) && !modal_open {
                     let editing_description =
                         self.project_detail.as_ref().is_some_and(|d| d.editing_description);
                     if let Some(msg) = keys::handle_project_detail_key(&key, modifiers, editing_description) {
-                        return self.update(msg);
+                        return self.update_unless_focus_elsewhere(msg);
                     }
                 }
                 if matches!(self.view, View::Dashboard(_)) && !modal_open {
@@ -6366,16 +6424,15 @@ impl App {
                     .ok()
                     .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
             }
-            // Mentions count open issues from the loaded issues, which the
-            // card needs in full, so they use the in-memory lists.
-            crate::body_hover::Anchor::Mention(_) => crate::body_hover::content_for(
-                &anchor,
-                &crate::body_hover::Records {
-                    issues: &self.issues,
-                    members: &self.members,
-                    ..Default::default()
-                },
-            ),
+            // A mention resolves on the body's team, whichever team is
+            // selected: that team's members and issues, read once as the
+            // card opens.
+            crate::body_hover::Anchor::Mention(_) => self.detail_team_id().and_then(|team_id| {
+                let conn = self.db();
+                crate::db::queries::mention_records(&conn, team_id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }),
         };
         self.hover_content = Some((anchor, content));
     }
@@ -6525,8 +6582,8 @@ impl App {
                         project_detail::view(
                             project,
                             detail,
-                            self.selected_team(),
-                            &self.members,
+                            self.detail_team(),
+                            &self.detail_members,
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
                             self.board_display(),
@@ -6571,11 +6628,11 @@ impl App {
                         issue_detail::view(
                             issue,
                             detail,
-                            self.selected_team(),
+                            self.detail_team(),
                             &self.teams,
                             &self.lanes,
                             &self.projects,
-                            &self.members,
+                            &self.detail_members,
                             project_name,
                             &self.detail_deps,
                             &self.detail_comments,

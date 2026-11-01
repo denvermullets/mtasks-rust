@@ -155,7 +155,6 @@ pub fn view<'a>(
                 .map(|e| text(e).size(12).color(t::danger())),
         )
         .push(description_section(detail, &crate::views::body::BodyCtx {
-            team,
             teams,
             issues,
             members,
@@ -174,7 +173,7 @@ pub fn view<'a>(
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(
-            comments, detail, members, team, teams, issues, comment_attachments, images, host,
+            comments, detail, members, teams, issues, comment_attachments, images, host,
             pending_paths,
         ));
 
@@ -294,7 +293,6 @@ fn discussion_section<'a>(
     comments: &'a [Comment],
     detail: &'a ProjectDetailState,
     members: &'a [Member],
-    team: Option<&'a Team>,
     teams: &'a [Team],
     issues: &'a [Issue],
     comment_attachments: &'a CommentAttachments,
@@ -310,7 +308,6 @@ fn discussion_section<'a>(
     }
     let ctx = ThreadCtx {
         members,
-        team,
         teams,
         issues,
         my_member_ids: &[],
