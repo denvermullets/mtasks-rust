@@ -12,6 +12,7 @@ pub mod cache;
 // Thumbnail loading is consumed by views; some helpers await later tickets.
 #[allow(dead_code)]
 pub mod images;
+pub mod drop;
 pub mod inline;
 pub mod intake;
 pub mod lightbox;
