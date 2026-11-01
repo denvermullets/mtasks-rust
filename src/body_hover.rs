@@ -17,7 +17,7 @@
 
 use iced::{Point, Rectangle};
 
-use crate::db::models::{Issue, Team};
+use crate::db::models::{Issue, Member, Team};
 use crate::hover_card::{Effect, Event, HoverCard};
 use crate::mentions::LinkTarget;
 
@@ -26,7 +26,7 @@ use crate::mentions::LinkTarget;
 pub enum Anchor {
     /// Local issue UUID.
     Issue(String),
-    /// Mention text including the `@`. No card yet (JRST-310).
+    /// Mention text including the `@`.
     Mention(String),
 }
 
@@ -103,6 +103,14 @@ impl BodyHover {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardContent {
     Issue(IssueCard),
+    Member(MemberCard),
+}
+
+/// The fields of a mention card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberCard {
+    pub name: String,
+    pub email: String,
 }
 
 /// The fields of an issue card.
@@ -114,7 +122,15 @@ pub struct IssueCard {
 }
 
 /// Card content for an anchor from local data; `None` draws no card.
-pub fn content_for(anchor: &Anchor, issues: &[Issue], teams: &[Team]) -> Option<CardContent> {
+///
+/// `members` are the body's team's members (the ones loaded for the selected
+/// team); a mention matches a member name case-insensitively.
+pub fn content_for(
+    anchor: &Anchor,
+    issues: &[Issue],
+    teams: &[Team],
+    members: &[Member],
+) -> Option<CardContent> {
     match anchor {
         Anchor::Issue(id) => {
             let issue = issues.iter().find(|i| i.id == *id)?;
@@ -125,7 +141,11 @@ pub fn content_for(anchor: &Anchor, issues: &[Issue], teams: &[Team]) -> Option<
             };
             Some(CardContent::Issue(IssueCard { identifier, title: issue.title.clone() }))
         }
-        Anchor::Mention(_) => None,
+        Anchor::Mention(text) => {
+            let wanted = text.strip_prefix('@').unwrap_or(text).to_lowercase();
+            let member = members.iter().find(|m| m.name.to_lowercase() == wanted)?;
+            Some(CardContent::Member(MemberCard { name: member.name.clone(), email: member.email.clone() }))
+        }
     }
 }
 
@@ -313,11 +333,40 @@ mod tests {
             (Anchor::Mention("@ann".into()), None),
         ];
         for (anchor, want) in rows {
-            let got = content_for(&anchor, &issues, std::slice::from_ref(&team));
+            let got = content_for(&anchor, &issues, std::slice::from_ref(&team), &[]);
             let want = want.map(|(i, t)| {
                 CardContent::Issue(IssueCard { identifier: i.into(), title: t.into() })
             });
             assert_eq!(got, want, "{anchor:?}");
+        }
+    }
+
+    fn member(name: &str, email: &str) -> Member {
+        Member {
+            id: format!("m-{name}"),
+            remote_id: None,
+            team_id: "t".into(),
+            name: name.into(),
+            email: email.into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn mention_card_content_from_members() {
+        let members = [member("Ann Lee", "ann@x.io"), member("Bob", "bob@x.io")];
+        let rows = [
+            ("@Ann Lee", Some(("Ann Lee", "ann@x.io"))),
+            ("@ann lee", Some(("Ann Lee", "ann@x.io"))),
+            ("@BOB", Some(("Bob", "bob@x.io"))),
+            ("@nobody", None),
+            ("@", None),
+        ];
+        for (text, want) in rows {
+            let got = content_for(&Anchor::Mention(text.into()), &[], &[], &members);
+            let want = want.map(|(n, e)| CardContent::Member(MemberCard { name: n.into(), email: e.into() }));
+            assert_eq!(got, want, "{text}");
         }
     }
 }

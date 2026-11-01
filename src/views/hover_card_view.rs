@@ -8,7 +8,7 @@ use iced::widget::{column, container, text};
 use iced::{Border, Element, Length, Padding, Rectangle, Theme};
 
 use crate::app::Message;
-use crate::body_hover::{CardContent, IssueCard};
+use crate::body_hover::{CardContent, IssueCard, MemberCard};
 use crate::theme as t;
 
 /// Card width in logical pixels.
@@ -19,6 +19,7 @@ pub const WIDTH: f32 = 320.0;
 pub fn overlay<'a>(content: &CardContent, anchor: Rectangle) -> Element<'a, Message> {
     let card = match content {
         CardContent::Issue(issue) => issue_card(issue),
+        CardContent::Member(member) => member_card(member),
     };
     // The card reports the pointer so moving from the anchor onto it keeps it open.
     let card = iced::widget::mouse_area(card)
@@ -35,12 +36,25 @@ pub fn overlay<'a>(content: &CardContent, anchor: Rectangle) -> Element<'a, Mess
         .into()
 }
 
+fn member_card<'a>(member: &MemberCard) -> Element<'a, Message> {
+    let body = column![
+        text(member.name.clone()).size(t::type_scale::SM).color(t::text_primary()),
+        text(member.email.clone()).size(t::type_scale::XS).color(t::text_secondary()),
+    ]
+    .spacing(t::space::S1);
+    panel(body.into())
+}
+
 fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
     let body = column![
         text(issue.identifier.clone()).size(t::type_scale::XS).color(t::text_secondary()),
         text(issue.title.clone()).size(t::type_scale::SM).color(t::text_primary()),
     ]
     .spacing(t::space::S1);
+    panel(body.into())
+}
+
+fn panel<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
     container(body)
         .padding(t::space::S3)
         .width(WIDTH)
