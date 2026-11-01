@@ -87,7 +87,8 @@ fn controls<'a>(
             .push(sort_picker(header.sort))
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
-            .push(set_home_button(dashboard, read_only, is_home)),
+            .push(set_home_button(dashboard, read_only, is_home))
+            .push(delete_dashboard_button(&dashboard.id, read_only)),
     )
     .padding([8, 16])
     .width(Length::Fill)
@@ -132,6 +133,15 @@ fn set_home_button<'a>(dashboard: &Dashboard, read_only: bool, is_home: bool) ->
     let label = if is_home { "Home page" } else { "Set as Home page" };
     button(text(label).size(13))
         .on_press_maybe((!read_only && !is_home).then(|| Message::SetDashboardAsHome(dashboard.id.clone())))
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
+}
+
+/// "Delete" for the dashboard (asks to confirm): disabled while read-only.
+fn delete_dashboard_button<'a>(id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Delete").size(13))
+        .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteDashboard(id.to_string())))
         .padding([4, 10])
         .style(button::secondary)
         .into()

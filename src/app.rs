@@ -83,6 +83,8 @@ pub enum Message {
     RevertSavedView,
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
+    ConfirmDeleteDashboard(String),
+    DeleteDashboardConfirmed,
     OpenRenameSavedView(String),
     DeleteSavedViewConfirmed,
     /// Make a Saved view (local id) the user's Home page.
@@ -500,6 +502,7 @@ pub enum Modal {
     DeleteRecurringConfirm(String),
     /// Confirm deleting a Saved view (local id) from the sidebar.
     DeleteSavedViewConfirm(String),
+    DeleteDashboardConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
     SaveView,
     /// "New dashboard" form; state in `App::dashboard_form`.
@@ -1073,6 +1076,23 @@ impl App {
 
     /// Switch to `view`, reloading data when crossing in or out of the
     /// cross-team views (their data replaces the per-team data).
+    /// Remove a dashboard locally and queue its server delete if it was pushed.
+    fn delete_dashboard(&mut self, id: &str) {
+        match crate::db::dashboards::delete_local(&self.db(), id) {
+            Ok(Some(payload)) => {
+                self.enqueue_sync(
+                    crate::db::dashboards::ENTITY_TYPE,
+                    id,
+                    "delete",
+                    Some(payload.as_str()),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[dashboards] delete failed: {e}"),
+        }
+        self.reload_data();
+    }
+
     fn switch_view(&mut self, view: View) {
         let crossing = self.view.is_cross_team() != view.is_cross_team()
             || matches!(view, View::Dashboard(_));
@@ -3464,6 +3484,30 @@ impl App {
                     );
                 } else {
                     self.modal = Modal::DeleteSavedViewConfirm(view_id);
+                }
+            }
+
+            Message::ConfirmDeleteDashboard(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteDashboardConfirm(id);
+                }
+            }
+
+            Message::DeleteDashboardConfirmed => {
+                let Modal::DeleteDashboardConfirm(id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                self.delete_dashboard(&id);
+                if self.view == View::Dashboard(id) {
+                    return self.update_inner(Message::NavigateToView(View::Board));
                 }
             }
 
@@ -6351,6 +6395,22 @@ impl App {
                 save_view_modal("Rename view", &self.save_view_name, self.save_view_error)
             ]
             .into(),
+            Modal::DeleteDashboardConfirm(id) => {
+                let name = self
+                    .dashboards
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default();
+                let body = format!(
+                    "Delete the dashboard \"{name}\" and its groups? Issues are not affected."
+                );
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Dashboard?", body, Message::DeleteDashboardConfirmed)
+                ]
+                .into()
+            }
             Modal::DeleteSavedViewConfirm(view_id) => {
                 let name = self
                     .saved_views
