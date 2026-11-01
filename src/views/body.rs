@@ -418,6 +418,10 @@ enum Run {
     /// A run drawn bold. Wraps the run it styles, so it composes with
     /// other styles (a bold link, a bold mention).
     Bold(Box<Run>),
+    /// A run drawn italic; wraps like `Bold`.
+    Italic(Box<Run>),
+    /// A run drawn with a line through it; wraps like `Bold`.
+    Struck(Box<Run>),
     /// Inline code: monospace on a subtle background.
     Code(String),
 }
@@ -446,6 +450,16 @@ fn push_runs(inlines: &[Inline], resolve: &impl Fn(&str) -> Option<LinkTarget>, 
                 push_runs(inner, resolve, &mut runs);
                 out.extend(runs.into_iter().map(|r| Run::Bold(Box::new(r))));
             }
+            Inline::Emphasis(inner) => {
+                let mut runs = Vec::new();
+                push_runs(inner, resolve, &mut runs);
+                out.extend(runs.into_iter().map(|r| Run::Italic(Box::new(r))));
+            }
+            Inline::Strikethrough(inner) => {
+                let mut runs = Vec::new();
+                push_runs(inner, resolve, &mut runs);
+                out.extend(runs.into_iter().map(|r| Run::Struck(Box::new(r))));
+            }
         }
     }
 }
@@ -471,6 +485,12 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
             s.font = Some(fonts::bold(s.font.unwrap_or_else(fonts::active)));
             s
         }
+        Run::Italic(inner) => {
+            let mut s = span_for(*inner, plain);
+            s.font = Some(fonts::italic(s.font.unwrap_or_else(fonts::active)));
+            s
+        }
+        Run::Struck(inner) => span_for(*inner, plain).strikethrough(true),
     }
 }
 
@@ -703,6 +723,58 @@ mod tests {
                 Run::Plain(" c".into()),
             ]
         );
+    }
+
+    #[test]
+    fn emphasis_maps_to_italic_runs() {
+        let doc = document::parse_with("*a* ***c***", "", &[]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        let it = |r| Run::Italic(Box::new(r));
+        let bold = |r| Run::Bold(Box::new(r));
+        assert_eq!(
+            runs(inl, resolve),
+            [it(Run::Plain("a".into())), Run::Plain(" ".into()), it(bold(Run::Plain("c".into())))]
+        );
+    }
+
+    #[test]
+    fn italic_spans_use_the_italic_style_and_compose_with_bold() {
+        let s = span_for(Run::Italic(Box::new(Run::Plain("x".into()))), Color::WHITE);
+        assert_eq!(s.font.map(|f| f.style), Some(iced::font::Style::Italic));
+        assert_eq!(s.color, Some(Color::WHITE));
+        let both = span_for(Run::Italic(Box::new(Run::Bold(Box::new(Run::Plain("x".into()))))), Color::WHITE);
+        let f = both.font.unwrap();
+        // No bold italic face yet: italic wins (JRST-270).
+        assert_eq!((f.style, f.weight), (iced::font::Style::Italic, iced::font::Weight::Normal));
+    }
+
+    #[test]
+    fn strikethrough_maps_to_struck_runs_keeping_their_tokens() {
+        let doc = document::parse_with("~~a @Ann~~ ~~*b*~~", "", &["Ann"]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        let st = |r| Run::Struck(Box::new(r));
+        assert_eq!(
+            runs(inl, resolve),
+            [
+                st(Run::Plain("a ".into())),
+                st(Run::Mention("@Ann".into())),
+                Run::Plain(" ".into()),
+                st(Run::Italic(Box::new(Run::Plain("b".into())))),
+            ]
+        );
+    }
+
+    #[test]
+    fn struck_spans_set_strikethrough_and_keep_other_styling() {
+        let s = span_for(Run::Struck(Box::new(Run::Plain("x".into()))), Color::WHITE);
+        assert!(s.strikethrough);
+        assert_eq!(s.color, Some(Color::WHITE));
+        let link = span_for(
+            Run::Struck(Box::new(Run::Link { text: "l".into(), url: "https://a.b".into() })),
+            Color::WHITE,
+        );
+        assert!(link.strikethrough && link.link.is_some());
+        assert!(!span_for(Run::Plain("x".into()), Color::WHITE).strikethrough);
     }
 
     #[test]
