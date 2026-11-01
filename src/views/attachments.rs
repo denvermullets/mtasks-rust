@@ -5,7 +5,7 @@ use iced::widget::{button, column, container, image, row, text};
 use iced::{Alignment, Border, ContentFit, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::attachments::Attachment;
+use crate::db::attachments::{Attachment, UploadState};
 use crate::files::images::ImageStore;
 use crate::theme as t;
 
@@ -37,11 +37,27 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Messag
         type_label(&a.content_type, &a.filename),
         format_size(a.byte_size)
     );
-    let labels = column![]
+    let info = column![]
         .spacing(2)
+        .width(Length::Fill)
         .push(text(&a.filename).size(13).color(t::text_primary()))
         .push(text(meta).size(11).color(t::text_muted()));
-    let body = container(row![].spacing(10).align_y(Alignment::Center).push_maybe(thumbnail(a, images)).push(labels))
+    // Only files the server has can be deleted this way; pending/failed ones
+    // are cancelled or removed by the upload tickets.
+    let delete = (a.upload_state == UploadState::Synced).then(|| {
+        button(text("Delete").size(11).color(t::text_muted()))
+            .on_press(Message::ConfirmDeleteAttachment(a.id.clone()))
+            .padding(0)
+            .style(button::text)
+    });
+    let body = container(
+        row![]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push_maybe(thumbnail(a, images))
+            .push(info)
+            .push_maybe(delete),
+    )
     .padding(10)
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {

@@ -24,7 +24,7 @@ use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
 use crate::api::recurring_issues::RecurringIssueDto;
 use crate::api::{
-    comments, dependencies, issues, labels, lanes, members, projects, recurring_issues, teams,
+    attachments, comments, dependencies, issues, labels, lanes, members, projects, recurring_issues, teams,
     users, ApiClient, ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams,
     LabelParams, MeDto, ProjectParams, RecurringIssueParams,
 };
@@ -404,6 +404,7 @@ async fn process(
         ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
         ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
+        ("attachment", "delete") => attachment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
@@ -2224,6 +2225,67 @@ fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> 
             Outcome::DropAndLog(format!("forbidden: {m}"))
         }
         Err(e) => classify_in_team(&e, team_remote_id),
+    }
+}
+
+/// What an `attachment/delete` entry needs, parsed from its payload (the local
+/// row is gone by drain time). See `db::attachments::remove_synced_issue_attachment`.
+#[derive(Debug, PartialEq)]
+struct AttachmentDeletePrep {
+    team_remote_id: i64,
+    owner: attachments::AttachmentOwner,
+    remote_id: i64,
+}
+
+fn prep_attachment_delete(payload: Option<&str>) -> Prep<AttachmentDeletePrep> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog("attachment delete: no payload".into()));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Prep::Done(Outcome::DropAndLog(format!("attachment delete: bad payload: {e}")))
+        }
+    };
+    let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
+    let owner = match (parsed.get("owner_kind").and_then(|v| v.as_str()), field("owner_remote_id")) {
+        (Some("issue"), Some(issue_id)) => attachments::AttachmentOwner::Issue { issue_id },
+        _ => {
+            return Prep::Done(Outcome::DropAndLog(
+                "attachment delete: unsupported or incomplete owner".into(),
+            ))
+        }
+    };
+    match (field("team_remote_id"), field("remote_id")) {
+        (Some(team_remote_id), Some(remote_id)) => {
+            Prep::Ready(AttachmentDeletePrep { team_remote_id, owner, remote_id })
+        }
+        _ => Prep::Done(Outcome::DropAndLog("attachment delete: incomplete payload".into())),
+    }
+}
+
+/// Same rules as `comment/delete` (204/404 = gone, 403 dropped with a toast),
+/// and a 403 also puts the row back from the payload's `restore` snapshot so
+/// the attachment reappears without waiting for the owner to change upstream.
+async fn attachment_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let prep = match prep_attachment_delete(payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    let result = attachments::delete(client, prep.team_remote_id, prep.owner, prep.remote_id).await;
+    let forbidden = matches!(&result, Err(ApiError::Forbidden(m)) if !is_token_scope_message(m));
+    if forbidden {
+        restore_deleted_attachment(payload, prep.remote_id);
+    }
+    comment_delete_outcome(result, prep.team_remote_id)
+}
+
+fn restore_deleted_attachment(payload: Option<&str>, remote_id: i64) {
+    let snap = payload
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| v.get("restore").cloned());
+    if let (Some(snap), Ok(conn)) = (snap, open()) {
+        let _ = crate::db::attachments::restore_from_snapshot(&conn, &snap, remote_id);
     }
 }
 
@@ -4446,6 +4508,30 @@ mod tests {
                 prep_comment_delete(bad),
                 Prep::Done(Outcome::DropAndLog(_))
             ));
+        }
+    }
+
+    #[test]
+    fn attachment_delete_payload_parses_for_an_issue_owner() {
+        let p = r#"{"owner_kind":"issue","team_remote_id":3,"owner_remote_id":9,"remote_id":12,"restore":{}}"#;
+        match prep_attachment_delete(Some(p)) {
+            Prep::Ready(r) => assert_eq!(
+                r,
+                AttachmentDeletePrep {
+                    team_remote_id: 3,
+                    owner: attachments::AttachmentOwner::Issue { issue_id: 9 },
+                    remote_id: 12
+                }
+            ),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn attachment_delete_bad_payloads_are_dropped() {
+        let bad = r#"{"owner_kind":"x","owner_remote_id":1,"team_remote_id":1,"remote_id":1}"#;
+        for p in [None, Some("nope"), Some(r#"{"owner_kind":"issue"}"#), Some(bad)] {
+            assert!(matches!(prep_attachment_delete(p), Prep::Done(Outcome::DropAndLog(_))));
         }
     }
 
