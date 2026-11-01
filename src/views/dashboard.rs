@@ -45,7 +45,7 @@ pub fn view<'a>(
 
     container(
         column![]
-            .push(controls(dashboard, header, read_only))
+            .push(controls(dashboard, header, evaluation, read_only))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
             .push(scrollable(list).height(Length::Fill)),
@@ -61,19 +61,35 @@ pub fn view<'a>(
 
 /// The dashboard's header controls. Later tickets push into this row: filter
 /// tabs, Mine, sort, counts and the pickers. Only the "Open" lens exists now.
-fn controls<'a>(dashboard: &'a Dashboard, header: Header, read_only: bool) -> Element<'a, Message> {
+fn controls<'a>(
+    dashboard: &'a Dashboard,
+    header: Header,
+    evaluation: &Evaluation<'a>,
+    read_only: bool,
+) -> Element<'a, Message> {
     container(
         row![]
             .spacing(12)
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
             .push(filter_tabs(header.filter))
+            .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
             .push(add_group_button(read_only)),
     )
     .padding([8, 16])
     .width(Length::Fill)
     .into()
+}
+
+/// "N due today" and "N overdue" for the whole dashboard.
+fn due_counts<'a>(e: &Evaluation<'a>) -> Element<'a, Message> {
+    let overdue = if e.overdue > 0 { t::danger() } else { t::text_muted() };
+    row![]
+        .spacing(10)
+        .push(text(format!("{} due today", e.due_today)).size(12).color(t::text_secondary()))
+        .push(text(format!("{} overdue", e.overdue)).size(12).color(overdue))
+        .into()
 }
 
 /// The sort order picker.
