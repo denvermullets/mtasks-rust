@@ -782,8 +782,7 @@ mod tests {
         assert_eq!(s.color, Some(Color::WHITE));
         let both = span_for(Run::Italic(Box::new(Run::Bold(Box::new(Run::Plain("x".into()))))), Color::WHITE);
         let f = both.font.unwrap();
-        // No bold italic face yet: italic wins (JRST-270).
-        assert_eq!((f.style, f.weight), (iced::font::Style::Italic, iced::font::Weight::Normal));
+        assert_eq!((f.style, f.weight), (iced::font::Style::Italic, iced::font::Weight::Bold));
     }
 
     #[test]
