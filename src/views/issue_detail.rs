@@ -185,7 +185,6 @@ pub fn view<'a>(
         .push(description_section(
             detail,
             &BodyCtx {
-                team,
                 teams,
                 issues,
                 members,
@@ -1267,7 +1266,6 @@ fn comment_row<'a>(
         13.0,
         t::text_primary(),
         &BodyCtx {
-            team,
             teams,
             issues,
             members,

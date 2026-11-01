@@ -811,6 +811,10 @@ pub struct App {
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
+    /// Members of the open detail's own team: what its bodies and comments
+    /// resolve mentions against. Not `members`, which is the selected team's
+    /// (or every team's in My Issues). Empty outside a detail view.
+    detail_members: Vec<Member>,
     /// The open issue detail was reached from My Issues, so Back returns there.
     detail_from_my_issues: bool,
     /// The open issue detail was reached from the Inbox (Back returns there).
@@ -1239,6 +1243,10 @@ impl App {
     /// Resolve dependency edges for the open detail issue so the sidebar can
     /// render them; other views don't need this, so keep it cheap.
     fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
+        self.detail_members = self
+            .detail_team_id()
+            .map(|team_id| queries::members_for_team(conn, team_id).unwrap_or_default())
+            .unwrap_or_default();
         if let View::IssueDetail(ref issue_id) = self.view {
             self.detail_deps =
                 queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
@@ -1513,6 +1521,21 @@ impl App {
                 Self::insert_suggestion(content, &s, idx);
             }
         }
+    }
+
+    /// The team the open detail's issue or project belongs to. Its bodies are
+    /// resolved against this team, whichever team is selected.
+    fn detail_team_id(&self) -> Option<&str> {
+        match &self.view {
+            View::IssueDetail(id) => self.issues.iter().find(|i| i.id == *id).map(|i| i.team_id.as_str()),
+            View::ProjectDetail(id) => self.projects.iter().find(|p| p.id == *id).map(|p| p.team_id.as_str()),
+            _ => None,
+        }
+    }
+
+    fn detail_team(&self) -> Option<&Team> {
+        let id = self.detail_team_id()?;
+        self.teams.iter().find(|t| t.id == id)
     }
 
     fn selected_team(&self) -> Option<&Team> {
@@ -2889,6 +2912,7 @@ impl App {
             labels,
             issue_labels,
             detail_deps: Default::default(),
+            detail_members: Vec::new(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_from_dashboard: None,
@@ -6366,16 +6390,15 @@ impl App {
                     .ok()
                     .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
             }
-            // Mentions count open issues from the loaded issues, which the
-            // card needs in full, so they use the in-memory lists.
-            crate::body_hover::Anchor::Mention(_) => crate::body_hover::content_for(
-                &anchor,
-                &crate::body_hover::Records {
-                    issues: &self.issues,
-                    members: &self.members,
-                    ..Default::default()
-                },
-            ),
+            // A mention resolves on the body's team, whichever team is
+            // selected: that team's members and issues, read once as the
+            // card opens.
+            crate::body_hover::Anchor::Mention(_) => self.detail_team_id().and_then(|team_id| {
+                let conn = self.db();
+                crate::db::queries::mention_records(&conn, team_id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }),
         };
         self.hover_content = Some((anchor, content));
     }
@@ -6525,8 +6548,8 @@ impl App {
                         project_detail::view(
                             project,
                             detail,
-                            self.selected_team(),
-                            &self.members,
+                            self.detail_team(),
+                            &self.detail_members,
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
                             self.board_display(),
@@ -6571,11 +6594,11 @@ impl App {
                         issue_detail::view(
                             issue,
                             detail,
-                            self.selected_team(),
+                            self.detail_team(),
                             &self.teams,
                             &self.lanes,
                             &self.projects,
-                            &self.members,
+                            &self.detail_members,
                             project_name,
                             &self.detail_deps,
                             &self.detail_comments,

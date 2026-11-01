@@ -128,9 +128,9 @@ pub fn has_images(body: &str, host: &str) -> bool {
     !image_list(body, host).is_empty()
 }
 
-/// Everything the renderer needs besides the body text itself.
+/// Everything the renderer needs besides the body text itself. `members` are
+/// those of the body's own team, not the selected one.
 pub struct BodyCtx<'a> {
-    pub team: Option<&'a Team>,
     pub teams: &'a [Team],
     pub issues: &'a [Issue],
     pub members: &'a [Member],

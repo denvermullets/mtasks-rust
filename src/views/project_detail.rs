@@ -155,7 +155,6 @@ pub fn view<'a>(
                 .map(|e| text(e).size(12).color(t::danger())),
         )
         .push(description_section(detail, &crate::views::body::BodyCtx {
-            team,
             teams,
             issues,
             members,
