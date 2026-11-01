@@ -22,6 +22,7 @@ pub fn view<'a>(
     focused_group: usize,
     focused_issue: usize,
     header: Header,
+    read_only: bool,
 ) -> Element<'a, Message> {
     let Some(dashboard) = dashboard else {
         return centered("Dashboard not found");
@@ -43,7 +44,7 @@ pub fn view<'a>(
 
     container(
         column![]
-            .push(controls(dashboard, header))
+            .push(controls(dashboard, header, read_only))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
             .push(scrollable(list).height(Length::Fill)),
@@ -59,14 +60,15 @@ pub fn view<'a>(
 
 /// The dashboard's header controls. Later tickets push into this row: filter
 /// tabs, Mine, sort, counts and the pickers. Only the "Open" lens exists now.
-fn controls<'a>(dashboard: &'a Dashboard, header: Header) -> Element<'a, Message> {
+fn controls<'a>(dashboard: &'a Dashboard, header: Header, read_only: bool) -> Element<'a, Message> {
     container(
         row![]
             .spacing(12)
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
             .push(filter_tabs(header.filter))
-            .push(sort_picker(header.sort)),
+            .push(sort_picker(header.sort))
+            .push(add_group_button(read_only)),
     )
     .padding([8, 16])
     .width(Length::Fill)
@@ -76,6 +78,15 @@ fn controls<'a>(dashboard: &'a Dashboard, header: Header) -> Element<'a, Message
 /// The sort order picker.
 fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
     pick_list(Sort::ALL, Some(active), Message::SetDashboardSort).text_size(13).into()
+}
+
+/// "Add group": disabled while the token is read-only.
+fn add_group_button<'a>(read_only: bool) -> Element<'a, Message> {
+    button(text("+ Add group").size(13))
+        .on_press_maybe((!read_only).then_some(Message::OpenNewGroup))
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
 }
 
 /// The Today / Week / Hot / Open tabs; the active one is highlighted.

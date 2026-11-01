@@ -289,6 +289,14 @@ pub enum Message {
     NewDashboardNameChanged(String),
     NewDashboardDescriptionChanged(String),
     NewDashboardSubmit,
+    /// Dashboard "Add group" modal (state in `App::group_form`).
+    OpenNewGroup,
+    GroupNameChanged(String),
+    GroupDescriptionChanged(String),
+    GroupColorPicked(String),
+    GroupToggleSource(crate::db::dashboards::SourceType, i64),
+    GroupSetIncludeAll(crate::db::dashboards::SourceType, i64, bool),
+    GroupSubmit,
     /// Inert click target (swallows clicks inside a popover).
     Noop,
     SetViewMode(ViewMode),
@@ -487,6 +495,8 @@ pub enum Modal {
     SaveView,
     /// "New dashboard" form; state in `App::dashboard_form`.
     NewDashboard,
+    /// "Add group" form on the open dashboard; state in `App::group_form`.
+    NewGroup,
     /// Name prompt for renaming a Saved view (local id).
     RenameSavedView(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
@@ -688,12 +698,21 @@ pub struct DashboardForm {
     pub error: Option<&'static str>,
 }
 
+/// Dashboard "Add group" modal state: the draft plus an inline name error.
+#[derive(Debug, Default, Clone)]
+pub struct GroupForm {
+    pub draft: crate::db::dashboards::GroupDraft,
+    pub error: Option<&'static str>,
+}
+
 pub struct App {
     teams: Vec<Team>,
     /// Mirrored dashboards for the sidebar (reloaded with the rest after a sync).
     dashboards: Vec<crate::db::dashboards::Dashboard>,
     /// State of the dashboard name/description modal (create now, rename later).
     dashboard_form: DashboardForm,
+    /// State of the dashboard "Add group" modal.
+    group_form: GroupForm,
     /// The open dashboard's groups with their sources (reloaded with the mirror).
     dashboard_groups: Vec<crate::dashboard_eval::GroupConfig>,
     /// Header state of the open dashboard. Per-dashboard memory is a later ticket.
@@ -2729,6 +2748,7 @@ impl App {
             saved_views,
             dashboards,
             dashboard_form: DashboardForm::default(),
+            group_form: GroupForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
             open_view: None,
@@ -3109,6 +3129,78 @@ impl App {
                     Err(crate::db::dashboards::CreateError::Db(e)) => {
                         eprintln!("[dashboards] create failed: {e}");
                         self.dashboard_form.error = Some("Couldn't create the dashboard");
+                    }
+                }
+            }
+
+            Message::OpenNewGroup => {
+                if !matches!(self.view, View::Dashboard(_)) {
+                    return Task::none();
+                }
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't add a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.group_form = GroupForm::default();
+                    self.modal = Modal::NewGroup;
+                    return text_input::focus(crate::views::group_form::name_input_id());
+                }
+            }
+
+            Message::GroupNameChanged(name) => {
+                self.group_form.draft.name = name;
+                self.group_form.error = None;
+            }
+
+            Message::GroupDescriptionChanged(desc) => {
+                self.group_form.draft.description = desc;
+            }
+
+            Message::GroupColorPicked(hex) => {
+                self.group_form.draft.color = hex;
+            }
+
+            Message::GroupToggleSource(kind, remote_id) => {
+                self.group_form.draft.toggle_source(kind, remote_id);
+            }
+
+            Message::GroupSetIncludeAll(kind, remote_id, on) => {
+                self.group_form.draft.set_include_all(kind, remote_id, on);
+            }
+
+            Message::GroupSubmit => {
+                use crate::db::dashboards::{create_group_local, GroupError};
+                if self.modal != Modal::NewGroup {
+                    return Task::none();
+                }
+                let View::Dashboard(dashboard_id) = self.view.clone() else {
+                    return Task::none();
+                };
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't add a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match create_group_local(&self.db(), &dashboard_id, &self.group_form.draft) {
+                    Ok(_) => {
+                        self.modal = Modal::None;
+                        self.group_form = GroupForm::default();
+                        self.reload_data();
+                    }
+                    Err(GroupError::Name(e)) => self.group_form.error = Some(e.message()),
+                    Err(GroupError::NoDashboard) => {
+                        self.group_form.error = Some("This dashboard no longer exists");
+                    }
+                    Err(GroupError::Db(e)) => {
+                        eprintln!("[dashboards] group create failed: {e}");
+                        self.group_form.error = Some("Couldn't add the group");
                     }
                 }
             }
@@ -5915,6 +6007,7 @@ impl App {
                     self.focused_lane,
                     self.focused_issue,
                     self.dashboard_header,
+                    self.sync_read_only,
                 )
             }
         };
@@ -6063,6 +6156,15 @@ impl App {
             Modal::NewDashboard => iced::widget::stack![
                 base,
                 dashboard_form_modal("New dashboard", "Create", &self.dashboard_form)
+            ]
+            .into(),
+            Modal::NewGroup => iced::widget::stack![
+                base,
+                crate::views::group_form::modal(
+                    &self.group_form.draft,
+                    &self.teams,
+                    self.group_form.error
+                )
             ]
             .into(),
             Modal::SaveView => iced::widget::stack![
