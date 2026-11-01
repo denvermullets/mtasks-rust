@@ -1167,6 +1167,37 @@ impl App {
         self.issue_detail.as_mut().map(|d| &mut d.suggest)
     }
 
+    /// Comment drafts do not survive leaving their detail view (the state is
+    /// rebuilt on open), so cancel the unsent staged files / pasted images
+    /// they own: their uploads never send. Submitted comments' rows are kept.
+    fn drop_drafts(&mut self, ids: &[String]) {
+        let conn = self.db();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        if matches!(crate::db::attachments::discard_unsent_for_drafts(&conn, &refs), Ok(n) if n > 0) {
+            self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+        }
+    }
+
+    /// Drop the drafts of a detail state that is no longer the open view.
+    fn discard_dead_composers(&mut self) {
+        let mut ids = Vec::new();
+        if let Some(d) = &self.issue_detail {
+            if !matches!(&self.view, View::IssueDetail(id) if *id == d.issue_id) {
+                ids.extend([d.composer_files.comment_id.clone(), d.composer_files.reply_id.clone()]);
+                self.issue_detail = None;
+            }
+        }
+        if let Some(d) = &self.project_detail {
+            if !matches!(&self.view, View::ProjectDetail(id) if *id == d.project_id) {
+                ids.extend([d.composer_files.comment_id.clone(), d.composer_files.reply_id.clone()]);
+                self.project_detail = None;
+            }
+        }
+        if !ids.is_empty() {
+            self.drop_drafts(&ids);
+        }
+    }
+
     /// The comment composers of whichever detail view is open (issue or project).
     fn comment_drafts_mut(&mut self) -> Option<CommentDrafts<'_>> {
         if matches!(self.view, View::ProjectDetail(_)) {
@@ -1717,6 +1748,9 @@ impl App {
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
         self.commit_issue_detail();
         self.commit_project_detail();
+        if let Some(old) = self.issue_detail.take() {
+            self.drop_drafts(&[old.composer_files.comment_id, old.composer_files.reply_id]);
+        }
         self.issue_detail = Some(issue_detail::IssueDetailState::from_issue(issue));
         self.view = View::IssueDetail(issue.id.clone());
         self.composer_focused = false;
@@ -2289,6 +2323,9 @@ impl App {
     fn open_project_detail(&mut self, project: &Project) -> Task<Message> {
         self.commit_issue_detail();
         self.commit_project_detail();
+        if let Some(old) = self.project_detail.take() {
+            self.drop_drafts(&[old.composer_files.comment_id, old.composer_files.reply_id]);
+        }
         self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
         self.view = View::ProjectDetail(project.id.clone());
         self.composer_focused = false;
@@ -2672,6 +2709,7 @@ impl App {
         sync_queue::take_local_write();
         let task = self.update_inner(message);
         self.retain_open_view();
+        self.discard_dead_composers();
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
@@ -3435,17 +3473,34 @@ impl App {
                 }
             }
             Message::StartReply(parent_id) => {
+                let mut dropped = None;
                 if let Some(d) = self.comment_drafts_mut() {
                     *d.reply_to = Some(parent_id);
                     *d.suggest = None;
                     *d.reply = iced::widget::text_editor::Content::new();
+                    // The previous reply draft is gone: its pasted images go too.
+                    dropped = Some(std::mem::replace(
+                        &mut d.files.reply_id,
+                        uuid::Uuid::new_v4().to_string(),
+                    ));
+                }
+                if let Some(id) = dropped {
+                    self.drop_drafts(&[id]);
                 }
             }
             Message::CancelReply => {
+                let mut dropped = None;
                 if let Some(d) = self.comment_drafts_mut() {
                     *d.reply_to = None;
                     *d.reply = iced::widget::text_editor::Content::new();
                     *d.suggest = None;
+                    dropped = Some(std::mem::replace(
+                        &mut d.files.reply_id,
+                        uuid::Uuid::new_v4().to_string(),
+                    ));
+                }
+                if let Some(id) = dropped {
+                    self.drop_drafts(&[id]);
                 }
             }
             Message::ReplyComposerChanged(action) => {

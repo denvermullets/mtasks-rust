@@ -508,6 +508,31 @@ pub fn remove_local(conn: &Connection, id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// A comment draft was dropped (reply cancelled, composer discarded, user
+/// navigated away): cancel every unsent staged file / pasted image owned by the
+/// given future-comment ids so their uploads never send. Rows whose comment was
+/// already submitted (a `comments` row with that id exists) are left alone.
+/// Returns how many rows were removed.
+pub fn discard_unsent_for_drafts(conn: &Connection, draft_ids: &[&str]) -> Result<usize> {
+    let mut removed = 0;
+    for draft in draft_ids {
+        let submitted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM comments WHERE id = ?1)",
+            params![draft],
+            |r| r.get(0),
+        )?;
+        if submitted {
+            continue;
+        }
+        for a in list_for_owner(conn, OwnerKind::Comment, draft)? {
+            if remove_local(conn, &a.id)? {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// Inline-image uploads of an owner that are ready for their body to be sent:
 /// placeholder uuid -> (signed id, blob filename). FAILED rows are left out on
 /// purpose, so a body waiting on one stays blocked until Retry/Remove.
@@ -673,6 +698,26 @@ mod comment_file_tests {
         assert_eq!(remove_staged(&c, &a.id).unwrap().as_deref(), Some("/tmp/outbox/c"));
         assert!(get(&c, &a.id).unwrap().is_none());
         assert_eq!(remove_staged(&c, &a.id).unwrap(), None);
+    }
+
+    #[test]
+    fn discarding_a_draft_cancels_unsent_rows_but_not_submitted_comments() {
+        let c = conn();
+        let staged = add_pending(&c, &new_comment_file("draft")).unwrap();
+        let kept = add_pending(&c, &new_comment_file("sent")).unwrap();
+        c.execute("PRAGMA foreign_keys=OFF", []).ok();
+        c.execute(
+            "INSERT INTO comments (id, issue_id, body, created_at, updated_at) VALUES ('sent', 'i1', 'b', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(discard_unsent_for_drafts(&c, &["draft", "sent"]).unwrap(), 1);
+        assert!(get(&c, &staged.id).unwrap().is_none());
+        assert!(get(&c, &kept.id).unwrap().is_some());
+        let queued: i64 = c
+            .query_row("SELECT COUNT(*) FROM sync_queue WHERE entity_id = ?1", params![staged.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 0);
     }
 
     #[test]
