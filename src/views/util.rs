@@ -1,6 +1,10 @@
 //! Small view-layer formatting helpers shared across views.
 
 use chrono::{DateTime, Utc};
+use iced::widget::{column, container, pick_list, text, text_input};
+use iced::{Border, Element, Length, Theme};
+
+use crate::theme::{self as t, radius, space, type_scale};
 
 /// Coarse "N{s,m,h,d} ago" label for a past instant. Clamps future instants to
 /// `0s ago`.
@@ -41,6 +45,107 @@ pub fn format_estimate(e: f64) -> String {
         format!("{}pt", e as i64)
     } else {
         format!("{e:.1}pt")
+    }
+}
+
+// ---- Detail-view sidebar (shared by issue and project detail) ----
+
+/// Sidebar width (web `w-80`).
+pub const SIDEBAR_WIDTH: f32 = space::S16 * 5.0;
+
+/// The "Properties" heading text: the web uppercases it.
+pub fn sidebar_heading_text(label: &str) -> String {
+    label.to_uppercase()
+}
+
+/// Sidebar group heading: small, bold, uppercase, muted (web
+/// `text-xs font-semibold text-gray-500 uppercase`).
+pub fn sidebar_heading<'a, M: 'a>(label: &str) -> Element<'a, M> {
+    text(sidebar_heading_text(label))
+        .size(type_scale::XS)
+        .font(crate::fonts::bold(crate::fonts::active()))
+        .color(t::text_muted())
+        .into()
+}
+
+/// A labelled sidebar field: small muted label above its control (web
+/// `text-xs font-medium text-gray-500 mb-2`).
+pub fn sidebar_field<'a, M: 'a>(
+    label: &'a str,
+    control: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
+    column![]
+        .spacing(space::S2)
+        .push(text(label).size(type_scale::XS).color(t::text_muted()))
+        .push(control.into())
+        .into()
+}
+
+/// The sidebar column's frame: fixed width, page background, scrolling is the
+/// caller's job. Pair the content with `.spacing(space::S6).padding(space::S6)`.
+pub fn sidebar_panel<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    container(content)
+        .width(Length::Fixed(SIDEBAR_WIDTH))
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_primary())),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Padding for sidebar controls (web `px-3 py-1.5`).
+pub const SIDEBAR_CONTROL_PADDING: [f32; 2] = [space::S1_5, space::S3];
+
+fn control_border(hovered_or_open: bool) -> Border {
+    Border {
+        color: if hovered_or_open { t::text_muted() } else { t::border() },
+        width: 1.0,
+        radius: radius::MD.into(),
+    }
+}
+
+/// `pick_list` style for sidebar controls: foreground fill, stroke border,
+/// `radius::MD`. Use as `.style(util::sidebar_pick_list_style)`.
+pub fn sidebar_pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    pick_list::Style {
+        text_color: t::text_body(),
+        placeholder_color: t::text_muted(),
+        handle_color: t::text_muted(),
+        background: iced::Background::Color(t::bg_secondary()),
+        border: control_border(!matches!(status, pick_list::Status::Active)),
+    }
+}
+
+/// `text_input` style for sidebar controls; the focused border is the accent.
+/// Use as `.style(util::sidebar_input_style)`.
+pub fn sidebar_input_style(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut border = control_border(matches!(status, text_input::Status::Hovered));
+    if matches!(status, text_input::Status::Focused) {
+        border.color = t::accent();
+    }
+    text_input::Style {
+        background: iced::Background::Color(t::bg_secondary()),
+        border,
+        icon: t::text_muted(),
+        placeholder: t::text_muted(),
+        value: t::text_body(),
+        selection: iced::Color { a: 0.35, ..t::accent() },
+    }
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_is_w_80_wide() {
+        assert_eq!(SIDEBAR_WIDTH, 320.0);
+    }
+
+    #[test]
+    fn heading_is_uppercased() {
+        assert_eq!(sidebar_heading_text("Properties"), "PROPERTIES");
     }
 }
 

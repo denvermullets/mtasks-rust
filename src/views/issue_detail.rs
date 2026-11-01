@@ -16,7 +16,10 @@ use crate::views::body::BodyCtx;
 use crate::views::issue_form::LaneOption;
 use crate::views::lane_icon;
 use crate::views::projects::MemberOption;
-use crate::views::util::relative_time;
+use crate::views::util::{
+    relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_panel,
+    sidebar_pick_list_style, SIDEBAR_CONTROL_PADDING,
+};
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
 /// estimate and due date live here and are committed (on Enter or on nav-away)
@@ -295,104 +298,112 @@ pub fn view<'a>(
     });
 
     let sidebar = column![]
-        .spacing(18)
-        .padding(20)
+        .spacing(space::S6)
+        .padding(space::S6)
         .width(Length::Fill)
-        .push(text("Properties").size(11).color(t::text_muted()))
-        .push_maybe(parent.map(|p| section("Parent", parent_link(p, team))))
-        .push(section(
+        .push(sidebar_heading("Properties"))
+        .push_maybe(parent.map(|p| sidebar_field("Parent", parent_link(p, team))))
+        .push(sidebar_field(
             "Status",
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .align_y(Alignment::Center)
                 .push_maybe(selected_icon.map(lane_icon::view))
                 .push(
                     pick_list(lane_options, selected_lane, |o: LaneOption| {
                         Message::IssueDetailStatusChanged(o.id)
                     })
-                    .width(Length::Fill),
+                    .width(Length::Fill)
+                    .text_size(type_scale::SM)
+                    .padding(SIDEBAR_CONTROL_PADDING)
+                    .style(sidebar_pick_list_style),
                 ),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Priority",
             pick_list(
                 PRIORITIES.as_slice(),
                 Some(issue.priority_enum()),
                 Message::IssueDetailPriorityChanged,
             )
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .text_size(type_scale::SM)
+            .padding(SIDEBAR_CONTROL_PADDING)
+            .style(sidebar_pick_list_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Assignee",
             pick_list(member_options, selected_assignee, |o: MemberOption| {
                 Message::IssueDetailAssigneeChanged(o.id)
             })
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .text_size(type_scale::SM)
+            .padding(SIDEBAR_CONTROL_PADDING)
+            .style(sidebar_pick_list_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Creator",
             match creator_name {
-                Some(name) => text(name).size(13).color(t::text_secondary()).into(),
+                Some(name) => text(name).size(type_scale::SM).color(t::text_secondary()).into(),
                 None => placeholder_value(),
             },
         ))
-        .push(section(
+        .push(sidebar_field(
             "Estimate",
             text_input("No estimate", &detail.estimate)
                 .on_input(Message::IssueDetailEstimateChanged)
                 .on_submit(Message::CommitIssueDetail)
-                .padding(8)
-                .size(13),
+                .padding(SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(sidebar_input_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Due date",
             text_input("YYYY-MM-DD", &detail.due_date)
                 .on_input(Message::IssueDetailDueDateChanged)
                 .on_submit(Message::CommitIssueDetail)
-                .padding(8)
-                .size(13),
+                .padding(SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(sidebar_input_style),
         ))
-        .push(section(
+        .push(sidebar_field(
             "Project",
             pick_list(project_options, selected_project, |o: ProjectOption| {
                 Message::IssueDetailProjectChanged(o.id)
             })
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .text_size(type_scale::SM)
+            .padding(SIDEBAR_CONTROL_PADDING)
+            .style(sidebar_pick_list_style),
         ))
-        .push(section("Labels", placeholder_value()))
+        .push(sidebar_field("Labels", placeholder_value()))
         .push(dependency_block(DepKind::Blocking, &deps.blocking))
         .push(dependency_block(DepKind::BlockedBy, &deps.blocked_by))
         .push_maybe(optional_dependency_block(DepKind::Related, &deps.related))
         .push_maybe(optional_dependency_block(DepKind::Duplicates, &deps.duplicates))
         .push_maybe(optional_dependency_block(DepKind::DuplicatedBy, &deps.duplicated_by))
         .push(
-            button(text("Move to team…").size(12).color(t::accent()))
+            button(text("Move to team…").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenMoveTeamPicker(issue.id.clone()))
                 .padding(0)
                 .style(button::text),
         )
         .push(
             column![]
-                .spacing(2)
+                .spacing(space::S0_5)
                 .push(
                     text(format!("Created {}", issue.created_at))
-                        .size(11)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 )
                 .push(
                     text(format!("Updated {}", issue.updated_at))
-                        .size(11)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 ),
         );
 
-    let sidebar_panel = container(scrollable(sidebar))
-        .width(Length::Fixed(300.0))
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_secondary())),
-            ..Default::default()
-        });
+    let sidebar_panel = sidebar_panel(scrollable(sidebar));
 
     // Thin vertical rule standing in for a `border-l` between panes.
     let divider = container(column![])
@@ -532,19 +543,10 @@ fn sub_issue_row<'a>(
     .into()
 }
 
-/// A labelled sidebar row: small muted label above its control.
-fn section<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![]
-        .spacing(6)
-        .push(text(label).size(12).color(t::text_muted()))
-        .push(control.into())
-        .into()
-}
-
 /// Em-dash placeholder for sidebar sections filled in by later tickets
 /// (Assignee JAIT-113, Labels JAIT-112).
 fn placeholder_value<'a>() -> Element<'a, Message> {
-    text("—").size(13).color(t::text_muted()).into()
+    text("—").size(type_scale::SM).color(t::text_muted()).into()
 }
 
 /// The dependency sidebar sections. Blocking / blocked-by are editable (they
@@ -589,7 +591,7 @@ impl DepKind {
 
 /// A titled sidebar section for `kind`.
 fn dependency_block<'a>(kind: DepKind, links: &'a [DependencyLink]) -> Element<'a, Message> {
-    section(kind.title(), dependency_section(links, kind))
+    sidebar_field(kind.title(), dependency_section(links, kind))
 }
 
 /// Like [`dependency_block`], but absent when there are no links.
@@ -604,7 +606,7 @@ fn optional_dependency_block<'a>(
 /// text "+ Add …" button that opens the picker.
 fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element<'a, Message> {
     let color = kind.color();
-    let mut col = column![].spacing(6);
+    let mut col = column![].spacing(space::S1_5);
     for link in links {
         col = col.push(dependency_row(link, color));
     }
@@ -758,7 +760,7 @@ fn suggestion_list<'a>(
 pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, Message> {
     let mut col = column![].spacing(2).push(
         text("↑↓ to move · Enter/Tab or click to insert · Esc to dismiss")
-            .size(10)
+            .size(type_scale::XS)
             .color(t::text_muted()),
     );
     for (i, item) in s.items.iter().enumerate() {
@@ -767,11 +769,11 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
             button(
                 row![]
                     .spacing(8)
-                    .push(text(&item.label).size(12).color(t::accent()))
-                    .push(text(&item.detail).size(12).color(t::text_secondary())),
+                    .push(text(&item.label).size(type_scale::SM).color(t::accent()))
+                    .push(text(&item.detail).size(type_scale::SM).color(t::text_secondary())),
             )
             .on_press(Message::PickSuggestion(i))
-            .padding([3, 8])
+            .padding([space::S2, space::S3])
             .width(Length::Fill)
             .style(move |theme: &Theme, status| {
                 let mut st = button::text(theme, status);
@@ -786,11 +788,11 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         .padding(6)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_card())),
+            background: Some(iced::Background::Color(t::bg_secondary())),
             border: Border {
                 color: t::border(),
                 width: 1.0,
-                radius: 6.0.into(),
+                radius: radius::MD.into(),
             },
             ..Default::default()
         })
