@@ -91,7 +91,7 @@ fn collect_images(blocks: &[Block], out: &mut Vec<InlineImage>) {
             Block::Image(img) => out.extend(InlineImage::from_document(img)),
             Block::List(list) => list.items.iter().for_each(|item| collect_images(item, out)),
             Block::Quote(inner) => collect_images(inner, out),
-            Block::Paragraph(_) | Block::Code(_) => {}
+            Block::Paragraph(_) | Block::Heading(..) | Block::Rule | Block::Code(_) => {}
         }
     }
 }
@@ -149,8 +149,11 @@ pub fn view<'a>(body: &str, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Eleme
     let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
     let doc = document::parse_with(body, ctx.host, &names);
     let mut col = column![].spacing(t::space::S2);
-    for b in &doc.blocks {
-        col = col.push(block(b, size, plain, ctx));
+    for (i, b) in doc.blocks.iter().enumerate() {
+        col = col.push(match b {
+            Block::Heading(level, inlines) if i == 0 => heading_block(*level, inlines, plain, ctx, true),
+            _ => block(b, size, plain, ctx),
+        });
     }
     col.into()
 }
@@ -167,7 +170,62 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
         Block::List(list) => list_block(list, size, plain, ctx),
         Block::Code(code) => code_block(code, size),
         Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx),
+        Block::Heading(level, inlines) => heading_block(*level, inlines, plain, ctx, false),
+        Block::Rule => rule_block(size),
     }
+}
+
+/// Font size of a heading, as the web's `.markdown h1..h6` (1.5, 1.25, 1.125
+/// and 1 rem). Absolute, like `rem`: it ignores the body size.
+fn heading_size(level: u8) -> f32 {
+    match level {
+        1 => t::type_scale::XXL,
+        2 => t::type_scale::XL,
+        3 => t::type_scale::LG,
+        _ => t::type_scale::BASE,
+    }
+}
+
+/// Space above and below a heading beyond the column's `S2` gap. The web
+/// gives `margin: 1.25em 0 0.5em`; the gap already supplies `S2`, and a
+/// margin smaller than the gap adds nothing. `lead` is the first block of
+/// the body, whose top margin is zero (`.markdown > *:first-child`).
+fn heading_padding(size: f32, lead: bool) -> (f32, f32) {
+    let extra = |margin: f32| (margin - t::space::S2).max(0.0);
+    (if lead { 0.0 } else { extra(1.25 * size) }, extra(0.5 * size))
+}
+
+/// A heading: its runs drawn bold where the font has a bold face (`fonts::bold`
+/// leaves other families regular).
+fn heading_block<'a>(
+    level: u8,
+    inlines: &[Inline],
+    plain: Color,
+    ctx: &BodyCtx<'a>,
+    lead: bool,
+) -> Element<'a, Message> {
+    let size = heading_size(level);
+    let (top, bottom) = heading_padding(size, lead);
+    let bold = [Inline::Strong(inlines.to_vec())];
+    container(paragraph(&bold, size, plain, ctx))
+        .padding(iced::Padding { top, bottom, ..Default::default() })
+        .into()
+}
+
+/// Space above and below the web's `hr` (`margin: 1.5em 0`) beyond the column gap.
+fn rule_margin(size: f32) -> f32 {
+    (1.5 * size - t::space::S2).max(0.0)
+}
+
+/// A horizontal rule: one pixel in the border color across the column.
+fn rule_block<'a>(size: f32) -> Element<'a, Message> {
+    let line = container(iced::widget::Space::new(0, 0))
+        .width(iced::Length::Fill)
+        .height(1)
+        .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() });
+    container(line)
+        .padding(iced::Padding { top: rule_margin(size), bottom: rule_margin(size), ..Default::default() })
+        .into()
 }
 
 /// A piece of code text and its color. The seam for syntax highlighting:
@@ -489,6 +547,31 @@ mod tests {
     use super::*;
 
     const HOST: &str = "http://localhost:3005";
+
+    #[test]
+    fn heading_sizes_and_spacing_follow_the_web_stylesheet() {
+        // (level, size in px, top, bottom) from `.markdown h1..h6`; extra
+        // space is margin minus the S2 column gap, never negative.
+        let cases = [
+            (1u8, 24.0, 22.0, 4.0),
+            (2, 20.0, 17.0, 2.0),
+            (3, 18.0, 14.5, 1.0),
+            (4, 16.0, 12.0, 0.0),
+            (6, 16.0, 12.0, 0.0),
+        ];
+        for (level, size, top, bottom) in cases {
+            assert_eq!(heading_size(level), size, "size h{level}");
+            assert_eq!(heading_padding(size, false), (top, bottom), "padding h{level}");
+        }
+        assert_eq!(heading_padding(24.0, true), (0.0, 4.0), "first block has no top margin");
+    }
+
+    #[test]
+    fn rule_margin_follows_the_web_stylesheet() {
+        assert_eq!(rule_margin(16.0), 16.0);
+        assert_eq!(rule_margin(14.0), 13.0);
+        assert_eq!(rule_margin(4.0), 0.0);
+    }
 
     #[test]
     fn images_inside_lists_and_quotes_are_listed_in_reading_order() {
