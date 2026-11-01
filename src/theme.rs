@@ -499,6 +499,23 @@ pub fn priority_color(priority: Priority) -> Color {
     }
 }
 
+/// A dashboard row's priority dot (web `PRIORITY_DOT_CLASSES`: Tailwind 400s,
+/// `gray-500` for no priority). These differ from `priority_color`: low is blue.
+pub fn priority_dot_color(priority: Priority) -> Color {
+    match priority {
+        Priority::Urgent => RED_400,
+        Priority::High => hx(0xfb923c),
+        Priority::Medium => hx(0xfacc15),
+        Priority::Low => hx(0x60a5fa),
+        Priority::None => hx(0x6b7280),
+    }
+}
+
+/// Web `red-400`: overdue text and the destructive menu items.
+pub const RED_400: Color = hx(0xf87171);
+/// Web `amber-400`: the "due today" dot.
+pub const AMBER_400: Color = hx(0xfbbf24);
+
 pub fn hex_to_color(hex: &str) -> Option<Color> {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {

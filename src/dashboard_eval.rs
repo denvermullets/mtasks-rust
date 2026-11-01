@@ -53,10 +53,10 @@ impl Filter {
 
     pub fn label(self) -> &'static str {
         match self {
-            Filter::Today => "Today",
-            Filter::Week => "Week",
-            Filter::Hot => "Hot",
-            Filter::Open => "Open",
+            Filter::Today => "Due today",
+            Filter::Week => "This week",
+            Filter::Hot => "Urgent / High",
+            Filter::Open => "All open",
         }
     }
 }
@@ -78,10 +78,10 @@ impl Sort {
 impl std::fmt::Display for Sort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Sort::Due => "Due date",
-            Sort::Priority => "Priority",
-            Sort::Updated => "Updated",
-            Sort::Created => "Created",
+            Sort::Due => "Sort: Due date",
+            Sort::Priority => "Sort: Priority",
+            Sort::Updated => "Sort: Recently updated",
+            Sort::Created => "Sort: Newest",
         })
     }
 }
@@ -146,6 +146,8 @@ pub struct GroupResult<'a> {
 }
 
 pub struct Evaluation<'a> {
+    /// The date the evaluation ran for, so rows and counts agree on "today".
+    pub today: NaiveDate,
     /// In the order of `Input::groups`.
     pub groups: Vec<GroupResult<'a>>,
     /// Distinct issues across all groups with effective due = today. Computed
@@ -246,7 +248,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         })
         .collect();
     let (due_today, overdue) = due_counts(&counted, m, input.today);
-    Evaluation { groups, due_today, overdue, source_teams, assignees, label_names, status_options }
+    Evaluation { today: input.today, groups, due_today, overdue, source_teams, assignees, label_names, status_options }
 }
 
 /// A group's pool narrowed to the starting set rows and counts both read.
@@ -561,6 +563,29 @@ fn is_active(i: &Issue, lanes: &[Lane]) -> bool {
     !closed_lane
 }
 
+/// A dashboard row's due cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueLabel {
+    pub text: String,
+    pub overdue: bool,
+    /// The date came from the issue's project, not the issue.
+    pub inherited: bool,
+}
+
+/// The due cell for `i` (web `dashboard_due_label`), or `None` without a date.
+pub fn due_label(i: &Issue, projects: &[Project], today: NaiveDate) -> Option<DueLabel> {
+    let due = effective_due(i, projects)?;
+    let (text, overdue) = if due == today {
+        ("Today".to_string(), false)
+    } else if due < today {
+        (format!("Overdue \u{b7} {}d", (today - due).num_days()), true)
+    } else {
+        (due.format("%a %b %-d").to_string(), false)
+    };
+    let inherited = i.due_date.as_deref().and_then(parse_day).is_none();
+    Some(DueLabel { text, overdue, inherited })
+}
+
 /// The issue's due date, else its project's.
 pub fn effective_due(i: &Issue, projects: &[Project]) -> Option<NaiveDate> {
     let own = i.due_date.as_deref().and_then(parse_day);
@@ -663,6 +688,25 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn due_label_matches_the_web() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let projects = [project("p", "t", Some("2026-11-02"))];
+        let label = |due: Option<&str>, project: Option<&str>| {
+            let mut i = issue("i", "t", "l");
+            i.due_date = due.map(str::to_string);
+            i.project_id = project.map(str::to_string);
+            due_label(&i, &projects, today)
+        };
+        assert_eq!(label(None, None), None);
+        let overdue = label(Some("2026-10-31"), None).unwrap();
+        assert_eq!((overdue.text.as_str(), overdue.overdue, overdue.inherited), ("Overdue \u{b7} 2d", true, false));
+        let upcoming = label(Some("2026-11-09"), None).unwrap();
+        assert_eq!((upcoming.text.as_str(), upcoming.overdue), ("Mon Nov 9", false));
+        let inherited = label(None, Some("p")).unwrap();
+        assert_eq!((inherited.text.as_str(), inherited.inherited), ("Today", true));
     }
 
     fn issue(id: &str, team: &str, lane: &str) -> Issue {

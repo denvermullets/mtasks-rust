@@ -1,8 +1,10 @@
+use iced::widget::text::LineHeight;
 use iced::widget::{button, container, row, text, text_input};
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::Project;
+use crate::fonts;
 use crate::theme as t;
 
 /// Id of the header search box, so a shortcut can focus it.
@@ -61,6 +63,44 @@ pub fn delete_view_button<'a>(view_id: &str, read_only: bool) -> Element<'a, Mes
         .padding([5, 12])
         .style(button::secondary)
         .into()
+}
+
+/// The dashboard's top bar (web `h-14 bg-menu border-b`): breadcrumb on the
+/// left, the dashboard's menu on the right.
+pub fn dashboard_bar<'a>(
+    crumbs: Vec<String>,
+    menu: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut trail = row![].spacing(t::space::S4).align_y(Alignment::Center);
+    let last = crumbs.len().saturating_sub(1);
+    for (i, crumb) in crumbs.into_iter().enumerate() {
+        if i > 0 {
+            trail = trail.push(text("\u{203A}").size(t::type_scale::SM).color(t::text_muted()));
+        }
+        let color = if i == last { t::text_primary() } else { t::text_muted() };
+        trail = trail.push(text(crumb).size(t::type_scale::SM).color(color));
+    }
+    let bar = container(
+        row![]
+            .align_y(Alignment::Center)
+            .push(trail)
+            .push(iced::widget::horizontal_space())
+            .push_maybe(menu),
+    )
+    .padding([0.0, t::space::S4])
+    .center_y(Length::Fixed(t::space::S12 + t::space::S2))
+    .width(Length::Fill)
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_menu())),
+        ..Default::default()
+    });
+    let rule = container(iced::widget::Space::with_height(1.0))
+        .width(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::border())),
+            ..Default::default()
+        });
+    iced::widget::column![bar, rule].into()
 }
 
 /// Top strip above the main pane: breadcrumb on the left; Search, Display and
@@ -136,25 +176,42 @@ pub fn view<'a>(
             style
         });
 
+    // The web's New button: `gap-1.5 px-3 py-1.5 text-xs rounded bg-accent`. Both
+    // texts take their color from the style, so they follow hover.
     let enabled = new_action.is_some();
-    let mut new_button = button(text("+ New").size(13).color(if enabled {
-        t::bg_primary()
-    } else {
-        t::text_muted()
-    }))
-    .padding([5, 12])
-    .style(move |_theme: &Theme, _status| button::Style {
-        background: Some(iced::Background::Color(if enabled {
-            t::accent()
-        } else {
-            t::bg_card()
-        })),
-        border: Border {
-            radius: 6.0.into(),
+    let new_label = row![]
+        .spacing(t::space::S1_5)
+        .align_y(Alignment::Center)
+        .push(
+            text("+")
+                .size(t::type_scale::SM)
+                .line_height(LineHeight::Relative(t::type_scale::LH_XS * t::type_scale::XS / t::type_scale::SM))
+                .font(fonts::bold_active()),
+        )
+        .push(
+            text("New")
+                .size(t::type_scale::XS)
+                .line_height(LineHeight::Relative(t::type_scale::LH_XS)),
+        );
+    let mut new_button = button(new_label)
+        .padding([t::space::S1_5, t::space::S3])
+        .style(move |_theme: &Theme, status| button::Style {
+            background: Some(iced::Background::Color(if enabled {
+                t::accent_fill(status)
+            } else {
+                t::bg_card()
+            })),
+            text_color: if enabled {
+                t::on_accent(status)
+            } else {
+                t::text_muted()
+            },
+            border: Border {
+                radius: t::radius::SM.into(),
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    });
+        });
     if let Some(msg) = new_action {
         new_button = new_button.on_press(msg);
     }

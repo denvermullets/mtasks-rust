@@ -21,6 +21,12 @@ pub const BOARD_SUBHEAD_H: f32 = 24.0;
 pub const BOARD_SPACING: f32 = crate::theme::space::S1_5;
 pub const BOARD_PAD_TOP: f32 = crate::theme::space::S1;
 
+/// The web board's column width (`w-80`), gap (`gap-3`) and side padding
+/// (`px-4`). Columns never shrink: a board wider than the window scrolls.
+pub const BOARD_COLUMN_W: f32 = 320.0;
+pub const BOARD_COLUMN_GAP: f32 = crate::theme::space::S3;
+pub const BOARD_PAD_X: f32 = crate::theme::space::S4;
+
 /// Breathing room kept between the focused item and the viewport edge.
 pub const MARGIN: f32 = 8.0;
 
@@ -76,6 +82,16 @@ pub fn list_row_span(sections: &[ListSection], section: usize, issue: usize) -> 
     }
     let top = item_top(&heights, target, LIST_SPACING, LIST_PAD_TOP);
     (top, LIST_ROW_H)
+}
+
+/// Left edge of board column `idx` within the board's horizontal scroll content.
+pub fn board_column_left(idx: usize) -> f32 {
+    BOARD_PAD_X + idx as f32 * (BOARD_COLUMN_W + BOARD_COLUMN_GAP)
+}
+
+/// Total width of a board with `columns` columns, side padding included.
+pub fn board_content_width(columns: usize) -> f32 {
+    2.0 * BOARD_PAD_X + columns as f32 * (BOARD_COLUMN_W + BOARD_COLUMN_GAP) - BOARD_COLUMN_GAP
 }
 
 /// Height of a board card from which optional lines it renders. Line heights
@@ -194,6 +210,19 @@ mod tests {
         );
         assert_eq!(h, 70.0);
         assert!(board_card_height(true, true, true) > board_card_height(false, false, false));
+    }
+
+    #[test]
+    fn board_columns_are_fixed_width_and_overflow_the_viewport() {
+        assert_eq!(board_column_left(0), 16.0);
+        assert_eq!(board_column_left(3), 16.0 + 3.0 * 332.0);
+        assert_eq!(board_content_width(4), 16.0 + 4.0 * 320.0 + 3.0 * 12.0 + 16.0);
+        // Moving focus to a column past the right edge scrolls it just into view.
+        let left = board_column_left(3);
+        assert_eq!(
+            offset_to_reveal(left, BOARD_COLUMN_W, 0.0, 1000.0),
+            left + BOARD_COLUMN_W + MARGIN - 1000.0
+        );
     }
 
     #[test]

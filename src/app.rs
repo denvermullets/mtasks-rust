@@ -310,6 +310,11 @@ pub enum Message {
     HeaderSearchChanged(String),
     /// Dashboard header: flip the Mine toggle.
     ToggleDashboardMine,
+    /// A dashboard or group ⋮ button: open its menu, or close it if open.
+    ToggleDashboardMenu(crate::views::dashboard::MenuTarget),
+    CloseDashboardMenu,
+    /// A dashboard or group menu item: closes the menu, then runs the message.
+    DashboardMenuPick(Box<Message>),
     /// Focus the header search box (Cmd+F).
     FocusSearch,
     /// "Display" button: open the display-options popover.
@@ -766,6 +771,8 @@ pub struct App {
     dashboards: Vec<crate::db::dashboards::Dashboard>,
     /// State of the dashboard name/description modal (create now, rename later).
     dashboard_form: DashboardForm,
+    /// Which dashboard or group ⋮ menu is open.
+    dashboard_menu: Option<crate::views::dashboard::MenuTarget>,
     /// State of the dashboard "Add group" modal.
     group_form: GroupForm,
     /// The open dashboard's groups with their sources (reloaded with the mirror).
@@ -1166,6 +1173,7 @@ impl App {
         let crossing = self.view.is_cross_team() != view.is_cross_team()
             || matches!(view, View::Dashboard(_));
         self.view = view;
+        self.dashboard_menu = None;
         self.composer_focused = false;
         self.retain_open_view();
         if self.view == View::Inbox {
@@ -1870,10 +1878,43 @@ impl App {
             .collect()
     }
 
+    /// Bring the focus into view: the focused board column sideways, then the
+    /// focused card or row within its scrollable.
+    fn scroll_to_focus(&mut self) -> Task<Message> {
+        let column = self.reveal_focused_board_column();
+        Task::batch([column, self.scroll_focused_item_into_view()])
+    }
+
+    /// Scroll the board sideways so the focused column is fully in view, even
+    /// when it is empty. Does nothing outside board mode.
+    fn reveal_focused_board_column(&mut self) -> Task<Message> {
+        if !matches!(self.view, View::Board | View::MyIssues)
+            || self.board_display().view_mode == ViewMode::List
+        {
+            return Task::none();
+        }
+        let (offset, viewport) = self
+            .scroll_state
+            .get(&board::BOARD_SCROLL_KEY)
+            .copied()
+            .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+        let left = scroll::board_column_left(self.focused_lane);
+        let new = scroll::offset_to_reveal(left, scroll::BOARD_COLUMN_W, offset, viewport);
+        if (new - offset).abs() < 0.5 {
+            return Task::none();
+        }
+        self.scroll_state
+            .insert(board::BOARD_SCROLL_KEY, (new, viewport));
+        scrollable::scroll_to(
+            board::board_scroll_id(),
+            scrollable::AbsoluteOffset { x: new, y: 0.0 },
+        )
+    }
+
     /// Scroll the board lane / list so the focused card or row is fully in
     /// view. Positions come from fixed element heights (see `scroll`); the
     /// current offset and viewport height come from `Message::Scrolled`.
-    fn scroll_to_focus(&mut self) -> Task<Message> {
+    fn scroll_focused_item_into_view(&mut self) -> Task<Message> {
         if let View::Dashboard(did) = &self.view {
             let collapsed = self.collapsed_dashboard_groups.get(did);
             let groups: Vec<crate::views::dashboard::SpanGroup> = self
@@ -1883,6 +1924,7 @@ impl App {
                 .map(|g| crate::views::dashboard::SpanGroup {
                     len: g.issues.len(),
                     collapsed: collapsed.is_some_and(|c| c.contains(&g.group.id)),
+                    has_description: !g.group.description.is_empty(),
                 })
                 .collect();
             if self.focused_issue >= groups.get(self.focused_lane).map_or(0, |g| g.len)
@@ -2956,6 +2998,7 @@ impl App {
             saved_views,
             dashboards,
             dashboard_form: DashboardForm::default(),
+            dashboard_menu: None,
             group_form: GroupForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
@@ -4040,6 +4083,15 @@ impl App {
                 self.focused_issue = 0;
             }
 
+            Message::ToggleDashboardMenu(target) => {
+                self.dashboard_menu =
+                    (self.dashboard_menu.as_ref() != Some(&target)).then_some(target);
+            }
+            Message::CloseDashboardMenu => self.dashboard_menu = None,
+            Message::DashboardMenuPick(inner) => {
+                self.dashboard_menu = None;
+                return self.update_inner(*inner);
+            }
             Message::ToggleDashboardMine => {
                 self.dashboard_header.mine = !self.dashboard_header.mine;
                 self.focused_lane = 0;
@@ -6477,7 +6529,21 @@ impl App {
 
         let search = self.active_search();
         let needle = crate::search_match::needle(search);
-        let header = header::view(
+        let header = if let View::Dashboard(id) = &self.view {
+            let dashboard = self.dashboards.iter().find(|d| d.id == *id);
+            header::dashboard_bar(
+                self.breadcrumb(),
+                dashboard.map(|d| {
+                    crate::views::dashboard::dashboard_menu(
+                        d,
+                        self.dashboard_menu.as_ref(),
+                        self.sync_read_only,
+                        self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d)),
+                    )
+                }),
+            )
+        } else {
+            header::view(
             self.breadcrumb(),
             search,
             self.search_enabled(),
@@ -6499,7 +6565,8 @@ impl App {
                     .then_some(Message::BackToDashboard)
                 }),
             self.update_view_action(),
-        );
+            )
+        };
 
         let columns = if matches!(self.view, View::Board | View::MyIssues) {
             self.board_columns()
@@ -6676,11 +6743,8 @@ impl App {
                         focused_group: self.focused_lane,
                         focused_issue: self.focused_issue,
                         read_only: self.sync_read_only,
-                        is_home: self
-                            .dashboards
-                            .iter()
-                            .find(|d| d.id == *id)
-                            .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
+                        search,
+                        open_menu: self.dashboard_menu.as_ref(),
                     },
                 )
             }

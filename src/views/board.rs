@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    column, container, horizontal_rule, mouse_area, row, scrollable, text, Column, Row,
+    column, container, mouse_area, row, scrollable, text, Column, Row,
 };
 use iced::widget::text::LineHeight;
 use iced::{Border, Element, Length, Theme};
@@ -49,7 +49,11 @@ pub fn view<'a>(
     }
 
     // Column headers row
-    let mut header_row = row![].spacing(0).width(Length::Fill);
+    // Each column's fixed slot is the column width plus a right gutter, which
+    // forms the gap to the next column and holds the lane's vertical scrollbar
+    // clear of the cards.
+    let slot_w = scroll::BOARD_COLUMN_W + scroll::BOARD_COLUMN_GAP;
+    let mut header_row = row![];
     for (col_idx, col) in columns.iter().enumerate() {
         let name_color = if col_idx == focused_lane {
             t::text_primary()
@@ -72,11 +76,21 @@ pub fn view<'a>(
                     .color(t::text_muted()),
             );
 
-        header_row = header_row.push(container(header).padding([space::S2_5, space::S3]).width(Length::Fill));
+        header_row = header_row.push(
+            container(header)
+                .padding(
+                    iced::Padding::ZERO
+                        .top(space::S2_5)
+                        .bottom(space::S2_5)
+                        .right(scroll::BOARD_COLUMN_GAP),
+                )
+                .width(Length::Fixed(slot_w))
+                .clip(true),
+        );
     }
 
     // Columns with cards
-    let mut lane_columns = row![].spacing(1).width(Length::Fill).height(Length::Fill);
+    let mut lane_columns = row![].height(Length::Fill);
 
     for (col_idx, col) in columns.iter().enumerate() {
         let is_focused_lane = col_idx == focused_lane;
@@ -84,8 +98,15 @@ pub fn view<'a>(
         let mut issue_cards: Column<'_, Message> =
             column![]
                 .spacing(space::S1_5)
-                .width(Length::Fill)
-                .padding([space::S1, space::S2]);
+                .width(Length::Fixed(slot_w))
+                .padding(
+                    // The bottom padding lifts the last card clear of the board's
+                    // horizontal scrollbar, which floats over the lanes.
+                    iced::Padding::ZERO
+                        .top(scroll::BOARD_PAD_TOP)
+                        .bottom(space::S3)
+                        .right(scroll::BOARD_COLUMN_GAP),
+                );
 
         for (issue_idx, issue) in col.issues.iter().copied().enumerate() {
             // Sub-group heading before the first card of each section.
@@ -121,31 +142,24 @@ pub fn view<'a>(
             })
             .height(Length::Fill);
 
-        let lane_container = container(lane_content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::bg_primary())),
-                border: Border {
-                    color: t::border(),
-                    width: 0.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            });
-
-        lane_columns = lane_columns.push(lane_container);
+        lane_columns = lane_columns.push(lane_content);
     }
 
     let board = column![]
         .push(header_row)
-        .push(
-            container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::border())),
-                ..Default::default()
-            }),
-        )
         .push(lane_columns)
+        .padding(iced::Padding::ZERO.left(scroll::BOARD_PAD_X))
+        .width(Length::Fixed(scroll::board_content_width(columns.len())))
+        .height(Length::Fill);
+
+    // Built horizontal from the start: `scrollable()` validates as vertical, which
+    // rejects this `Fill`-height content before `.direction()` could apply.
+    let board = scrollable::Scrollable::with_direction(
+        board,
+        scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
+    )
+        .id(board_scroll_id())
+        .on_scroll(|vp| Message::Scrolled(BOARD_SCROLL_KEY, vp.absolute_offset().x, vp.bounds().width))
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -216,6 +230,14 @@ pub fn card_height(issue: &Issue, data: &CardData<'_>) -> f32 {
             .is_some_and(|l| !l.is_empty());
     let has_meta = d.shows(CardProperty::Priority) || !card_facts(issue, data).is_empty();
     scroll::board_card_height(d.shows(CardProperty::Id), has_chips, has_meta)
+}
+
+/// `scroll_state` key of the board's horizontal scroll (lanes use their index).
+pub const BOARD_SCROLL_KEY: usize = usize::MAX - 2;
+
+/// Scrollable id of the board's horizontal scroll.
+pub fn board_scroll_id() -> scrollable::Id {
+    scrollable::Id::new("board-columns")
 }
 
 /// Scrollable id of board lane `idx`.
