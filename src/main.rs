@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod csv_io;
 mod dashboard_eval;
+mod dashboard_session;
 mod db;
 mod display;
 mod files;
