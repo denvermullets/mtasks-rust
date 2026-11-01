@@ -394,7 +394,7 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
     .width(Length::Fill)
     .padding(space::S4)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_card())),
+        background: Some(iced::Background::Color(t::bg_secondary())),
         border: Border {
             color: t::border(),
             width: 1.0,
@@ -513,7 +513,7 @@ fn issue_row<'a>(
         .padding([space::S2, space::S3])
         .width(Length::Fill)
         .style(|_theme: &Theme, _status| button::Style {
-            background: Some(iced::Background::Color(t::bg_card())),
+            background: Some(iced::Background::Color(t::bg_secondary())),
             text_color: t::text_primary(),
             border: Border {
                 color: t::border(),
