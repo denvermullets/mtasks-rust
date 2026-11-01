@@ -1,6 +1,18 @@
-//! Attachment endpoints. Delete lives here; JRST-197 adds upload/create.
+//! Attachment endpoints: download (JRST-186) and delete (JRST-215).
+//! JRST-197 adds upload/create.
 
 use super::{ApiClient, ApiError};
+
+/// Path of the authenticated download endpoint for an Attachment's remote id.
+pub fn download_path(remote_id: i64) -> String {
+    format!("/api/v1/attachments/{remote_id}/download")
+}
+
+/// Download an Attachment's bytes. The endpoint redirects to the blob, which
+/// the client follows.
+pub async fn download(client: &ApiClient, remote_id: i64) -> Result<Vec<u8>, ApiError> {
+    client.get_bytes(&download_path(remote_id)).await
+}
 
 /// What an attachment hangs off, as remote ids. JRST-216 adds the project and
 /// comment variants.
@@ -30,6 +42,11 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_path_uses_the_remote_id() {
+        assert_eq!(download_path(42), "/api/v1/attachments/42/download");
+    }
 
     /// Live check against local Rails on :3005 (run with `--ignored`). Env:
     /// ATT_TEAM, ATT_ISSUE, ATT_ID (remote ids of an attached throwaway file).

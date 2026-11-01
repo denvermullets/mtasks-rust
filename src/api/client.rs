@@ -177,6 +177,21 @@ impl ApiClient {
         })
     }
 
+    /// GET raw bytes (following redirects). Used for Attachment downloads.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>, ApiError> {
+        let resp = self
+            .http
+            .get(self.url(path))
+            .bearer_auth(&self.token)
+            .header(header::ACCEPT, "*/*")
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(map_error(resp).await);
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     pub async fn post<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,

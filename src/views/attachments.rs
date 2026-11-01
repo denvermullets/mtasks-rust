@@ -49,7 +49,7 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
             .padding(0)
             .style(button::text)
     });
-    container(row![info].spacing(8).push_maybe(delete))
+    let body = container(row![info].spacing(8).push_maybe(delete))
     .padding(10)
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
@@ -60,8 +60,14 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
             radius: 6.0.into(),
         },
         ..Default::default()
-    })
-    .into()
+    });
+    // Clicking the card opens the file in its default app.
+    button(body)
+        .padding(0)
+        .width(Length::Fill)
+        .on_press(Message::OpenAttachment(a.clone()))
+        .style(|_theme: &Theme, _status| button::Style::default())
+        .into()
 }
 
 /// Byte count as "999 B", "1.5 KB", "1.2 MB", "3.0 GB" (1024-based, one decimal).
