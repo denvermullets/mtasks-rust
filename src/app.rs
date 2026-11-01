@@ -6329,7 +6329,7 @@ impl App {
             return None;
         }
         let (anchor, rect) = self.body_hover.current()?;
-        let content = crate::body_hover::content_for(anchor, &self.issues, &self.teams)?;
+        let content = crate::body_hover::content_for(anchor, &self.issues, &self.teams, &self.members)?;
         Some(crate::views::hover_card_view::overlay(&content, rect))
     }
 

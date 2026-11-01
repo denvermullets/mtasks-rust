@@ -9,7 +9,7 @@ use iced::widget::{column, container, text};
 use iced::{alignment, Border, Element, Length, Padding, Rectangle, Size, Theme};
 
 use crate::app::Message;
-use crate::body_hover::{CardContent, IssueCard};
+use crate::body_hover::{CardContent, IssueCard, MemberCard};
 use crate::card_placement::{self, Vertical};
 use crate::theme as t;
 
@@ -30,6 +30,7 @@ pub fn overlay<'a>(content: &CardContent, anchor: Rectangle) -> Element<'a, Mess
         };
         let card = match &content {
             CardContent::Issue(issue) => issue_card(issue),
+            CardContent::Member(member) => member_card(member),
         };
         // The card reports the pointer so moving from the anchor onto it keeps it open.
         let card = iced::widget::mouse_area(card)
@@ -58,7 +59,28 @@ fn estimated_height(content: &CardContent) -> f32 {
                 + t::space::S1
                 + title_lines * t::type_scale::SM * t::type_scale::LH_SM
         }
+        // Name, email and count: three single lines.
+        CardContent::Member(_) => {
+            2.0 * t::space::S3
+                + t::type_scale::SM * t::type_scale::LH_SM
+                + 2.0 * (t::space::S1 + t::type_scale::XS * t::type_scale::LH_XS)
+        }
     }
+}
+
+fn member_card<'a>(member: &MemberCard) -> Element<'a, Message> {
+    let body = column![
+        text(member.name.clone()).size(t::type_scale::SM).color(t::text_primary()),
+        text(member.email.clone()).size(t::type_scale::XS).color(t::text_secondary()),
+        text(match member.open_issues {
+            1 => "1 open issue".to_string(),
+            n => format!("{n} open issues"),
+        })
+        .size(t::type_scale::XS)
+        .color(t::text_secondary()),
+    ]
+    .spacing(t::space::S1);
+    panel(body.into())
 }
 
 fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
@@ -67,6 +89,10 @@ fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
         text(issue.title.clone()).size(t::type_scale::SM).color(t::text_primary()),
     ]
     .spacing(t::space::S1);
+    panel(body.into())
+}
+
+fn panel<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
     container(body)
         .padding(t::space::S3)
         .width(WIDTH)
