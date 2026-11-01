@@ -120,8 +120,17 @@ pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
 
 /// Keys bound only while an issue detail is showing. Checked before the
 /// global handler; `None` falls through to it.
-pub fn handle_issue_detail_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+pub fn handle_issue_detail_key(
+    key: &Key,
+    modifiers: Modifiers,
+    editing_description: bool,
+) -> Option<Message> {
     match key {
+        // Esc leaves the description editor first; once rendered, it falls
+        // through to the global handler as it always did.
+        Key::Named(keyboard::key::Named::Escape) if editing_description => {
+            Some(Message::StopEditingIssueDescription)
+        }
         Key::Character(c) if modifiers.is_empty() && c.as_str() == "a" => {
             Some(Message::PickAttachmentFiles)
         }
@@ -179,14 +188,25 @@ mod tests {
     fn a_attaches_a_file_in_issue_detail_only() {
         let a = Key::Character("a".into());
         assert!(matches!(
-            handle_issue_detail_key(&a, Modifiers::empty()),
+            handle_issue_detail_key(&a, Modifiers::empty(), false),
             Some(Message::PickAttachmentFiles)
         ));
-        assert!(handle_issue_detail_key(&a, Modifiers::COMMAND).is_none());
-        assert!(handle_issue_detail_key(&Key::Character("b".into()), Modifiers::empty()).is_none());
+        assert!(handle_issue_detail_key(&a, Modifiers::COMMAND, false).is_none());
+        assert!(handle_issue_detail_key(&Key::Character("b".into()), Modifiers::empty(), false).is_none());
         // The global handler never binds it, so it's inert off the detail view.
         assert!(press("a", false, true).is_none());
         assert!(press("a", false, false).is_none());
+    }
+
+    #[test]
+    fn escape_leaves_the_description_editor_only_while_editing() {
+        let esc = Key::Named(keyboard::key::Named::Escape);
+        assert!(matches!(
+            handle_issue_detail_key(&esc, Modifiers::empty(), true),
+            Some(Message::StopEditingIssueDescription)
+        ));
+        // Rendered: Escape falls through to today's behavior.
+        assert!(handle_issue_detail_key(&esc, Modifiers::empty(), false).is_none());
     }
 
     #[test]
