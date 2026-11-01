@@ -3,7 +3,7 @@
 //!
 //! Focus uses the same `(group index, issue index in group)` pair as the list.
 
-use iced::widget::{column, container, horizontal_rule, row, scrollable, text, Column};
+use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, Column};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
@@ -19,6 +19,7 @@ pub fn view<'a>(
     data: CardData<'a>,
     focused_group: usize,
     focused_issue: usize,
+    read_only: bool,
 ) -> Element<'a, Message> {
     let Some(dashboard) = dashboard else {
         return centered("Dashboard not found");
@@ -40,7 +41,7 @@ pub fn view<'a>(
 
     container(
         column![]
-            .push(controls(dashboard))
+            .push(controls(dashboard, read_only))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
             .push(scrollable(list).height(Length::Fill)),
@@ -56,17 +57,27 @@ pub fn view<'a>(
 
 /// The dashboard's header controls. Later tickets push into this row: filter
 /// tabs, Mine, sort, counts and the pickers. Only the "Open" lens exists now.
-fn controls<'a>(dashboard: &'a Dashboard) -> Element<'a, Message> {
+fn controls<'a>(dashboard: &'a Dashboard, read_only: bool) -> Element<'a, Message> {
     container(
         row![]
             .spacing(12)
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
-            .push(text("Open").size(13).color(t::text_muted())),
+            .push(text("Open").size(13).color(t::text_muted()))
+            .push(add_group_button(read_only)),
     )
     .padding([8, 16])
     .width(Length::Fill)
     .into()
+}
+
+/// "Add group": disabled while the token is read-only.
+fn add_group_button<'a>(read_only: bool) -> Element<'a, Message> {
+    button(text("+ Add group").size(13))
+        .on_press_maybe((!read_only).then_some(Message::OpenNewGroup))
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
 }
 
 /// A group's section header: color swatch, name, description and issue count.
