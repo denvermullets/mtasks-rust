@@ -86,6 +86,7 @@ pub fn view<'a>(
     comments: &'a [Comment],
     attachments: &'a [crate::db::attachments::Attachment],
     comment_attachments: &'a CommentAttachments,
+    images: &'a crate::files::images::ImageStore,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -153,11 +154,11 @@ pub fn view<'a>(
                 .size(14)
                 .height(Length::Fixed(160.0)),
         )
-        .push_maybe(crate::views::attachments::section(attachments))
+        .push_maybe(crate::views::attachments::section(attachments, images))
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(
-            comments, detail, members, team, teams, issues, comment_attachments,
+            comments, detail, members, team, teams, issues, comment_attachments, images,
         ));
 
     // ---- Right sidebar: properties ----
@@ -280,6 +281,7 @@ fn discussion_section<'a>(
     teams: &'a [Team],
     issues: &'a [Issue],
     comment_attachments: &'a CommentAttachments,
+    images: &'a crate::files::images::ImageStore,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
@@ -298,6 +300,7 @@ fn discussion_section<'a>(
         reply_composer: &detail.reply_composer,
         suggest: detail.suggest.as_ref(),
         comment_attachments,
+        images,
     };
     push_thread(col, Comment::thread_order(comments), &ctx)
         .push(new_comment_composer(

@@ -6,6 +6,7 @@ use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
 use crate::db::attachments::Attachment;
+use crate::files::images::ImageStore;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
@@ -108,6 +109,7 @@ pub fn view<'a>(
     references: &'a [Reference],
     attachments: &'a [Attachment],
     comment_attachments: &'a CommentAttachments,
+    images: &'a ImageStore,
     issues: &'a [Issue],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
@@ -171,7 +173,7 @@ pub fn view<'a>(
             issues,
             members,
         ))
-        .push_maybe(crate::views::attachments::section(attachments))
+        .push_maybe(crate::views::attachments::section(attachments, images))
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
@@ -197,6 +199,7 @@ pub fn view<'a>(
                 reply_composer: &detail.reply_composer,
                 suggest: detail.suggest.as_ref(),
                 comment_attachments,
+                images,
             },
         ));
 
@@ -882,6 +885,8 @@ pub struct ThreadCtx<'a, 'b> {
     pub suggest: Option<&'a SuggestState>,
     /// Files per comment, keyed by the comment's local id.
     pub comment_attachments: &'a CommentAttachments,
+    /// Image fetch state, for attachment thumbnails.
+    pub images: &'a ImageStore,
 }
 
 /// Comment local id -> its files (absent when it has none).
@@ -1056,7 +1061,7 @@ fn comment_row<'a>(
     col = col.push_maybe(
         ctx.comment_attachments
             .get(&comment.id)
-            .and_then(|files| crate::views::attachments::section(files)),
+            .and_then(|files| crate::views::attachments::section(files, ctx.images)),
     );
     // Delete is offered on the user's own comments, synced or not.
     let can_delete = comment

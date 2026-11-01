@@ -1,24 +1,25 @@
 //! Reusable file-card list for an owner's attachments (issue, project or
 //! comment). Callers load the rows with `db::attachments::list_for_owner`.
 
-use iced::widget::{button, column, container, text};
-use iced::{Border, Element, Length, Theme};
+use iced::widget::{button, column, container, image, row, text};
+use iced::{Alignment, Border, ContentFit, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::attachments::Attachment;
+use crate::files::images::ImageStore;
 use crate::theme as t;
 
 /// The "Attachments" section: a heading plus one card per file, in the order
 /// given (`list_for_owner` returns them in the order they were added).
 /// Returns `None` when there are no files so callers can `push_maybe` it and
 /// the section stays hidden.
-pub fn section<'a>(attachments: &'a [Attachment]) -> Option<Element<'a, Message>> {
+pub fn section<'a>(attachments: &'a [Attachment], images: &'a ImageStore) -> Option<Element<'a, Message>> {
     if attachments.is_empty() {
         return None;
     }
     let cards = attachments
         .iter()
-        .fold(column![].spacing(8), |col, a| col.push(card(a)));
+        .fold(column![].spacing(8), |col, a| col.push(card(a, images)));
     Some(
         column![]
             .spacing(8)
@@ -30,18 +31,17 @@ pub fn section<'a>(attachments: &'a [Attachment]) -> Option<Element<'a, Message>
 
 /// One file card: filename, then "TYPE · size". Later tickets hang the
 /// thumbnail, open, delete and pending/failed states off this.
-pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
+pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Message> {
     let meta = format!(
         "{} · {}",
         type_label(&a.content_type, &a.filename),
         format_size(a.byte_size)
     );
-    let body = container(
-        column![]
-            .spacing(2)
-            .push(text(&a.filename).size(13).color(t::text_primary()))
-            .push(text(meta).size(11).color(t::text_muted())),
-    )
+    let labels = column![]
+        .spacing(2)
+        .push(text(&a.filename).size(13).color(t::text_primary()))
+        .push(text(meta).size(11).color(t::text_muted()));
+    let body = container(row![].spacing(10).align_y(Alignment::Center).push_maybe(thumbnail(a, images)).push(labels))
     .padding(10)
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
@@ -60,6 +60,44 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
         .on_press(Message::OpenAttachment(a.clone()))
         .style(|_theme: &Theme, _status| button::Style::default())
         .into()
+}
+
+/// Side length of the square thumbnail slot.
+const THUMB: f32 = 48.0;
+
+/// Square thumbnail for an image Attachment once its bytes are cached; `None`
+/// for other files, so their cards stay unchanged. While the fetch is pending
+/// or failed an empty placeholder keeps the card from jumping around.
+fn thumbnail<'a>(a: &'a Attachment, images: &'a ImageStore) -> Option<Element<'a, Message>> {
+    if !crate::files::images::is_thumbnailable(&a.content_type) {
+        return None;
+    }
+    let slot: Element<'a, Message> = match crate::files::open::blob_key(a)
+        .as_deref()
+        .and_then(|k| images.path(k))
+    {
+        Some(path) => image(path)
+            .width(THUMB)
+            .height(THUMB)
+            .content_fit(ContentFit::Cover)
+            .into(),
+        None => container(text("")).width(THUMB).height(THUMB).into(),
+    };
+    Some(
+        container(slot)
+            .width(THUMB)
+            .height(THUMB)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::bg_primary())),
+                border: Border {
+                    color: t::border(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into(),
+    )
 }
 
 /// Byte count as "999 B", "1.5 KB", "1.2 MB", "3.0 GB" (1024-based, one decimal).
