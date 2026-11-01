@@ -33,6 +33,8 @@ pub enum Block {
     Image(ImageBlock),
     /// A bulleted or numbered list.
     List(List),
+    /// A `>` quote: any blocks, including lists and further quotes.
+    Quote(Vec<Block>),
 }
 
 /// A list: each item is its own block sequence, so an item can hold
@@ -248,6 +250,8 @@ enum Frame {
     /// A container with no block of its own (an item outside any list):
     /// children are spliced into the parent when it closes.
     Flat(Vec<Block>),
+    /// A block quote; becomes `Block::Quote`.
+    Quote(Vec<Block>),
 }
 
 impl Builder {
@@ -272,6 +276,7 @@ impl Builder {
                 _ => blocks.into_iter().for_each(|b| self.push_block(b)),
             },
             Some(Frame::Flat(blocks)) => blocks.into_iter().for_each(|b| self.push_block(b)),
+            Some(Frame::Quote(blocks)) => self.push_block(Block::Quote(blocks)),
             None => {}
         }
     }
@@ -279,7 +284,7 @@ impl Builder {
     /// Add a finished block to the innermost open container, or the root.
     fn push_block(&mut self, block: Block) {
         match self.stack.last_mut() {
-            Some(Frame::Item(blocks, _) | Frame::Flat(blocks)) => blocks.push(block),
+            Some(Frame::Item(blocks, _) | Frame::Flat(blocks) | Frame::Quote(blocks)) => blocks.push(block),
             // A block directly in a list (never from the parser) is kept, not lost.
             Some(Frame::List(_, items, checked)) => {
                 items.push(vec![block]);
@@ -373,7 +378,8 @@ impl Builder {
                 self.flush();
                 self.literal_depth += 1;
             }
-            Event::Start(Tag::BlockQuote(_)) => self.flush(),
+            Event::Start(Tag::BlockQuote(_)) => self.open(Frame::Quote(Vec::new())),
+            Event::End(TagEnd::BlockQuote(_)) => self.close(),
             Event::End(TagEnd::Link | TagEnd::Image) => {
                 self.literal_depth = self.literal_depth.saturating_sub(1);
             }
@@ -487,7 +493,6 @@ fn is_block_end(end: &TagEnd) -> bool {
         end,
         TagEnd::Paragraph
             | TagEnd::Heading(_)
-            | TagEnd::BlockQuote(_)
             | TagEnd::CodeBlock
             | TagEnd::TableCell
             | TagEnd::TableRow
@@ -552,6 +557,55 @@ mod tests {
                 "a <!-- hidden --> b",
                 vec![para(vec![text("a  b")])],
             ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    fn quote(blocks: Vec<Block>) -> Block {
+        Block::Quote(blocks)
+    }
+
+    #[test]
+    fn parses_blockquotes() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("one line", "> hi", vec![quote(vec![para(vec![text("hi")])])]),
+            (
+                "lazy continuation reflows",
+                "> a\nb",
+                vec![quote(vec![para(vec![text("a b")])])],
+            ),
+            (
+                "paragraphs inside",
+                "> a\n>\n> b",
+                vec![quote(vec![para(vec![text("a")]), para(vec![text("b")])])],
+            ),
+            (
+                "text after a blank line leaves the quote",
+                "> a\n\nb",
+                vec![quote(vec![para(vec![text("a")])]), para(vec![text("b")])],
+            ),
+            (
+                "nested quote",
+                "> a\n>> b",
+                vec![quote(vec![para(vec![text("a")]), quote(vec![para(vec![text("b")])])])],
+            ),
+            (
+                "list inside",
+                "> - a\n> - b",
+                vec![quote(vec![list(vec![vec![para(vec![text("a")])], vec![para(vec![text("b")])]])])],
+            ),
+            (
+                "quote then paragraph then quote",
+                "> a\n\nb\n\n> c",
+                vec![
+                    quote(vec![para(vec![text("a")])]),
+                    para(vec![text("b")]),
+                    quote(vec![para(vec![text("c")])]),
+                ],
+            ),
+            ("empty quote", ">", vec![quote(vec![])]),
         ];
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
@@ -789,9 +843,9 @@ mod tests {
                 ])],
             ),
             (
-                "quote inside an item stays flat",
+                "quote inside an item",
                 "- a\n  > q",
-                vec![list(vec![vec![para(vec![text("a")]), para(vec![text("q")])]])],
+                vec![list(vec![vec![para(vec![text("a")]), quote(vec![para(vec![text("q")])])]])],
             ),
         ];
         for (name, body, want) in cases {
