@@ -312,6 +312,73 @@ fn replace_sources(conn: &Connection, group_id: &str, g: &GroupIn) -> Result<()>
     Ok(())
 }
 
+/// Longest dashboard name Rails accepts.
+pub const MAX_NAME_LEN: usize = 80;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameError {
+    Blank,
+    TooLong,
+}
+
+impl NameError {
+    pub fn message(self) -> &'static str {
+        match self {
+            NameError::Blank => "Name can't be blank",
+            NameError::TooLong => "Name must be 80 characters or fewer",
+        }
+    }
+}
+
+/// Local check of a dashboard name (matches Rails): trimmed, 1 to 80 characters.
+pub fn validate_name(name: &str) -> std::result::Result<String, NameError> {
+    let name = name.trim();
+    if name.is_empty() {
+        Err(NameError::Blank)
+    } else if name.chars().count() > MAX_NAME_LEN {
+        Err(NameError::TooLong)
+    } else {
+        Ok(name.to_string())
+    }
+}
+
+#[derive(Debug)]
+pub enum CreateError {
+    Name(NameError),
+    Db(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for CreateError {
+    fn from(e: rusqlite::Error) -> Self {
+        CreateError::Db(e)
+    }
+}
+
+/// Create a dashboard offline: validate, append after the last position, and
+/// queue a "create" entry. The push ticket reads the row, so no payload.
+pub fn create_local(
+    conn: &Connection,
+    name: &str,
+    description: &str,
+) -> std::result::Result<Dashboard, CreateError> {
+    let name = validate_name(name).map_err(CreateError::Name)?;
+    let tx = conn.unchecked_transaction()?;
+    let position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM dashboards",
+        [],
+        |r| r.get(0),
+    )?;
+    let id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO dashboards (id, remote_id, name, description, position, updated_at)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+        params![id, name, description.trim(), position, crate::db::now_iso()],
+    )?;
+    sync_queue::enqueue(&tx, ENTITY_TYPE, &id, "create", None)?;
+    tx.commit()?;
+    Ok(get(conn, &id)?.expect("dashboard just inserted"))
+}
+
 pub fn find_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Dashboard>> {
     conn.query_row(
         "SELECT id, remote_id, name, description, position, updated_at FROM dashboards WHERE remote_id = ?1",
@@ -322,7 +389,6 @@ pub fn find_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Das
 }
 
 /// A dashboard by local id.
-#[allow(dead_code)]
 pub fn get(conn: &Connection, id: &str) -> Result<Option<Dashboard>> {
     conn.query_row(
         "SELECT id, remote_id, name, description, position, updated_at FROM dashboards WHERE id = ?1",
@@ -583,5 +649,51 @@ mod tests {
         assert!(find_by_remote_id(&conn, 1).unwrap().is_none());
         assert!(find_group_by_remote_id(&conn, 10).unwrap().is_none());
         assert!(find_by_remote_id(&conn, 2).unwrap().is_some());
+    }
+
+    #[test]
+    fn create_local_appends_after_the_last_position_and_queues_a_create() {
+        let conn = setup();
+        apply_snapshot(&conn, &[dash(1, "A", 4, vec![])]).unwrap();
+        let a = create_local(&conn, "  Mine  ", " about ").unwrap();
+        let b = create_local(&conn, "Next", "").unwrap();
+        assert_eq!((a.name.as_str(), a.description.as_str(), a.position), ("Mine", "about", 5));
+        assert_eq!((b.position, b.remote_id), (6, None));
+        let names: Vec<_> = list(&conn).unwrap().into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["A", "Mine", "Next"]);
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 2);
+        assert_eq!(
+            (q[0].entity_type.as_str(), q[0].action.as_str(), q[0].entity_id.as_str()),
+            (ENTITY_TYPE, "create", a.id.as_str())
+        );
+    }
+
+    #[test]
+    fn create_local_first_dashboard_gets_position_zero() {
+        let conn = setup();
+        assert_eq!(create_local(&conn, "First", "").unwrap().position, 0);
+    }
+
+    #[test]
+    fn create_local_rejects_blank_and_overlong_names_without_writing() {
+        let conn = setup();
+        assert!(matches!(create_local(&conn, "   ", ""), Err(CreateError::Name(NameError::Blank))));
+        assert!(matches!(
+            create_local(&conn, &"x".repeat(81), ""),
+            Err(CreateError::Name(NameError::TooLong))
+        ));
+        assert_eq!(list(&conn).unwrap().len(), 0);
+        assert_eq!(sync_queue::pending_entries(&conn).unwrap().len(), 0);
+        assert!(create_local(&conn, &"x".repeat(80), "").is_ok());
+        assert!(create_local(&conn, &"é".repeat(80), "").is_ok());
+    }
+
+    #[test]
+    fn a_created_dashboard_survives_a_pull_that_does_not_list_it() {
+        let conn = setup();
+        let d = create_local(&conn, "Local", "").unwrap();
+        apply_snapshot(&conn, &[]).unwrap();
+        assert!(get(&conn, &d.id).unwrap().is_some());
     }
 }
