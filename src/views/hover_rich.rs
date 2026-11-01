@@ -41,6 +41,12 @@ pub struct Hover<Link> {
     pub viewport: Rectangle,
 }
 
+/// Whether a left press on a span is captured: only for a span known to be a
+/// link, so plain text and gaps pass the press on to enclosing click areas.
+fn takes_press(span_is_link: Option<bool>) -> bool {
+    span_is_link == Some(true)
+}
+
 /// Remembers the hovered span so only changes are reported. Pure.
 #[derive(Debug, Default)]
 pub struct HoverTracker {
@@ -291,7 +297,10 @@ where
         match mouse_event {
             mouse::Event::ButtonPressed(mouse::Button::Left) => {
                 if let Some(p) = cursor.position_in(layout.bounds()) {
-                    if let Some(span) = state.paragraph.hit_span(p) {
+                    // Only a link takes the press; plain text lets it reach
+                    // an enclosing click area (the description's click-to-edit).
+                    let hit = state.paragraph.hit_span(p);
+                    if let Some(span) = hit.filter(|&s| takes_press(self.spans.get(s).map(|s| s.link.is_some()))) {
                         state.span_pressed = Some(span);
                         return event::Status::Captured;
                     }
@@ -344,6 +353,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_link_spans_take_a_press() {
+        let cases = [(Some(true), true), (Some(false), false), (None, false)];
+        for (span_is_link, expected) in cases {
+            assert_eq!(takes_press(span_is_link), expected, "{span_is_link:?}");
+        }
+    }
 
     #[test]
     fn tracker_reports_only_changes_of_the_hovered_span() {
