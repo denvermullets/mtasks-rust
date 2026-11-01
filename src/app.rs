@@ -143,6 +143,10 @@ pub enum Message {
     /// Cancel a pending upload (local row id): drops the row, queue entries and outbox file.
     CancelAttachmentUpload(String),
     DeleteAttachmentConfirmed,
+    /// "Retry" on a failed upload card (local attachment id).
+    RetryUpload(String),
+    /// "Remove" on a failed upload card (local attachment id).
+    RemoveFailedUpload(String),
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -352,6 +356,8 @@ pub enum Message {
     /// Files chosen for the open issue (picker, drag-and-drop, shortcut all
     /// send this). Each is validated, copied to the outbox and queued.
     FilesPicked(Vec<std::path::PathBuf>),
+    /// A file dropped on the window; routed by `files::drop::drop_target`.
+    FileDropped(std::path::PathBuf),
 
     // CSV import / export (sidebar footer)
     /// Export the selected team's issues via a native save dialog.
@@ -2384,6 +2390,9 @@ impl App {
             | iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
                 Some(Message::UserInput)
             }
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                Some(Message::FileDropped(path))
+            }
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused),
             _ => None,
@@ -3955,6 +3964,14 @@ impl App {
                 );
             }
 
+            Message::FileDropped(path) => {
+                use crate::files::drop::{drop_target, DropTarget};
+                match drop_target(&self.view, &self.modal) {
+                    DropTarget::Issue => return self.update(Message::FilesPicked(vec![path])),
+                    DropTarget::Ignore => {}
+                }
+            }
+
             Message::FilesPicked(paths) => {
                 let View::IssueDetail(ref issue_id) = self.view else {
                     return Task::none();
@@ -4598,6 +4615,31 @@ impl App {
                 }
                 self.modal = Modal::None;
                 self.reload_data();
+            }
+
+            Message::RetryUpload(id) => {
+                let conn = self.db();
+                let _ = crate::db::attachments::retry_failed(&conn, &id);
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::RemoveFailedUpload(id) => {
+                let conn = self.db();
+                let row = crate::db::attachments::get(&conn, &id)
+                    .ok()
+                    .flatten()
+                    .filter(|a| a.upload_state == crate::db::attachments::UploadState::Failed);
+                if let Some(row) = row {
+                    if let Ok(true) = crate::db::attachments::remove_local(&conn, &id) {
+                        // JRST-214 hook: for an inline image (`row.placeholder_uuid`),
+                        // strip its `jait-pending://` placeholder from the body here
+                        // via `mentions::strip_placeholder`.
+                        let _ = row;
+                    }
+                }
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
             }
 
             Message::DeleteProjectConfirmed => {
