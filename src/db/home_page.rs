@@ -5,6 +5,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
 use crate::api::HomePageDto;
+use crate::db::dashboards::Dashboard;
 use crate::db::models::Team;
 use crate::db::saved_views::SavedView;
 
@@ -23,6 +24,9 @@ pub enum HomeTarget {
     LocalView(String),
     /// A dashboard, by remote id (not shown on the desktop yet).
     Dashboard(i64),
+    /// A dashboard chosen before its create has pushed (local uuid);
+    /// `adopt_dashboard` swaps it for `Dashboard` once it has a remote id.
+    LocalDashboard(String),
 }
 
 impl HomeTarget {
@@ -53,6 +57,15 @@ impl HomePage {
         }
     }
 
+    /// True if this Home page is the given dashboard (by remote or local id).
+    pub fn matches_dashboard(&self, dashboard: &Dashboard) -> bool {
+        match &self.target {
+            HomeTarget::Dashboard(id) => dashboard.remote_id == Some(*id),
+            HomeTarget::LocalDashboard(local) => &dashboard.id == local,
+            _ => false,
+        }
+    }
+
     /// True if this Home page is the given team.
     pub fn matches_team(&self, team: &Team) -> bool {
         matches!(&self.target, HomeTarget::Team(id) if team.remote_id == Some(*id))
@@ -65,6 +78,7 @@ fn store(conn: &Connection, target: &HomeTarget) -> Result<()> {
         HomeTarget::View(id) => ("view", *id, None),
         HomeTarget::LocalView(l) => ("view", 0, Some(l)),
         HomeTarget::Dashboard(id) => ("dashboard", *id, None),
+        HomeTarget::LocalDashboard(l) => ("dashboard", 0, Some(l)),
     };
     conn.execute(
         "INSERT INTO home_page (id, kind, remote_id, local_view_id) VALUES (1, ?1, ?2, ?3)
@@ -90,6 +104,7 @@ pub fn get(conn: &Connection) -> Result<Option<HomePage>> {
     Ok(row.and_then(|(kind, id, local)| {
         let target = match local {
             Some(l) if kind == "view" => HomeTarget::LocalView(l),
+            Some(l) if kind == "dashboard" => HomeTarget::LocalDashboard(l),
             _ => HomeTarget::from_wire(&kind, id)?,
         };
         Some(HomePage { target })
@@ -127,6 +142,40 @@ pub fn set_view_local(conn: &Connection, view_id: &str, remote_id: Option<i64>) 
     store(conn, &HomeTarget::LocalView(view_id.to_string()))?;
     let payload = serde_json::json!({ "kind": "view", "local_id": view_id }).to_string();
     super::sync_queue::enqueue(conn, QUEUE_ENTITY, "home", "update", Some(&payload))
+}
+
+/// Set a dashboard (local uuid) as the Home page. One with a remote id is an
+/// ordinary `set_local`. One not pushed yet is stored by its local id and
+/// queued with `local_id`; the engine resolves it once the create (earlier in
+/// the FIFO queue) has pushed.
+pub fn set_dashboard_local(conn: &Connection, dashboard_id: &str, remote_id: Option<i64>) -> Result<()> {
+    if let Some(rid) = remote_id {
+        return set_local(conn, "dashboard", rid);
+    }
+    store(conn, &HomeTarget::LocalDashboard(dashboard_id.to_string()))?;
+    let payload = serde_json::json!({ "kind": "dashboard", "local_id": dashboard_id }).to_string();
+    super::sync_queue::enqueue(conn, QUEUE_ENTITY, "home", "update", Some(&payload))
+}
+
+fn is_local_dashboard(conn: &Connection, local_id: &str) -> Result<bool> {
+    Ok(get(conn)?.is_some_and(|h| matches!(&h.target, HomeTarget::LocalDashboard(l) if l == local_id)))
+}
+
+/// A dashboard just got its remote id: if it is the stored home by local id,
+/// store the remote id instead.
+pub fn adopt_dashboard(conn: &Connection, local_id: &str, remote_id: i64) -> Result<()> {
+    if is_local_dashboard(conn, local_id)? {
+        store(conn, &HomeTarget::Dashboard(remote_id))?;
+    }
+    Ok(())
+}
+
+/// Clear the stored home if it is the unpushed dashboard `local_id`.
+pub fn clear_if_local_dashboard(conn: &Connection, local_id: &str) -> Result<()> {
+    if is_local_dashboard(conn, local_id)? {
+        clear(conn)?;
+    }
+    Ok(())
 }
 
 fn is_local_view(conn: &Connection, local_id: &str) -> Result<bool> {
@@ -168,8 +217,16 @@ pub fn resolve_payload(conn: &Connection, payload: Option<&str>) -> Resolved {
         .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
         .and_then(|v| v.get("local_id")?.as_str().map(str::to_string));
     let Some(local) = local else { return Resolved::Bad };
-    match super::saved_views::remote_id_of(conn, &local) {
-        Ok(Some(Some(id))) => Resolved::Ready("view".into(), id),
+    let is_dashboard = payload
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .is_some_and(|v| v.get("kind").and_then(|k| k.as_str()) == Some("dashboard"));
+    let (kind, remote) = if is_dashboard {
+        ("dashboard", super::dashboards::get(conn, &local).map(|d| d.map(|d| d.remote_id)))
+    } else {
+        ("view", super::saved_views::remote_id_of(conn, &local))
+    };
+    match remote {
+        Ok(Some(Some(id))) => Resolved::Ready(kind.into(), id),
         Ok(Some(None)) => Resolved::Waiting,
         Ok(None) | Err(_) => Resolved::Bad,
     }
@@ -179,6 +236,15 @@ pub fn resolve_payload(conn: &Connection, payload: Option<&str>) -> Resolved {
 /// is queued: the server treats a missing view as the default home.
 pub fn clear_if_view(conn: &Connection, remote_id: i64) -> Result<()> {
     if get(conn)?.is_some_and(|h| h.target == HomeTarget::View(remote_id)) {
+        clear(conn)?;
+    }
+    Ok(())
+}
+
+/// Clear the stored home if it points at the dashboard `remote_id`. Nothing
+/// is queued: the server treats a missing dashboard as the default home.
+pub fn clear_if_dashboard(conn: &Connection, remote_id: i64) -> Result<()> {
+    if get(conn)?.is_some_and(|h| h.target == HomeTarget::Dashboard(remote_id)) {
         clear(conn)?;
     }
     Ok(())
@@ -210,17 +276,20 @@ pub enum LaunchTarget {
     Team(String),
     /// A Saved view, opened on its team (local ids).
     View { view_id: String, team_id: String },
+    /// A dashboard (local id).
+    Dashboard(String),
     /// No usable Home page: the first non-archived team's board.
     Default,
 }
 
-/// Resolve the stored Home page against the local mirror. Dashboards, unknown
+/// Resolve the stored Home page against the local mirror. Unknown
 /// kinds and targets that are not mirrored (deleted, not synced yet, or a
 /// view whose team is missing) resolve to `Default`.
 pub fn launch_target(
     home: Option<&HomePage>,
     teams: &[Team],
     views: &std::collections::HashMap<String, Vec<SavedView>>,
+    dashboards: &[Dashboard],
 ) -> LaunchTarget {
     let Some(h) = home else { return LaunchTarget::Default };
     match &h.target {
@@ -237,7 +306,10 @@ pub fn launch_target(
                 view_id: v.id.clone(),
                 team_id: v.team_id.clone(),
             }),
-        HomeTarget::Dashboard(_) => LaunchTarget::Default,
+        HomeTarget::Dashboard(_) | HomeTarget::LocalDashboard(_) => dashboards
+            .iter()
+            .find(|d| h.matches_dashboard(d))
+            .map_or(LaunchTarget::Default, |d| LaunchTarget::Dashboard(d.id.clone())),
     }
 }
 
@@ -265,6 +337,50 @@ mod tests {
         .unwrap();
     }
 
+    fn mirror(conn: &Connection, remote_id: i64, name: &str) -> Dashboard {
+        let row = crate::db::dashboards::DashboardIn {
+            id: remote_id,
+            name: name.into(),
+            description: None,
+            position: remote_id,
+            updated_at: "2026-10-31T00:00:00.000Z".into(),
+            groups: vec![],
+        };
+        crate::db::dashboards::apply_snapshot(conn, &[row]).unwrap();
+        crate::db::dashboards::find_by_remote_id(conn, remote_id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn local_delete_of_the_home_dashboard_clears_home_and_queues_no_home_write() {
+        let conn = mem();
+        let d = mirror(&conn, 3, "Home one");
+        apply_me(&conn, Some(&dto("dashboard", 3))).unwrap();
+        crate::db::dashboards::delete_local(&conn, &d.id).unwrap();
+        assert_eq!(get(&conn).unwrap(), None);
+        assert_eq!(launch_target(get(&conn).unwrap().as_ref(), &[], &Default::default(), &[]), LaunchTarget::Default);
+        assert!(crate::db::sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pull_that_drops_the_home_dashboard_clears_home() {
+        let conn = mem();
+        mirror(&conn, 3, "Home one");
+        apply_me(&conn, Some(&dto("dashboard", 3))).unwrap();
+        crate::db::dashboards::apply_snapshot(&conn, &[]).unwrap();
+        assert_eq!(get(&conn).unwrap(), None);
+        assert_eq!(launch_target(get(&conn).unwrap().as_ref(), &[], &Default::default(), &[]), LaunchTarget::Default);
+    }
+
+    #[test]
+    fn deleting_another_dashboard_leaves_home_alone() {
+        let conn = mem();
+        mirror(&conn, 3, "Home one");
+        let other = mirror(&conn, 4, "Other");
+        apply_me(&conn, Some(&dto("dashboard", 3))).unwrap();
+        crate::db::dashboards::delete_local(&conn, &other.id).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Dashboard(3) }));
+    }
+
     #[test]
     fn set_local_stores_at_once_and_queues_the_put() {
         let conn = mem();
@@ -274,6 +390,16 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!((pending[0].entity_type.as_str(), pending[0].action.as_str()), ("home_page", "update"));
         assert_eq!(parse_payload(pending[0].payload.as_deref()), Some(("team".into(), 7)));
+    }
+
+    #[test]
+    fn setting_a_dashboard_stores_it_and_queues_the_dashboard_kind() {
+        let conn = mem();
+        set_local(&conn, "team", 7).unwrap();
+        set_local(&conn, "dashboard", 3).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Dashboard(3) }));
+        let pending = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(parse_payload(pending[1].payload.as_deref()), Some(("dashboard".into(), 3)));
     }
 
     #[test]
@@ -334,6 +460,50 @@ mod tests {
         crate::db::saved_views::adopt_created(&conn, &v.id, &dto).unwrap();
         assert_eq!(resolve_payload(&conn, p[1].payload.as_deref()), Resolved::Ready("view".into(), 88));
         assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::View(88) }));
+    }
+
+    #[test]
+    fn an_unpushed_dashboard_is_stored_by_local_id_swapped_on_adopt_and_launches() {
+        let conn = mem();
+        let d = crate::db::dashboards::create_local(&conn, "Mine", "").unwrap();
+        set_dashboard_local(&conn, &d.id, None).unwrap();
+        let h = get(&conn).unwrap().unwrap();
+        assert_eq!(h.target, HomeTarget::LocalDashboard(d.id.clone()));
+        assert!(h.matches_dashboard(&d));
+        assert_eq!(
+            launch_target(Some(&h), &[], &Default::default(), std::slice::from_ref(&d)),
+            LaunchTarget::Dashboard(d.id.clone())
+        );
+        // FIFO: the create first, then the home write, which waits.
+        let p = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!((p[0].entity_type.as_str(), p[1].entity_type.as_str()), ("dashboard", "home_page"));
+        assert_eq!(resolve_payload(&conn, p[1].payload.as_deref()), Resolved::Waiting);
+        // The create is adopted: the payload resolves and the stored home swaps.
+        let dto = crate::db::dashboards::DashboardIn {
+            id: 41,
+            name: "Mine".into(),
+            description: None,
+            position: 1,
+            updated_at: "2026-11-01T00:00:00.000Z".into(),
+            groups: vec![],
+        };
+        crate::db::dashboards::adopt_created(&conn, &d.id, &dto).unwrap();
+        assert_eq!(resolve_payload(&conn, p[1].payload.as_deref()), Resolved::Ready("dashboard".into(), 41));
+        let h = get(&conn).unwrap().unwrap();
+        assert_eq!(h.target, HomeTarget::Dashboard(41));
+        let d = crate::db::dashboards::get(&conn, &d.id).unwrap().unwrap();
+        assert!(h.matches_dashboard(&d));
+    }
+
+    #[test]
+    fn a_synced_dashboard_is_set_like_a_team_and_deleting_an_unpushed_one_clears_home() {
+        let conn = mem();
+        set_dashboard_local(&conn, "d1", Some(9)).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Dashboard(9) }));
+        let d = crate::db::dashboards::create_local(&conn, "N", "").unwrap();
+        set_dashboard_local(&conn, &d.id, None).unwrap();
+        crate::db::dashboards::delete_local(&conn, &d.id).unwrap();
+        assert_eq!(get(&conn).unwrap(), None);
     }
 
     #[test]
@@ -432,14 +602,14 @@ mod tests {
     #[test]
     fn team_home_launches_that_team() {
         let (t, v) = fixture();
-        assert_eq!(launch_target(home("team", 2).as_ref(), &t, &v), LaunchTarget::Team("b".into()));
+        assert_eq!(launch_target(home("team", 2).as_ref(), &t, &v, &[]), LaunchTarget::Team("b".into()));
     }
 
     #[test]
     fn view_home_launches_that_view() {
         let (t, v) = fixture();
         assert_eq!(
-            launch_target(home("view", 50).as_ref(), &t, &v),
+            launch_target(home("view", 50).as_ref(), &t, &v, &[]),
             LaunchTarget::View { view_id: "v1".into(), team_id: "b".into() }
         );
     }
@@ -448,7 +618,7 @@ mod tests {
     fn no_home_dashboard_and_missing_targets_fall_back() {
         let (t, v) = fixture();
         for h in [None, home("dashboard", 9), home("team", 99), home("view", 99), home("bogus", 1)] {
-            assert_eq!(launch_target(h.as_ref(), &t, &v), LaunchTarget::Default);
+            assert_eq!(launch_target(h.as_ref(), &t, &v, &[]), LaunchTarget::Default);
         }
     }
 
@@ -456,6 +626,24 @@ mod tests {
     fn a_view_whose_team_is_not_mirrored_falls_back() {
         let (t, _) = fixture();
         let views = std::collections::HashMap::from([("gone".to_string(), vec![sv("v2", "gone", Some(60))])]);
-        assert_eq!(launch_target(home("view", 60).as_ref(), &t, &views), LaunchTarget::Default);
+        assert_eq!(launch_target(home("view", 60).as_ref(), &t, &views, &[]), LaunchTarget::Default);
+    }
+
+    #[test]
+    fn a_mirrored_dashboard_home_launches_it() {
+        let (t, v) = fixture();
+        let d = crate::db::dashboards::Dashboard {
+            id: "d1".into(),
+            remote_id: Some(9),
+            name: "D".into(),
+            description: String::new(),
+            position: 0,
+            updated_at: String::new(),
+        };
+        assert_eq!(
+            launch_target(home("dashboard", 9).as_ref(), &t, &v, &[d.clone()]),
+            LaunchTarget::Dashboard("d1".into())
+        );
+        assert_eq!(launch_target(home("dashboard", 10).as_ref(), &t, &v, &[d]), LaunchTarget::Default);
     }
 }

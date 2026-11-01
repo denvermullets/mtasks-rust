@@ -4,6 +4,7 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{Message, TeamWebSection, View};
+use crate::db::dashboards::Dashboard;
 use crate::db::home_page::HomePage;
 use crate::db::models::Team;
 use crate::db::saved_views::SavedView;
@@ -22,6 +23,10 @@ pub struct SidebarState<'a> {
     pub saved_views: &'a HashMap<String, Vec<SavedView>>,
     pub open_view_id: Option<&'a str>,
     pub home: Option<&'a HomePage>,
+    /// Mirrored dashboards (any order; the view sorts them).
+    pub dashboards: &'a [Dashboard],
+    /// Local id of the open dashboard (`View::Dashboard`), highlighted in its row.
+    pub open_dashboard_id: Option<&'a str>,
 }
 
 pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
@@ -37,6 +42,8 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         saved_views,
         open_view_id,
         home,
+        dashboards,
+        open_dashboard_id,
     } = state;
     let mut col = column![].spacing(0).width(Length::Fill);
 
@@ -49,6 +56,54 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         14,
     ));
     col = col.push(inbox_row(*current_view == View::Inbox, unread_count));
+
+    // Dashboards section: header with a "+" action; an empty state offers the
+    // same action when there are none. Disabled in read-only mode.
+    let new_dashboard = (!read_only).then_some(Message::OpenNewDashboard);
+    col = col.push(
+        row![]
+            .align_y(iced::Alignment::Center)
+            .push(section_header("DASHBOARDS"))
+            .push(iced::widget::horizontal_space())
+            .push(
+                button(text("+").size(14).color(t::text_muted()))
+                    .on_press_maybe(new_dashboard.clone())
+                    .padding([2, 14])
+                    .style(plain_row_style),
+            ),
+    );
+    if dashboards.is_empty() {
+        col = col.push(
+            button(text("New dashboard").size(13).color(if read_only {
+                t::text_muted()
+            } else {
+                t::text_secondary()
+            }))
+            .on_press_maybe(new_dashboard)
+            .padding([6, 14])
+            .width(Length::Fill)
+            .style(plain_row_style),
+        );
+    }
+    for d in ordered_dashboards(dashboards) {
+        let active = open_dashboard_id == Some(d.id.as_str());
+        col = col.push(
+            button(
+                row![text(&d.name).size(13).color(if active {
+                    t::text_primary()
+                } else {
+                    t::text_secondary()
+                })]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+                .push_maybe(is_home_dashboard(home, d).then(home_marker)),
+            )
+            .on_press(Message::OpenDashboard(d.id.clone()))
+            .padding([6, 14])
+            .width(Length::Fill)
+            .style(move |_theme: &Theme, _status| selected_row_style(active)),
+        );
+    }
 
     // Teams section. The archived toggle only appears once there's something
     // archived to reveal.
@@ -245,9 +300,21 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         .into()
 }
 
+/// Dashboards in sidebar order: server position, then id.
+pub fn ordered_dashboards(dashboards: &[Dashboard]) -> Vec<&Dashboard> {
+    let mut v: Vec<&Dashboard> = dashboards.iter().collect();
+    v.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.id.cmp(&b.id)));
+    v
+}
+
 /// True when `home` is this team. A team without a remote id never matches.
 pub fn is_home_team(home: Option<&HomePage>, team: &Team) -> bool {
     home.is_some_and(|h| h.matches_team(team))
+}
+
+/// True when `home` is this dashboard. One without a remote id never matches.
+pub fn is_home_dashboard(home: Option<&HomePage>, dashboard: &Dashboard) -> bool {
+    home.is_some_and(|h| h.matches_dashboard(dashboard))
 }
 
 /// True when `home` is this Saved view, by remote id or (chosen before its
@@ -423,7 +490,8 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_label, is_home_team, is_home_view};
+    use super::{badge_label, is_home_dashboard, is_home_team, is_home_view, ordered_dashboards};
+    use crate::db::dashboards::Dashboard;
     use crate::db::home_page::HomePage;
     use crate::db::models::Team;
     use crate::db::saved_views::SavedView;
@@ -475,12 +543,51 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_or_missing_home_marks_nothing() {
+    fn dashboard_home_marks_that_dashboard_only() {
+        let h = home("dashboard", 7);
+        let mut d = dash("a", 0);
+        d.remote_id = Some(7);
+        assert!(is_home_dashboard(Some(&h), &d));
+        d.remote_id = Some(8);
+        assert!(!is_home_dashboard(Some(&h), &d));
+        d.remote_id = None;
+        assert!(!is_home_dashboard(Some(&h), &d));
+        assert!(!is_home_dashboard(None, &d));
+        let t = home("team", 7);
+        d.remote_id = Some(7);
+        assert!(!is_home_dashboard(Some(&t), &d));
+    }
+
+    #[test]
+    fn dashboard_or_missing_home_marks_no_team_or_view() {
         let d = home("dashboard", 7);
         assert!(!is_home_team(Some(&d), &team(Some(7))));
         assert!(!is_home_view(Some(&d), &sv(Some(7))));
         assert!(!is_home_team(None, &team(Some(7))));
         assert!(!is_home_view(None, &sv(Some(7))));
+    }
+
+    fn dash(id: &str, position: i64) -> Dashboard {
+        Dashboard {
+            id: id.into(),
+            remote_id: None,
+            name: format!("name-{id}"),
+            description: String::new(),
+            position,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn dashboards_ordered_by_position_then_id() {
+        let ds = vec![dash("c", 2), dash("b", 1), dash("a", 1), dash("z", 0)];
+        let ids: Vec<&str> = ordered_dashboards(&ds).iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["z", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn no_dashboards_orders_to_nothing() {
+        assert!(ordered_dashboards(&[]).is_empty());
     }
 
     #[test]

@@ -66,6 +66,29 @@ pub fn handle_key_press(
     }
 }
 
+/// Keys bound only while a dashboard is showing: j/k and the arrows walk rows
+/// across groups, h/l jump between groups, Enter opens the focused issue.
+pub fn handle_dashboard_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match key {
+        Key::Character(c) => match c.as_str() {
+            "j" => Some(Message::FocusNextIssue),
+            "k" => Some(Message::FocusPrevIssue),
+            "h" => Some(Message::FocusPrevLane),
+            "l" => Some(Message::FocusNextLane),
+            _ => None,
+        },
+        Key::Named(keyboard::key::Named::Enter) => Some(Message::EditFocusedIssue),
+        Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::FocusNextIssue),
+        Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::FocusPrevIssue),
+        Key::Named(keyboard::key::Named::ArrowLeft) => Some(Message::FocusPrevLane),
+        Key::Named(keyboard::key::Named::ArrowRight) => Some(Message::FocusNextLane),
+        _ => None,
+    }
+}
+
 /// Keys bound only while the Inbox is showing. Checked before the global
 /// handler; `None` falls through to it.
 pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
@@ -345,5 +368,25 @@ mod tests {
         use keyboard::key::Named;
         assert!(arrow(Named::ArrowDown, false, true).is_none());
         assert!(arrow(Named::ArrowUp, false, true).is_none());
+    }
+}
+
+#[cfg(test)]
+mod dashboard_key_tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_keys_map_to_focus_and_open() {
+        let none = Modifiers::empty();
+        let ch = |c: &str| Key::Character(c.into());
+        assert!(matches!(handle_dashboard_key(&ch("j"), none), Some(Message::FocusNextIssue)));
+        assert!(matches!(handle_dashboard_key(&ch("k"), none), Some(Message::FocusPrevIssue)));
+        assert!(matches!(handle_dashboard_key(&ch("h"), none), Some(Message::FocusPrevLane)));
+        assert!(matches!(handle_dashboard_key(&ch("l"), none), Some(Message::FocusNextLane)));
+        assert!(matches!(
+            handle_dashboard_key(&Key::Named(keyboard::key::Named::Enter), none),
+            Some(Message::EditFocusedIssue)
+        ));
+        assert!(handle_dashboard_key(&ch("j"), Modifiers::SHIFT).is_none());
     }
 }

@@ -34,6 +34,14 @@ use crate::views::{
     team_list, team_members, team_picker, toast,
 };
 
+/// Where an issue detail opened from a dashboard returns to.
+#[derive(Debug, Clone, PartialEq)]
+struct DashboardOrigin {
+    dashboard_id: String,
+    /// The team selected before the detail switched to the issue's own team.
+    prev_team_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     // Navigation
@@ -75,18 +83,37 @@ pub enum Message {
     RevertSavedView,
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
+    ConfirmDeleteDashboard(String),
+    DeleteDashboardConfirmed,
+    ConfirmDeleteDashboardGroup(String),
+    DeleteDashboardGroupConfirmed,
     OpenRenameSavedView(String),
     DeleteSavedViewConfirmed,
     /// Make a Saved view (local id) the user's Home page.
     SetSavedViewAsHome(String),
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
+    /// Open a dashboard (its local id) from the sidebar.
+    OpenDashboard(String),
+    /// Move a dashboard group (local id) up or down.
+    MoveDashboardGroup(String, crate::db::dashboards::MoveDirection),
+    /// Pick a dashboard filter tab (Today / Week / Hot / Open).
+    SetDashboardFilter(crate::dashboard_eval::Filter),
+    SetDashboardSort(crate::dashboard_eval::Sort),
+    /// Local team id, or None for all teams.
+    SetDashboardTeam(Option<String>),
+    SetDashboardStatus(Option<String>),
+    /// Dashboard header: pick an assignee (or Unassigned); None clears it.
+    SetDashboardAssignee(Option<crate::dashboard_eval::AssigneeFilter>),
+    SetDashboardLabel(Option<String>),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
     ToggleTeamMenu(String),
     /// Make a team's board the user's Home page (local UUID).
     SetTeamAsHome(String),
+    /// Make a dashboard the user's Home page (local UUID).
+    SetDashboardAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
     /// Open the read-only members panel for a team (local UUID).
@@ -188,6 +215,9 @@ pub enum Message {
     OpenIssueDetail(String),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
+    BackToDashboard,
+    /// Restore the open dashboard's header and focus to the defaults.
+    ResetDashboard,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
     /// Step the open picker's link kind (Tab forward, Shift+Tab back).
@@ -256,6 +286,8 @@ pub enum Message {
     // Header bar
     /// Header search box changed; filters the current view's items.
     HeaderSearchChanged(String),
+    /// Dashboard header: flip the Mine toggle.
+    ToggleDashboardMine,
     /// Focus the header search box (Cmd+F).
     FocusSearch,
     /// "Display" button: open the display-options popover.
@@ -270,6 +302,24 @@ pub enum Message {
     SaveViewNameChanged(String),
     /// Create the Saved view from the current board state.
     SaveViewSubmit,
+    /// Sidebar "New dashboard": open the create modal.
+    OpenNewDashboard,
+    /// Opens the rename/description modal for the dashboard with this local id.
+    OpenEditDashboard(String),
+    EditDashboardSubmit,
+    NewDashboardNameChanged(String),
+    NewDashboardDescriptionChanged(String),
+    NewDashboardSubmit,
+    /// Dashboard "Add group" modal (state in `App::group_form`).
+    OpenNewGroup,
+    /// Open the group modal pre-filled for the group (local id).
+    OpenEditGroup(String),
+    GroupNameChanged(String),
+    GroupDescriptionChanged(String),
+    GroupColorPicked(String),
+    GroupToggleSource(crate::db::dashboards::SourceType, i64),
+    GroupSetIncludeAll(crate::db::dashboards::SourceType, i64, bool),
+    GroupSubmit,
     /// Inert click target (swallows clicks inside a popover).
     Noop,
     SetViewMode(ViewMode),
@@ -277,6 +327,8 @@ pub enum Message {
     ToggleViewMode,
     /// List mode: collapse/expand the section with this title (header click).
     ToggleSection(String),
+    /// Collapse/expand a dashboard group (its local id) on the open dashboard.
+    ToggleDashboardGroup(String),
     /// List mode `c`: collapse/expand the focused section.
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
@@ -464,8 +516,18 @@ pub enum Modal {
     DeleteRecurringConfirm(String),
     /// Confirm deleting a Saved view (local id) from the sidebar.
     DeleteSavedViewConfirm(String),
+    DeleteDashboardConfirm(String),
+    DeleteDashboardGroupConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
     SaveView,
+    /// "New dashboard" form; state in `App::dashboard_form`.
+    NewDashboard,
+    /// Rename/description form; target id in `DashboardForm::editing`.
+    EditDashboard,
+    /// "Add group" form on the open dashboard; state in `App::group_form`.
+    NewGroup,
+    /// The same form pre-filled to edit a group (local id).
+    EditGroup(String),
     /// Name prompt for renaming a Saved view (local id).
     RenameSavedView(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
@@ -584,6 +646,25 @@ pub enum View {
     /// Notification Inbox. Not team-scoped, but unlike `MyIssues` it loads no
     /// cross-team issue data (the per-team data stays as is).
     Inbox,
+    /// A dashboard (local id). Cross-team like `MyIssues`: the mirror data of
+    /// every active team is loaded, and the selected team is left alone.
+    Dashboard(String),
+}
+
+impl View {
+    /// Views whose data is every active team's (see `App::load_cross_team`).
+    fn is_cross_team(&self) -> bool {
+        matches!(self, View::MyIssues | View::Dashboard(_))
+    }
+
+    /// An open dashboard that a pull (or a local delete) removed falls back to
+    /// the default board; every other view is unchanged.
+    fn without_missing_dashboard(self, dashboards: &[crate::db::dashboards::Dashboard]) -> View {
+        match self {
+            View::Dashboard(id) if !dashboards.iter().any(|d| d.id == id) => View::Board,
+            other => other,
+        }
+    }
 }
 
 /// Sort key for the Projects table (mirrors the Rails index sort options).
@@ -639,8 +720,40 @@ impl SortDir {
     }
 }
 
+/// Dashboard name/description modal state; the rename ticket reuses it.
+#[derive(Debug, Default, Clone)]
+pub struct DashboardForm {
+    /// Local id of the dashboard being edited (None when creating).
+    pub editing: Option<String>,
+    pub name: String,
+    pub description: String,
+    /// Inline validation error under the name field.
+    pub error: Option<&'static str>,
+}
+
+/// Dashboard "Add group" modal state: the draft plus an inline name error.
+#[derive(Debug, Default, Clone)]
+pub struct GroupForm {
+    pub draft: crate::db::dashboards::GroupDraft,
+    pub error: Option<&'static str>,
+}
+
 pub struct App {
     teams: Vec<Team>,
+    /// Mirrored dashboards for the sidebar (reloaded with the rest after a sync).
+    dashboards: Vec<crate::db::dashboards::Dashboard>,
+    /// State of the dashboard name/description modal (create now, rename later).
+    dashboard_form: DashboardForm,
+    /// State of the dashboard "Add group" modal.
+    group_form: GroupForm,
+    /// The open dashboard's groups with their sources (reloaded with the mirror).
+    dashboard_groups: Vec<crate::dashboard_eval::GroupConfig>,
+    /// Header state of the open dashboard. Per-dashboard memory is a later ticket.
+    dashboard_header: crate::dashboard_eval::Header,
+    /// Collapsed group ids per dashboard, for the session.
+    collapsed_dashboard_groups: crate::views::dashboard::CollapsedGroups,
+    /// Header state and focus parked per dashboard (session only).
+    dashboard_sessions: crate::dashboard_session::Sessions,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -680,6 +793,8 @@ pub struct App {
     detail_from_my_issues: bool,
     /// The open issue detail was reached from the Inbox (Back returns there).
     detail_from_inbox: bool,
+    /// The open issue detail was reached from a dashboard (Back returns there).
+    detail_from_dashboard: Option<DashboardOrigin>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -791,6 +906,14 @@ impl App {
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
             saved_views: self.palette_saved_views(),
+            dashboards: self
+                .dashboards
+                .iter()
+                .map(|d| crate::palette_results::SearchableDashboard {
+                    id: d.id.clone(),
+                    name: d.name.clone(),
+                })
+                .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
         }
     }
@@ -819,7 +942,7 @@ impl App {
     /// another team (or we are on My Issues, whose data is mixed), select its
     /// team like a sidebar click, so the sidebar follows and its data is loaded.
     fn select_team_for_palette(&mut self, team_id: &str) -> Task<Message> {
-        if self.selected_team_id.as_deref() == Some(team_id) && self.view != View::MyIssues {
+        if self.selected_team_id.as_deref() == Some(team_id) && !self.view.is_cross_team() {
             return Task::none();
         }
         self.expanded_teams.insert(team_id.to_string());
@@ -852,13 +975,21 @@ impl App {
         let conn = self.db();
         self.teams = queries::all_teams(&conn).unwrap_or_default();
         self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
+        self.dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+
+        let kept = self.view.clone().without_missing_dashboard(&self.dashboards);
+        if kept != self.view {
+            self.view = kept;
+            self.focused_lane = 0;
+            self.focused_issue = 0;
+        }
 
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
         }
 
-        if self.view == View::MyIssues {
+        if self.view.is_cross_team() {
             self.load_cross_team(&conn);
         } else if let Some(ref team_id) = self.selected_team_id {
             self.lanes = queries::lanes_for_team(&conn, team_id).unwrap_or_default();
@@ -874,13 +1005,18 @@ impl App {
             self.issue_labels.clear();
         }
 
+        self.reload_dashboard_config(&conn);
         self.reload_recurring(&conn);
         self.reload_detail_origin(&conn);
         self.refresh_open_view();
 
         // Filters are global but hold per-team ids; drop the ones this data
         // doesn't contain (My Issues loads every team, so its ids all stay).
+        // Skipped while a dashboard-opened detail is up: the selected team is
+        // temporarily the issue's, and pruning would drop the board filters of
+        // the team that was selected before.
         if self.selected_team_id.is_some()
+            && self.detail_from_dashboard.is_none()
             && self.prune_board_filters()
         {
             if let Err(e) = config::save(&self.config) {
@@ -919,10 +1055,85 @@ impl App {
         }
     }
 
+    /// Re-read the open dashboard's groups and sources from the mirror.
+    fn reload_dashboard_config(&mut self, conn: &rusqlite::Connection) {
+        use crate::db::dashboards;
+        self.dashboard_groups = match &self.view {
+            View::Dashboard(id) => dashboards::groups_for(conn, id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|group| crate::dashboard_eval::GroupConfig {
+                    sources: dashboards::sources_for(conn, &group.id).unwrap_or_default(),
+                    group,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+    }
+
+    /// The open dashboard evaluated over the loaded cross-team data.
+    fn dashboard_evaluation(&self) -> crate::dashboard_eval::Evaluation<'_> {
+        crate::dashboard_eval::evaluate(&crate::dashboard_eval::Input {
+            groups: &self.dashboard_groups,
+            mirror: crate::dashboard_eval::Mirror {
+                teams: &self.teams,
+                projects: &self.projects,
+                labels: &self.labels,
+                lanes: &self.lanes,
+                members: &self.members,
+                issues: &self.issues,
+                issue_labels: &self.issue_labels,
+            },
+            current_user_remote_id: self.config.current_user_remote_id,
+            today: chrono::Local::now().date_naive(),
+            header: crate::dashboard_eval::Header {
+                search: self.active_search().to_string(),
+                ..self.dashboard_header.clone()
+            },
+        })
+    }
+
     /// Switch to `view`, reloading data when crossing in or out of the
-    /// cross-team My Issues view (its data replaces the per-team data).
+    /// cross-team views (their data replaces the per-team data).
+    /// Remove a dashboard locally and queue its server delete if it was pushed.
+    fn delete_dashboard(&mut self, id: &str) {
+        match crate::db::dashboards::delete_local(&self.db(), id) {
+            Ok(Some(payload)) => {
+                self.enqueue_sync(
+                    crate::db::dashboards::ENTITY_TYPE,
+                    id,
+                    "delete",
+                    Some(payload.as_str()),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[dashboards] delete failed: {e}"),
+        }
+        self.reload_data();
+    }
+
+    /// Remove a dashboard group locally and queue its server delete if it was pushed.
+    fn delete_dashboard_group(&mut self, id: &str) {
+        match crate::db::dashboards::delete_group_local(&self.db(), id) {
+            Ok(Some(payload)) => {
+                self.enqueue_sync(
+                    crate::db::dashboards::GROUP_ENTITY_TYPE,
+                    id,
+                    "delete",
+                    Some(payload.as_str()),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[dashboards] delete group failed: {e}"),
+        }
+        self.focused_lane = 0;
+        self.focused_issue = 0;
+        self.reload_data();
+    }
+
     fn switch_view(&mut self, view: View) {
-        let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
+        let crossing = self.view.is_cross_team() != view.is_cross_team()
+            || matches!(view, View::Dashboard(_));
         self.view = view;
         self.composer_focused = false;
         self.retain_open_view();
@@ -938,6 +1149,39 @@ impl App {
             self.focused_issue = 0;
             self.reload_data();
         }
+        self.restore_dashboard_session();
+    }
+
+    /// Park the open dashboard's header (with its search text) and focus.
+    fn stash_dashboard_session(&mut self) {
+        let View::Dashboard(id) = &self.view else {
+            return;
+        };
+        let session = crate::dashboard_session::Session {
+            header: crate::dashboard_eval::Header {
+                search: self.active_search().to_string(),
+                ..self.dashboard_header.clone()
+            },
+            focused_lane: self.focused_lane,
+            focused_issue: self.focused_issue,
+        };
+        let id = id.clone();
+        self.dashboard_sessions.save(&id, session);
+    }
+
+    /// Entering a dashboard: load its parked header, search text and focus.
+    fn restore_dashboard_session(&mut self) {
+        let View::Dashboard(id) = &self.view else {
+            return;
+        };
+        let session = self.dashboard_sessions.restore(id);
+        self.search_query = session.header.search.clone();
+        self.search_view = self.view.clone();
+        self.dashboard_header = session.header;
+        self.focused_lane = session.focused_lane;
+        self.focused_issue = session.focused_issue;
+        // The parked focus may point past rows or groups that went away.
+        self.clamp_focus();
     }
 
     /// Re-read the selected team's Recurring issue rows from the mirror.
@@ -951,7 +1195,7 @@ impl App {
 
     fn reload_recurring(&mut self, conn: &rusqlite::Connection) {
         self.recurring_rows = match &self.selected_team_id {
-            Some(team_id) if self.view != View::MyIssues => {
+            Some(team_id) if !self.view.is_cross_team() => {
                 crate::db::recurring_issues::list_rows(conn, team_id).unwrap_or_default()
             }
             _ => Vec::new(),
@@ -1333,6 +1577,7 @@ impl App {
                     self.commit_issue_detail();
                     self.detail_from_my_issues = false;
                     self.detail_from_inbox = false;
+                    self.detail_from_dashboard = None;
                 }
                 self.view = View::Board;
                 self.focused_lane = 0;
@@ -1396,8 +1641,18 @@ impl App {
             &self.issues,
             &self.projects,
         );
+        if let View::Dashboard(id) = &self.view {
+            if let Some(d) = self.dashboards.iter().find(|d| d.id == *id) {
+                crumbs.push(d.name.clone());
+            }
+        }
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "My Issues".into());
+        }
+        if let (Some(o), View::IssueDetail(_)) = (&self.detail_from_dashboard, &self.view) {
+            if let Some(d) = self.dashboards.iter().find(|d| d.id == o.dashboard_id) {
+                crumbs.insert(0, d.name.clone());
+            }
         }
         if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "Inbox".into());
@@ -1426,7 +1681,7 @@ impl App {
         let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
         let visible: usize = self.board_columns().iter().map(|c| c.issues.len()).sum();
         let narrowed = self.board_filters().count() > self.board_filters().assignees.len()
-            || !header::needle(self.active_search()).is_empty();
+            || !crate::search_match::needle(self.active_search()).is_empty();
         display::my_issues_empty_message(!ids.is_empty(), visible, narrowed)
     }
 
@@ -1436,6 +1691,7 @@ impl App {
             self.view,
             View::Board
                 | View::MyIssues
+                | View::Dashboard(_)
                 | View::ProjectList
                 | View::ProjectDetail(_)
                 | View::Roadmap
@@ -1456,6 +1712,19 @@ impl App {
     /// Board columns for the current display options, filters and search.
     /// Focus indices (`focused_lane`/`focused_issue`) index into these.
     fn board_columns(&self) -> Vec<display::Column<'_>> {
+        if matches!(self.view, View::Dashboard(_)) {
+            return self
+                .dashboard_evaluation()
+                .groups
+                .into_iter()
+                .map(|g| display::Column {
+                    title: g.group.name.clone(),
+                    lane_icon: None,
+                    issues: g.issues,
+                    sections: Vec::new(),
+                })
+                .collect();
+        }
         let my = self.view == View::MyIssues;
         let data = display::Data {
             team: if my { None } else { self.selected_team() },
@@ -1468,7 +1737,7 @@ impl App {
             labels: &self.labels,
             issue_labels: &self.issue_labels,
         };
-        let needle = header::needle(self.active_search());
+        let needle = crate::search_match::needle(self.active_search());
         if my {
             let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
             let filters = display::my_issues_filters(self.board_filters(), &ids, &self.lanes);
@@ -1515,9 +1784,30 @@ impl App {
         }
     }
 
+    /// Whether j/k/h/l use list-mode navigation: the list display mode, or a
+    /// dashboard (always a list of groups).
+    fn list_nav_active(&self) -> bool {
+        matches!(self.view, View::Dashboard(_)) || self.board_display().view_mode == ViewMode::List
+    }
+
     /// Per-section counts for list-mode navigation: collapsed sections count
     /// as empty so j/k and h/l skip their hidden rows.
     fn list_nav_counts(&self) -> Vec<usize> {
+        if let View::Dashboard(did) = &self.view {
+            let collapsed = self.collapsed_dashboard_groups.get(did);
+            return self
+                .dashboard_evaluation()
+                .groups
+                .iter()
+                .map(|g| {
+                    if collapsed.is_some_and(|c| c.contains(&g.group.id)) {
+                        0
+                    } else {
+                        g.issues.len()
+                    }
+                })
+                .collect();
+        }
         self.board_columns()
             .iter()
             .map(|c| {
@@ -1534,6 +1824,40 @@ impl App {
     /// view. Positions come from fixed element heights (see `scroll`); the
     /// current offset and viewport height come from `Message::Scrolled`.
     fn scroll_to_focus(&mut self) -> Task<Message> {
+        if let View::Dashboard(did) = &self.view {
+            let collapsed = self.collapsed_dashboard_groups.get(did);
+            let groups: Vec<crate::views::dashboard::SpanGroup> = self
+                .dashboard_evaluation()
+                .groups
+                .iter()
+                .map(|g| crate::views::dashboard::SpanGroup {
+                    len: g.issues.len(),
+                    collapsed: collapsed.is_some_and(|c| c.contains(&g.group.id)),
+                })
+                .collect();
+            if self.focused_issue >= groups.get(self.focused_lane).map_or(0, |g| g.len)
+                || groups[self.focused_lane].collapsed
+            {
+                return Task::none();
+            }
+            let (top, height) =
+                crate::views::dashboard::focused_span(&groups, self.focused_lane, self.focused_issue);
+            let key = issue_list::SCROLL_KEY;
+            let (offset, viewport) = self
+                .scroll_state
+                .get(&key)
+                .copied()
+                .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+            let new = scroll::offset_to_reveal(top, height, offset, viewport);
+            if (new - offset).abs() < 0.5 {
+                return Task::none();
+            }
+            self.scroll_state.insert(key, (new, viewport));
+            return scrollable::scroll_to(
+                crate::views::dashboard::scroll_id(),
+                scrollable::AbsoluteOffset { x: 0.0, y: new },
+            );
+        }
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
@@ -1621,20 +1945,8 @@ impl App {
             .iter()
             .map(|c| c.issues.len())
             .collect();
-        if counts.is_empty() {
-            self.focused_lane = 0;
-            self.focused_issue = 0;
-            return;
-        }
-        if self.focused_lane >= counts.len() {
-            self.focused_lane = counts.len() - 1;
-        }
-        let count = counts[self.focused_lane];
-        if count == 0 {
-            self.focused_issue = 0;
-        } else if self.focused_issue >= count {
-            self.focused_issue = count - 1;
-        }
+        (self.focused_lane, self.focused_issue) =
+            clamped_focus(&counts, self.focused_lane, self.focused_issue);
     }
 
     /// Persist the display/filter settings and re-validate board focus.
@@ -1658,7 +1970,7 @@ impl App {
             _ => 0,
         };
         self.board_filters().count() - ignored
-            + usize::from(!header::needle(self.active_search()).is_empty())
+            + usize::from(!crate::search_match::needle(self.active_search()).is_empty())
     }
 
     /// The header's view actions on an open view on the Board: Update view, Save
@@ -1708,6 +2020,9 @@ impl App {
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
+        if let View::Dashboard(dashboard_id) = self.view.clone() {
+            return self.open_issue_from_dashboard(dashboard_id, issue);
+        }
         if self.view == View::MyIssues {
             self.selected_team_id = Some(issue.team_id.clone());
             self.view = View::Board;
@@ -1715,6 +2030,38 @@ impl App {
             self.detail_from_my_issues = true;
         }
         self.open_issue_detail(&issue)
+    }
+
+    /// Open `issue` from a dashboard: select its own team (like My Issues) so
+    /// the detail is that team's, remembering the dashboard and the team that
+    /// was selected before, so Back restores both.
+    fn open_issue_from_dashboard(&mut self, dashboard_id: String, issue: Issue) -> Task<Message> {
+        // The view is about to stop being a dashboard, which skips the stash
+        // `update` does afterwards: park the focus now (a click sets it and
+        // opens the issue in the same message).
+        self.stash_dashboard_session();
+        self.detail_from_dashboard = Some(DashboardOrigin {
+            dashboard_id,
+            prev_team_id: self.selected_team_id.clone(),
+        });
+        self.selected_team_id = Some(issue.team_id.clone());
+        self.view = View::Board;
+        self.reload_data();
+        self.open_issue_detail(&issue)
+    }
+
+    /// Leave an issue detail opened from a dashboard: put the previously
+    /// selected team back and return to the dashboard. False when the detail
+    /// didn't come from one.
+    fn back_to_dashboard(&mut self) -> bool {
+        let Some(origin) = self.detail_from_dashboard.take() else {
+            return false;
+        };
+        self.commit_issue_detail();
+        self.issue_detail = None;
+        self.selected_team_id = origin.prev_team_id;
+        self.switch_view(View::Dashboard(origin.dashboard_id));
+        true
     }
 
     /// Open `issue` from the Inbox: select its own team (like My Issues) so the
@@ -2241,6 +2588,10 @@ impl App {
                     .to_string();
                 self.push_toast(summary.toast(&name), ToastKind::Info, false);
                 if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
+                    if self.back_to_dashboard() {
+                        self.reload_data();
+                        return;
+                    }
                     let back = if self.detail_from_my_issues {
                         View::MyIssues
                     } else if self.detail_from_inbox {
@@ -2250,6 +2601,7 @@ impl App {
                     };
                     self.detail_from_my_issues = false;
                     self.detail_from_inbox = false;
+                    self.detail_from_dashboard = None;
                     self.issue_detail = None;
                     self.switch_view(back);
                 }
@@ -2459,15 +2811,21 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        let dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         // Open the stored Home page; anything unresolvable falls back to the
         // first team's board.
-        let launch = crate::db::home_page::launch_target(home_page.as_ref(), &teams, &saved_views);
-        let (selected_team_id, launch_view) = match launch {
-            crate::db::home_page::LaunchTarget::Team(id) => (Some(id), None),
-            crate::db::home_page::LaunchTarget::View { view_id, team_id } => {
-                (Some(team_id), Some(view_id))
-            }
-            crate::db::home_page::LaunchTarget::Default => (default_team_id(&teams), None),
+        let launch = crate::db::home_page::launch_target(
+            home_page.as_ref(),
+            &teams,
+            &saved_views,
+            &dashboards,
+        );
+        use crate::db::home_page::LaunchTarget;
+        let (selected_team_id, launch_view, launch_dashboard) = match launch {
+            LaunchTarget::Team(id) => (Some(id), None, None),
+            LaunchTarget::View { view_id, team_id } => (Some(team_id), Some(view_id), None),
+            LaunchTarget::Dashboard(id) => (default_team_id(&teams), None, Some(id)),
+            LaunchTarget::Default => (default_team_id(&teams), None, None),
         };
 
         let (lanes, issues, projects, members, labels, issue_labels) =
@@ -2506,6 +2864,7 @@ impl App {
             detail_deps: Default::default(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
+            detail_from_dashboard: None,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
@@ -2544,6 +2903,13 @@ impl App {
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views,
+            dashboards,
+            dashboard_form: DashboardForm::default(),
+            group_form: GroupForm::default(),
+            dashboard_groups: Vec::new(),
+            dashboard_header: Default::default(),
+            collapsed_dashboard_groups: Default::default(),
+            dashboard_sessions: Default::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -2560,9 +2926,10 @@ impl App {
             sync_paused_auth: false,
         };
 
-        let task = match launch_view {
-            Some(view_id) => app.update_inner(Message::OpenSavedView(view_id)),
-            None => Task::none(),
+        let task = match (launch_view, launch_dashboard) {
+            (Some(view_id), _) => app.update_inner(Message::OpenSavedView(view_id)),
+            (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
+            _ => Task::none(),
         };
         (app, task)
     }
@@ -2730,6 +3097,7 @@ impl App {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
         let task = self.update_inner(message);
+        self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
         let task = Task::batch([task, self.request_visible_images()]);
@@ -2743,7 +3111,7 @@ impl App {
         // My Issues spans several teams: create and lane moves need a single
         // team's lanes, so they're no-ops here. Priority and delete act on the
         // issue's own row/team, so they work cross-team.
-        if self.view == View::MyIssues
+        if self.view.is_cross_team()
             && matches!(
                 message,
                 Message::CreateIssue | Message::MoveIssueNextLane | Message::MoveIssuePrevLane
@@ -2783,6 +3151,18 @@ impl App {
                     if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers) {
                         return self.update(msg);
                     }
+                }
+                if matches!(self.view, View::Dashboard(_)) && !modal_open {
+                    if let Some(msg) = keys::handle_dashboard_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
+                if matches!(self.view, View::Dashboard(_))
+                    && !modal_open
+                    && modifiers.is_empty()
+                    && matches!(&key, iced::keyboard::Key::Character(c) if c.as_str() == "c")
+                {
+                    return self.update(Message::ToggleFocusedSection);
                 }
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
@@ -2866,6 +3246,223 @@ impl App {
             Message::SaveViewNameChanged(name) => {
                 self.save_view_name = name;
                 self.save_view_error = None;
+            }
+
+            Message::OpenNewDashboard => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't create a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.dashboard_form = DashboardForm::default();
+                    self.modal = Modal::NewDashboard;
+                    return text_input::focus(dashboard_name_input_id());
+                }
+            }
+
+            Message::OpenEditDashboard(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't edit a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Ok(Some(d)) = crate::db::dashboards::get(&self.db(), &id) {
+                    self.dashboard_form = DashboardForm {
+                        editing: Some(d.id),
+                        name: d.name,
+                        description: d.description,
+                        error: None,
+                    };
+                    self.modal = Modal::EditDashboard;
+                    return text_input::focus(dashboard_name_input_id());
+                }
+            }
+
+            Message::EditDashboardSubmit => {
+                if self.modal != Modal::EditDashboard {
+                    return Task::none();
+                }
+                let Some(id) = self.dashboard_form.editing.clone() else {
+                    return Task::none();
+                };
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't edit a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::update_local(
+                    &self.db(),
+                    &id,
+                    &self.dashboard_form.name,
+                    &self.dashboard_form.description,
+                ) {
+                    Ok(_) => {
+                        self.modal = Modal::None;
+                        self.dashboard_form = DashboardForm::default();
+                        self.reload_data();
+                    }
+                    Err(crate::db::dashboards::CreateError::Name(e)) => {
+                        self.dashboard_form.error = Some(e.message());
+                    }
+                    Err(crate::db::dashboards::CreateError::Db(e)) => {
+                        eprintln!("[dashboards] update failed: {e}");
+                        self.dashboard_form.error = Some("Couldn't save the dashboard");
+                    }
+                }
+            }
+
+            Message::NewDashboardNameChanged(name) => {
+                self.dashboard_form.name = name;
+                self.dashboard_form.error = None;
+            }
+
+            Message::NewDashboardDescriptionChanged(desc) => {
+                self.dashboard_form.description = desc;
+            }
+
+            Message::NewDashboardSubmit => {
+                if self.modal != Modal::NewDashboard {
+                    return Task::none();
+                }
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't create a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::create_local(
+                    &self.db(),
+                    &self.dashboard_form.name,
+                    &self.dashboard_form.description,
+                ) {
+                    Ok(d) => {
+                        self.modal = Modal::None;
+                        self.dashboard_form = DashboardForm::default();
+                        self.reload_data();
+                        return self.update_inner(Message::OpenDashboard(d.id));
+                    }
+                    Err(crate::db::dashboards::CreateError::Name(e)) => {
+                        self.dashboard_form.error = Some(e.message());
+                    }
+                    Err(crate::db::dashboards::CreateError::Db(e)) => {
+                        eprintln!("[dashboards] create failed: {e}");
+                        self.dashboard_form.error = Some("Couldn't create the dashboard");
+                    }
+                }
+            }
+
+            Message::OpenNewGroup => {
+                if !matches!(self.view, View::Dashboard(_)) {
+                    return Task::none();
+                }
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't add a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.group_form = GroupForm::default();
+                    self.modal = Modal::NewGroup;
+                    return text_input::focus(crate::views::group_form::name_input_id());
+                }
+            }
+
+            Message::OpenEditGroup(group_id) => {
+                if !matches!(self.view, View::Dashboard(_)) {
+                    return Task::none();
+                }
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't edit a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::group_draft(&self.db(), &group_id) {
+                    Ok(Some(draft)) => {
+                        self.group_form = GroupForm { draft, error: None };
+                        self.modal = Modal::EditGroup(group_id);
+                        return text_input::focus(crate::views::group_form::name_input_id());
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[dashboards] group read failed: {e}"),
+                }
+            }
+
+            Message::GroupNameChanged(name) => {
+                self.group_form.draft.name = name;
+                self.group_form.error = None;
+            }
+
+            Message::GroupDescriptionChanged(desc) => {
+                self.group_form.draft.description = desc;
+            }
+
+            Message::GroupColorPicked(hex) => {
+                self.group_form.draft.color = hex;
+            }
+
+            Message::GroupToggleSource(kind, remote_id) => {
+                self.group_form.draft.toggle_source(kind, remote_id);
+            }
+
+            Message::GroupSetIncludeAll(kind, remote_id, on) => {
+                self.group_form.draft.set_include_all(kind, remote_id, on);
+            }
+
+            Message::GroupSubmit => {
+                use crate::db::dashboards::{create_group_local, update_group_local, GroupError};
+                let editing = match &self.modal {
+                    Modal::NewGroup => None,
+                    Modal::EditGroup(id) => Some(id.clone()),
+                    _ => return Task::none(),
+                };
+                let View::Dashboard(dashboard_id) = self.view.clone() else {
+                    return Task::none();
+                };
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't change a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                let saved = match &editing {
+                    Some(id) => update_group_local(&self.db(), id, &self.group_form.draft),
+                    None => create_group_local(&self.db(), &dashboard_id, &self.group_form.draft),
+                };
+                match saved {
+                    Ok(_) => {
+                        self.modal = Modal::None;
+                        self.group_form = GroupForm::default();
+                        self.reload_data();
+                    }
+                    Err(GroupError::Name(e)) => self.group_form.error = Some(e.message()),
+                    Err(GroupError::NoDashboard) => {
+                        self.group_form.error = Some("This dashboard no longer exists");
+                    }
+                    Err(GroupError::NoGroup) => {
+                        self.group_form.error = Some("This group no longer exists");
+                    }
+                    Err(GroupError::Db(e)) => {
+                        eprintln!("[dashboards] group create failed: {e}");
+                        self.group_form.error = Some("Couldn't add the group");
+                    }
+                }
             }
 
             Message::OpenRenameSavedView(view_id) => {
@@ -3032,6 +3629,51 @@ impl App {
                 }
             }
 
+            Message::ConfirmDeleteDashboard(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteDashboardConfirm(id);
+                }
+            }
+
+            Message::DeleteDashboardConfirmed => {
+                let Modal::DeleteDashboardConfirm(id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                self.delete_dashboard(&id);
+                if self.view == View::Dashboard(id) {
+                    return self.update_inner(Message::NavigateToView(View::Board));
+                }
+            }
+
+            Message::ConfirmDeleteDashboardGroup(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteDashboardGroupConfirm(id);
+                }
+            }
+
+            Message::DeleteDashboardGroupConfirmed => {
+                let Modal::DeleteDashboardGroupConfirm(id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                self.delete_dashboard_group(&id);
+            }
+
             Message::DeleteSavedViewConfirmed => {
                 let Modal::DeleteSavedViewConfirm(view_id) =
                     std::mem::replace(&mut self.modal, Modal::None)
@@ -3068,6 +3710,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 let from_my = self.view == View::MyIssues;
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
                     self.selected_team_id = Some(team_id);
@@ -3138,6 +3781,7 @@ impl App {
             Message::BackToInbox => {
                 self.commit_issue_detail();
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.issue_detail = None;
                 self.switch_view(View::Inbox);
             }
@@ -3152,6 +3796,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(View::Inbox);
                 let crate::db::notifications::BannerTarget::Notification(remote_id) = target else {
                     return Task::batch([focus, self.scroll_inbox_to_selection()]);
@@ -3205,11 +3850,86 @@ impl App {
                 return self.scroll_inbox_to_selection();
             }
 
+            Message::MoveDashboardGroup(group_id, direction) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't reorder groups",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::move_group(&self.db(), &group_id, direction) {
+                    Ok(true) => self.reload_data(),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[dashboards] move group failed: {e}"),
+                }
+            }
+
+            Message::OpenDashboard(id) => {
+                self.commit_issue_detail();
+                self.commit_project_detail();
+                self.detail_from_my_issues = false;
+                self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
+                self.switch_view(View::Dashboard(id));
+            }
+
+            Message::ResetDashboard => {
+                if let View::Dashboard(id) = self.view.clone() {
+                    self.dashboard_sessions.reset(&id);
+                    self.restore_dashboard_session();
+                }
+            }
+
+            Message::SetDashboardSort(sort) => {
+                self.dashboard_header.sort = sort;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardTeam(team) => {
+                self.dashboard_header.team = team;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardStatus(status) => {
+                self.dashboard_header.status = status;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardAssignee(pick) => {
+                self.dashboard_header.assignee = pick;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardLabel(label) => {
+                self.dashboard_header.label = label;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::ToggleDashboardMine => {
+                self.dashboard_header.mine = !self.dashboard_header.mine;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardFilter(filter) => {
+                self.dashboard_header.filter = filter;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
             Message::NavigateToView(view) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(view);
             }
 
@@ -3241,6 +3961,24 @@ impl App {
                     self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
                 } else {
                     self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
+                }
+            }
+
+            Message::SetDashboardAsHome(dashboard_id) => {
+                let found = self.dashboards.iter().find(|d| d.id == dashboard_id).map(|d| d.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(remote_id) = found {
+                    if let Err(e) =
+                        crate::db::home_page::set_dashboard_local(&self.db(), &dashboard_id, remote_id)
+                    {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
                 }
             }
 
@@ -3700,6 +4438,9 @@ impl App {
                 self.issue_detail = None;
                 self.switch_view(View::MyIssues);
             }
+            Message::BackToDashboard => {
+                self.back_to_dashboard();
+            }
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
@@ -3856,7 +4597,7 @@ impl App {
             }
 
             Message::FocusNextIssue | Message::FocusPrevIssue
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: j/k walk rows top-to-bottom across sections.
                 let counts = self.list_nav_counts();
@@ -3870,7 +4611,7 @@ impl App {
                 return self.scroll_to_focus();
             }
             Message::FocusNextLane | Message::FocusPrevLane
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: h/l jump to the next/previous non-empty section.
                 let counts = self.list_nav_counts();
@@ -3926,6 +4667,9 @@ impl App {
                 if matches!(self.view, View::Board | View::MyIssues) {
                     self.focused_issue = 0;
                     self.clamp_focus();
+                } else if matches!(self.view, View::Dashboard(_)) {
+                    self.focused_lane = 0;
+                    self.focused_issue = 0;
                 }
             }
             Message::FocusSearch => {
@@ -3949,6 +4693,25 @@ impl App {
             Message::ToggleSection(title) => {
                 if !self.collapsed_sections.remove(&title) {
                     self.collapsed_sections.insert(title);
+                }
+            }
+            Message::ToggleDashboardGroup(group_id) => {
+                if let View::Dashboard(did) = self.view.clone() {
+                    crate::views::dashboard::toggle_group(
+                        &mut self.collapsed_dashboard_groups,
+                        &did,
+                        &group_id,
+                    );
+                }
+            }
+            Message::ToggleFocusedSection if matches!(self.view, View::Dashboard(_)) => {
+                let gid = self
+                    .dashboard_evaluation()
+                    .groups
+                    .get(self.focused_lane)
+                    .map(|g| g.group.id.clone());
+                if let Some(gid) = gid {
+                    return self.update(Message::ToggleDashboardGroup(gid));
                 }
             }
             Message::ToggleFocusedSection => {
@@ -4076,6 +4839,7 @@ impl App {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
+                    PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
@@ -5432,6 +6196,11 @@ impl App {
             saved_views: &self.saved_views,
             open_view_id: self.open_view.as_ref().map(|v| v.view_id.as_str()),
             home: self.home_page.as_ref(),
+            dashboards: &self.dashboards,
+            open_dashboard_id: match &self.view {
+                View::Dashboard(id) => Some(id.as_str()),
+                _ => None,
+            },
         });
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
@@ -5439,7 +6208,7 @@ impl App {
         ];
 
         let search = self.active_search();
-        let needle = header::needle(search);
+        let needle = crate::search_match::needle(search);
         let header = header::view(
             self.breadcrumb(),
             search,
@@ -5455,6 +6224,11 @@ impl App {
                 .or_else(|| {
                     (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
                         .then_some(Message::BackToInbox)
+                })
+                .or_else(|| {
+                    (self.detail_from_dashboard.is_some()
+                        && matches!(self.view, View::IssueDetail(_)))
+                    .then_some(Message::BackToDashboard)
                 }),
             self.update_view_action(),
         );
@@ -5615,6 +6389,33 @@ impl App {
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
             View::RecurringIssues => crate::views::recurring_issues::view(&self.recurring_rows),
             View::Inbox => crate::views::inbox::view(&self.inbox),
+            View::Dashboard(ref id) => {
+                let evaluation = self.dashboard_evaluation();
+                crate::views::dashboard::view(
+                    self.dashboards.iter().find(|d| d.id == *id),
+                    &evaluation,
+                    board::CardData {
+                        teams: &self.teams,
+                        lanes: &self.lanes,
+                        members: &self.members,
+                        projects: &self.projects,
+                        issue_labels: &self.issue_labels,
+                        display: DisplayOptions::dashboard_rows(),
+                    },
+                    self.dashboard_header.clone(),
+                    &crate::views::dashboard::ViewState {
+                        collapsed: self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
+                        focused_group: self.focused_lane,
+                        focused_issue: self.focused_issue,
+                        read_only: self.sync_read_only,
+                        is_home: self
+                            .dashboards
+                            .iter()
+                            .find(|d| d.id == *id)
+                            .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
+                    },
+                )
+            }
         };
 
         let token_configured = self
@@ -5758,6 +6559,50 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::NewDashboard => iced::widget::stack![
+                base,
+                dashboard_form_modal(
+                    "New dashboard",
+                    "Create",
+                    Message::NewDashboardSubmit,
+                    &self.dashboard_form
+                )
+            ]
+            .into(),
+            Modal::EditDashboard => iced::widget::stack![
+                base,
+                dashboard_form_modal(
+                    "Edit dashboard",
+                    "Save",
+                    Message::EditDashboardSubmit,
+                    &self.dashboard_form
+                )
+            ]
+            .into(),
+            Modal::NewGroup => iced::widget::stack![
+                base,
+                crate::views::group_form::modal(
+                    &self.group_form.draft,
+                    &self.teams,
+                    &self.projects,
+                    &self.labels,
+                    self.group_form.error,
+                    false
+                )
+            ]
+            .into(),
+            Modal::EditGroup(_) => iced::widget::stack![
+                base,
+                crate::views::group_form::modal(
+                    &self.group_form.draft,
+                    &self.teams,
+                    &self.projects,
+                    &self.labels,
+                    self.group_form.error,
+                    true
+                )
+            ]
+            .into(),
             Modal::SaveView => iced::widget::stack![
                 base,
                 save_view_modal("Save view", &self.save_view_name, self.save_view_error)
@@ -5768,6 +6613,36 @@ impl App {
                 save_view_modal("Rename view", &self.save_view_name, self.save_view_error)
             ]
             .into(),
+            Modal::DeleteDashboardConfirm(id) => {
+                let name = self
+                    .dashboards
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default();
+                let body = format!(
+                    "Delete the dashboard \"{name}\" and its groups? Issues are not affected."
+                );
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Dashboard?", body, Message::DeleteDashboardConfirmed)
+                ]
+                .into()
+            }
+            Modal::DeleteDashboardGroupConfirm(id) => {
+                let name = self
+                    .dashboard_groups
+                    .iter()
+                    .find(|c| c.group.id == *id)
+                    .map(|c| c.group.name.clone())
+                    .unwrap_or_default();
+                let body = format!("Delete the group \"{name}\"? Issues are not affected.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Group?", body, Message::DeleteDashboardGroupConfirmed)
+                ]
+                .into()
+            }
             Modal::DeleteSavedViewConfirm(view_id) => {
                 let name = self
                     .saved_views
@@ -5911,6 +6786,9 @@ fn breadcrumb(
     if *view == View::Inbox {
         return vec!["Inbox".into()];
     }
+    if matches!(view, View::Dashboard(_)) {
+        return vec!["Dashboards".into()];
+    }
     let mut crumbs = vec![team
         .map(|t| t.identifier.clone())
         .unwrap_or_else(|| "JAIT".into())];
@@ -5936,7 +6814,7 @@ fn breadcrumb(
                 crumbs.push("Issues".into());
             }
         }
-        View::MyIssues | View::Inbox => {}
+        View::MyIssues | View::Inbox | View::Dashboard(_) => {}
     }
     crumbs
 }
@@ -6088,6 +6966,87 @@ fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
     delete_modal("Delete Comment?", body, Message::DeleteCommentConfirmed)
 }
 
+fn dashboard_name_input_id() -> text_input::Id {
+    text_input::Id::new("dashboard-name")
+}
+
+/// Name + optional description modal for dashboards (create now, rename later).
+fn dashboard_form_modal<'a>(
+    title: &'a str,
+    submit_label: &'a str,
+    submit: Message,
+    form: &'a DashboardForm,
+) -> Element<'a, Message> {
+    use iced::widget::{button, text};
+
+    let mut content = column![]
+        .spacing(12)
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(
+            text_input("Name", &form.name)
+                .id(dashboard_name_input_id())
+                .on_input(Message::NewDashboardNameChanged)
+                .on_submit(submit.clone())
+                .padding([6, 10])
+                .size(14)
+                .width(Length::Fixed(360.0)),
+        );
+    if let Some(e) = form.error {
+        content = content.push(text(e).size(12).color(t::danger()));
+    }
+    content = content
+        .push(
+            text_input("Description (optional)", &form.description)
+                .on_input(Message::NewDashboardDescriptionChanged)
+                .on_submit(submit.clone())
+                .padding([6, 10])
+                .size(14)
+                .width(Length::Fixed(360.0)),
+        )
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text(submit_label).size(14))
+                        .on_press(submit)
+                        .padding([8, 24])
+                        .style(button::primary),
+                )
+                .push(
+                    button(text("Cancel").size(14))
+                        .on_press(Message::CloseModal)
+                        .padding([8, 24])
+                        .style(button::secondary),
+                ),
+        );
+
+    let modal =
+        container(content)
+            .padding(28)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::bg_modal())),
+                border: iced::Border {
+                    color: t::border(),
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            });
+
+    container(modal)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                0.0, 0.0, 0.0, 0.7,
+            ))),
+            ..Default::default()
+        })
+        .into()
+}
+
 fn save_view_input_id() -> text_input::Id {
     text_input::Id::new("save-view-name")
 }
@@ -6215,8 +7174,32 @@ fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'
         .into()
 }
 
+/// Pull a focus position back onto a real row given each group's row count:
+/// the lane to the last group, the issue to the last row of that group.
+fn clamped_focus(counts: &[usize], lane: usize, issue: usize) -> (usize, usize) {
+    let Some(last) = counts.len().checked_sub(1) else {
+        return (0, 0);
+    };
+    let lane = lane.min(last);
+    let issue = match counts[lane] {
+        0 => 0,
+        n => issue.min(n - 1),
+    };
+    (lane, issue)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_focus_is_clamped_onto_a_real_row() {
+        // A group vanished: lane 3 of 2 groups lands on the last group.
+        assert_eq!(super::clamped_focus(&[2, 4], 3, 1), (1, 1));
+        // Rows shrank: issue 9 lands on the last row.
+        assert_eq!(super::clamped_focus(&[2, 4], 1, 9), (1, 3));
+        assert_eq!(super::clamped_focus(&[2, 0], 1, 5), (1, 0));
+        assert_eq!(super::clamped_focus(&[], 2, 5), (0, 0));
+    }
+
     #[test]
     fn comment_content_rule_allows_files_without_text() {
         assert!(!super::comment_has_content("", false));
@@ -6225,6 +7208,26 @@ mod tests {
     }
 
     use super::*;
+
+    fn dash(id: &str) -> crate::db::dashboards::Dashboard {
+        crate::db::dashboards::Dashboard {
+            id: id.into(),
+            remote_id: None,
+            name: id.into(),
+            description: String::new(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn open_dashboard_removed_by_a_pull_falls_back_to_the_board() {
+        let list = [dash("a")];
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&list), View::Dashboard("a".into()));
+        assert_eq!(View::Dashboard("gone".into()).without_missing_dashboard(&list), View::Board);
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&[]), View::Board);
+        assert_eq!(View::MyIssues.without_missing_dashboard(&[]), View::MyIssues);
+    }
 
     fn team(id: &str, archived: bool) -> Team {
         Team {
@@ -6296,7 +7299,7 @@ mod tests {
     fn issue_search_matches_title_or_identifier() {
         let jait = team("JAIT", false);
         let i = issue("i1", "Header bar — Search", 184);
-        let m = |q: &str| header::issue_matches(&i, Some(&jait), &header::needle(q));
+        let m = |q: &str| crate::search_match::issue_matches(&i, Some(&jait), &crate::search_match::needle(q));
         assert!(m(""));
         assert!(m("  HEADER "));
         assert!(m("jait-184"));

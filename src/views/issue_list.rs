@@ -82,7 +82,7 @@ fn cell_text<'a>(s: impl text::IntoFragment<'a>, width: f32) -> Element<'a, Mess
 }
 
 /// Column captions, in the same order/widths as `issue_row`.
-fn header_row<'a>(d: &DisplayOptions) -> Element<'a, Message> {
+pub fn header_row<'a>(d: &DisplayOptions) -> Element<'a, Message> {
     let mut r: Row<'a, Message> = row![].spacing(12).align_y(Alignment::Center);
     if d.shows(CardProperty::Priority) {
         r = r.push(cell_text("", W_PRIORITY));
@@ -217,7 +217,7 @@ pub fn view<'a>(
     .into()
 }
 
-fn issue_row<'a>(
+pub fn issue_row<'a>(
     issue: &'a Issue,
     data: &CardData<'a>,
     focused: bool,
