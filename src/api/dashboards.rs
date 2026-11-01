@@ -43,6 +43,26 @@ pub async fn delete_group(client: &ApiClient, dashboard_remote_id: i64, id: i64)
     client.delete(&format!("api/v1/dashboards/{dashboard_remote_id}/groups/{id}")).await
 }
 
+
+/// `PATCH /api/v1/dashboards/:dashboard_id/groups/reorder`: every group id in
+/// display order. Returns the dashboard's groups in the order the server applied.
+pub async fn reorder_groups(
+    client: &ApiClient,
+    dashboard_id: i64,
+    group_ids: &[i64],
+) -> Result<Vec<crate::db::dashboards::GroupIn>, ApiError> {
+    client
+        .patch(
+            &format!("api/v1/dashboards/{dashboard_id}/groups/reorder"),
+            &reorder_body(group_ids),
+        )
+        .await
+}
+
+fn reorder_body(group_ids: &[i64]) -> serde_json::Value {
+    serde_json::json!({ "ids": group_ids })
+}
+
 fn create_body(name: &str, description: &str) -> serde_json::Value {
     serde_json::json!({ "dashboard": { "name": name, "description": description } })
 }
@@ -99,6 +119,11 @@ pub fn group_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reorder_body_is_a_bare_ids_list() {
+        assert_eq!(reorder_body(&[3, 1, 2]), serde_json::json!({"ids": [3, 1, 2]}));
+    }
 
     #[test]
     fn group_body_sends_remote_ids_and_all_lists() {

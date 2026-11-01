@@ -434,6 +434,9 @@ async fn process(
         (dashboards::ENTITY_TYPE, "delete") => {
             dashboard_delete(client, entry.payload.as_deref()).await
         }
+        (dashboards::GROUP_ORDER_ENTITY_TYPE, "update") => {
+            dashboard_group_order(client, &entry.entity_id, entry_id).await
+        }
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -2766,6 +2769,52 @@ async fn dashboard_group_create(client: &ApiClient, entity_id: &str, entry_id: i
                 Err(e) => Outcome::LeavePending(e),
             }
         }
+        Err(e) => classify(&e),
+    }
+}
+
+// Group order: one coalesced entry per dashboard (see `dashboards::move_group`).
+
+fn dashboard_group_order_prep(
+    conn: &Connection,
+    entry_id: i64,
+    dashboard_id: &str,
+) -> Prep<dashboards::OrderPlan> {
+    match dashboards::plan_order_push(conn, entry_id, dashboard_id) {
+        Ok(dashboards::OrderPlan::Waiting(why)) => Prep::Done(Outcome::LeavePending(why.into())),
+        Ok(dashboards::OrderPlan::Gone) => Prep::Done(Outcome::DropAndLog(format!(
+            "dashboard {dashboard_id} or its groups missing locally"
+        ))),
+        Ok(ready) => Prep::Ready(ready),
+        Err(e) => Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    }
+}
+
+/// `PATCH /dashboards/:id/groups/reorder`. The response's order becomes the
+/// local positions. A 404 means the dashboard is gone: done.
+async fn dashboard_group_order(client: &ApiClient, dashboard_id: &str, entry_id: i64) -> Outcome {
+    let plan = match open() {
+        Ok(conn) => match dashboard_group_order_prep(&conn, entry_id, dashboard_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let dashboards::OrderPlan::Ready { dashboard_remote_id, group_remote_ids, payload } = plan else {
+        return Outcome::LeavePending("group order not ready".into());
+    };
+    match crate::api::dashboards::reorder_groups(client, dashboard_remote_id, &group_remote_ids).await {
+        Ok(returned) => match open() {
+            Ok(conn) => {
+                match dashboards::finish_order_push(&conn, entry_id, dashboard_id, &payload, &returned) {
+                    Ok(true) => Outcome::Success,
+                    Ok(false) => Outcome::LeavePending("group order changed while pushing".into()),
+                    Err(e) => Outcome::LeavePending(format!("db: {e}")),
+                }
+            }
+            Err(e) => Outcome::LeavePending(e),
+        },
+        Err(ApiError::NotFound(_)) => Outcome::Success,
         Err(e) => classify(&e),
     }
 }
@@ -8297,5 +8346,82 @@ mod tests {
             dashboard_group_create_prep(&conn, &gid),
             Prep::Done(Outcome::DropAndLog(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod group_order_live {
+    use super::*;
+
+    /// Live check of `dashboard_group_order` against local Rails (:3005), run
+    /// with `--ignored` and MTASKS_TEST_DATA_DIR pointed at a scratch dir, so
+    /// the engine's `open()` uses a scratch database. Creates a dashboard with
+    /// three groups, makes several quick local moves, drains the one queue
+    /// entry through the engine, reads the web order back, and always deletes
+    /// the dashboard.
+    #[tokio::test]
+    #[ignore]
+    async fn reorder_through_the_engine_matches_the_server() {
+        let (cfg, _) = crate::config::load();
+        let client = ApiClient::new(cfg.api_base_url.trim(), cfg.api_token.unwrap_or_default()).unwrap();
+        let created = crate::api::dashboards::create(&client, "zz order check", "").await.unwrap();
+        let outcome = run_live(&client, created.id).await;
+        crate::api::dashboards::delete(&client, created.id).await.unwrap();
+        outcome.unwrap();
+    }
+
+    async fn run_live(client: &ApiClient, dashboard: i64) -> Result<(), String> {
+        for name in ["one", "two", "three"] {
+            let body = serde_json::json!({"dashboard_group": {"name": name, "description": "",
+                "color": "#6366f1", "team_ids": [], "project_ids": [], "label_ids": [],
+                "all_team_ids": [], "all_project_ids": []}});
+            let _: crate::db::dashboards::GroupIn = client
+                .post(&format!("api/v1/dashboards/{dashboard}/groups"), &body)
+                .await
+                .map_err(|e| format!("create group: {e}"))?;
+        }
+        let conn = open()?;
+        let rows = crate::api::dashboards::list(client).await.map_err(|e| e.to_string())?;
+        dashboards::apply_snapshot(&conn, &rows).map_err(|e| e.to_string())?;
+        let d = dashboards::find_by_remote_id(&conn, dashboard).unwrap().unwrap();
+        let ids: Vec<String> =
+            dashboards::groups_for(&conn, &d.id).unwrap().into_iter().map(|g| g.id).collect();
+        use dashboards::MoveDirection::{Down, Up};
+        for (i, dir) in [(2, Up), (2, Up), (1, Down), (0, Down)] {
+            dashboards::move_group(&conn, &ids[i], dir).unwrap();
+        }
+        let remote_order = |conn: &Connection| -> Vec<i64> {
+            dashboards::groups_for(conn, &d.id)
+                .unwrap()
+                .into_iter()
+                .map(|g| g.remote_id.unwrap())
+                .collect()
+        };
+        let want = remote_order(&conn);
+        let entries = sync_queue::pending_entries(&conn).unwrap();
+        let order: Vec<_> =
+            entries.iter().filter(|e| e.entity_type == dashboards::GROUP_ORDER_ENTITY_TYPE).collect();
+        if order.len() != 1 {
+            return Err(format!("expected one coalesced entry, got {}", order.len()));
+        }
+        let entry_id = order[0].id.unwrap();
+        match dashboard_group_order(client, &d.id, entry_id).await {
+            Outcome::Success => {}
+            _ => return Err("engine did not report success".into()),
+        }
+        if sync_queue::has_pending_entry(&conn, dashboards::GROUP_ORDER_ENTITY_TYPE, &d.id).unwrap() {
+            return Err("entry still pending".into());
+        }
+        let web = crate::api::dashboards::list(client).await.map_err(|e| e.to_string())?;
+        let web_order: Vec<i64> = web
+            .iter()
+            .find(|x| x.id == dashboard)
+            .map(|x| x.groups.iter().map(|g| g.id).collect())
+            .unwrap_or_default();
+        let local = remote_order(&conn);
+        if web_order != want || local != want {
+            return Err(format!("want {want:?}, web {web_order:?}, local {local:?}"));
+        }
+        Ok(())
     }
 }

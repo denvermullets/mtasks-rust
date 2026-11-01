@@ -100,6 +100,8 @@ pub enum Message {
     /// Pick a dashboard filter tab (Today / Week / Hot / Open).
     SetDashboardFilter(crate::dashboard_eval::Filter),
     SetDashboardSort(crate::dashboard_eval::Sort),
+    /// Local team id, or None for all teams.
+    SetDashboardTeam(Option<String>),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -3852,6 +3854,12 @@ impl App {
                 self.focused_issue = 0;
             }
 
+            Message::SetDashboardTeam(team) => {
+                self.dashboard_header.team = team;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
             Message::ToggleDashboardMine => {
                 self.dashboard_header.mine = !self.dashboard_header.mine;
                 self.focused_lane = 0;
@@ -3912,13 +3920,13 @@ impl App {
                         ToastKind::Error,
                         false,
                     );
-                } else if let Some(Some(rid)) = found {
-                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "dashboard", rid) {
+                } else if let Some(remote_id) = found {
+                    if let Err(e) =
+                        crate::db::home_page::set_dashboard_local(&self.db(), &dashboard_id, remote_id)
+                    {
                         eprintln!("[home_page] set failed: {e}");
                     }
                     self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
-                } else if found.is_some() {
-                    self.push_toast("This dashboard hasn't synced yet", ToastKind::Error, false);
                 }
             }
 
@@ -6521,6 +6529,7 @@ impl App {
                 crate::views::group_form::modal(
                     &self.group_form.draft,
                     &self.teams,
+                    &self.projects,
                     self.group_form.error
                 )
             ]

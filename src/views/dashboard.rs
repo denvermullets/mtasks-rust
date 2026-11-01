@@ -144,6 +144,7 @@ fn controls<'a>(
             .push(mine_toggle(header.mine))
             .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
+            .push(team_picker(evaluation, header.team.as_deref()))
             .push(reset_button())
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
@@ -168,6 +169,33 @@ fn due_counts<'a>(e: &Evaluation<'a>) -> Element<'a, Message> {
 /// The sort order picker.
 fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
     pick_list(Sort::ALL, Some(active), Message::SetDashboardSort).text_size(13).into()
+}
+
+/// The team picker, listing the dashboard's source teams. Hidden when there
+/// is only one to pick; "All teams" clears the filter.
+fn team_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Message> {
+    if e.source_teams.len() < 2 {
+        return horizontal_space().width(0).into();
+    }
+    let mut options = vec![TeamChoice { id: None, label: "All teams".into() }];
+    options.extend(e.source_teams.iter().map(|t| TeamChoice {
+        id: Some(t.id.clone()),
+        label: t.name.clone(),
+    }));
+    let selected = options.iter().find(|o| o.id.as_deref() == active).cloned();
+    pick_list(options, selected, |c| Message::SetDashboardTeam(c.id)).text_size(13).into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TeamChoice {
+    id: Option<String>,
+    label: String,
+}
+
+impl std::fmt::Display for TeamChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
 
 /// "Reset": back to the default filter, sort, search and pickers.
