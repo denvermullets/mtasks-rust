@@ -7444,6 +7444,35 @@ mod tests {
     }
 
     #[test]
+    fn files_on_an_unsynced_issue_follow_its_create_in_one_drain() {
+        let mut conn = setup_labels_db(); // i1 has no remote id
+        sync_queue::enqueue(&conn, "issue", "i1", "create", None).unwrap();
+        let a = pending_upload(&conn, "i1");
+        let order: Vec<(String, String)> = sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.entity_type, e.action))
+            .collect();
+        let want = |t: &str, a: &str| (t.to_string(), a.to_string());
+        assert_eq!(
+            order,
+            vec![want("issue", "create"), want("upload", "create"), want("attachment", "create")]
+        );
+
+        // Entries run in queue order against the live DB: waiting first...
+        assert!(matches!(
+            prep_upload_create_in(&conn, &a.id),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        // ...then the create lands the remote id and the same drain proceeds.
+        let create_id = sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 55, create_id).unwrap();
+        assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Ready(_)));
+        attachments::set_uploaded(&conn, &a.id, "signed", "spec.pdf").unwrap();
+        assert!(matches!(prep_attachment_create_in(&conn, &a.id), Prep::Ready(_)));
+    }
+
+    #[test]
     fn a_removed_row_is_a_finished_entry() {
         let conn = setup_dependency_db();
         assert!(matches!(prep_upload_create_in(&conn, "gone"), Prep::Done(Outcome::Success)));
