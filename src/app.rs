@@ -224,6 +224,10 @@ pub enum Message {
     /// A body paragraph's hovered span changed. The id is the reporting
     /// widget's owner id (see `hover_rich::HoverRich::on_hover`).
     BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// The pointer entered (`Some`) or left (`None`) a row that anchors a hover
+    /// card, with the row's window rectangle (`views::row_hover`). The id is
+    /// the row widget's owner id.
+    RowHover(u64, Option<(crate::body_hover::Anchor, iced::Rectangle)>),
     /// A hover-card timer elapsed (see `hover_card::Effect`).
     HoverTimer(u64),
     /// The pointer entered or left the hover card itself.
@@ -4538,7 +4542,13 @@ impl App {
                 return Self::hover_timer(effect);
             }
             // No cards behind a modal.
-            Message::BodyHover(..) if self.modal != Modal::None => {}
+            Message::BodyHover(..) | Message::RowHover(..) if self.modal != Modal::None => {}
+            Message::RowHover(owner, hover) => {
+                let effect = self
+                    .body_hover
+                    .body_hover(owner, hover.map(|(anchor, rect)| (Some(anchor), rect)));
+                return Self::hover_timer(effect);
+            }
             Message::BodyHover(owner, hover) => {
                 let span = hover.map(|h| {
                     let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
@@ -4582,6 +4592,8 @@ impl App {
                 }
             }
             Message::OpenIssueDetail(issue_id) => {
+                // A click on a row ends its hover (the view may not change).
+                self.body_hover.event(crate::hover_card::Event::Clicked);
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
                 }

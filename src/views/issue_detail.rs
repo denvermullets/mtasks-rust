@@ -936,6 +936,20 @@ pub(crate) fn description_block<'a>(
     }
 }
 
+/// Makes a row the hover-card anchor for the issue with local id `issue_id`.
+/// Never captures events, so the row's buttons and focus work as before.
+fn issue_row_anchor<'a>(
+    row: impl Into<Element<'a, Message>>,
+    issue_id: &str,
+) -> Element<'a, Message> {
+    crate::views::row_hover::row_hover(
+        row,
+        crate::body_hover::Anchor::Issue(issue_id.to_string()),
+        Message::RowHover,
+    )
+    .into()
+}
+
 /// "Referenced in" block: one clickable row per issue whose description or
 /// comments mention this one.
 fn referenced_in_section<'a>(
@@ -955,29 +969,28 @@ fn referenced_in_section<'a>(
             (true, false) => "description",
             _ => "comment",
         };
-        col = col.push(
-            button(
-                row![]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(
-                        text(issue_identifier(src, team))
-                            .size(12)
-                            .color(t::text_muted()),
-                    )
-                    .push(
-                        text(&src.title)
-                            .size(13)
-                            .color(t::text_primary())
-                            .width(Length::Fill),
-                    )
-                    .push(text(via).size(11).color(t::text_muted())),
-            )
-            .on_press(Message::OpenIssueDetail(src.id.clone()))
-            .padding([6, 8])
-            .width(Length::Fill)
-            .style(button::text),
-        );
+        let row_button = button(
+            row![]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(
+                    text(issue_identifier(src, team))
+                        .size(12)
+                        .color(t::text_muted()),
+                )
+                .push(
+                    text(&src.title)
+                        .size(13)
+                        .color(t::text_primary())
+                        .width(Length::Fill),
+                )
+                .push(text(via).size(11).color(t::text_muted())),
+        )
+        .on_press(Message::OpenIssueDetail(src.id.clone()))
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(button::text);
+        col = col.push(issue_row_anchor(row_button, &src.id));
     }
     col.into()
 }
