@@ -899,6 +899,9 @@ pub struct App {
     toasts: Vec<Toast>,
     /// Hover card over body references (JRST-299).
     body_hover: crate::body_hover::BodyHover,
+    /// The open hover card's content, read from the local database when the
+    /// card opened (never on the view path). `None` content = no card.
+    hover_content: Option<(crate::body_hover::Anchor, Option<crate::body_hover::CardContent>)>,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
     next_toast_id: u64,
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
@@ -2943,6 +2946,7 @@ impl App {
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
             body_hover: crate::body_hover::BodyHover::new(),
+            hover_content: None,
             next_toast_id: 0,
             sync_paused_auth: false,
         };
@@ -4551,7 +4555,13 @@ impl App {
                 return Self::hover_timer(effect);
             }
             Message::HoverTimer(generation) => {
+                // A card opening afresh re-reads, so edits made while it was
+                // closed show.
+                if !self.body_hover.is_open() {
+                    self.hover_content = None;
+                }
                 let effect = self.body_hover.event(crate::hover_card::Event::TimerFired(generation));
+                self.refresh_hover_content();
                 return Self::hover_timer(effect);
             }
             Message::HoverCardEntered => {
@@ -6323,23 +6333,42 @@ impl App {
         Task::none()
     }
 
+    /// Keep `hover_content` in step with the card on screen: read the local
+    /// database once when a card opens on a new anchor, drop it when the card
+    /// closes. Called where a card can open (the show timer), not per frame.
+    fn refresh_hover_content(&mut self) {
+        let Some((anchor, _)) = self.body_hover.current() else {
+            self.hover_content = None;
+            return;
+        };
+        if self.hover_content.as_ref().is_some_and(|(a, _)| a == anchor) {
+            return;
+        }
+        let anchor = anchor.clone();
+        let content = match &anchor {
+            crate::body_hover::Anchor::Issue(id) => {
+                let conn = self.db();
+                crate::db::queries::card_records(&conn, id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }
+            crate::body_hover::Anchor::Mention(_) => None,
+        };
+        self.hover_content = Some((anchor, content));
+    }
+
     /// The hover card for the current anchor, positioned under its span.
     fn hover_card_overlay(&self) -> Option<Element<'_, Message>> {
         if self.modal != Modal::None {
             return None;
         }
         let (anchor, rect) = self.body_hover.current()?;
-        let content = crate::body_hover::content_for(
-            anchor,
-            &crate::body_hover::Records {
-                issues: &self.issues,
-                teams: &self.teams,
-                lanes: &self.lanes,
-                members: &self.members,
-                projects: &self.projects,
-            },
-        )?;
-        Some(crate::views::hover_card_view::overlay(&content, rect))
+        let (cached, content) = self.hover_content.as_ref()?;
+        if cached != anchor {
+            return None;
+        }
+        let content = content.as_ref()?;
+        Some(crate::views::hover_card_view::overlay(content, rect))
     }
 
     pub fn view(&self) -> Element<'_, Message> {

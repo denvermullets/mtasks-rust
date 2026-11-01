@@ -158,6 +158,28 @@ pub struct LaneInfo {
     pub icon: LaneIcon,
 }
 
+/// Owned records for one card, read from the local database when it opens.
+#[derive(Debug, Clone, Default)]
+pub struct OwnedRecords {
+    pub issues: Vec<Issue>,
+    pub teams: Vec<Team>,
+    pub lanes: Vec<Lane>,
+    pub members: Vec<Member>,
+    pub projects: Vec<Project>,
+}
+
+impl OwnedRecords {
+    pub fn records(&self) -> Records<'_> {
+        Records {
+            issues: &self.issues,
+            teams: &self.teams,
+            lanes: &self.lanes,
+            members: &self.members,
+            projects: &self.projects,
+        }
+    }
+}
+
 /// The local records a card is built from. Slices, so the caller decides
 /// where they come from.
 #[derive(Debug, Clone, Copy, Default)]
