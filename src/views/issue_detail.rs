@@ -814,27 +814,25 @@ pub(crate) fn rich_body<'a>(
 ) -> Element<'a, Message> {
     let ident = team.map(|t| t.identifier.as_str()).unwrap_or("");
     let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
-    let spans: Vec<text::Span<'a, String, iced::Font>> = mentions::segments(body, ident, &names)
+    let spans: Vec<text::Span<'a, mentions::LinkTarget, iced::Font>> = mentions::segments(body, ident, &names)
         .into_iter()
         .map(|seg| match seg {
             Segment::Text(s) => span(s.to_string()).color(plain),
             Segment::Mention(s) => span(s.to_string()).color(t::highlight()),
             Segment::Issue { text, .. } => {
                 // Resolves own-team and cross-team identifiers alike.
-                let target = mentions::parse_ident(text)
-                    .and_then(|(p, n)| mentions::resolve_issue(issues, teams, p, n));
-                match target {
-                    Some(i) => span(text.to_string())
+                match mentions::issue_link_target(issues, teams, text) {
+                    Some(target) => span(text.to_string())
                         .color(t::accent())
                         .underline(true)
-                        .link(i.id.clone()),
+                        .link(target),
                     None => span(text.to_string()).color(t::accent()),
                 }
             }
         })
         .collect();
-    let el: Element<'a, String> = rich_text(spans).size(size).into();
-    el.map(Message::OpenIssueDetail)
+    let el: Element<'a, mentions::LinkTarget> = rich_text(spans).size(size).into();
+    el.map(Message::OpenBodyLink)
 }
 
 /// Rendered (highlighted, clickable) view of the description, shown only when

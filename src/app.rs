@@ -213,6 +213,8 @@ pub enum Message {
     /// click on a linked dependency row). Rebuilds the detail buffer, unlike
     /// `NavigateToView(View::IssueDetail(_))` which only swaps the view.
     OpenIssueDetail(String),
+    /// Click on a link in rendered body text, carrying its typed target.
+    OpenBodyLink(crate::mentions::LinkTarget),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -4441,6 +4443,13 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
+            Message::OpenBodyLink(target) => match target {
+                crate::mentions::LinkTarget::Issue(id) => {
+                    return self.update(Message::OpenIssueDetail(id));
+                }
+                // Later tickets add behavior for these kinds.
+                crate::mentions::LinkTarget::External(_) | crate::mentions::LinkTarget::Mention(_) => {}
+            },
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);

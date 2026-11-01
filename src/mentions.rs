@@ -637,6 +637,24 @@ pub fn resolve_issue<'a>(
         .find(|i| i.team_id == team.id && i.team_number.map(i64::from) == Some(number))
 }
 
+/// What a link in rendered body text points at. Later link kinds (mentions,
+/// external URLs) are new variants; the renderer and app routing stay put.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// Local issue UUID.
+    Issue(String),
+    /// External URL.
+    External(String),
+    /// Member id.
+    Mention(String),
+}
+
+/// Typed target for an `IDENT-n` token, if it resolves to a local issue.
+pub fn issue_link_target(issues: &[Issue], teams: &[Team], token: &str) -> Option<LinkTarget> {
+    let (prefix, number) = parse_ident(token)?;
+    resolve_issue(issues, teams, prefix, number).map(|i| LinkTarget::Issue(i.id.clone()))
+}
+
 /// Text of the cursor's line up to the cursor. `col` is the editor's column
 /// (a byte offset; clamped defensively to a char boundary).
 pub fn line_before_cursor(line: &str, col: usize) -> &str {
@@ -988,6 +1006,28 @@ mod tests {
         assert!(resolve_issue(&issues, std::slice::from_ref(&t), "OTH", 6).is_none());
         t.identifier = "ZZZ".into();
         assert!(resolve_issue(&issues, &[t], "OTH", 5).is_none());
+    }
+
+    #[test]
+    fn issue_token_resolves_to_a_typed_issue_target() {
+        let a = issue("a-id", 5, None);
+        let t = Team {
+            id: "t".into(),
+            name: "T".into(),
+            identifier: "OTH".into(),
+            remote_id: None,
+            archived_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let issues = [a];
+        let teams = [t];
+        assert_eq!(
+            issue_link_target(&issues, &teams, "#oth-5"),
+            Some(LinkTarget::Issue("a-id".into()))
+        );
+        assert_eq!(issue_link_target(&issues, &teams, "OTH-6"), None);
+        assert_eq!(issue_link_target(&issues, &teams, "nonsense"), None);
     }
 
     #[test]
