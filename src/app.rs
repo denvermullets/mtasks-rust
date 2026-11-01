@@ -614,6 +614,15 @@ impl View {
     fn is_cross_team(&self) -> bool {
         matches!(self, View::MyIssues | View::Dashboard(_))
     }
+
+    /// An open dashboard that a pull (or a local delete) removed falls back to
+    /// the default board; every other view is unchanged.
+    fn without_missing_dashboard(self, dashboards: &[crate::db::dashboards::Dashboard]) -> View {
+        match self {
+            View::Dashboard(id) if !dashboards.iter().any(|d| d.id == id) => View::Board,
+            other => other,
+        }
+    }
 }
 
 /// Sort key for the Projects table (mirrors the Rails index sort options).
@@ -903,6 +912,13 @@ impl App {
         self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         self.dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+
+        let kept = self.view.clone().without_missing_dashboard(&self.dashboards);
+        if kept != self.view {
+            self.view = kept;
+            self.focused_lane = 0;
+            self.focused_issue = 0;
+        }
 
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
@@ -6583,6 +6599,26 @@ mod tests {
     }
 
     use super::*;
+
+    fn dash(id: &str) -> crate::db::dashboards::Dashboard {
+        crate::db::dashboards::Dashboard {
+            id: id.into(),
+            remote_id: None,
+            name: id.into(),
+            description: String::new(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn open_dashboard_removed_by_a_pull_falls_back_to_the_board() {
+        let list = [dash("a")];
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&list), View::Dashboard("a".into()));
+        assert_eq!(View::Dashboard("gone".into()).without_missing_dashboard(&list), View::Board);
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&[]), View::Board);
+        assert_eq!(View::MyIssues.without_missing_dashboard(&[]), View::MyIssues);
+    }
 
     fn team(id: &str, archived: bool) -> Team {
         Team {
