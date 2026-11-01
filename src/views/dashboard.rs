@@ -69,7 +69,8 @@ fn controls<'a>(dashboard: &'a Dashboard, header: Header, read_only: bool) -> El
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
             .push(filter_tabs(header.filter))
             .push(sort_picker(header.sort))
-            .push(add_group_button(read_only)),
+            .push(add_group_button(read_only))
+            .push(edit_button(dashboard, read_only)),
     )
     .padding([8, 16])
     .width(Length::Fill)
@@ -85,6 +86,15 @@ fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
 fn add_group_button<'a>(read_only: bool) -> Element<'a, Message> {
     button(text("+ Add group").size(13))
         .on_press_maybe((!read_only).then_some(Message::OpenNewGroup))
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
+}
+
+/// "Edit": rename the dashboard / change its description; disabled when read-only.
+fn edit_button<'a>(dashboard: &Dashboard, read_only: bool) -> Element<'a, Message> {
+    button(text("Edit").size(13))
+        .on_press_maybe((!read_only).then(|| Message::OpenEditDashboard(dashboard.id.clone())))
         .padding([4, 10])
         .style(button::secondary)
         .into()

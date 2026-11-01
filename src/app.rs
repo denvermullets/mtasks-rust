@@ -288,6 +288,9 @@ pub enum Message {
     SaveViewSubmit,
     /// Sidebar "New dashboard": open the create modal.
     OpenNewDashboard,
+    /// Opens the rename/description modal for the dashboard with this local id.
+    OpenEditDashboard(String),
+    EditDashboardSubmit,
     NewDashboardNameChanged(String),
     NewDashboardDescriptionChanged(String),
     NewDashboardSubmit,
@@ -497,6 +500,8 @@ pub enum Modal {
     SaveView,
     /// "New dashboard" form; state in `App::dashboard_form`.
     NewDashboard,
+    /// Rename/description form; target id in `DashboardForm::editing`.
+    EditDashboard,
     /// "Add group" form on the open dashboard; state in `App::group_form`.
     NewGroup,
     /// Name prompt for renaming a Saved view (local id).
@@ -694,6 +699,8 @@ impl SortDir {
 /// Dashboard name/description modal state; the rename ticket reuses it.
 #[derive(Debug, Default, Clone)]
 pub struct DashboardForm {
+    /// Local id of the dashboard being edited (None when creating).
+    pub editing: Option<String>,
     pub name: String,
     pub description: String,
     /// Inline validation error under the name field.
@@ -3089,6 +3096,62 @@ impl App {
                     self.dashboard_form = DashboardForm::default();
                     self.modal = Modal::NewDashboard;
                     return text_input::focus(dashboard_name_input_id());
+                }
+            }
+
+            Message::OpenEditDashboard(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't edit a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Ok(Some(d)) = crate::db::dashboards::get(&self.db(), &id) {
+                    self.dashboard_form = DashboardForm {
+                        editing: Some(d.id),
+                        name: d.name,
+                        description: d.description,
+                        error: None,
+                    };
+                    self.modal = Modal::EditDashboard;
+                    return text_input::focus(dashboard_name_input_id());
+                }
+            }
+
+            Message::EditDashboardSubmit => {
+                if self.modal != Modal::EditDashboard {
+                    return Task::none();
+                }
+                let Some(id) = self.dashboard_form.editing.clone() else {
+                    return Task::none();
+                };
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't edit a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::update_local(
+                    &self.db(),
+                    &id,
+                    &self.dashboard_form.name,
+                    &self.dashboard_form.description,
+                ) {
+                    Ok(_) => {
+                        self.modal = Modal::None;
+                        self.dashboard_form = DashboardForm::default();
+                        self.reload_data();
+                    }
+                    Err(crate::db::dashboards::CreateError::Name(e)) => {
+                        self.dashboard_form.error = Some(e.message());
+                    }
+                    Err(crate::db::dashboards::CreateError::Db(e)) => {
+                        eprintln!("[dashboards] update failed: {e}");
+                        self.dashboard_form.error = Some("Couldn't save the dashboard");
+                    }
                 }
             }
 
@@ -6173,7 +6236,22 @@ impl App {
             }
             Modal::NewDashboard => iced::widget::stack![
                 base,
-                dashboard_form_modal("New dashboard", "Create", &self.dashboard_form)
+                dashboard_form_modal(
+                    "New dashboard",
+                    "Create",
+                    Message::NewDashboardSubmit,
+                    &self.dashboard_form
+                )
+            ]
+            .into(),
+            Modal::EditDashboard => iced::widget::stack![
+                base,
+                dashboard_form_modal(
+                    "Edit dashboard",
+                    "Save",
+                    Message::EditDashboardSubmit,
+                    &self.dashboard_form
+                )
             ]
             .into(),
             Modal::NewGroup => iced::widget::stack![
@@ -6526,6 +6604,7 @@ fn dashboard_name_input_id() -> text_input::Id {
 fn dashboard_form_modal<'a>(
     title: &'a str,
     submit_label: &'a str,
+    submit: Message,
     form: &'a DashboardForm,
 ) -> Element<'a, Message> {
     use iced::widget::{button, text};
@@ -6537,7 +6616,7 @@ fn dashboard_form_modal<'a>(
             text_input("Name", &form.name)
                 .id(dashboard_name_input_id())
                 .on_input(Message::NewDashboardNameChanged)
-                .on_submit(Message::NewDashboardSubmit)
+                .on_submit(submit.clone())
                 .padding([6, 10])
                 .size(14)
                 .width(Length::Fixed(360.0)),
@@ -6549,7 +6628,7 @@ fn dashboard_form_modal<'a>(
         .push(
             text_input("Description (optional)", &form.description)
                 .on_input(Message::NewDashboardDescriptionChanged)
-                .on_submit(Message::NewDashboardSubmit)
+                .on_submit(submit.clone())
                 .padding([6, 10])
                 .size(14)
                 .width(Length::Fixed(360.0)),
@@ -6559,7 +6638,7 @@ fn dashboard_form_modal<'a>(
                 .spacing(8)
                 .push(
                     button(text(submit_label).size(14))
-                        .on_press(Message::NewDashboardSubmit)
+                        .on_press(submit)
                         .padding([8, 24])
                         .style(button::primary),
                 )

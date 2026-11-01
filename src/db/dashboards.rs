@@ -376,6 +376,29 @@ pub fn create_local(
     Ok(get(conn, &id)?.expect("dashboard just inserted"))
 }
 
+/// Rename a dashboard and/or change its description: validate, write the row,
+/// and queue an "update" entry (no payload; the push reads the row). A pull
+/// leaves the row alone while that entry is pending.
+pub fn update_local(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    description: &str,
+) -> std::result::Result<Dashboard, CreateError> {
+    let name = validate_name(name).map_err(CreateError::Name)?;
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
+        "UPDATE dashboards SET name = ?2, description = ?3 WHERE id = ?1",
+        params![id, name, description.trim()],
+    )?;
+    if changed == 0 {
+        return Err(CreateError::Db(rusqlite::Error::QueryReturnedNoRows));
+    }
+    sync_queue::enqueue(&tx, ENTITY_TYPE, id, "update", None)?;
+    tx.commit()?;
+    Ok(get(conn, id)?.expect("dashboard just updated"))
+}
+
 /// Which way to move a group in its dashboard's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveDirection {
@@ -1066,5 +1089,42 @@ mod tests {
             .unwrap();
         apply_snapshot(&conn, &[]).unwrap();
         assert_eq!(groups_for(&conn, &d.id).unwrap()[0].id, g.id);
+    }
+
+    #[test]
+    fn update_local_writes_the_row_and_queues_an_update_without_payload() {
+        let conn = setup();
+        let d = create_local(&conn, "Old", "x").unwrap();
+        let u = update_local(&conn, &d.id, "  New  ", " desc ").unwrap();
+        assert_eq!((u.name.as_str(), u.description.as_str()), ("New", "desc"));
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        let upd: Vec<_> = q.iter().filter(|e| e.action == "update").collect();
+        assert_eq!(upd.len(), 1);
+        assert_eq!((upd[0].entity_type.as_str(), upd[0].entity_id.as_str()), (ENTITY_TYPE, d.id.as_str()));
+        assert!(upd[0].payload.is_none());
+    }
+
+    #[test]
+    fn update_local_validates_like_create_and_queues_nothing_on_error() {
+        let conn = setup();
+        let d = create_local(&conn, "Old", "").unwrap();
+        assert!(matches!(update_local(&conn, &d.id, "  ", ""), Err(CreateError::Name(NameError::Blank))));
+        let long = "x".repeat(81);
+        assert!(matches!(update_local(&conn, &d.id, &long, ""), Err(CreateError::Name(NameError::TooLong))));
+        assert!(update_local(&conn, &d.id, &"x".repeat(80), "").is_ok());
+        assert_eq!(get(&conn, &d.id).unwrap().unwrap().name.len(), 80);
+        let updates = sync_queue::pending_entries(&conn).unwrap().iter().filter(|e| e.action == "update").count();
+        assert_eq!(updates, 1);
+    }
+
+    #[test]
+    fn pull_does_not_overwrite_a_dashboard_with_a_pending_edit() {
+        let conn = setup();
+        apply_snapshot(&conn, &[dash(1, "Server", 0, vec![])]).unwrap();
+        let local = find_by_remote_id(&conn, 1).unwrap().unwrap();
+        update_local(&conn, &local.id, "Mine", "").unwrap();
+        let a = apply_snapshot(&conn, &[dash(1, "Server2", 0, vec![])]).unwrap();
+        assert_eq!(a.skipped_pending, 1);
+        assert_eq!(get(&conn, &local.id).unwrap().unwrap().name, "Mine");
     }
 }
