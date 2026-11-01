@@ -23,6 +23,8 @@ pub enum PaletteNav {
     /// Open a Saved view by local id, switching team when needed
     /// (`Message::OpenSavedView`).
     SavedView(String),
+    /// Open a dashboard by local id (`Message::OpenDashboard`).
+    Dashboard(String),
     /// Attach files to the open issue (`Message::PickAttachmentFiles`).
     AttachFiles,
 }
@@ -36,6 +38,7 @@ impl PaletteNav {
             PaletteNav::Issue(_) => "Issue",
             PaletteNav::Project { .. } => "Project",
             PaletteNav::SavedView(_) => "View",
+            PaletteNav::Dashboard(_) => "Dashboard",
             PaletteNav::AttachFiles => "Command",
         }
     }
@@ -57,6 +60,13 @@ pub struct SearchableSavedView {
     pub name: String,
 }
 
+/// A dashboard as the palette searches it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchableDashboard {
+    pub id: String,
+    pub name: String,
+}
+
 /// Local data the palette searches, owned so `PaletteState` can keep it and
 /// recompute rows on every keystroke. Archived issues, teams, and the
 /// projects of archived teams are already left out when this is loaded.
@@ -68,6 +78,7 @@ pub struct PaletteData {
     pub teams: Vec<Team>,
     pub projects: Vec<SearchableProject>,
     pub saved_views: Vec<SearchableSavedView>,
+    pub dashboards: Vec<SearchableDashboard>,
     /// An issue detail is open, so issue-only commands are offered.
     pub on_issue_detail: bool,
 }
@@ -86,6 +97,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     push_teams(&needle, data, &mut rows);
     push_projects(&needle, data, &mut rows);
     push_saved_views(&needle, data, &mut rows);
+    push_dashboards(&needle, data, &mut rows);
     // After ordering, so the best matches survive.
     rows.truncate(MAX_ROWS);
     rows
@@ -231,6 +243,18 @@ fn push_saved_views(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>
                 primary: v.name.clone(),
                 secondary: v.team_name.clone(),
                 nav: PaletteNav::SavedView(v.id.clone()),
+            });
+        }
+    }
+}
+
+fn push_dashboards(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    for d in &data.dashboards {
+        if name_matches(needle, &d.name) {
+            rows.push(PaletteRow {
+                primary: d.name.clone(),
+                secondary: String::new(),
+                nav: PaletteNav::Dashboard(d.id.clone()),
             });
         }
     }
@@ -627,5 +651,43 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].nav, PaletteNav::AttachFiles);
         assert!(palette_results("attach", &PaletteData::default()).is_empty());
+    }
+
+    fn dashboard_data() -> PaletteData {
+        PaletteData {
+            dashboards: vec![
+                SearchableDashboard { id: "d1".into(), name: "Morning Triage".into() },
+                SearchableDashboard { id: "d2".into(), name: "Hot list".into() },
+            ],
+            ..PaletteData::default()
+        }
+    }
+
+    #[test]
+    fn dashboard_matches_name_ignoring_case_and_is_labelled() {
+        let rows = palette_results("TRIAGE", &dashboard_data());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Morning Triage");
+        assert_eq!(rows[0].nav, PaletteNav::Dashboard("d1".into()));
+        assert_eq!(rows[0].nav.label(), "Dashboard");
+        assert!(palette_results("zzz", &dashboard_data()).is_empty());
+    }
+
+    #[test]
+    fn empty_query_lists_dashboards_after_other_targets() {
+        let mut data = dashboard_data();
+        data.saved_views = vec![sv("v1", "t1", "JAIT App", "Bugs")];
+        let rows = palette_results("", &data);
+        let labels: Vec<_> = rows.iter().map(|r| r.nav.label()).collect();
+        assert!(labels.starts_with(&["View"; 5][..]));
+        assert_eq!(&labels[labels.len() - 2..], ["Dashboard", "Dashboard"]);
+        assert_eq!(rows[rows.len() - 2].primary, "Morning Triage");
+    }
+
+    #[test]
+    fn choosing_a_dashboard_row_yields_its_local_id() {
+        let mut state = PaletteState::new(dashboard_data());
+        state.set_query("hot".into());
+        assert_eq!(state.chosen(), Some(PaletteNav::Dashboard("d2".into())));
     }
 }
