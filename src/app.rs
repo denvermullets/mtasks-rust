@@ -635,6 +635,11 @@ pub struct App {
     /// Files attached to the open issue (synced, then pending/failed). Repopulated
     /// each reload only while `view` is `IssueDetail`.
     detail_attachments: Vec<crate::db::attachments::Attachment>,
+    /// Files attached to each comment of the open issue/project, keyed by the
+    /// comment's local id (comments without files have no entry). Repopulated
+    /// each reload while `view` is `IssueDetail` or `ProjectDetail`.
+    detail_comment_attachments:
+        std::collections::HashMap<String, Vec<crate::db::attachments::Attachment>>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
     /// Title of the recurring issue that spawned the open issue detail, if any.
@@ -906,6 +911,7 @@ impl App {
                 issue_id,
             )
             .unwrap_or_default();
+            self.load_comment_attachments(conn);
         } else if let View::ProjectDetail(ref project_id) = self.view {
             self.detail_attachments.clear();
             self.detail_references.clear();
@@ -913,14 +919,23 @@ impl App {
             self.detail_comments =
                 queries::comments_for_project(conn, project_id).unwrap_or_default();
             self.detail_activity.clear();
+            self.load_comment_attachments(conn);
             return;
         } else {
+            self.detail_comment_attachments.clear();
             self.detail_attachments.clear();
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments.clear();
             self.detail_activity.clear();
         }
+    }
+
+    /// Refill `detail_comment_attachments` for the comments in `detail_comments`.
+    fn load_comment_attachments(&mut self, conn: &rusqlite::Connection) {
+        let ids: Vec<&str> = self.detail_comments.iter().map(|c| c.id.as_str()).collect();
+        self.detail_comment_attachments =
+            crate::db::attachments::list_for_comments(conn, &ids).unwrap_or_default();
     }
 
     /// Local "Referenced In": scan the open issue's team (descriptions in
@@ -2088,6 +2103,7 @@ impl App {
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
+            detail_comment_attachments: Default::default(),
             detail_references: Vec::new(),
             detail_origin: None,
             issue_picker: None,
@@ -4730,6 +4746,7 @@ impl App {
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,
+                            &self.detail_comment_attachments,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -4774,6 +4791,7 @@ impl App {
                             &self.detail_activity,
                             &self.detail_references,
                             &self.detail_attachments,
+                            &self.detail_comment_attachments,
                             &self.issues,
                             parent,
                             sub_issues,
