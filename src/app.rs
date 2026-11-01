@@ -83,6 +83,8 @@ pub enum Message {
     NavigateToView(View),
     /// Open a dashboard (its local id) from the sidebar.
     OpenDashboard(String),
+    /// Pick a dashboard filter tab (Today / Week / Hot / Open).
+    SetDashboardFilter(crate::dashboard_eval::Filter),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -3370,6 +3372,12 @@ impl App {
                 self.switch_view(View::Dashboard(id));
             }
 
+            Message::SetDashboardFilter(filter) => {
+                self.dashboard_header.filter = filter;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
             Message::NavigateToView(view) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
@@ -5800,6 +5808,7 @@ impl App {
                     },
                     self.focused_lane,
                     self.focused_issue,
+                    self.dashboard_header,
                 )
             }
         };

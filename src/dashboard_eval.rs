@@ -37,11 +37,31 @@ pub struct Mirror<'a> {
     pub issue_labels: &'a HashMap<String, Vec<Label>>,
 }
 
-/// The lens over each group's base set. Only Open exists so far.
+/// The lens over each group's base set. Today is the default, as on the web.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
+    /// Effective due date on or before today (overdue included).
     #[default]
+    Today,
+    /// Effective due date on or before today + 6.
+    Week,
+    /// Urgent or high priority, whatever the date.
+    Hot,
+    /// No date or priority condition.
     Open,
+}
+
+impl Filter {
+    pub const ALL: [Filter; 4] = [Filter::Today, Filter::Week, Filter::Hot, Filter::Open];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Filter::Today => "Today",
+            Filter::Week => "Week",
+            Filter::Hot => "Hot",
+            Filter::Open => "Open",
+        }
+    }
 }
 
 /// Row order within a group. Only Due exists so far.
@@ -54,8 +74,6 @@ pub enum Sort {
 /// The header state. Held in memory per dashboard; not persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Header {
-    // Read by the filter-tab ticket.
-    #[allow(dead_code)]
     pub filter: Filter,
     pub sort: Sort,
 }
@@ -65,8 +83,7 @@ pub struct Input<'a> {
     pub mirror: Mirror<'a>,
     /// Rails user id of the configured current user.
     pub current_user_remote_id: Option<i64>,
-    /// Machine-local date. Read by the date-based filter tabs and counts.
-    #[allow(dead_code)]
+    /// Machine-local date.
     pub today: NaiveDate,
     pub header: Header,
 }
@@ -111,6 +128,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
                 .issues
                 .iter()
                 .filter(|i| pool.contains(i.id.as_str()) && is_active(i, m.lanes))
+                .filter(|i| passes_filter(i, input.header.filter, input.today, m.projects))
                 .collect();
             sort(&mut issues, input.header.sort, m.projects);
             GroupResult {
@@ -161,6 +179,18 @@ fn pool<'a>(
         }
     }
     out
+}
+
+/// The filter tab's rule. Undated issues never match Today or Week.
+fn passes_filter(i: &Issue, filter: Filter, today: NaiveDate, projects: &[Project]) -> bool {
+    match filter {
+        Filter::Open => true,
+        Filter::Hot => i.priority <= 1,
+        Filter::Today => effective_due(i, projects).is_some_and(|d| d <= today),
+        Filter::Week => {
+            effective_due(i, projects).is_some_and(|d| d <= today + chrono::Days::new(6))
+        }
+    }
 }
 
 /// Not archived, completed or canceled, and not in a completed/canceled lane.
@@ -349,6 +379,15 @@ mod tests {
         }
 
         fn eval<'a>(&'a self, groups: &'a [GroupConfig], user: Option<i64>) -> Evaluation<'a> {
+            self.eval_with(groups, user, Header { filter: Filter::Open, ..Header::default() })
+        }
+
+        fn eval_with<'a>(
+            &'a self,
+            groups: &'a [GroupConfig],
+            user: Option<i64>,
+            header: Header,
+        ) -> Evaluation<'a> {
             evaluate(&Input {
                 groups,
                 mirror: Mirror {
@@ -362,7 +401,7 @@ mod tests {
                 },
                 current_user_remote_id: user,
                 today: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
-                header: Header::default(),
+                header,
             })
         }
 
@@ -516,5 +555,74 @@ mod tests {
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 2, 2));
         i.due_date = Some("2026-01-01".into());
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 1, 1));
+    }
+
+    fn filter_ids(fx: &Fx, filter: Filter) -> Vec<String> {
+        let groups = vec![cfg("g", vec![team_src(1, true)])];
+        let header = Header { filter, ..Header::default() };
+        let mut v: Vec<String> = fx.eval_with(&groups, None, header).groups[0]
+            .issues
+            .iter()
+            .map(|i| i.id.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn dated(id: &str, due: Option<&str>, prio: i32) -> Issue {
+        let mut i = issue(id, "a", "la");
+        i.due_date = due.map(String::from);
+        i.priority = prio;
+        i
+    }
+
+    // Fixture today is 2026-11-01.
+    fn filter_fixture() -> Fx {
+        let mut fx = Fx::new();
+        fx.projects = vec![project("p_due", "a", Some("2026-11-03"))];
+        let mut via_project = dated("via_project", None, 3);
+        via_project.project_id = Some("p_due".into());
+        fx.issues = vec![
+            dated("yesterday", Some("2026-10-31"), 3),
+            dated("today", Some("2026-11-01"), 3),
+            dated("plus6", Some("2026-11-07"), 3),
+            dated("plus7", Some("2026-11-08"), 3),
+            dated("undated", None, 3),
+            dated("hot_undated", None, 1),
+            dated("urgent_far", Some("2027-01-01"), 0),
+            via_project,
+        ];
+        fx
+    }
+
+    #[test]
+    fn today_tab_is_the_default_and_includes_overdue() {
+        assert_eq!(Header::default().filter, Filter::Today);
+        assert_eq!(filter_ids(&filter_fixture(), Filter::Today), ids(&["today", "yesterday"]));
+    }
+
+    #[test]
+    fn week_tab_stops_at_today_plus_six() {
+        assert_eq!(
+            filter_ids(&filter_fixture(), Filter::Week),
+            ids(&["plus6", "today", "via_project", "yesterday"])
+        );
+    }
+
+    #[test]
+    fn hot_tab_is_urgent_and_high_whatever_the_date() {
+        assert_eq!(filter_ids(&filter_fixture(), Filter::Hot), ids(&["hot_undated", "urgent_far"]));
+    }
+
+    #[test]
+    fn open_tab_has_no_date_or_priority_condition() {
+        assert_eq!(filter_ids(&filter_fixture(), Filter::Open).len(), 8);
+    }
+
+    #[test]
+    fn project_due_date_fallback_counts_for_week_but_not_today() {
+        let ids_today = filter_ids(&filter_fixture(), Filter::Today);
+        assert!(!ids_today.contains(&"via_project".to_string()));
+        assert!(filter_ids(&filter_fixture(), Filter::Week).contains(&"via_project".to_string()));
     }
 }
