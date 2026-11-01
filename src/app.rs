@@ -2610,15 +2610,21 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        let dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         // Open the stored Home page; anything unresolvable falls back to the
         // first team's board.
-        let launch = crate::db::home_page::launch_target(home_page.as_ref(), &teams, &saved_views);
-        let (selected_team_id, launch_view) = match launch {
-            crate::db::home_page::LaunchTarget::Team(id) => (Some(id), None),
-            crate::db::home_page::LaunchTarget::View { view_id, team_id } => {
-                (Some(team_id), Some(view_id))
-            }
-            crate::db::home_page::LaunchTarget::Default => (default_team_id(&teams), None),
+        let launch = crate::db::home_page::launch_target(
+            home_page.as_ref(),
+            &teams,
+            &saved_views,
+            &dashboards,
+        );
+        use crate::db::home_page::LaunchTarget;
+        let (selected_team_id, launch_view, launch_dashboard) = match launch {
+            LaunchTarget::Team(id) => (Some(id), None, None),
+            LaunchTarget::View { view_id, team_id } => (Some(team_id), Some(view_id), None),
+            LaunchTarget::Dashboard(id) => (default_team_id(&teams), None, Some(id)),
+            LaunchTarget::Default => (default_team_id(&teams), None, None),
         };
 
         let (lanes, issues, projects, members, labels, issue_labels) =
@@ -2696,7 +2702,7 @@ impl App {
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views,
-            dashboards: crate::db::dashboards::list(&conn).unwrap_or_default(),
+            dashboards,
             dashboard_form: DashboardForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
@@ -2716,9 +2722,10 @@ impl App {
             sync_paused_auth: false,
         };
 
-        let task = match launch_view {
-            Some(view_id) => app.update_inner(Message::OpenSavedView(view_id)),
-            None => Task::none(),
+        let task = match (launch_view, launch_dashboard) {
+            (Some(view_id), _) => app.update_inner(Message::OpenSavedView(view_id)),
+            (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
+            _ => Task::none(),
         };
         (app, task)
     }
