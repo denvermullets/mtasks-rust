@@ -3815,7 +3815,7 @@ fn apply_pulled_comments(conn: &Connection, dtos: Vec<CommentDto>) -> usize {
 
 fn apply_one_comment(
     conn: &Connection,
-    dto: CommentDto,
+    mut dto: CommentDto,
     parent_local: Option<String>,
 ) -> Result<(), String> {
     let owner = if let Some(issue_remote) = dto.issue_id {
@@ -3842,8 +3842,19 @@ fn apply_one_comment(
     let existing = queries::find_comment_by_remote_id(conn, dto.id)
         .map_err(|e| format!("db (find comment): {e}"))?
         .map(|c| c.id);
+    let files = dto.files.take();
     let comment = dto.into_model(conn, owner, existing, parent_local);
-    queries::upsert_comment(conn, &comment).map_err(|e| format!("db (upsert comment): {e}"))
+    queries::upsert_comment(conn, &comment).map_err(|e| format!("db (upsert comment): {e}"))?;
+    if let Some(files) = files {
+        crate::db::attachments::replace_synced(
+            conn,
+            crate::db::attachments::OwnerKind::Comment,
+            &comment.id,
+            &files,
+        )
+        .map_err(|e| format!("db (comment attachments): {e}"))?;
+    }
+    Ok(())
 }
 
 /// Keep one row per key (the last delivered wins), in first-seen order. The
@@ -5611,6 +5622,7 @@ mod tests {
             replies: None,
             issue_id: Some(500),
             project_id: None,
+            files: None,
         }
     }
 
@@ -6168,6 +6180,7 @@ mod tests {
             replies: None,
             issue_id: issue,
             project_id: None,
+            files: None,
         }
     }
 
@@ -6186,6 +6199,21 @@ mod tests {
         let top = all.iter().find(|c| c.remote_id == Some(1)).unwrap();
         let reply = all.iter().find(|c| c.remote_id == Some(2)).unwrap();
         assert_eq!(reply.parent_id.as_deref(), Some(top.id.as_str()));
+    }
+
+    #[test]
+    fn feed_comments_store_files_per_comment() {
+        use crate::db::attachments::{list_for_owner, OwnerKind};
+        let conn = setup_labels_db();
+        conn.execute("UPDATE issues SET remote_id = 50 WHERE id = 'i1'", []).unwrap();
+        let mut dto = feed_comment(1, None, Some(50), "with file");
+        dto.files = Some(serde_json::from_value(serde_json::json!([file_json(7, "pic.png")])).unwrap());
+        assert_eq!(apply_pulled_comments(&conn, vec![dto]), 0);
+        let c = queries::find_comment_by_remote_id(&conn, 1).unwrap().unwrap();
+        let files = list_for_owner(&conn, OwnerKind::Comment, &c.id).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "pic.png");
+        assert_eq!(files[0].remote_id, Some(7));
     }
 
     #[test]

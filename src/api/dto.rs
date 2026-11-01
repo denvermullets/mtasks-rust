@@ -435,6 +435,10 @@ pub struct CommentDto {
     /// project comments, null for issue comments).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
+    /// Files attached to the comment. `None` when the payload has no `files`
+    /// key (the local attachments are then left alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<AttachmentDto>>,
 }
 
 impl CommentDto {
@@ -493,6 +497,7 @@ pub fn merge_comment_tree(
             dto.parent_id
                 .and_then(|pid| local_uuid_for(conn, "comments", pid).ok())
         });
+        let files = dto.files.take();
         let comment = dto.into_model(
             conn,
             owner.clone(),
@@ -500,6 +505,14 @@ pub fn merge_comment_tree(
             parent,
         );
         if crate::db::queries::upsert_comment(conn, &comment).is_ok() {
+            if let Some(files) = files {
+                let _ = crate::db::attachments::replace_synced(
+                    conn,
+                    crate::db::attachments::OwnerKind::Comment,
+                    &comment.id,
+                    &files,
+                );
+            }
             count += 1;
             count += merge_comment_tree(conn, owner, replies, Some(&comment.id));
         }
@@ -1016,6 +1029,7 @@ mod tests {
             replies,
             issue_id: None,
             project_id: None,
+            files: None,
         };
         let tree = vec![mk(
             10,
@@ -1045,6 +1059,59 @@ mod tests {
     }
 
     #[test]
+    fn merge_comment_tree_stores_comment_files_and_replaces_on_refetch() {
+        use crate::db::attachments::{list_for_owner, OwnerKind};
+        let conn = fresh_conn();
+        conn.execute_batch(
+            "INSERT INTO teams (id,name,identifier,remote_id,created_at,updated_at) VALUES ('t1','T','TT',1,'x','x');
+             INSERT INTO projects (id,team_id,name,created_at,updated_at) VALUES ('p1','t1','P','x','x');",
+        )
+        .unwrap();
+        let file = |id: i64, name: &str| AttachmentDto {
+            id,
+            blob_id: Some(id + 100),
+            filename: name.into(),
+            content_type: Some("image/png".into()),
+            byte_size: 5,
+            checksum: None,
+            created_at: format!("2026-01-0{id}T00:00:00.000Z"),
+            download_url: None,
+        };
+        let mk = |files: Option<Vec<AttachmentDto>>, replies: Option<Vec<CommentDto>>| CommentDto {
+            id: 10,
+            body: "b".into(),
+            parent_id: None,
+            user: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            replies,
+            issue_id: None,
+            project_id: Some(80),
+            files,
+        };
+        let owner = CommentOwner::Project("p1".into());
+        let names = |conn: &Connection| -> Vec<String> {
+            let c = crate::db::queries::find_comment_by_remote_id(conn, 10).unwrap().unwrap();
+            list_for_owner(conn, OwnerKind::Comment, &c.id)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.filename)
+                .collect()
+        };
+        merge_comment_tree(&conn, &owner, vec![mk(Some(vec![file(1, "a"), file(2, "b")]), None)], None);
+        assert_eq!(names(&conn), ["a", "b"]);
+        // A refetch with one file left replaces the set.
+        merge_comment_tree(&conn, &owner, vec![mk(Some(vec![file(2, "b")]), None)], None);
+        assert_eq!(names(&conn), ["b"]);
+        // No `files` key leaves local attachments alone.
+        merge_comment_tree(&conn, &owner, vec![mk(None, None)], None);
+        assert_eq!(names(&conn), ["b"]);
+        // Empty list clears.
+        merge_comment_tree(&conn, &owner, vec![mk(Some(vec![]), None)], None);
+        assert!(names(&conn).is_empty());
+    }
+
+    #[test]
     fn merge_comment_tree_stores_a_project_thread_under_the_project() {
         let conn = fresh_conn();
         conn.execute_batch(
@@ -1062,6 +1129,7 @@ mod tests {
             replies,
             issue_id: None,
             project_id: Some(80),
+            files: None,
         };
         let tree = vec![mk(10, None, Some(vec![mk(11, Some(10), None)]))];
         let owner = CommentOwner::Project("p1".into());
