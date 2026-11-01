@@ -1,11 +1,11 @@
 //! Reusable file-card list for an owner's attachments (issue, project or
 //! comment). Callers load the rows with `db::attachments::list_for_owner`.
 
-use iced::widget::{column, container, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::attachments::Attachment;
+use crate::db::attachments::{Attachment, UploadState};
 use crate::theme as t;
 
 /// The "Attachments" section: a heading plus one card per file, in the order
@@ -36,12 +36,20 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
         type_label(&a.content_type, &a.filename),
         format_size(a.byte_size)
     );
-    container(
-        column![]
-            .spacing(2)
-            .push(text(&a.filename).size(13).color(t::text_primary()))
-            .push(text(meta).size(11).color(t::text_muted())),
-    )
+    let info = column![]
+        .spacing(2)
+        .width(Length::Fill)
+        .push(text(&a.filename).size(13).color(t::text_primary()))
+        .push(text(meta).size(11).color(t::text_muted()));
+    // Only files the server has can be deleted this way; pending/failed ones
+    // are cancelled or removed by the upload tickets.
+    let delete = (a.upload_state == UploadState::Synced).then(|| {
+        button(text("Delete").size(11).color(t::text_muted()))
+            .on_press(Message::ConfirmDeleteAttachment(a.id.clone()))
+            .padding(0)
+            .style(button::text)
+    });
+    container(row![info].spacing(8).push_maybe(delete))
     .padding(10)
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {

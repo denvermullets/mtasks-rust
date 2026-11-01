@@ -138,6 +138,9 @@ pub enum Message {
     /// "Delete" pressed on one of the user's own unsynced comments (local id).
     ConfirmDeleteComment(String),
     DeleteCommentConfirmed,
+    /// "Delete" pressed on a synced attachment card (local attachment id).
+    ConfirmDeleteAttachment(String),
+    DeleteAttachmentConfirmed,
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -404,6 +407,8 @@ pub enum Modal {
     DeleteProjectConfirm(String),
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
+    /// Confirm deleting a synced attachment (local attachment id).
+    DeleteAttachmentConfirm(String),
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
@@ -4247,6 +4252,31 @@ impl App {
                 self.reload_data();
             }
 
+            Message::ConfirmDeleteAttachment(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete an attachment",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteAttachmentConfirm(id);
+                }
+            }
+
+            Message::DeleteAttachmentConfirmed => {
+                if let Modal::DeleteAttachmentConfirm(ref id) = self.modal {
+                    let conn = self.db();
+                    if let Ok(Some(payload)) =
+                        crate::db::attachments::remove_synced_issue_attachment(&conn, id)
+                    {
+                        self.enqueue_sync("attachment", id, "delete", Some(payload.as_str()));
+                    }
+                }
+                self.modal = Modal::None;
+                self.reload_data();
+            }
+
             Message::DeleteProjectConfirmed => {
                 if let Modal::DeleteProjectConfirm(ref project_id) = self.modal {
                     let conn = self.db();
@@ -4986,6 +5016,19 @@ impl App {
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
+            }
+            Modal::DeleteAttachmentConfirm(id) => {
+                let name = crate::db::attachments::get(&self.db(), id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.filename)
+                    .unwrap_or_default();
+                let body = format!("Delete the attachment \"{name}\"? This can't be undone.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Attachment?", body, Message::DeleteAttachmentConfirmed)
+                ]
+                .into()
             }
             Modal::IssuePicker => match (&self.issue_picker, &self.issue_detail) {
                 (Some(picker), Some(detail)) => {
