@@ -21,7 +21,7 @@ pub use client::{ApiClient, Conditional, Page};
 pub use comments::{CommentParams, CommentTarget};
 pub use dependencies::{Direction, IssueDependencyResponse};
 pub use dto::{
-    CommentDto, IssueDependencyDto, IssueDto, IssueRef, LabelDto, LabelRef, LaneDto, MemberDto,
+    AttachmentDto, CommentDto, IssueDependencyDto, IssueDto, IssueRef, LabelDto, LabelRef, LaneDto, MemberDto,
     ParentIssueRef, ProjectDto, RecordRef, TeamDto, UserRef,
 };
 pub use error::ApiError;

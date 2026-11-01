@@ -105,6 +105,30 @@ pub struct IssueDto {
     pub completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canceled_at: Option<String>,
+    /// Files attached to the issue (detail payload only). `None` when the
+    /// payload has no `files` key: that means no files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<AttachmentDto>>,
+}
+
+/// One attachment as Rails serializes it under `files` on issues, projects
+/// and comments. `id` is the attachment row (what delete takes);
+/// `download_url` is `/api/v1/attachments/:id/download`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentDto {
+    pub id: i64,
+    #[serde(default)]
+    pub blob_id: Option<i64>,
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub byte_size: i64,
+    #[serde(default)]
+    pub checksum: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub download_url: Option<String>,
 }
 
 impl IssueDto {
@@ -171,6 +195,7 @@ impl IssueDto {
             started_at: issue.started_at.clone(),
             completed_at: issue.completed_at.clone(),
             canceled_at: issue.canceled_at.clone(),
+            files: None,
         })
     }
 

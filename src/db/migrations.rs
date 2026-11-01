@@ -621,6 +621,36 @@ const MIGRATIONS: &[Migration] = &[
                 ON issues (recurring_issue_id);
         ",
     },
+    Migration {
+        version: 30,
+        name: "attachments",
+        up: "
+            -- Files attached to an issue, project or comment. `owner_id` is
+            -- the owner's LOCAL id (polymorphic, so no FK). Synced rows are
+            -- replaced from each pull of the owner's `files`; pending and
+            -- failed rows are local-only and survive the replace.
+            CREATE TABLE IF NOT EXISTS attachments (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER,
+                owner_kind TEXT NOT NULL
+                    CHECK (owner_kind IN ('issue', 'project', 'comment')),
+                owner_id TEXT NOT NULL,
+                blob_id INTEGER,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL DEFAULT '',
+                byte_size INTEGER NOT NULL DEFAULT 0,
+                checksum TEXT,
+                created_at TEXT NOT NULL,
+                upload_state TEXT NOT NULL DEFAULT 'synced'
+                    CHECK (upload_state IN ('synced', 'pending', 'failed')),
+                failure_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_attachments_owner
+                ON attachments (owner_kind, owner_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_remote_id
+                ON attachments (remote_id) WHERE remote_id IS NOT NULL;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -803,7 +833,7 @@ mod tests {
         }
         run(&conn).unwrap();
         conn.prepare("SELECT recurring_issue_id FROM issues").unwrap();
-        assert_eq!(applied_versions(&conn).last(), Some(&29));
+        assert!(applied_versions(&conn).contains(&29));
     }
 
     #[test]
@@ -1238,6 +1268,30 @@ mod tests {
         conn.execute("DELETE FROM issues WHERE id='i1'", []).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM issue_activity_entries", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0, "rows cascade with the issue");
+    }
+
+    #[test]
+    fn attachments_table_added_to_existing_db_and_checks_enums() {
+        let conn = open_mem();
+        conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);").unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 30) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        assert!(!table_exists(&conn, "attachments"));
+        run(&conn).unwrap();
+        assert!(table_exists(&conn, "attachments"));
+        let ins = |kind: &str, state: &str| {
+            conn.execute(
+                "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state)
+                 VALUES (lower(hex(randomblob(8))), ?1, 'o', 'f', 'c', ?2)",
+                rusqlite::params![kind, state],
+            )
+        };
+        assert!(ins("issue", "synced").is_ok());
+        assert!(ins("comment", "failed").is_ok());
+        assert!(ins("team", "synced").is_err());
+        assert!(ins("issue", "uploading").is_err());
     }
 
     #[test]
