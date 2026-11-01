@@ -202,6 +202,8 @@ enum Run {
     Mention(String),
     /// An issue reference; `target` is set when it resolves to a local issue.
     Reference { text: String, target: Option<LinkTarget> },
+    /// An external link.
+    Link { text: String, url: String },
 }
 
 /// Map inlines to runs. `resolve` turns an `IDENT-n` token into a link target.
@@ -216,6 +218,7 @@ fn runs(inlines: &[Inline], resolve: impl Fn(&str) -> Option<LinkTarget>) -> Vec
                 text: text.clone(),
                 target: resolve(&format!("{prefix}-{number}")),
             },
+            Inline::Link { text, url } => Run::Link { text: text.clone(), url: url.clone() },
         })
         .collect()
 }
@@ -228,6 +231,7 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
             span(text).color(t::accent()).underline(true).link(target)
         }
         Run::Reference { text, target: None } => span(text).color(t::accent()),
+        Run::Link { text, url } => span(text).color(t::accent()).link(LinkTarget::External(url)),
     }
 }
 
@@ -367,6 +371,20 @@ mod tests {
                 Run::Plain(" and ".into()),
                 Run::Reference { text: "OTH-1".into(), target: None },
                 Run::Plain(" next".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn links_map_to_link_runs() {
+        let doc = document::parse_with("go [here](https://a.b) or [no](file:///x)", "", &[]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(
+            runs(inl, resolve),
+            [
+                Run::Plain("go ".into()),
+                Run::Link { text: "here".into(), url: "https://a.b".into() },
+                Run::Plain(" or no".into()),
             ]
         );
     }

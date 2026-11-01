@@ -76,6 +76,22 @@ pub enum Inline {
     /// An `IDENT-123` reference (any prefix; the consumer resolves the team).
     /// `text` is the matched source, including a leading `#` when present.
     IssueRef { text: String, prefix: String, number: i64 },
+    /// A link with an openable target. Text is flat (no tokens inside).
+    /// Links with any other scheme are not produced: their text stays plain.
+    Link { text: String, url: String },
+}
+
+/// Whether a link target may be opened: only `http`, `https` and `mailto`
+/// (scheme case-insensitive). Everything else (`file:`, custom app schemes,
+/// `javascript:`, relative paths) is inert.
+pub fn is_openable_link(url: &str) -> bool {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once(':') else { return false };
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => rest.starts_with("//") && rest.len() > 2,
+        "mailto" => !rest.is_empty(),
+        _ => false,
+    }
 }
 
 /// Parser options: the web feature set. Hard breaks are never produced from
@@ -125,6 +141,8 @@ struct Builder {
     pending: String,
     /// Depth inside links and images, whose text stays literal.
     literal_depth: usize,
+    /// The link being read: (url, text so far).
+    link: Option<(String, String)>,
 }
 
 /// An open container and what it has collected so far.
@@ -170,6 +188,24 @@ impl Builder {
     }
 
     fn event(&mut self, ev: Event) {
+        if let Some((_, text)) = &mut self.link {
+            match ev {
+                Event::Text(s) | Event::Code(s) => text.push_str(&s),
+                Event::SoftBreak | Event::HardBreak => text.push(' '),
+                Event::End(TagEnd::Link) => {
+                    let (url, text) = self.link.take().unwrap_or_default();
+                    self.literal_depth = self.literal_depth.saturating_sub(1);
+                    self.flush_pending();
+                    if is_openable_link(&url) {
+                        self.current.push(Inline::Link { text, url });
+                    } else {
+                        self.push_plain(&text);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Some((src, alt)) = &mut self.image {
             match ev {
                 Event::Text(s) | Event::Code(s) => alt.push_str(&s),
@@ -193,6 +229,11 @@ impl Builder {
             Event::Start(Tag::Image { dest_url, .. }) if self.html_depth == 0 => {
                 self.flush();
                 self.image = Some((dest_url.to_string(), String::new()));
+            }
+            Event::Start(Tag::Link { dest_url, .. }) if self.html_depth == 0 => {
+                self.flush_pending();
+                self.literal_depth += 1;
+                self.link = Some((dest_url.to_string(), String::new()));
             }
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::Start(Tag::List(None)) => self.open(Frame::List(Vec::new())),
@@ -601,8 +642,16 @@ mod tests {
                 "PROJ-1 `PROJ-2` PROJ-3",
                 vec![issue("PROJ-1", "PROJ", 1), text(" PROJ-2 "), issue("PROJ-3", "PROJ", 3)],
             ),
-            ("link text not tokenized", "[PROJ-1 @ann](http://x.y)", vec![text("PROJ-1 @ann")]),
-            ("autolink not tokenized", "<http://a.b/PROJ-1>", vec![text("http://a.b/PROJ-1")]),
+            (
+                "link text not tokenized",
+                "[PROJ-1 @ann](http://x.y)",
+                vec![Inline::Link { text: "PROJ-1 @ann".into(), url: "http://x.y".into() }],
+            ),
+            (
+                "autolink not tokenized",
+                "<http://a.b/PROJ-1>",
+                vec![Inline::Link { text: "http://a.b/PROJ-1".into(), url: "http://a.b/PROJ-1".into() }],
+            ),
             ("code block not tokenized", "```\nPROJ-1 @ann\n```", vec![text("PROJ-1 @ann\n")]),
         ];
         for (name, body, want) in cases {
@@ -644,5 +693,72 @@ mod tests {
         }
         assert_eq!(parse("**unclosed bold").blocks, vec![para(vec![text("**unclosed bold")])]);
         assert_eq!(parse("[broken](link").blocks, vec![para(vec![text("[broken](link")])]);
+    }
+
+    #[test]
+    fn classifies_openable_link_schemes() {
+        let cases = [
+            ("http://a.b", true),
+            ("https://a.b/x?y=1#z", true),
+            ("HTTPS://A.B", true),
+            ("  https://a.b ", true),
+            ("mailto:a@b.c", true),
+            ("MAILTO:a@b.c", true),
+            ("file:///etc/passwd", false),
+            ("javascript:alert(1)", false),
+            ("jait://issue/1", false),
+            ("slack://open", false),
+            ("ftp://a.b", false),
+            ("data:text/html,x", false),
+            ("http:", false),
+            ("http:a.b", false),
+            ("mailto:", false),
+            ("/relative/path", false),
+            ("page.html", false),
+            ("", false),
+        ];
+        for (url, want) in cases {
+            assert_eq!(is_openable_link(url), want, "{url}");
+        }
+    }
+
+    #[test]
+    fn parses_links() {
+        let link = |t: &str, u: &str| Inline::Link { text: t.into(), url: u.into() };
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            (
+                "https link",
+                "see [docs](https://a.b/x) now",
+                vec![para(vec![text("see "), link("docs", "https://a.b/x"), text(" now")])],
+            ),
+            ("mailto link", "[me](mailto:a@b.c)", vec![para(vec![link("me", "mailto:a@b.c")])]),
+            ("file link is inert text", "[x](file:///etc/hosts)", vec![para(vec![text("x")])]),
+            ("custom scheme is inert text", "a [x](slack://open) b", vec![para(vec![text("a x b")])]),
+            ("relative link is inert text", "[x](/foo)", vec![para(vec![text("x")])]),
+            (
+                "tokens in link text stay literal",
+                "[PROJ-1 @Ann](http://x.y)",
+                vec![para(vec![link("PROJ-1 @Ann", "http://x.y")])],
+            ),
+            (
+                "tokens in inert link text stay literal",
+                "[PROJ-1](file:///x)",
+                vec![para(vec![text("PROJ-1")])],
+            ),
+            (
+                "emphasis in link text is flattened",
+                "[**bold** `code`](http://x.y)",
+                vec![para(vec![link("bold code", "http://x.y")])],
+            ),
+            (
+                "tokens around a link still tokenize",
+                "PROJ-2 [a](http://x.y) PROJ-3",
+                vec![para(vec![issue("PROJ-2", "PROJ", 2), text(" "), link("a", "http://x.y"), text(" "), issue("PROJ-3", "PROJ", 3)])],
+            ),
+            ("link in code stays text", "`[a](http://x.y)`", vec![para(vec![text("[a](http://x.y)")])]),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse(body).blocks, want, "{name}");
+        }
     }
 }
