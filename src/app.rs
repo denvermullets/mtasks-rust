@@ -6478,6 +6478,7 @@ impl App {
                 crate::views::group_form::modal(
                     &self.group_form.draft,
                     &self.teams,
+                    &self.projects,
                     self.group_form.error
                 )
             ]
