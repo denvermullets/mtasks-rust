@@ -91,7 +91,7 @@ pub fn view<'a>(
     comment_attachments: &'a CommentAttachments,
     images: &'a crate::files::images::ImageStore,
     host: &'a str,
-    pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
+    pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -312,7 +312,7 @@ fn discussion_section<'a>(
     comment_attachments: &'a CommentAttachments,
     images: &'a crate::files::images::ImageStore,
     host: &'a str,
-    pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
+    pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)

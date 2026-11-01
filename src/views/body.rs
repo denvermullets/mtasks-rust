@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, image, text};
+use iced::widget::{button, column, container, image, row, text};
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
@@ -26,6 +26,20 @@ use crate::theme as t;
 const MAX_IMAGE_WIDTH: f32 = 560.0;
 /// Placeholder size while an image loads.
 const PLACEHOLDER: (f32, f32) = (240.0, 140.0);
+
+/// A not-yet-uploaded inline image (pending or failed), found by placeholder uuid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInline {
+    /// Local attachment id (target of Retry / Remove).
+    pub id: String,
+    /// Outbox copy of the pasted image.
+    pub path: PathBuf,
+    /// `Some(reason)` when the upload failed for good.
+    pub failure: Option<String>,
+}
+
+/// Pending inline images by placeholder uuid.
+pub type PendingInlineMap = HashMap<String, PendingInline>;
 
 /// One image block in reading order. `key` is the file-cache/`ImageStore` key
 /// (`None` for pending placeholders, which have no blob yet).
@@ -60,8 +74,8 @@ pub fn image_list(body: &str, host: &str) -> Vec<InlineImage> {
         .collect()
 }
 
-/// `src` of every image in `body` that can be fetched (blob images; pending skipped).
-pub fn fetchable_srcs(body: &str, host: &str) -> Vec<String> {
+/// `src` of every image in ONE `body` that can be fetched (blob images; pending skipped).
+pub fn fetchable_srcs_of_body(body: &str, host: &str) -> Vec<String> {
     image_list(body, host)
         .into_iter()
         .filter(|i| i.key.is_some())
@@ -69,13 +83,14 @@ pub fn fetchable_srcs(body: &str, host: &str) -> Vec<String> {
         .collect()
 }
 
-/// Fetchable (blob) image srcs across `bodies`, in order; pending placeholders skipped.
-pub fn blob_srcs<'b>(bodies: impl IntoIterator<Item = &'b str>, host: &str) -> Vec<String> {
+/// [`fetchable_srcs_of_body`] across MANY `bodies`, in order.
+pub fn fetchable_srcs_of_bodies<'b>(
+    bodies: impl IntoIterator<Item = &'b str>,
+    host: &str,
+) -> Vec<String> {
     bodies
         .into_iter()
-        .flat_map(|b| image_list(b, host))
-        .filter(|i| i.key.is_some())
-        .map(|i| i.src)
+        .flat_map(|b| fetchable_srcs_of_body(b, host))
         .collect()
 }
 
@@ -98,7 +113,7 @@ pub struct BodyCtx<'a> {
     /// Outbox file per pending placeholder uuid. Pending uploads (JRST-197)
     /// fill this; a uuid with no entry renders as a card.
     /// `None` = no pending uploads known.
-    pub pending_paths: Option<&'a HashMap<String, PathBuf>>,
+    pub pending_paths: Option<&'a PendingInlineMap>,
     /// Click on an image (lightbox, JRST-192). `None` = not clickable.
     pub on_image: Option<fn(InlineImage) -> Message>,
 }
@@ -134,6 +149,7 @@ fn image_path(block: &ImageBlock<'_>, ctx: &BodyCtx<'_>) -> Option<PathBuf> {
     match block.kind {
         ImageKind::Pending(uuid) => ctx.pending_paths
             .and_then(|m| m.get(uuid))
+            .map(|p| &p.path)
             .filter(|p| p.exists())
             .cloned(),
         ImageKind::Blob => inline::blob_key(block.src)
@@ -153,14 +169,45 @@ fn image_block<'a>(block: &ImageBlock<'_>, ctx: &BodyCtx<'a>) -> Element<'a, Mes
         None if loading => placeholder(),
         None => alt_card(block.alt),
     };
-    match ctx.on_image {
+    let el: Element<'a, Message> = match ctx.on_image {
         Some(on_image) => button(el)
             .padding(0)
             .style(|_theme: &Theme, _status| button::Style::default())
             .on_press(on_image(InlineImage::from_block(block)))
             .into(),
         None => el,
+    };
+    match failed_inline(block, ctx) {
+        Some((id, reason)) => column![el, failed_row(id, reason)].spacing(4).into(),
+        None => el,
     }
+}
+
+/// The failed upload behind a pending-placeholder block: (attachment id, reason).
+fn failed_inline<'a>(block: &ImageBlock<'_>, ctx: &BodyCtx<'a>) -> Option<(String, String)> {
+    let ImageKind::Pending(uuid) = block.kind else { return None };
+    let p = ctx.pending_paths?.get(uuid)?;
+    Some((p.id.clone(), p.failure.clone()?))
+}
+
+/// "Upload failed: reason" with the two ways out.
+fn failed_row<'a>(id: String, reason: String) -> Element<'a, Message> {
+    row![]
+        .spacing(8)
+        .push(text(format!("Upload failed: {reason}")).size(11).color(t::danger()))
+        .push(
+            button(text("Retry").size(11).color(t::accent()))
+                .on_press(Message::RetryUpload(id.clone()))
+                .padding(0)
+                .style(button::text),
+        )
+        .push(
+            button(text("Remove").size(11).color(t::text_muted()))
+                .on_press(Message::RemoveFailedUpload(id))
+                .padding(0)
+                .style(button::text),
+        )
+        .into()
 }
 
 fn placeholder<'a>() -> Element<'a, Message> {
@@ -215,21 +262,21 @@ mod tests {
     }
 
     #[test]
-    fn fetchable_srcs_lists_only_blob_images() {
+    fn fetchable_srcs_of_body_lists_only_blob_images() {
         let body = "![a](/rails/active_storage/blobs/redirect/AA--1/a.png) \
                     ![p](jait-pending://123e4567-e89b-12d3-a456-426614174000)";
         assert_eq!(
-            fetchable_srcs(body, HOST),
+            fetchable_srcs_of_body(body, HOST),
             ["/rails/active_storage/blobs/redirect/AA--1/a.png"]
         );
     }
 
     #[test]
-    fn blob_srcs_collects_fetchable_images_across_bodies() {
+    fn fetchable_srcs_of_bodies_collects_fetchable_images_across_bodies() {
         let a = "![one](/rails/active_storage/blobs/redirect/AA--1/one.png)";
         let b = "text ![p](jait-pending://123e4567-e89b-12d3-a456-426614174000) \
                  ![two](/rails/active_storage/blobs/redirect/BB--2/two.png)";
-        let srcs = blob_srcs([a, b, "none"], HOST);
+        let srcs = fetchable_srcs_of_bodies([a, b, "none"], HOST);
         assert_eq!(
             srcs,
             [

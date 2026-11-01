@@ -4,9 +4,6 @@
 //! `owner_id` is the owner's LOCAL id. Synced rows are replaced from each
 //! pull of the owner's `files` ([`replace_synced`]); pending and failed rows
 //! are local-only (upload tickets own them) and are never touched by it.
-// The read side (list_for_owner, Attachment, UploadState) is consumed by the
-// display and upload tickets; only replace_synced is wired so far.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -31,6 +28,30 @@ impl OwnerKind {
             OwnerKind::Comment => "comment",
         }
     }
+
+    /// `None` for anything but the three stored names.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "issue" => Some(OwnerKind::Issue),
+            "project" => Some(OwnerKind::Project),
+            "comment" => Some(OwnerKind::Comment),
+            _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for OwnerKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        Self::parse(s).ok_or_else(|| format!("unknown attachment owner kind {s:?}"))
+    }
+}
+
+impl std::fmt::Display for OwnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Where an attachment is in its life: on the server, waiting to upload, or
@@ -43,14 +64,6 @@ pub enum UploadState {
 }
 
 impl UploadState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            UploadState::Synced => "synced",
-            UploadState::Pending => "pending",
-            UploadState::Failed => "failed",
-        }
-    }
-
     fn from_db(s: &str) -> Self {
         match s {
             "pending" => UploadState::Pending,
@@ -66,7 +79,7 @@ pub struct Attachment {
     /// Local uuid.
     pub id: String,
     pub remote_id: Option<i64>,
-    pub owner_kind: String,
+    pub owner_kind: OwnerKind,
     /// Owner's local id.
     pub owner_id: String,
     pub blob_id: Option<i64>,
@@ -99,7 +112,12 @@ fn from_row(r: &Row) -> Result<Attachment> {
     Ok(Attachment {
         id: r.get(0)?,
         remote_id: r.get(1)?,
-        owner_kind: r.get(2)?,
+        owner_kind: {
+            let raw: String = r.get(2)?;
+            raw.parse().map_err(|e: String| {
+                rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
+            })?
+        },
         owner_id: r.get(3)?,
         blob_id: r.get(4)?,
         filename: r.get(5)?,
@@ -138,6 +156,8 @@ pub const UPLOAD_ENTITY: &str = "upload";
 /// Sync queue entity for attaching the uploaded blob to its owner
 /// (`attachment/create`; `attachment/delete` belongs to JRST-215).
 pub const ATTACHMENT_ENTITY: &str = "attachment";
+/// Sync queue entity for comments (their create carries staged files).
+pub const COMMENT_ENTITY: &str = "comment";
 
 /// Record a Pending upload: insert the `pending` row and enqueue `upload/create`
 /// (plus `attachment/create` for [`UploadKind::Attachment`]), atomically. Queue
@@ -341,6 +361,11 @@ pub fn replace_synced(
             }
         }
         for f in files {
+            // A delete the server has not seen yet: the row is already gone
+            // locally, so a pull must not resurrect it.
+            if has_pending_delete(conn, kind, f.id)? {
+                continue;
+            }
             let content_type = f.content_type.clone().unwrap_or_default();
             match existing.get(&f.id) {
                 Some(local_id) => {
@@ -389,6 +414,75 @@ pub fn replace_synced(
     }
 }
 
+/// True while an `attachment/delete` for `remote_id` (of this owner kind) is
+/// queued and unpushed.
+fn has_pending_delete(conn: &Connection, kind: OwnerKind, remote_id: i64) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_queue
+         WHERE entity_type = ?3 AND action = 'delete' AND synced_at IS NULL
+           AND json_extract(payload, '$.owner_kind') = ?1
+           AND json_extract(payload, '$.remote_id') = ?2)",
+        params![kind.as_str(), remote_id, ATTACHMENT_ENTITY],
+        |r| r.get(0),
+    )
+}
+
+/// Where an attachment's owner lives: its team and remote id, and for a
+/// comment the issue/project it is under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerRef {
+    /// The owner's team, local id.
+    pub team_id: String,
+    /// The owner's own remote id; `None` until the server has seen it.
+    pub remote_id: Option<i64>,
+    /// Comment owners only.
+    pub parent: Option<ParentRef>,
+}
+
+/// The issue or project a comment belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRef {
+    pub kind: OwnerKind,
+    pub remote_id: Option<i64>,
+}
+
+/// The one owner lookup: `None` when the owner (or a comment's parent) is
+/// missing locally.
+pub fn owner_ref(conn: &Connection, a: &Attachment) -> Result<Option<OwnerRef>> {
+    use crate::db::models::CommentOwner;
+    use crate::db::queries;
+    Ok(match a.owner_kind {
+        OwnerKind::Issue => queries::get_issue(conn, &a.owner_id)?.map(|i| OwnerRef {
+            team_id: i.team_id,
+            remote_id: i.remote_id,
+            parent: None,
+        }),
+        OwnerKind::Project => queries::get_project(conn, &a.owner_id)?.map(|p| OwnerRef {
+            team_id: p.team_id,
+            remote_id: p.remote_id,
+            parent: None,
+        }),
+        OwnerKind::Comment => {
+            let Some(c) = queries::get_comment(conn, &a.owner_id)? else { return Ok(None) };
+            let (kind, team_id, parent_remote) = match c.owner() {
+                CommentOwner::Issue(iid) => {
+                    let Some(i) = queries::get_issue(conn, &iid)? else { return Ok(None) };
+                    (OwnerKind::Issue, i.team_id, i.remote_id)
+                }
+                CommentOwner::Project(pid) => {
+                    let Some(p) = queries::get_project(conn, &pid)? else { return Ok(None) };
+                    (OwnerKind::Project, p.team_id, p.remote_id)
+                }
+            };
+            Some(OwnerRef {
+                team_id,
+                remote_id: c.remote_id,
+                parent: Some(ParentRef { kind, remote_id: parent_remote }),
+            })
+        }
+    })
+}
+
 /// One attachment by local id.
 pub fn get(conn: &Connection, id: &str) -> Result<Option<Attachment>> {
     use rusqlite::OptionalExtension;
@@ -414,51 +508,28 @@ pub fn remove_synced_attachment(conn: &Connection, id: &str) -> Result<Option<St
     let (Some(remote_id), UploadState::Synced) = (a.remote_id, a.upload_state) else {
         return Ok(None);
     };
-    // (team local id, owner remote id, extra payload fields)
-    let (team_local, owner_remote_id, extra) = match a.owner_kind.as_str() {
-        "issue" => {
-            let Some(issue) = queries::get_issue(conn, &a.owner_id)? else { return Ok(None) };
-            let Some(r) = issue.remote_id else { return Ok(None) };
-            (issue.team_id, r, serde_json::json!({}))
+    let Some(owner) = owner_ref(conn, &a)? else { return Ok(None) };
+    let Some(owner_remote_id) = owner.remote_id else { return Ok(None) };
+    // Comment owners also carry the parent the server addresses them under.
+    let extra = match &owner.parent {
+        Some(parent) => {
+            let Some(parent_remote) = parent.remote_id else { return Ok(None) };
+            serde_json::json!({ "parent_kind": parent.kind.as_str(), "parent_remote_id": parent_remote })
         }
-        "project" => {
-            let Some(project) = queries::get_project(conn, &a.owner_id)? else { return Ok(None) };
-            let Some(r) = project.remote_id else { return Ok(None) };
-            (project.team_id, r, serde_json::json!({}))
-        }
-        "comment" => {
-            let Some(comment) = queries::get_comment(conn, &a.owner_id)? else { return Ok(None) };
-            let Some(comment_remote) = comment.remote_id else { return Ok(None) };
-            let (kind, team, parent_remote) = match comment.owner() {
-                crate::db::models::CommentOwner::Issue(iid) => {
-                    let Some(i) = queries::get_issue(conn, &iid)? else { return Ok(None) };
-                    ("issue", i.team_id, i.remote_id)
-                }
-                crate::db::models::CommentOwner::Project(pid) => {
-                    let Some(p) = queries::get_project(conn, &pid)? else { return Ok(None) };
-                    ("project", p.team_id, p.remote_id)
-                }
-            };
-            let Some(parent_remote) = parent_remote else { return Ok(None) };
-            (
-                team,
-                comment_remote,
-                serde_json::json!({ "parent_kind": kind, "parent_remote_id": parent_remote }),
-            )
-        }
-        _ => return Ok(None),
+        None => serde_json::json!({}),
     };
+    let team_local = owner.team_id;
     let Some(team_remote_id) = queries::remote_id_for(conn, "teams", &team_local)? else {
         return Ok(None);
     };
     conn.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
     let mut payload = serde_json::json!({
-        "owner_kind": a.owner_kind,
+        "owner_kind": a.owner_kind.as_str(),
         "team_remote_id": team_remote_id,
         "owner_remote_id": owner_remote_id,
         "remote_id": remote_id,
         "restore": {
-            "id": a.id, "owner_kind": a.owner_kind, "owner_id": a.owner_id,
+            "id": a.id, "owner_kind": a.owner_kind.as_str(), "owner_id": a.owner_id,
             "blob_id": a.blob_id, "filename": a.filename, "content_type": a.content_type,
             "byte_size": a.byte_size, "checksum": a.checksum, "created_at": a.created_at,
         },
@@ -488,6 +559,31 @@ pub fn remove_local(conn: &Connection, id: &str) -> Result<bool> {
         let _ = crate::files::outbox::remove(std::path::Path::new(path));
     }
     Ok(true)
+}
+
+/// A comment draft was dropped (reply cancelled, composer discarded, user
+/// navigated away): cancel every unsent staged file / pasted image owned by the
+/// given future-comment ids so their uploads never send. Rows whose comment was
+/// already submitted (a `comments` row with that id exists) are left alone.
+/// Returns how many rows were removed.
+pub fn discard_unsent_for_drafts(conn: &Connection, draft_ids: &[&str]) -> Result<usize> {
+    let mut removed = 0;
+    for draft in draft_ids {
+        let submitted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM comments WHERE id = ?1)",
+            params![draft],
+            |r| r.get(0),
+        )?;
+        if submitted {
+            continue;
+        }
+        for a in list_for_owner(conn, OwnerKind::Comment, draft)? {
+            if remove_local(conn, &a.id)? {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Inline-image uploads of an owner that are ready for their body to be sent:
@@ -658,6 +754,26 @@ mod comment_file_tests {
     }
 
     #[test]
+    fn discarding_a_draft_cancels_unsent_rows_but_not_submitted_comments() {
+        let c = conn();
+        let staged = add_pending(&c, &new_comment_file("draft")).unwrap();
+        let kept = add_pending(&c, &new_comment_file("sent")).unwrap();
+        c.execute("PRAGMA foreign_keys=OFF", []).ok();
+        c.execute(
+            "INSERT INTO comments (id, issue_id, body, created_at, updated_at) VALUES ('sent', 'i1', 'b', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(discard_unsent_for_drafts(&c, &["draft", "sent"]).unwrap(), 1);
+        assert!(get(&c, &staged.id).unwrap().is_none());
+        assert!(get(&c, &kept.id).unwrap().is_some());
+        let queued: i64 = c
+            .query_row("SELECT COUNT(*) FROM sync_queue WHERE entity_id = ?1", params![staged.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 0);
+    }
+
+    #[test]
     fn finishing_comment_files_swaps_pending_rows_for_the_servers_list() {
         let c = conn();
         add_pending(&c, &new_comment_file("c1")).unwrap();
@@ -708,6 +824,35 @@ mod tests {
 
     fn names(c: &Connection) -> Vec<String> {
         list_for_owner(c, OwnerKind::Issue, "i1").unwrap().into_iter().map(|a| a.filename).collect()
+    }
+
+    #[test]
+    fn owner_kind_parses_and_rejects_unknown_names() {
+        for k in [OwnerKind::Issue, OwnerKind::Project, OwnerKind::Comment] {
+            assert_eq!(k.as_str().parse::<OwnerKind>(), Ok(k));
+        }
+        assert!("team".parse::<OwnerKind>().is_err());
+    }
+
+    #[test]
+    fn pull_does_not_resurrect_attachment_with_queued_delete() {
+        let c = conn();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(5, "a.png"), dto(6, "b.png")]).unwrap();
+        let a = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap().remove(0);
+        assert_eq!(a.remote_id, Some(5));
+        c.execute("DELETE FROM attachments WHERE id = ?1", params![a.id]).unwrap();
+        c.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, action, payload, created_at)
+             VALUES ('attachment', ?1, 'delete', '{\"owner_kind\":\"issue\",\"remote_id\":5}', 'now')",
+            params![a.id],
+        )
+        .unwrap();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(5, "a.png"), dto(6, "b.png")]).unwrap();
+        assert_eq!(names(&c), vec!["b.png"]);
+        // Once the delete is pushed, the server list decides again.
+        c.execute("UPDATE sync_queue SET synced_at = 'x' WHERE entity_type = 'attachment'", []).unwrap();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(5, "a.png"), dto(6, "b.png")]).unwrap();
+        assert_eq!(names(&c).len(), 2);
     }
 
     #[test]

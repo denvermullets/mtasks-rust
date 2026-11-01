@@ -23,6 +23,8 @@ pub enum PaletteNav {
     /// Open a Saved view by local id, switching team when needed
     /// (`Message::OpenSavedView`).
     SavedView(String),
+    /// Attach files to the open issue (`Message::PickAttachmentFiles`).
+    AttachFiles,
 }
 
 impl PaletteNav {
@@ -34,6 +36,7 @@ impl PaletteNav {
             PaletteNav::Issue(_) => "Issue",
             PaletteNav::Project { .. } => "Project",
             PaletteNav::SavedView(_) => "View",
+            PaletteNav::AttachFiles => "Command",
         }
     }
 }
@@ -65,6 +68,8 @@ pub struct PaletteData {
     pub teams: Vec<Team>,
     pub projects: Vec<SearchableProject>,
     pub saved_views: Vec<SearchableSavedView>,
+    /// An issue detail is open, so issue-only commands are offered.
+    pub on_issue_detail: bool,
 }
 
 /// Most rows the palette ever shows.
@@ -76,6 +81,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let needle = query.trim().to_lowercase();
     let mut rows = Vec::new();
     push_issues(query, data, &mut rows);
+    push_commands(&needle, data, &mut rows);
     push_views(&needle, &mut rows);
     push_teams(&needle, data, &mut rows);
     push_projects(&needle, data, &mut rows);
@@ -157,6 +163,16 @@ fn push_issues(query: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             primary: format!("{}-{number}", s.team_identifier),
             secondary: format!("{} \u{b7} {}", s.issue.title, s.team_name),
             nav: PaletteNav::Issue(s.issue.id.clone()),
+        });
+    }
+}
+
+fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    if data.on_issue_detail && name_matches(needle, "Attach file") {
+        rows.push(PaletteRow {
+            primary: "Attach file".to_string(),
+            secondary: "Shortcut: a".to_string(),
+            nav: PaletteNav::AttachFiles,
         });
     }
 }
@@ -602,5 +618,14 @@ mod tests {
         assert_eq!(state.chosen(), Some(PaletteNav::View(View::Board)));
         state.move_selection(-1);
         assert_eq!(state.chosen(), Some(PaletteNav::View(View::Inbox)));
+    }
+
+    #[test]
+    fn attach_command_only_on_issue_detail() {
+        let on = PaletteData { on_issue_detail: true, ..PaletteData::default() };
+        let rows = palette_results("attach", &on);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nav, PaletteNav::AttachFiles);
+        assert!(palette_results("attach", &PaletteData::default()).is_empty());
     }
 }

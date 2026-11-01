@@ -56,7 +56,7 @@ mod tests {
         Attachment {
             id: "l".into(),
             remote_id,
-            owner_kind: "issue".into(),
+            owner_kind: crate::db::attachments::OwnerKind::Issue,
             owner_id: "o".into(),
             blob_id,
             filename: "a.pdf".into(),

@@ -404,11 +404,11 @@ async fn process(
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
         ("label", "update") => label_update(client, &entry.entity_id).await,
         ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
-        ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
-        ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
-        ("upload", "create") => upload_create(client, &entry.entity_id).await,
-        ("attachment", "create") => attachment_create(client, &entry.entity_id).await,
-        ("attachment", "delete") => attachment_delete(client, entry.payload.as_deref()).await,
+        (attachments::COMMENT_ENTITY, "create") => comment_create(client, &entry.entity_id, entry_id).await,
+        (attachments::COMMENT_ENTITY, "delete") => comment_delete(client, entry.payload.as_deref()).await,
+        (attachments::UPLOAD_ENTITY, "create") => upload_create(client, &entry.entity_id).await,
+        (attachments::ATTACHMENT_ENTITY, "create") => attachment_create(client, &entry.entity_id).await,
+        (attachments::ATTACHMENT_ENTITY, "delete") => attachment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
@@ -2844,14 +2844,10 @@ struct AttachPrep {
 
 /// Remote id of an attachment's owner; `Err` is the wait/drop outcome.
 fn owner_remote_id(conn: &Connection, a: &Attachment) -> Result<i64, Outcome> {
-    let found = match a.owner_kind.as_str() {
-        "issue" => queries::get_issue(conn, &a.owner_id).map(|o| o.map(|i| i.remote_id)),
-        "project" => queries::get_project(conn, &a.owner_id).map(|o| o.map(|p| p.remote_id)),
-        _ => queries::get_comment(conn, &a.owner_id).map(|o| o.map(|c| c.remote_id)),
-    };
-    match found {
-        Ok(Some(Some(r))) => Ok(r),
-        Ok(Some(None)) => Err(Outcome::LeavePending(format!("{} not synced yet", a.owner_kind))),
+    match attachments::owner_ref(conn, a) {
+        Ok(Some(o)) => o
+            .remote_id
+            .ok_or_else(|| Outcome::LeavePending(format!("{} not synced yet", a.owner_kind))),
         Ok(None) => Err(Outcome::DropAndLog(format!(
             "attachment owner ({}) missing locally",
             a.owner_kind
@@ -2872,7 +2868,7 @@ fn prep_upload_create_in(conn: &Connection, entity_id: &str) -> Prep<UploadPrep>
     }
     // A comment's files upload while it is still being written (and while it
     // has no remote id): its create waits for them, not the other way round.
-    if a.owner_kind != "comment" {
+    if a.owner_kind != attachments::OwnerKind::Comment {
         if let Err(o) = owner_remote_id(conn, &a) {
             return Prep::Done(o);
         }
@@ -2909,22 +2905,17 @@ fn prep_attachment_create_in(conn: &Connection, entity_id: &str) -> Prep<AttachP
         Err(o) => return Prep::Done(o),
     };
     use attachments_api::AttachmentOwner;
-    let (owner, team_local_id) = match a.owner_kind.as_str() {
-        "issue" => (
-            AttachmentOwner::Issue { issue_id: owner_remote },
-            queries::get_issue(conn, &a.owner_id).ok().flatten().map(|i| i.team_id),
-        ),
-        "project" => (
-            AttachmentOwner::Project { project_id: owner_remote },
-            queries::get_project(conn, &a.owner_id).ok().flatten().map(|p| p.team_id),
-        ),
+    let owner = match a.owner_kind {
+        attachments::OwnerKind::Issue => AttachmentOwner::Issue { issue_id: owner_remote },
+        attachments::OwnerKind::Project => AttachmentOwner::Project { project_id: owner_remote },
         // Comment files ride on the comment's own create (JRST-206).
-        other => {
-            return Prep::Done(Outcome::LeavePending(format!(
-                "attaching to a {other} is not supported yet"
-            )))
+        attachments::OwnerKind::Comment => {
+            return Prep::Done(Outcome::LeavePending(
+                "attaching to a comment is not supported yet".into(),
+            ))
         }
     };
+    let team_local_id = attachments::owner_ref(conn, &a).ok().flatten().map(|o| o.team_id);
     let team_remote_id = match team_local_id
         .and_then(|t| queries::remote_id_for(conn, "teams", &t).ok().flatten())
     {
@@ -3280,16 +3271,11 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
                 .ok()?;
             team_remote(&team_id)
         }
-        ("upload", _) | ("attachment", _) => {
+        (attachments::UPLOAD_ENTITY, _) | (attachments::ATTACHMENT_ENTITY, _) => {
             let a = attachments::get(conn, id).ok()??;
-            let team_id = match a.owner_kind.as_str() {
-                "issue" => queries::get_issue(conn, &a.owner_id).ok()??.team_id,
-                "project" => queries::get_project(conn, &a.owner_id).ok()??.team_id,
-                _ => return None,
-            };
-            team_remote(&team_id)
+            team_remote(&attachments::owner_ref(conn, &a).ok()??.team_id)
         }
-        ("comment", _) => {
+        (attachments::COMMENT_ENTITY, _) => {
             let c = queries::get_comment(conn, id).ok()??;
             let team_id = match (&c.issue_id, &c.project_id) {
                 (Some(i), _) => queries::get_issue(conn, i).ok()??.team_id,

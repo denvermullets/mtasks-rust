@@ -5,12 +5,7 @@
 //!   least-recently-accessed first ([`cache`]).
 //! - `outbox/` pending uploads. Never touched by cache eviction.
 
-// The cache is consumed by the download tickets (JRST-185/186); outbox and
-// validate are consumed by the upload path and no longer need the allow.
-#[allow(dead_code)]
 pub mod cache;
-// Thumbnail loading is consumed by views; some helpers await later tickets.
-#[allow(dead_code)]
 pub mod images;
 pub mod drop;
 pub mod inline;
