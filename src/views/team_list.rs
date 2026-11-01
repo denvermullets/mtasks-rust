@@ -57,28 +57,52 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
     ));
     col = col.push(inbox_row(*current_view == View::Inbox, unread_count));
 
-    // Dashboards section: nothing at all while there are none.
-    if !dashboards.is_empty() {
-        col = col.push(section_header("DASHBOARDS"));
-        for d in ordered_dashboards(dashboards) {
-            let active = open_dashboard_id == Some(d.id.as_str());
-            // Rows don't open anything yet (the open ticket wires this up).
-            col = col.push(
-                container(
-                    row![text(&d.name).size(13).color(if active {
-                        t::text_primary()
-                    } else {
-                        t::text_secondary()
-                    })]
-                    .spacing(6)
-                    .align_y(iced::Alignment::Center)
-                    .push_maybe(is_home_dashboard(home, d).then(home_marker)),
-                )
-                .padding([6, 14])
-                .width(Length::Fill)
-                .style(move |_theme: &Theme| selected_row_container_style(active)),
-            );
-        }
+    // Dashboards section: header with a "+" action; an empty state offers the
+    // same action when there are none. Disabled in read-only mode.
+    let new_dashboard = (!read_only).then_some(Message::OpenNewDashboard);
+    col = col.push(
+        row![]
+            .align_y(iced::Alignment::Center)
+            .push(section_header("DASHBOARDS"))
+            .push(iced::widget::horizontal_space())
+            .push(
+                button(text("+").size(14).color(t::text_muted()))
+                    .on_press_maybe(new_dashboard.clone())
+                    .padding([2, 14])
+                    .style(plain_row_style),
+            ),
+    );
+    if dashboards.is_empty() {
+        col = col.push(
+            button(text("New dashboard").size(13).color(if read_only {
+                t::text_muted()
+            } else {
+                t::text_secondary()
+            }))
+            .on_press_maybe(new_dashboard)
+            .padding([6, 14])
+            .width(Length::Fill)
+            .style(plain_row_style),
+        );
+    }
+    for d in ordered_dashboards(dashboards) {
+        let active = open_dashboard_id == Some(d.id.as_str());
+        // Rows don't open anything yet (the open ticket wires this up).
+        col = col.push(
+            container(
+                row![text(&d.name).size(13).color(if active {
+                    t::text_primary()
+                } else {
+                    t::text_secondary()
+                })]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+                .push_maybe(is_home_dashboard(home, d).then(home_marker)),
+            )
+            .padding([6, 14])
+            .width(Length::Fill)
+            .style(move |_theme: &Theme| selected_row_container_style(active)),
+        );
     }
 
     // Teams section. The archived toggle only appears once there's something

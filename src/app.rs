@@ -270,6 +270,14 @@ pub enum Message {
     SaveViewNameChanged(String),
     /// Create the Saved view from the current board state.
     SaveViewSubmit,
+    /// Sidebar "New dashboard": open the create modal.
+    OpenNewDashboard,
+    NewDashboardNameChanged(String),
+    NewDashboardDescriptionChanged(String),
+    NewDashboardSubmit,
+    /// Open a dashboard by local id. JRST-220 owns the real handler and view;
+    /// JRST-233 only sets `open_dashboard_id`.
+    OpenDashboard(String),
     /// Inert click target (swallows clicks inside a popover).
     Noop,
     SetViewMode(ViewMode),
@@ -466,6 +474,8 @@ pub enum Modal {
     DeleteSavedViewConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
     SaveView,
+    /// "New dashboard" form; state in `App::dashboard_form`.
+    NewDashboard,
     /// Name prompt for renaming a Saved view (local id).
     RenameSavedView(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
@@ -639,12 +649,23 @@ impl SortDir {
     }
 }
 
+/// Dashboard name/description modal state; the rename ticket reuses it.
+#[derive(Debug, Default, Clone)]
+pub struct DashboardForm {
+    pub name: String,
+    pub description: String,
+    /// Inline validation error under the name field.
+    pub error: Option<&'static str>,
+}
+
 pub struct App {
     teams: Vec<Team>,
     /// Mirrored dashboards for the sidebar (reloaded with the rest after a sync).
     dashboards: Vec<crate::db::dashboards::Dashboard>,
     /// Local id of the open dashboard; set once dashboards can be opened.
     open_dashboard_id: Option<String>,
+    /// State of the dashboard name/description modal (create now, rename later).
+    dashboard_form: DashboardForm,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -2551,6 +2572,7 @@ impl App {
             saved_views,
             dashboards: crate::db::dashboards::list(&conn).unwrap_or_default(),
             open_dashboard_id: None,
+            dashboard_form: DashboardForm::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -2873,6 +2895,67 @@ impl App {
             Message::SaveViewNameChanged(name) => {
                 self.save_view_name = name;
                 self.save_view_error = None;
+            }
+
+            Message::OpenNewDashboard => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't create a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.dashboard_form = DashboardForm::default();
+                    self.modal = Modal::NewDashboard;
+                    return text_input::focus(dashboard_name_input_id());
+                }
+            }
+
+            Message::NewDashboardNameChanged(name) => {
+                self.dashboard_form.name = name;
+                self.dashboard_form.error = None;
+            }
+
+            Message::NewDashboardDescriptionChanged(desc) => {
+                self.dashboard_form.description = desc;
+            }
+
+            Message::NewDashboardSubmit => {
+                if self.modal != Modal::NewDashboard {
+                    return Task::none();
+                }
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't create a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::create_local(
+                    &self.db(),
+                    &self.dashboard_form.name,
+                    &self.dashboard_form.description,
+                ) {
+                    Ok(d) => {
+                        self.modal = Modal::None;
+                        self.dashboard_form = DashboardForm::default();
+                        self.reload_data();
+                        return self.update_inner(Message::OpenDashboard(d.id));
+                    }
+                    Err(crate::db::dashboards::CreateError::Name(e)) => {
+                        self.dashboard_form.error = Some(e.message());
+                    }
+                    Err(crate::db::dashboards::CreateError::Db(e)) => {
+                        eprintln!("[dashboards] create failed: {e}");
+                        self.dashboard_form.error = Some("Couldn't create the dashboard");
+                    }
+                }
+            }
+
+            Message::OpenDashboard(id) => {
+                self.open_dashboard_id = Some(id);
             }
 
             Message::OpenRenameSavedView(view_id) => {
@@ -5767,6 +5850,11 @@ impl App {
                 let confirm = delete_project_confirm_modal(project_name);
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::NewDashboard => iced::widget::stack![
+                base,
+                dashboard_form_modal("New dashboard", "Create", &self.dashboard_form)
+            ]
+            .into(),
             Modal::SaveView => iced::widget::stack![
                 base,
                 save_view_modal("Save view", &self.save_view_name, self.save_view_error)
@@ -6095,6 +6183,86 @@ fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
         n => format!("Delete this comment and its {n} replies?"),
     };
     delete_modal("Delete Comment?", body, Message::DeleteCommentConfirmed)
+}
+
+fn dashboard_name_input_id() -> text_input::Id {
+    text_input::Id::new("dashboard-name")
+}
+
+/// Name + optional description modal for dashboards (create now, rename later).
+fn dashboard_form_modal<'a>(
+    title: &'a str,
+    submit_label: &'a str,
+    form: &'a DashboardForm,
+) -> Element<'a, Message> {
+    use iced::widget::{button, text};
+
+    let mut content = column![]
+        .spacing(12)
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(
+            text_input("Name", &form.name)
+                .id(dashboard_name_input_id())
+                .on_input(Message::NewDashboardNameChanged)
+                .on_submit(Message::NewDashboardSubmit)
+                .padding([6, 10])
+                .size(14)
+                .width(Length::Fixed(360.0)),
+        );
+    if let Some(e) = form.error {
+        content = content.push(text(e).size(12).color(t::danger()));
+    }
+    content = content
+        .push(
+            text_input("Description (optional)", &form.description)
+                .on_input(Message::NewDashboardDescriptionChanged)
+                .on_submit(Message::NewDashboardSubmit)
+                .padding([6, 10])
+                .size(14)
+                .width(Length::Fixed(360.0)),
+        )
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text(submit_label).size(14))
+                        .on_press(Message::NewDashboardSubmit)
+                        .padding([8, 24])
+                        .style(button::primary),
+                )
+                .push(
+                    button(text("Cancel").size(14))
+                        .on_press(Message::CloseModal)
+                        .padding([8, 24])
+                        .style(button::secondary),
+                ),
+        );
+
+    let modal =
+        container(content)
+            .padding(28)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::bg_modal())),
+                border: iced::Border {
+                    color: t::border(),
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            });
+
+    container(modal)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                0.0, 0.0, 0.0, 0.7,
+            ))),
+            ..Default::default()
+        })
+        .into()
 }
 
 fn save_view_input_id() -> text_input::Id {
