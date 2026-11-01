@@ -123,6 +123,25 @@ pub struct IssueCard {
     pub project: Option<String>,
     /// `Jul 6`, as the web's `%b %-d`; `None` when unset or unparseable.
     pub due: Option<String>,
+    /// Plain-text start of the description; `None` when empty.
+    pub excerpt: Option<String>,
+}
+
+/// Longest excerpt, ellipsis included (the web's `truncate(.., length: 170)`).
+pub const EXCERPT_CHARS: usize = 170;
+
+/// The description as a plain-text excerpt of at most [`EXCERPT_CHARS`]
+/// characters, ending in `...` when cut. `None` for an empty description.
+pub fn excerpt(description: Option<&str>) -> Option<String> {
+    let text = crate::document::parse(description?).plain_text();
+    if text.is_empty() {
+        return None;
+    }
+    if text.chars().count() <= EXCERPT_CHARS {
+        return Some(text);
+    }
+    let cut: String = text.chars().take(EXCERPT_CHARS - 3).collect();
+    Some(format!("{cut}..."))
 }
 
 /// `YYYY-MM-DD` (or an RFC 3339 timestamp) as `Jul 6`.
@@ -186,6 +205,7 @@ pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
                 assignee,
                 project,
                 due,
+                excerpt: excerpt(issue.description.as_deref()),
             }))
         }
         Anchor::Mention(_) => None,
@@ -392,6 +412,7 @@ mod tests {
                     assignee: None,
                     project: None,
                     due: None,
+                    excerpt: None,
                 })
             });
             assert_eq!(got, want, "{anchor:?}");
@@ -511,5 +532,37 @@ mod tests {
             assert_eq!(card.project.as_deref(), project, "{project_id:?}");
             assert_eq!(card.due.as_deref(), label, "{due:?}");
         }
+    }
+
+    #[test]
+    fn excerpt_is_plain_and_capped() {
+        let exact = "x".repeat(170);
+        let long = "y".repeat(171);
+        let multibyte = "é".repeat(200);
+        let rows: [(Option<&str>, Option<String>); 7] = [
+            (None, None),
+            (Some(""), None),
+            (Some("  \n "), None),
+            (Some("# Hi\n\nsome **bold** text"), Some("Hi some bold text".into())),
+            (Some(&exact), Some(exact.clone())),
+            (Some(&long), Some(format!("{}...", "y".repeat(167)))),
+            (Some(&multibyte), Some(format!("{}...", "é".repeat(167)))),
+        ];
+        for (input, want) in rows {
+            assert_eq!(excerpt(input), want, "{input:?}");
+        }
+        assert_eq!(excerpt(Some("![pic](https://x.y/a.png)")), None, "image-only leaves nothing");
+    }
+
+    #[test]
+    fn card_carries_the_excerpt() {
+        let mut i = issue("a", "t", Some(1), "x");
+        i.description = Some("- `code` item".into());
+        let issues = [i];
+        let records = Records { issues: &issues, ..Default::default() };
+        let Some(CardContent::Issue(card)) = content_for(&Anchor::Issue("a".into()), &records) else {
+            panic!("card expected");
+        };
+        assert_eq!(card.excerpt.as_deref(), Some("code item"));
     }
 }

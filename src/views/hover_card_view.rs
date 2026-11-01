@@ -66,9 +66,23 @@ fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
     let body = column![
         top,
         text(issue.title.clone()).size(t::type_scale::SM).color(t::text_primary()),
-        meta,
     ]
     .spacing(t::space::S1);
+    let body = match &issue.excerpt {
+        Some(excerpt) => body.push(
+            // About three lines: iced has no line clamp, so cut the height.
+            container(
+                text(excerpt.clone())
+                    .size(t::type_scale::XS)
+                    .line_height(t::type_scale::LH_XS)
+                    .color(t::text_muted()),
+            )
+                .max_height(t::type_scale::XS * t::type_scale::LH_XS * 3.0)
+                .clip(true),
+        ),
+        None => body,
+    };
+    let body = body.push(meta);
     container(body)
         .padding(t::space::S3)
         .width(WIDTH)
