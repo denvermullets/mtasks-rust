@@ -439,8 +439,16 @@ fn paragraph<'a>(inlines: &[Inline], size: f32, plain: Color, ctx: &BodyCtx<'a>)
         .collect();
     hover_rich(spans, Message::OpenBodyLink)
         .size(size)
+        .clickable(is_clickable)
         .on_hover(|owner, h| Message::BodyHover(owner, h))
         .into()
+}
+
+/// Whether a span's link target acts as a link. A mention anchors a hover
+/// card but isn't a link: no underline, no pointer, and a click falls through
+/// to the description's click-to-edit.
+fn is_clickable(target: &LinkTarget) -> bool {
+    !matches!(target, LinkTarget::Mention(_))
 }
 
 /// A styled stretch of text, before it becomes an Iced span. Pure, so the
@@ -508,7 +516,8 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
         // Tagged so a mention hover card (JRST-310) can identify the span.
         Run::Mention(s) => span(s.clone()).color(t::highlight()).link(LinkTarget::Mention(s)),
         Run::Reference { text, target: Some(target) } => {
-            span(text).color(t::accent()).underline(true).link(target)
+            // Underlined only while hovered (hover_rich), like the web's `hover:underline`.
+            span(text).color(t::accent()).link(target)
         }
         Run::Reference { text, target: None } => span(text).color(t::accent()),
         Run::Link { text, url } => span(text).color(t::accent()).link(LinkTarget::External(url)),
@@ -799,6 +808,23 @@ mod tests {
                 st(Run::Italic(Box::new(Run::Plain("b".into())))),
             ]
         );
+    }
+
+    #[test]
+    fn only_links_and_references_are_clickable_and_none_underline_at_rest() {
+        let rows = [
+            (Run::Mention("@ann".into()), true, false),
+            (Run::Link { text: "l".into(), url: "https://a.b".into() }, true, true),
+            (Run::Reference { text: "A-1".into(), target: Some(LinkTarget::Issue("i".into())) }, true, true),
+            (Run::Reference { text: "A-2".into(), target: None }, false, false),
+            (Run::Plain("x".into()), false, false),
+        ];
+        for (run, has_anchor, clickable) in rows {
+            let s = span_for(run.clone(), Color::WHITE);
+            assert!(!s.underline, "{run:?}: underline only on hover");
+            assert_eq!(s.link.is_some(), has_anchor, "{run:?}");
+            assert_eq!(s.link.as_ref().is_some_and(is_clickable), clickable, "{run:?}");
+        }
     }
 
     #[test]

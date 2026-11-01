@@ -109,6 +109,10 @@ where
     size: Option<Pixels>,
     on_link: OnLink<'a, Link, Message>,
     on_hover: Option<OnHover<'a, Link, Message>>,
+    /// Which linked spans act as links (underline on hover, pointer cursor,
+    /// captured press, `on_link`). A linked span that isn't clickable still
+    /// reports hover, so it can anchor a card without behaving like a link.
+    clickable: fn(&Link) -> bool,
 }
 
 pub fn hover_rich<'a, Link, Message>(
@@ -118,7 +122,7 @@ pub fn hover_rich<'a, Link, Message>(
 where
     Link: Clone + 'static,
 {
-    HoverRich { spans, size: None, on_link: Box::new(on_link), on_hover: None }
+    HoverRich { spans, size: None, on_link: Box::new(on_link), on_hover: None, clickable: |_| true }
 }
 
 impl<'a, Link, Message> HoverRich<'a, Link, Message>
@@ -127,6 +131,16 @@ where
 {
     pub fn size(mut self, size: impl Into<Pixels>) -> Self {
         self.size = Some(size.into());
+        self
+    }
+
+    fn is_clickable(&self, index: usize) -> bool {
+        self.spans.get(index).and_then(|s| s.link.as_ref()).is_some_and(|l| (self.clickable)(l))
+    }
+
+    /// Decide which linked spans are clickable; the default is all of them.
+    pub fn clickable(mut self, f: fn(&Link) -> bool) -> Self {
+        self.clickable = f;
         self
     }
 
@@ -235,7 +249,7 @@ where
             .and_then(|p| state.paragraph.hit_span(p));
 
         for (index, span) in self.spans.iter().enumerate() {
-            let is_hovered_link = span.link.is_some() && Some(index) == hovered_span;
+            let is_hovered_link = self.is_clickable(index) && Some(index) == hovered_span;
             if span.highlight.is_some() || span.underline || span.strikethrough || is_hovered_link {
                 let translation = layout.position() - Point::ORIGIN;
                 let regions = state.paragraph.span_bounds(index);
@@ -350,7 +364,7 @@ where
                     // Only a link takes the press; plain text lets it reach
                     // an enclosing click area (the description's click-to-edit).
                     let hit = state.paragraph.hit_span(p);
-                    if let Some(span) = hit.filter(|&s| takes_press(self.spans.get(s).map(|s| s.link.is_some()))) {
+                    if let Some(span) = hit.filter(|&s| takes_press(Some(self.is_clickable(s)))) {
                         state.span_pressed = Some(span);
                         return event::Status::Captured;
                     }
@@ -360,7 +374,7 @@ where
                 if let Some(pressed) = state.span_pressed.take() {
                     if let Some(p) = cursor.position_in(layout.bounds()) {
                         if state.paragraph.hit_span(p) == Some(pressed) {
-                            if let Some(link) = self.spans.get(pressed).and_then(|s| s.link.clone()) {
+                            if let Some(link) = self.spans.get(pressed).and_then(|s| s.link.clone()).filter(|l| (self.clickable)(l)) {
                                 shell.publish((self.on_link)(link));
                             }
                         }
@@ -384,8 +398,7 @@ where
         let linked = cursor
             .position_in(layout.bounds())
             .and_then(|p| state.paragraph.hit_span(p))
-            .and_then(|i| self.spans.get(i))
-            .is_some_and(|s| s.link.is_some());
+            .is_some_and(|i| self.is_clickable(i));
         if linked { mouse::Interaction::Pointer } else { mouse::Interaction::None }
     }
 }
