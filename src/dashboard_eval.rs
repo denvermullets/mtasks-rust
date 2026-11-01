@@ -1627,7 +1627,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn source_teams_cover_all_source_kinds_in_mirror_order() {
         let mut fx = Fx::new();
         fx.labels = vec![label("l1", "b", 50)];

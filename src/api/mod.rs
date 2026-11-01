@@ -21,17 +21,17 @@ pub mod users;
 
 pub use client::{ApiClient, Conditional, Page};
 pub use comments::{CommentParams, CommentTarget};
-pub use dependencies::{Direction, IssueDependencyResponse};
+pub use dependencies::Direction;
 pub use dto::{
-    AttachmentDto, CommentDto, IssueDependencyDto, IssueDto, IssueRef, LabelDto, LabelRef, LaneDto, MemberDto,
-    ParentIssueRef, ProjectDto, RecordRef, TeamDto, UserRef,
+    AttachmentDto, CommentDto, IssueDto, IssueRef, LabelDto, LaneDto, MemberDto, ProjectDto,
+    RecordRef, TeamDto,
 };
 pub use error::ApiError;
 pub use issues::IssueParams;
 pub use labels::LabelParams;
 pub use projects::ProjectParams;
 pub use recurring_issues::RecurringIssueParams;
-pub use users::{HomePageDto, MeDto, MeTokenDto};
+pub use users::{HomePageDto, MeDto};
 
 /// Percent-encode a query value (timestamps carry `:` and possibly `+`).
 pub(crate) fn encode_query_value(v: &str) -> String {

@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::db::models::{
-    Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Priority, Project, ProjectStatus,
+    Comment, CommentOwner, Issue, Label, Lane, Member, Priority, Project, ProjectStatus,
     RoadmapCommitment, Team,
 };
 
@@ -132,72 +132,6 @@ pub struct AttachmentDto {
 }
 
 impl IssueDto {
-    /// Build a DTO from a local model. Hydrates nested {id, name} objects by
-    /// querying SQLite for the related records' remote_ids and names.
-    pub fn from_model(conn: &Connection, issue: &Issue) -> Result<Self, ApiError> {
-        let team = lookup_team_by_local_id(conn, &issue.team_id)?;
-        let team_number = issue
-            .team_number
-            .ok_or_else(|| ApiError::Decode("issue missing team_number".into()))?;
-        let identifier = format!("{}-{}", team.identifier, team_number);
-
-        let lane = lookup_lane_by_local_id(conn, &issue.lane_id)?;
-        let lane_ref = Some(RecordRef {
-            id: require_remote(lane.remote_id, "lane")?,
-            name: lane.name,
-        });
-
-        let assignee = match &issue.assignee_id {
-            Some(local) => Some(member_record_ref(conn, local)?),
-            None => None,
-        };
-        let creator = match &issue.creator_id {
-            Some(local) => Some(member_record_ref(conn, local)?),
-            None => None,
-        };
-        let project = match &issue.project_id {
-            Some(local) => Some(project_record_ref(conn, local)?),
-            None => None,
-        };
-        let parent_issue = match &issue.parent_issue_id {
-            Some(local) => Some(parent_issue_ref(conn, local)?),
-            None => None,
-        };
-        let labels = labels_for_issue(conn, &issue.id)?;
-        let blocking = blocking_issue_refs(conn, &issue.id)?;
-        let blocked = blocked_issue_refs(conn, &issue.id)?;
-
-        let id = require_remote(issue.remote_id, "issue")?;
-        Ok(IssueDto {
-            id,
-            identifier,
-            title: issue.title.clone(),
-            priority: Priority::from_i32(issue.priority)
-                .as_rails_str()
-                .to_string(),
-            estimate: issue.estimate.map(|f| f as i64),
-            due_date: issue.due_date.clone(),
-            lane: lane_ref,
-            assignee,
-            creator,
-            project,
-            labels,
-            created_at: issue.created_at.clone(),
-            updated_at: issue.updated_at.clone(),
-            archived_at: None,
-            recurring_issue_id: None,
-            description: issue.description.clone(),
-            parent_issue,
-            blocking_issues: Some(blocking),
-            blocked_issues: Some(blocked),
-            related_issues: None,
-            duplicates: None,
-            started_at: issue.started_at.clone(),
-            completed_at: issue.completed_at.clone(),
-            canceled_at: issue.canceled_at.clone(),
-            files: None,
-        })
-    }
 
     /// Every dependency edge in this (detail) payload, oriented source ->
     /// target. Entries without a `dependency_id` are skipped.
@@ -341,51 +275,6 @@ pub struct ProjectDto {
 }
 
 impl ProjectDto {
-    pub fn from_model(conn: &Connection, project: &Project) -> Result<Self, ApiError> {
-        let lead = match &project.lead_id {
-            Some(local) => Some(member_record_ref(conn, local)?),
-            None => None,
-        };
-        let labels = labels_for_project(conn, &project.id)?;
-
-        let progress_percentage = if project.total_issues_count == 0 {
-            0
-        } else {
-            (project.completed_issues_count as f64 / project.total_issues_count as f64 * 100.0)
-                .round() as i64
-        };
-
-        // behind_schedule on Rails depends on querying issues for the
-        // effective start date (project.rb:44). Replicating that here would
-        // cross out of the DTO module's responsibility; defer until a caller
-        // actually needs it locally and pass a conservative default.
-        let behind_schedule = false;
-
-        Ok(ProjectDto {
-            id: require_remote(project.remote_id, "project")?,
-            name: project.name.clone(),
-            description: project.description.clone(),
-            status: project.status,
-            priority: Priority::from_i32(project.priority)
-                .as_rails_str()
-                .to_string(),
-            lead,
-            start_date: project.start_date.clone(),
-            due_date: project.due_date.clone(),
-            velocity_score: project.velocity_score,
-            completed_issues_count: project.completed_issues_count,
-            total_issues_count: project.total_issues_count,
-            progress_percentage,
-            behind_schedule,
-            roadmap_commitment: project.roadmap_commitment,
-            created_at: project.created_at.clone(),
-            updated_at: project.updated_at.clone(),
-            labels: Some(labels),
-            issues_count: None,
-            files: None,
-        })
-    }
-
     pub fn into_model(
         self,
         conn: &Connection,
@@ -617,22 +506,6 @@ impl LaneDto {
     }
 }
 
-impl LaneDto {
-    pub fn from_model(conn: &Connection, lane: &Lane) -> Result<Self, ApiError> {
-        let team = lookup_team_by_local_id(conn, &lane.team_id)?;
-        Ok(LaneDto {
-            id: require_remote(lane.remote_id, "lane")?,
-            team_id: require_remote(team.remote_id, "team")?,
-            name: lane.name.clone(),
-            color: lane.color.clone(),
-            position: lane.position,
-            category: lane.category.clone(),
-            created_at: Some(lane.created_at.clone()),
-            updated_at: Some(lane.updated_at.clone()),
-        })
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LabelDto {
     pub id: i64,
@@ -664,18 +537,6 @@ impl LabelDto {
             color: self.color,
             created_at,
             updated_at,
-        })
-    }
-
-    pub fn from_model(conn: &Connection, label: &Label) -> Result<Self, ApiError> {
-        let team = lookup_team_by_local_id(conn, &label.team_id)?;
-        Ok(LabelDto {
-            id: require_remote(label.remote_id, "label")?,
-            team_id: require_remote(team.remote_id, "team")?,
-            name: label.name.clone(),
-            color: label.color.clone(),
-            created_at: Some(label.created_at.clone()),
-            updated_at: Some(label.updated_at.clone()),
         })
     }
 }
@@ -713,60 +574,6 @@ impl MemberDto {
             updated_at,
         })
     }
-
-    pub fn from_model(conn: &Connection, member: &Member) -> Result<Self, ApiError> {
-        let team = lookup_team_by_local_id(conn, &member.team_id)?;
-        Ok(MemberDto {
-            id: require_remote(member.remote_id, "member")?,
-            team_id: require_remote(team.remote_id, "team")?,
-            name: member.name.clone(),
-            email: member.email.clone(),
-            created_at: Some(member.created_at.clone()),
-            updated_at: Some(member.updated_at.clone()),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IssueDependencyDto {
-    pub id: i64,
-    pub blocking_issue_id: i64,
-    pub blocked_issue_id: i64,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl IssueDependencyDto {
-    pub fn into_model(
-        self,
-        conn: &Connection,
-        existing_uuid: Option<String>,
-    ) -> Result<IssueDependency, ApiError> {
-        let blocking_issue_id = local_uuid_for(conn, "issues", self.blocking_issue_id)?;
-        let blocked_issue_id = local_uuid_for(conn, "issues", self.blocked_issue_id)?;
-        Ok(IssueDependency {
-            id: existing_uuid.unwrap_or_else(|| Uuid::new_v4().to_string()),
-            remote_id: Some(self.id),
-            blocking_issue_id,
-            blocked_issue_id,
-            kind: "blocks".into(),
-            direction: "blocking".into(),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        })
-    }
-
-    pub fn from_model(conn: &Connection, dep: &IssueDependency) -> Result<Self, ApiError> {
-        let blocking = lookup_issue_by_local_id(conn, &dep.blocking_issue_id)?;
-        let blocked = lookup_issue_by_local_id(conn, &dep.blocked_issue_id)?;
-        Ok(IssueDependencyDto {
-            id: require_remote(dep.remote_id, "issue_dependency")?,
-            blocking_issue_id: require_remote(blocking.remote_id, "issue")?,
-            blocked_issue_id: require_remote(blocked.remote_id, "issue")?,
-            created_at: dep.created_at.clone(),
-            updated_at: dep.updated_at.clone(),
-        })
-    }
 }
 
 // ── Internal lookup helpers ──
@@ -787,201 +594,367 @@ fn local_uuid_for(conn: &Connection, table: &str, remote_id: i64) -> Result<Stri
         })
 }
 
-fn lookup_team_by_local_id(conn: &Connection, id: &str) -> Result<Team, ApiError> {
-    conn.query_row(
-        "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
-         FROM teams WHERE id = ?1",
-        params![id],
-        Team::from_row,
-    )
-    .map_err(|e| ApiError::Decode(format!("team {id} not found: {e}")))
-}
-
-fn lookup_lane_by_local_id(conn: &Connection, id: &str) -> Result<Lane, ApiError> {
-    conn.query_row(
-        "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
-         FROM lanes WHERE id = ?1",
-        params![id],
-        Lane::from_row,
-    )
-    .map_err(|e| ApiError::Decode(format!("lane {id} not found: {e}")))
-}
-
-fn lookup_member_by_local_id(conn: &Connection, id: &str) -> Result<Member, ApiError> {
-    conn.query_row(
-        "SELECT id, remote_id, team_id, name, email, created_at, updated_at
-         FROM members WHERE id = ?1",
-        params![id],
-        Member::from_row,
-    )
-    .map_err(|e| ApiError::Decode(format!("member {id} not found: {e}")))
-}
-
-fn lookup_project_by_local_id(conn: &Connection, id: &str) -> Result<Project, ApiError> {
-    conn.query_row(
-        "SELECT id, remote_id, team_id, name, description, status, priority, lead_id,
-                start_date, due_date, roadmap_commitment, velocity_score,
-                completed_issues_count, total_issues_count, progress_percentage,
-                behind_schedule, created_at, updated_at
-         FROM projects WHERE id = ?1",
-        params![id],
-        Project::from_row,
-    )
-    .map_err(|e| ApiError::Decode(format!("project {id} not found: {e}")))
-}
-
-fn lookup_issue_by_local_id(conn: &Connection, id: &str) -> Result<Issue, ApiError> {
-    conn.query_row(
-        "SELECT id, title, description, priority, team_number, due_date, estimate,
-                started_at, completed_at, canceled_at, lane_id, team_id,
-                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
-                remote_id, created_at, updated_at
-         FROM issues WHERE id = ?1",
-        params![id],
-        Issue::from_row,
-    )
-    .map_err(|e| ApiError::Decode(format!("issue {id} not found: {e}")))
-}
-
-fn member_record_ref(conn: &Connection, id: &str) -> Result<RecordRef, ApiError> {
-    let m = lookup_member_by_local_id(conn, id)?;
-    Ok(RecordRef {
-        id: require_remote(m.remote_id, "member")?,
-        name: m.name,
-    })
-}
-
-fn project_record_ref(conn: &Connection, id: &str) -> Result<RecordRef, ApiError> {
-    let p = lookup_project_by_local_id(conn, id)?;
-    Ok(RecordRef {
-        id: require_remote(p.remote_id, "project")?,
-        name: p.name,
-    })
-}
-
-fn parent_issue_ref(conn: &Connection, id: &str) -> Result<ParentIssueRef, ApiError> {
-    let parent = lookup_issue_by_local_id(conn, id)?;
-    let team = lookup_team_by_local_id(conn, &parent.team_id)?;
-    let team_number = parent
-        .team_number
-        .ok_or_else(|| ApiError::Decode("parent issue missing team_number".into()))?;
-    Ok(ParentIssueRef {
-        id: require_remote(parent.remote_id, "issue")?,
-        identifier: format!("{}-{}", team.identifier, team_number),
-    })
-}
-
-fn labels_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<LabelRef>, ApiError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT l.remote_id, l.name
-             FROM labels l
-             JOIN issue_labels il ON il.label_id = l.id
-             WHERE il.issue_id = ?1
-             ORDER BY l.name",
-        )
-        .map_err(|e| ApiError::Decode(format!("labels_for_issue prepare: {e}")))?;
-    let rows = stmt
-        .query_map(params![issue_id], |row| {
-            let remote: Option<i64> = row.get(0)?;
-            let name: String = row.get(1)?;
-            Ok((remote, name))
-        })
-        .map_err(|e| ApiError::Decode(format!("labels_for_issue query: {e}")))?;
-    rows.map(|r| {
-        let (remote, name) = r.map_err(|e| ApiError::Decode(format!("labels row: {e}")))?;
-        Ok(LabelRef {
-            id: require_remote(remote, "label")?,
-            name,
-        })
-    })
-    .collect()
-}
-
-fn labels_for_project(conn: &Connection, project_id: &str) -> Result<Vec<LabelRef>, ApiError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT l.remote_id, l.name
-             FROM labels l
-             JOIN project_labels pl ON pl.label_id = l.id
-             WHERE pl.project_id = ?1
-             ORDER BY l.name",
-        )
-        .map_err(|e| ApiError::Decode(format!("labels_for_project prepare: {e}")))?;
-    let rows = stmt
-        .query_map(params![project_id], |row| {
-            let remote: Option<i64> = row.get(0)?;
-            let name: String = row.get(1)?;
-            Ok((remote, name))
-        })
-        .map_err(|e| ApiError::Decode(format!("labels_for_project query: {e}")))?;
-    rows.map(|r| {
-        let (remote, name) = r.map_err(|e| ApiError::Decode(format!("labels row: {e}")))?;
-        Ok(LabelRef {
-            id: require_remote(remote, "label")?,
-            name,
-        })
-    })
-    .collect()
-}
-
-fn issue_ref_query(
-    conn: &Connection,
-    issue_id: &str,
-    join_column: &str,
-    return_column: &str,
-) -> Result<Vec<IssueRef>, ApiError> {
-    let sql = format!(
-        "SELECT i.remote_id, i.team_number, i.title, t.identifier
-         FROM issue_dependencies d
-         JOIN issues i ON i.id = d.{return_column}
-         JOIN teams t ON t.id = i.team_id
-         WHERE d.{join_column} = ?1
-         ORDER BY i.created_at"
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| ApiError::Decode(format!("issue_ref_query prepare: {e}")))?;
-    let rows = stmt
-        .query_map(params![issue_id], |row| {
-            let remote: Option<i64> = row.get(0)?;
-            let team_number: Option<i32> = row.get(1)?;
-            let title: String = row.get(2)?;
-            let team_identifier: String = row.get(3)?;
-            Ok((remote, team_number, title, team_identifier))
-        })
-        .map_err(|e| ApiError::Decode(format!("issue_ref_query query: {e}")))?;
-    rows.map(|r| {
-        let (remote, team_number, title, team_identifier) =
-            r.map_err(|e| ApiError::Decode(format!("issue_ref row: {e}")))?;
-        let tn = team_number
-            .ok_or_else(|| ApiError::Decode("dependency issue missing team_number".into()))?;
-        Ok(IssueRef {
-            id: require_remote(remote, "issue")?,
-            identifier: format!("{team_identifier}-{tn}"),
-            title,
-            dependency_id: None,
-            direction: None,
-        })
-    })
-    .collect()
-}
-
-fn blocking_issue_refs(conn: &Connection, issue_id: &str) -> Result<Vec<IssueRef>, ApiError> {
-    // Issues that are BLOCKING this issue: rows where this issue is blocked.
-    issue_ref_query(conn, issue_id, "blocked_issue_id", "blocking_issue_id")
-}
-
-fn blocked_issue_refs(conn: &Connection, issue_id: &str) -> Result<Vec<IssueRef>, ApiError> {
-    // Issues that this issue is BLOCKING: rows where this issue is blocking.
-    issue_ref_query(conn, issue_id, "blocking_issue_id", "blocked_issue_id")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::migrations;
     use rusqlite::Connection;
+
+    // ── Model → DTO, test-only ──
+    //
+    // Production only maps wire → model (`into_model`); pushes send `*Params`.
+    // These inverses exist so the round-trip tests can prove `into_model`
+    // keeps every field.
+
+    impl IssueDto {
+        /// Build a DTO from a local model. Hydrates nested {id, name} objects by
+        /// querying SQLite for the related records' remote_ids and names.
+        fn from_model(conn: &Connection, issue: &Issue) -> Result<Self, ApiError> {
+            let team = lookup_team_by_local_id(conn, &issue.team_id)?;
+            let team_number = issue
+                .team_number
+                .ok_or_else(|| ApiError::Decode("issue missing team_number".into()))?;
+            let identifier = format!("{}-{}", team.identifier, team_number);
+
+            let lane = lookup_lane_by_local_id(conn, &issue.lane_id)?;
+            let lane_ref = Some(RecordRef {
+                id: require_remote(lane.remote_id, "lane")?,
+                name: lane.name,
+            });
+
+            let assignee = match &issue.assignee_id {
+                Some(local) => Some(member_record_ref(conn, local)?),
+                None => None,
+            };
+            let creator = match &issue.creator_id {
+                Some(local) => Some(member_record_ref(conn, local)?),
+                None => None,
+            };
+            let project = match &issue.project_id {
+                Some(local) => Some(project_record_ref(conn, local)?),
+                None => None,
+            };
+            let parent_issue = match &issue.parent_issue_id {
+                Some(local) => Some(parent_issue_ref(conn, local)?),
+                None => None,
+            };
+            let labels = labels_for_issue(conn, &issue.id)?;
+            let blocking = blocking_issue_refs(conn, &issue.id)?;
+            let blocked = blocked_issue_refs(conn, &issue.id)?;
+
+            let id = require_remote(issue.remote_id, "issue")?;
+            Ok(IssueDto {
+                id,
+                identifier,
+                title: issue.title.clone(),
+                priority: Priority::from_i32(issue.priority)
+                    .as_rails_str()
+                    .to_string(),
+                estimate: issue.estimate.map(|f| f as i64),
+                due_date: issue.due_date.clone(),
+                lane: lane_ref,
+                assignee,
+                creator,
+                project,
+                labels,
+                created_at: issue.created_at.clone(),
+                updated_at: issue.updated_at.clone(),
+                archived_at: None,
+                recurring_issue_id: None,
+                description: issue.description.clone(),
+                parent_issue,
+                blocking_issues: Some(blocking),
+                blocked_issues: Some(blocked),
+                related_issues: None,
+                duplicates: None,
+                started_at: issue.started_at.clone(),
+                completed_at: issue.completed_at.clone(),
+                canceled_at: issue.canceled_at.clone(),
+                files: None,
+            })
+        }
+    }
+
+    impl ProjectDto {
+        fn from_model(conn: &Connection, project: &Project) -> Result<Self, ApiError> {
+            let lead = match &project.lead_id {
+                Some(local) => Some(member_record_ref(conn, local)?),
+                None => None,
+            };
+            let labels = labels_for_project(conn, &project.id)?;
+
+            let progress_percentage = if project.total_issues_count == 0 {
+                0
+            } else {
+                (project.completed_issues_count as f64 / project.total_issues_count as f64 * 100.0)
+                    .round() as i64
+            };
+
+            // behind_schedule on Rails depends on querying issues for the
+            // effective start date (project.rb:44). Replicating that here would
+            // cross out of the DTO module's responsibility; defer until a caller
+            // actually needs it locally and pass a conservative default.
+            let behind_schedule = false;
+
+            Ok(ProjectDto {
+                id: require_remote(project.remote_id, "project")?,
+                name: project.name.clone(),
+                description: project.description.clone(),
+                status: project.status,
+                priority: Priority::from_i32(project.priority)
+                    .as_rails_str()
+                    .to_string(),
+                lead,
+                start_date: project.start_date.clone(),
+                due_date: project.due_date.clone(),
+                velocity_score: project.velocity_score,
+                completed_issues_count: project.completed_issues_count,
+                total_issues_count: project.total_issues_count,
+                progress_percentage,
+                behind_schedule,
+                roadmap_commitment: project.roadmap_commitment,
+                created_at: project.created_at.clone(),
+                updated_at: project.updated_at.clone(),
+                labels: Some(labels),
+                issues_count: None,
+                files: None,
+            })
+        }
+    }
+
+    impl LaneDto {
+        fn from_model(conn: &Connection, lane: &Lane) -> Result<Self, ApiError> {
+            let team = lookup_team_by_local_id(conn, &lane.team_id)?;
+            Ok(LaneDto {
+                id: require_remote(lane.remote_id, "lane")?,
+                team_id: require_remote(team.remote_id, "team")?,
+                name: lane.name.clone(),
+                color: lane.color.clone(),
+                position: lane.position,
+                category: lane.category.clone(),
+                created_at: Some(lane.created_at.clone()),
+                updated_at: Some(lane.updated_at.clone()),
+            })
+        }
+    }
+
+    impl LabelDto {
+        fn from_model(conn: &Connection, label: &Label) -> Result<Self, ApiError> {
+            let team = lookup_team_by_local_id(conn, &label.team_id)?;
+            Ok(LabelDto {
+                id: require_remote(label.remote_id, "label")?,
+                team_id: require_remote(team.remote_id, "team")?,
+                name: label.name.clone(),
+                color: label.color.clone(),
+                created_at: Some(label.created_at.clone()),
+                updated_at: Some(label.updated_at.clone()),
+            })
+        }
+    }
+
+    impl MemberDto {
+        fn from_model(conn: &Connection, member: &Member) -> Result<Self, ApiError> {
+            let team = lookup_team_by_local_id(conn, &member.team_id)?;
+            Ok(MemberDto {
+                id: require_remote(member.remote_id, "member")?,
+                team_id: require_remote(team.remote_id, "team")?,
+                name: member.name.clone(),
+                email: member.email.clone(),
+                created_at: Some(member.created_at.clone()),
+                updated_at: Some(member.updated_at.clone()),
+            })
+        }
+    }
+
+    fn lookup_team_by_local_id(conn: &Connection, id: &str) -> Result<Team, ApiError> {
+        conn.query_row(
+            "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
+             FROM teams WHERE id = ?1",
+            params![id],
+            Team::from_row,
+        )
+        .map_err(|e| ApiError::Decode(format!("team {id} not found: {e}")))
+    }
+
+    fn lookup_lane_by_local_id(conn: &Connection, id: &str) -> Result<Lane, ApiError> {
+        conn.query_row(
+            "SELECT id, name, color, position, team_id, remote_id, category, created_at, updated_at
+             FROM lanes WHERE id = ?1",
+            params![id],
+            Lane::from_row,
+        )
+        .map_err(|e| ApiError::Decode(format!("lane {id} not found: {e}")))
+    }
+
+    fn lookup_member_by_local_id(conn: &Connection, id: &str) -> Result<Member, ApiError> {
+        conn.query_row(
+            "SELECT id, remote_id, team_id, name, email, created_at, updated_at
+             FROM members WHERE id = ?1",
+            params![id],
+            Member::from_row,
+        )
+        .map_err(|e| ApiError::Decode(format!("member {id} not found: {e}")))
+    }
+
+    fn lookup_project_by_local_id(conn: &Connection, id: &str) -> Result<Project, ApiError> {
+        conn.query_row(
+            "SELECT id, remote_id, team_id, name, description, status, priority, lead_id,
+                    start_date, due_date, roadmap_commitment, velocity_score,
+                    completed_issues_count, total_issues_count, progress_percentage,
+                    behind_schedule, created_at, updated_at
+             FROM projects WHERE id = ?1",
+            params![id],
+            Project::from_row,
+        )
+        .map_err(|e| ApiError::Decode(format!("project {id} not found: {e}")))
+    }
+
+    fn lookup_issue_by_local_id(conn: &Connection, id: &str) -> Result<Issue, ApiError> {
+        conn.query_row(
+            "SELECT id, title, description, priority, team_number, due_date, estimate,
+                    started_at, completed_at, canceled_at, lane_id, team_id,
+                    project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                    remote_id, created_at, updated_at
+             FROM issues WHERE id = ?1",
+            params![id],
+            Issue::from_row,
+        )
+        .map_err(|e| ApiError::Decode(format!("issue {id} not found: {e}")))
+    }
+
+    fn member_record_ref(conn: &Connection, id: &str) -> Result<RecordRef, ApiError> {
+        let m = lookup_member_by_local_id(conn, id)?;
+        Ok(RecordRef {
+            id: require_remote(m.remote_id, "member")?,
+            name: m.name,
+        })
+    }
+
+    fn project_record_ref(conn: &Connection, id: &str) -> Result<RecordRef, ApiError> {
+        let p = lookup_project_by_local_id(conn, id)?;
+        Ok(RecordRef {
+            id: require_remote(p.remote_id, "project")?,
+            name: p.name,
+        })
+    }
+
+    fn parent_issue_ref(conn: &Connection, id: &str) -> Result<ParentIssueRef, ApiError> {
+        let parent = lookup_issue_by_local_id(conn, id)?;
+        let team = lookup_team_by_local_id(conn, &parent.team_id)?;
+        let team_number = parent
+            .team_number
+            .ok_or_else(|| ApiError::Decode("parent issue missing team_number".into()))?;
+        Ok(ParentIssueRef {
+            id: require_remote(parent.remote_id, "issue")?,
+            identifier: format!("{}-{}", team.identifier, team_number),
+        })
+    }
+
+    fn labels_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<LabelRef>, ApiError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT l.remote_id, l.name
+                 FROM labels l
+                 JOIN issue_labels il ON il.label_id = l.id
+                 WHERE il.issue_id = ?1
+                 ORDER BY l.name",
+            )
+            .map_err(|e| ApiError::Decode(format!("labels_for_issue prepare: {e}")))?;
+        let rows = stmt
+            .query_map(params![issue_id], |row| {
+                let remote: Option<i64> = row.get(0)?;
+                let name: String = row.get(1)?;
+                Ok((remote, name))
+            })
+            .map_err(|e| ApiError::Decode(format!("labels_for_issue query: {e}")))?;
+        rows.map(|r| {
+            let (remote, name) = r.map_err(|e| ApiError::Decode(format!("labels row: {e}")))?;
+            Ok(LabelRef {
+                id: require_remote(remote, "label")?,
+                name,
+            })
+        })
+        .collect()
+    }
+
+    fn labels_for_project(conn: &Connection, project_id: &str) -> Result<Vec<LabelRef>, ApiError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT l.remote_id, l.name
+                 FROM labels l
+                 JOIN project_labels pl ON pl.label_id = l.id
+                 WHERE pl.project_id = ?1
+                 ORDER BY l.name",
+            )
+            .map_err(|e| ApiError::Decode(format!("labels_for_project prepare: {e}")))?;
+        let rows = stmt
+            .query_map(params![project_id], |row| {
+                let remote: Option<i64> = row.get(0)?;
+                let name: String = row.get(1)?;
+                Ok((remote, name))
+            })
+            .map_err(|e| ApiError::Decode(format!("labels_for_project query: {e}")))?;
+        rows.map(|r| {
+            let (remote, name) = r.map_err(|e| ApiError::Decode(format!("labels row: {e}")))?;
+            Ok(LabelRef {
+                id: require_remote(remote, "label")?,
+                name,
+            })
+        })
+        .collect()
+    }
+
+    fn issue_ref_query(
+        conn: &Connection,
+        issue_id: &str,
+        join_column: &str,
+        return_column: &str,
+    ) -> Result<Vec<IssueRef>, ApiError> {
+        let sql = format!(
+            "SELECT i.remote_id, i.team_number, i.title, t.identifier
+             FROM issue_dependencies d
+             JOIN issues i ON i.id = d.{return_column}
+             JOIN teams t ON t.id = i.team_id
+             WHERE d.{join_column} = ?1
+             ORDER BY i.created_at"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| ApiError::Decode(format!("issue_ref_query prepare: {e}")))?;
+        let rows = stmt
+            .query_map(params![issue_id], |row| {
+                let remote: Option<i64> = row.get(0)?;
+                let team_number: Option<i32> = row.get(1)?;
+                let title: String = row.get(2)?;
+                let team_identifier: String = row.get(3)?;
+                Ok((remote, team_number, title, team_identifier))
+            })
+            .map_err(|e| ApiError::Decode(format!("issue_ref_query query: {e}")))?;
+        rows.map(|r| {
+            let (remote, team_number, title, team_identifier) =
+                r.map_err(|e| ApiError::Decode(format!("issue_ref row: {e}")))?;
+            let tn = team_number
+                .ok_or_else(|| ApiError::Decode("dependency issue missing team_number".into()))?;
+            Ok(IssueRef {
+                id: require_remote(remote, "issue")?,
+                identifier: format!("{team_identifier}-{tn}"),
+                title,
+                dependency_id: None,
+                direction: None,
+            })
+        })
+        .collect()
+    }
+
+    fn blocking_issue_refs(conn: &Connection, issue_id: &str) -> Result<Vec<IssueRef>, ApiError> {
+        // Issues that are BLOCKING this issue: rows where this issue is blocked.
+        issue_ref_query(conn, issue_id, "blocked_issue_id", "blocking_issue_id")
+    }
+
+    fn blocked_issue_refs(conn: &Connection, issue_id: &str) -> Result<Vec<IssueRef>, ApiError> {
+        // Issues that this issue is BLOCKING: rows where this issue is blocking.
+        issue_ref_query(conn, issue_id, "blocking_issue_id", "blocked_issue_id")
+    }
 
     fn fresh_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -1217,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_dto_roundtrip_lane_label_member_dependency() {
+    fn flat_dto_roundtrip_lane_label_member() {
         let conn = fresh_conn();
         // seed a team so foreign keys resolve when we round-trip through the DB
         let team_uuid = Uuid::new_v4().to_string();
@@ -1319,32 +1292,6 @@ mod tests {
             .into_model(&conn, Some(member.id.clone()))
             .unwrap();
         assert_eq!(member_back.id, member.id);
-
-        // IssueDependency requires two issues
-        let issue_a = insert_minimal_issue(&conn, &team_uuid, &lane.id, 101, 1);
-        let issue_b = insert_minimal_issue(&conn, &team_uuid, &lane.id, 102, 2);
-        let dep = IssueDependency {
-            id: Uuid::new_v4().to_string(),
-            remote_id: Some(44),
-            blocking_issue_id: issue_a.clone(),
-            blocked_issue_id: issue_b.clone(),
-            kind: "blocks".into(),
-            direction: "blocking".into(),
-            created_at: now(),
-            updated_at: now(),
-        };
-        conn.execute(
-            "INSERT INTO issue_dependencies (id, remote_id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![dep.id, dep.remote_id, dep.blocking_issue_id, dep.blocked_issue_id, dep.created_at, dep.updated_at],
-        ).unwrap();
-        let dep_dto = IssueDependencyDto::from_model(&conn, &dep).unwrap();
-        assert_eq!(dep_dto.id, 44);
-        assert_eq!(dep_dto.blocking_issue_id, 101);
-        assert_eq!(dep_dto.blocked_issue_id, 102);
-        let dep_back = dep_dto.into_model(&conn, Some(dep.id.clone())).unwrap();
-        assert_eq!(dep_back.blocking_issue_id, issue_a);
-        assert_eq!(dep_back.blocked_issue_id, issue_b);
     }
 
     fn insert_minimal_issue(

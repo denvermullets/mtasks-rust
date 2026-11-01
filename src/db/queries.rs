@@ -97,18 +97,6 @@ pub fn searchable_projects(conn: &Connection) -> Result<Vec<SearchableProject>> 
     rows.collect()
 }
 
-pub fn issues_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Issue>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, description, priority, team_number, due_date, estimate,
-                started_at, completed_at, canceled_at, lane_id, team_id,
-                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
-                remote_id, created_at, updated_at
-         FROM issues WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY priority, created_at",
-    )?;
-    let rows = stmt.query_map(params![project_id], Issue::from_row)?;
-    rows.collect()
-}
-
 pub fn next_team_number(conn: &Connection, team_id: &str) -> Result<i32> {
     let max: Option<i32> = conn.query_row(
         "SELECT MAX(team_number) FROM issues WHERE team_id = ?1",
@@ -986,11 +974,6 @@ pub fn update_project(conn: &Connection, project: &Project) -> Result<()> {
             project.id,
         ],
     )?;
-    Ok(())
-}
-
-pub fn delete_project(conn: &Connection, project_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
     Ok(())
 }
 

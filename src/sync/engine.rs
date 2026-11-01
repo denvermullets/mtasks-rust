@@ -209,10 +209,6 @@ enum Prep<T> {
 pub struct SyncEngine;
 
 impl SyncEngine {
-    pub fn new() -> Self {
-        Self
-    }
-
     /// One full Data sync cycle: drain the push queue first, then pull, so the
     /// pull reflects the user's own edits. One `/me` call opens the cycle; its
     /// result ([`CycleCtx`]) feeds the write-scope gate, the push half, the
@@ -308,10 +304,6 @@ impl CycleCtx {
         }
     }
 
-    pub fn from_me(me: Result<MeDto, ApiError>) -> Self {
-        Self { me }
-    }
-
     /// `Some(true/false)` from the token's write scope; `None` when `/me` failed.
     pub fn can_write(&self) -> Option<bool> {
         self.me.as_ref().ok().map(|m| m.token.has_write_scope())
@@ -384,7 +376,6 @@ async fn process(
         ("issue", "move") => issue_move(client, &entry.entity_id, entry.payload.as_deref()).await,
         ("project", "create") => project_create(client, &entry.entity_id, entry_id).await,
         ("project", "update") => project_update(client, &entry.entity_id).await,
-        ("project", "delete") => project_delete(client, entry.payload.as_deref()).await,
         ("recurring_issue", "create") => {
             recurring_issue_create(
                 client,
@@ -1634,32 +1625,6 @@ async fn project_update(client: &ApiClient, entity_id: &str) -> Outcome {
             Outcome::Success
         }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
-    }
-}
-
-async fn project_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
-    let raw = match payload {
-        Some(s) => s,
-        None => return Outcome::DropAndLog("project delete: no payload (legacy entry)".into()),
-    };
-    let parsed: serde_json::Value = match serde_json::from_str(raw) {
-        Ok(v) => v,
-        Err(e) => return Outcome::DropAndLog(format!("project delete: bad payload: {e}")),
-    };
-    let remote_id = match parsed.get("remote_id").and_then(|v| v.as_i64()) {
-        Some(v) => v,
-        None => return Outcome::DropAndLog("project delete: missing remote_id in payload".into()),
-    };
-    let team_remote_id = match parsed.get("team_remote_id").and_then(|v| v.as_i64()) {
-        Some(v) => v,
-        None => {
-            return Outcome::DropAndLog("project delete: missing team_remote_id in payload".into())
-        }
-    };
-    match projects::delete(client, team_remote_id, remote_id).await {
-        Ok(_) => Outcome::Success,
-        Err(ApiError::NotFound(m)) if !is_team_access_message(&m) => Outcome::Success,
-        Err(e) => classify_in_team(&e, team_remote_id),
     }
 }
 
@@ -3578,7 +3543,7 @@ async fn dependency_create(client: &ApiClient, entity_id: &str, entry_id: i64) -
 /// Deletes a dependency's Rails record from the queue payload.
 ///
 /// The local row (and its remote_id) is gone by drain time, so — like
-/// issue_delete / project_delete — this handler relies entirely on the payload,
+/// issue_delete — this handler relies entirely on the payload,
 /// NOT on re-reading local state. The enqueue site (JAIT-114) must capture, before
 /// deleting the local row:
 ///   { "team_remote_id":  <blocking issue's team remote_id>,
@@ -5165,7 +5130,7 @@ mod tests {
             "token": { "name": "t", "scopes": scopes }
         }))
         .unwrap();
-        CycleCtx::from_me(Ok(me))
+        CycleCtx { me: Ok(me) }
     }
 
     #[test]
@@ -5173,7 +5138,7 @@ mod tests {
         assert_eq!(ctx_with_scopes(&["read"]).can_write(), Some(false));
         assert_eq!(ctx_with_scopes(&["read", "write"]).can_write(), Some(true));
         assert_eq!(
-            CycleCtx::from_me(Err(ApiError::MissingToken)).can_write(),
+            CycleCtx { me: Err(ApiError::MissingToken) }.can_write(),
             None
         );
     }

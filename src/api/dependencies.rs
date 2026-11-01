@@ -7,8 +7,6 @@ use super::{ApiClient, ApiError, IssueRef};
 pub enum Direction {
     /// Current issue blocks the target issue.
     Blocking,
-    /// Current issue is blocked by the target issue.
-    BlockedBy,
     /// Current issue relates to the target issue (symmetric).
     Relates,
     /// Current issue duplicates the target issue.
@@ -20,7 +18,6 @@ impl Direction {
     pub fn as_str(self) -> &'static str {
         match self {
             Direction::Blocking => "blocking",
-            Direction::BlockedBy => "blocked_by",
             Direction::Relates => "relates",
             Direction::Duplicates => "duplicates",
         }
@@ -110,16 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn create_body_is_flat_with_snake_case_direction() {
-        let body = CreateBody {
-            target_issue_id: 42,
-            direction: Direction::BlockedBy,
-        };
-        assert_eq!(
-            serde_json::to_value(&body).unwrap(),
-            serde_json::json!({ "target_issue_id": 42, "direction": "blocked_by" })
-        );
-
+    fn create_body_is_flat_with_wire_direction() {
         let body = CreateBody {
             target_issue_id: 7,
             direction: Direction::Blocking,
@@ -157,7 +145,6 @@ mod tests {
     fn as_str_matches_serde_wire_form() {
         for d in [
             Direction::Blocking,
-            Direction::BlockedBy,
             Direction::Relates,
             Direction::Duplicates,
         ] {

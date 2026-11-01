@@ -21,7 +21,6 @@ pub struct ProjectFormState {
     pub start_date: String,
     pub due_date: String,
     pub roadmap_commitment: Option<RoadmapCommitment>,
-    pub editing_project_id: Option<String>,
     /// Inline validation message shown under the name field. `None` = valid.
     pub error: Option<String>,
 }
@@ -37,25 +36,6 @@ impl ProjectFormState {
             start_date: String::new(),
             due_date: String::new(),
             roadmap_commitment: None,
-            editing_project_id: None,
-            error: None,
-        }
-    }
-
-    pub fn from_project(p: &Project) -> Self {
-        Self {
-            name: p.name.clone(),
-            description: match &p.description {
-                Some(body) => text_editor::Content::with_text(body),
-                None => text_editor::Content::new(),
-            },
-            status: p.status.unwrap_or(ProjectStatus::Backlog),
-            priority: Priority::from_i32(p.priority),
-            lead_id: p.lead_id.clone(),
-            start_date: p.start_date.clone().unwrap_or_default(),
-            due_date: p.due_date.clone().unwrap_or_default(),
-            roadmap_commitment: p.roadmap_commitment,
-            editing_project_id: Some(p.id.clone()),
             error: None,
         }
     }
@@ -113,12 +93,6 @@ const ROADMAPS: [RoadmapOption; 4] = [
 ];
 
 pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Element<'a, Message> {
-    let title = if form.editing_project_id.is_some() {
-        "Edit Project"
-    } else {
-        "New Project"
-    };
-
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
         id: None,
         name: "—".to_string(),
@@ -138,7 +112,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
     let mut form_content = column![]
         .spacing(14)
         .width(Length::Fixed(460.0))
-        .push(text(title).size(type_scale::LG).color(t::text_primary()))
+        .push(text("New Project").size(type_scale::LG).color(t::text_primary()))
         .push(
             text_input("Name", &form.name)
                 .on_input(Message::ProjectNameChanged)
@@ -233,7 +207,7 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
                 )),
         );
 
-    let mut button_row = row![]
+    let button_row = row![]
         .spacing(8)
         .push(
             button(text("Save").size(type_scale::SM))
@@ -247,15 +221,6 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
                 .padding([space::S2, space::S6])
                 .style(button::secondary),
         );
-
-    if form.editing_project_id.is_some() {
-        button_row = button_row.push(iced::widget::horizontal_space()).push(
-            button(text("Delete").size(type_scale::SM).color(t::danger()))
-                .on_press(Message::ConfirmDeleteProject)
-                .padding([space::S2, space::S6])
-                .style(button::secondary),
-        );
-    }
 
     form_content = form_content.push(button_row);
 

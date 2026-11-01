@@ -406,10 +406,7 @@ pub enum Message {
 
     // Project CRUD
     CreateProject,
-    EditProject(String),
     SaveProject,
-    ConfirmDeleteProject,
-    DeleteProjectConfirmed,
 
     // Project form fields
     ProjectNameChanged(String),
@@ -529,7 +526,6 @@ pub enum Modal {
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
     RecurringForm,
-    DeleteProjectConfirm(String),
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
     /// Confirm deleting a synced attachment (local attachment id).
@@ -5839,15 +5835,6 @@ impl App {
                 self.modal = Modal::ProjectForm;
             }
 
-            Message::EditProject(project_id) => {
-                let conn = self.db();
-                if let Ok(Some(project)) = queries::get_project(&conn, &project_id) {
-                    self.project_form =
-                        Some(projects_view::ProjectFormState::from_project(&project));
-                    self.modal = Modal::ProjectForm;
-                }
-            }
-
             Message::ProjectNameChanged(v) => {
                 if let Some(form) = self.project_form.as_mut() {
                     form.name = v;
@@ -5996,61 +5983,35 @@ impl App {
                         Some(form.due_date.trim().to_string())
                     };
 
-                    if let Some(ref project_id) = form.editing_project_id {
-                        if let Ok(Some(mut project)) = queries::get_project(&conn, project_id) {
-                            project.name = form.name.trim().to_string();
-                            project.description = description.clone();
-                            project.status = Some(form.status);
-                            project.priority = form.priority.to_i32();
-                            project.lead_id = form.lead_id.clone();
-                            project.start_date = start_date;
-                            project.due_date = due_date;
-                            project.roadmap_commitment = form.roadmap_commitment;
-                            project.updated_at = now;
-                            let _ = queries::update_project(&conn, &project);
+                    let team_id = self.selected_team_id.clone().unwrap_or_default();
+                    let project = Project {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        remote_id: None,
+                        team_id,
+                        name: form.name.trim().to_string(),
+                        description,
+                        status: Some(form.status),
+                        priority: form.priority.to_i32(),
+                        lead_id: form.lead_id.clone(),
+                        start_date,
+                        due_date,
+                        roadmap_commitment: form.roadmap_commitment,
+                        velocity_score: 0,
+                        completed_issues_count: 0,
+                        total_issues_count: 0,
+                        progress_percentage: 0,
+                        behind_schedule: false,
+                        created_at: now.clone(),
+                        updated_at: now,
+                    };
+                    let _ = queries::insert_project(&conn, &project);
 
-                            let payload = serde_json::to_string(&project).ok();
-                            self.enqueue_sync("project", &project.id, "update", payload.as_deref());
-                        }
-                    } else {
-                        let team_id = self.selected_team_id.clone().unwrap_or_default();
-                        let project = Project {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            remote_id: None,
-                            team_id,
-                            name: form.name.trim().to_string(),
-                            description: description.clone(),
-                            status: Some(form.status),
-                            priority: form.priority.to_i32(),
-                            lead_id: form.lead_id.clone(),
-                            start_date,
-                            due_date,
-                            roadmap_commitment: form.roadmap_commitment,
-                            velocity_score: 0,
-                            completed_issues_count: 0,
-                            total_issues_count: 0,
-                            progress_percentage: 0,
-                            behind_schedule: false,
-                            created_at: now.clone(),
-                            updated_at: now,
-                        };
-                        let _ = queries::insert_project(&conn, &project);
-
-                        let payload = serde_json::to_string(&project).ok();
-                        self.enqueue_sync("project", &project.id, "create", payload.as_deref());
-                    }
+                    let payload = serde_json::to_string(&project).ok();
+                    self.enqueue_sync("project", &project.id, "create", payload.as_deref());
                 }
                 self.modal = Modal::None;
                 self.project_form = None;
                 self.reload_data();
-            }
-
-            Message::ConfirmDeleteProject => {
-                if let Some(ref form) = self.project_form {
-                    if let Some(ref id) = form.editing_project_id {
-                        self.modal = Modal::DeleteProjectConfirm(id.clone());
-                    }
-                }
             }
 
             Message::ConfirmDeleteComment(comment_id) => {
@@ -6124,37 +6085,6 @@ impl App {
                 }
                 self.load_detail_dependencies(&conn);
                 self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
-            }
-
-            Message::DeleteProjectConfirmed => {
-                if let Modal::DeleteProjectConfirm(ref project_id) = self.modal {
-                    let conn = self.db();
-                    let payload = match queries::get_project(&conn, project_id) {
-                        Ok(Some(project)) => match project.remote_id {
-                            Some(remote_id) => {
-                                queries::remote_id_for(&conn, "teams", &project.team_id)
-                                    .ok()
-                                    .flatten()
-                                    .map(|team_remote_id| {
-                                        serde_json::json!({
-                                            "remote_id": remote_id,
-                                            "team_remote_id": team_remote_id,
-                                        })
-                                        .to_string()
-                                    })
-                            }
-                            None => None,
-                        },
-                        _ => None,
-                    };
-                    if let Some(p) = &payload {
-                        self.enqueue_sync("project", project_id, "delete", Some(p.as_str()));
-                    }
-                    let _ = queries::delete_project(&conn, project_id);
-                }
-                self.modal = Modal::None;
-                self.project_form = None;
-                self.reload_data();
             }
 
             Message::OpenLabels => {
@@ -6904,16 +6834,6 @@ impl App {
                 }
                 None => base,
             },
-            Modal::DeleteProjectConfirm(project_id) => {
-                let project_name = self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == *project_id)
-                    .map(|p| p.name.as_str())
-                    .unwrap_or("this project");
-                let confirm = delete_project_confirm_modal(project_name);
-                iced::widget::stack![base, confirm].into()
-            }
             Modal::NewDashboard => iced::widget::stack![
                 base,
                 dashboard_form_modal(
@@ -7306,14 +7226,6 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
             ..Default::default()
         })
         .into()
-}
-
-fn delete_project_confirm_modal(project_name: &str) -> Element<'_, Message> {
-    delete_modal(
-        "Delete Project?",
-        format!("Are you sure you want to delete \"{}\"?", project_name),
-        Message::DeleteProjectConfirmed,
-    )
 }
 
 fn delete_label_confirm_modal<'a>(name: String, issues: usize) -> Element<'a, Message> {

@@ -71,11 +71,6 @@ pub async fn update(
     client.patch(&path, &ProjectWrap { project: params }).await
 }
 
-pub async fn delete(client: &ApiClient, team_id: i64, id: i64) -> Result<(), ApiError> {
-    let path = format!("api/v1/teams/{team_id}/projects/{id}");
-    client.delete(&path).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
