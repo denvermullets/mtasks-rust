@@ -19,6 +19,14 @@ pub struct Intake {
     pub refused: Vec<String>,
 }
 
+impl Intake {
+    /// One toast body listing every refused file with its reason (None when
+    /// nothing was refused).
+    pub fn refusal_toast(&self) -> Option<String> {
+        (!self.refused.is_empty()).then(|| self.refused.join("\n"))
+    }
+}
+
 /// Queue each picked file as an Attachment of `owner`. A bad file is refused
 /// (reason in [`Intake::refused`]) without blocking the rest.
 pub fn queue_files(
@@ -122,6 +130,22 @@ mod tests {
         assert_eq!(std::fs::read(a.outbox_path.as_ref().unwrap()).unwrap(), b"hello");
         // Upload + attach queued for the one good file only.
         assert_eq!(crate::db::sync_queue::pending_count(&c).unwrap(), 2);
+    }
+
+    #[test]
+    fn all_bad_batch_queues_nothing_and_one_toast_lists_each_file() {
+        let d = dir();
+        let empty = d.join("empty.txt");
+        let svg = d.join("logo.svg");
+        std::fs::write(&empty, b"").unwrap();
+        std::fs::write(&svg, b"<svg/>").unwrap();
+        let c = conn();
+        let r = queue_files(&c, &d.join("outbox"), OwnerKind::Issue, "i1", &[empty, svg]);
+        assert!(r.queued.is_empty());
+        assert_eq!(crate::db::sync_queue::pending_count(&c).unwrap(), 0);
+        let toast = r.refusal_toast().unwrap();
+        assert!(toast.contains("empty.txt") && toast.contains("logo.svg"));
+        assert!(Intake::default().refusal_toast().is_none());
     }
 
     #[test]

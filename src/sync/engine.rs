@@ -2233,7 +2233,7 @@ fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> 
 }
 
 /// What an `attachment/delete` entry needs, parsed from its payload (the local
-/// row is gone by drain time). See `db::attachments::remove_synced_issue_attachment`.
+/// row is gone by drain time). See `db::attachments::remove_synced_attachment`.
 #[derive(Debug, PartialEq)]
 struct AttachmentDeletePrep {
     team_remote_id: i64,
@@ -2252,8 +2252,22 @@ fn prep_attachment_delete(payload: Option<&str>) -> Prep<AttachmentDeletePrep> {
         }
     };
     let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
-    let owner = match (parsed.get("owner_kind").and_then(|v| v.as_str()), field("owner_remote_id")) {
-        (Some("issue"), Some(issue_id)) => attachments_api::AttachmentOwner::Issue { issue_id },
+    let owner = match (
+        parsed.get("owner_kind").and_then(|v| v.as_str()),
+        parsed.get("parent_kind").and_then(|v| v.as_str()),
+        field("owner_remote_id"),
+        field("parent_remote_id"),
+    ) {
+        (Some("issue"), _, Some(issue_id), _) => attachments_api::AttachmentOwner::Issue { issue_id },
+        (Some("project"), _, Some(project_id), _) => {
+            attachments_api::AttachmentOwner::Project { project_id }
+        }
+        (Some("comment"), Some("issue"), Some(comment_id), Some(issue_id)) => {
+            attachments_api::AttachmentOwner::IssueComment { issue_id, comment_id }
+        }
+        (Some("comment"), Some("project"), Some(comment_id), Some(project_id)) => {
+            attachments_api::AttachmentOwner::ProjectComment { project_id, comment_id }
+        }
         _ => {
             return Prep::Done(Outcome::DropAndLog(
                 "attachment delete: unsupported or incomplete owner".into(),
@@ -2811,6 +2825,15 @@ fn upload_outcome(entity_id: &str, err: &ApiError) -> Outcome {
     }
 }
 
+/// Outcome for an error from the PUT to the upload target. Kept apart from
+/// [`upload_outcome`] (the direct-upload-create step) because the storage host
+/// answers with its own statuses: a 403 there means the signed target expired,
+/// never that the file is refused, so it must never become a permanent failure.
+/// The target isn't stored, so every retry starts a fresh direct upload.
+fn put_outcome(err: &ApiError) -> Outcome {
+    Outcome::LeavePending(format!("upload target failed, will restart the upload: {err:?}"))
+}
+
 async fn upload_create(client: &ApiClient, entity_id: &str) -> Outcome {
     let prep = match open() {
         Ok(conn) => match prep_upload_create_in(&conn, entity_id) {
@@ -2828,7 +2851,7 @@ async fn upload_create(client: &ApiClient, entity_id: &str) -> Outcome {
         Err(e) => return upload_outcome(entity_id, &e),
     };
     if let Err(e) = attachments_api::put_bytes(client, &direct.direct_upload, bytes).await {
-        return upload_outcome(entity_id, &e);
+        return put_outcome(&e);
     }
     let blob_filename = direct.filename.unwrap_or(prep.blob.filename);
     let saved = open().and_then(|c| {
@@ -4767,6 +4790,29 @@ mod tests {
             ),
             Prep::Done(o) => panic!("expected ready, got {o:?}"),
         }
+    }
+
+    #[test]
+    fn attachment_delete_payload_parses_for_project_and_comment_owners() {
+        let ready = |p: &str| match prep_attachment_delete(Some(p)) {
+            Prep::Ready(r) => r.owner,
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        };
+        assert_eq!(
+            ready(r#"{"owner_kind":"project","team_remote_id":3,"owner_remote_id":4,"remote_id":12}"#),
+            attachments_api::AttachmentOwner::Project { project_id: 4 }
+        );
+        assert_eq!(
+            ready(r#"{"owner_kind":"comment","parent_kind":"issue","parent_remote_id":9,"team_remote_id":3,"owner_remote_id":5,"remote_id":12}"#),
+            attachments_api::AttachmentOwner::IssueComment { issue_id: 9, comment_id: 5 }
+        );
+        assert_eq!(
+            ready(r#"{"owner_kind":"comment","parent_kind":"project","parent_remote_id":4,"team_remote_id":3,"owner_remote_id":5,"remote_id":12}"#),
+            attachments_api::AttachmentOwner::ProjectComment { project_id: 4, comment_id: 5 }
+        );
+        // A comment payload without its parent cannot be addressed.
+        let no_parent = r#"{"owner_kind":"comment","team_remote_id":3,"owner_remote_id":5,"remote_id":12}"#;
+        assert!(matches!(prep_attachment_delete(Some(no_parent)), Prep::Done(Outcome::DropAndLog(_))));
     }
 
     #[test]
@@ -7433,6 +7479,35 @@ mod tests {
     }
 
     #[test]
+    fn files_on_an_unsynced_issue_follow_its_create_in_one_drain() {
+        let mut conn = setup_labels_db(); // i1 has no remote id
+        sync_queue::enqueue(&conn, "issue", "i1", "create", None).unwrap();
+        let a = pending_upload(&conn, "i1");
+        let order: Vec<(String, String)> = sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.entity_type, e.action))
+            .collect();
+        let want = |t: &str, a: &str| (t.to_string(), a.to_string());
+        assert_eq!(
+            order,
+            vec![want("issue", "create"), want("upload", "create"), want("attachment", "create")]
+        );
+
+        // Entries run in queue order against the live DB: waiting first...
+        assert!(matches!(
+            prep_upload_create_in(&conn, &a.id),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        // ...then the create lands the remote id and the same drain proceeds.
+        let create_id = sync_queue::pending_entries(&conn).unwrap()[0].id.unwrap();
+        save_remote_id_and_mark_synced(&mut conn, "issues", "i1", 55, create_id).unwrap();
+        assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Ready(_)));
+        attachments::set_uploaded(&conn, &a.id, "signed", "spec.pdf").unwrap();
+        assert!(matches!(prep_attachment_create_in(&conn, &a.id), Prep::Ready(_)));
+    }
+
+    #[test]
     fn a_removed_row_is_a_finished_entry() {
         let conn = setup_dependency_db();
         assert!(matches!(prep_upload_create_in(&conn, "gone"), Prep::Done(Outcome::Success)));
@@ -7491,5 +7566,22 @@ mod tests {
         attachments::mark_failed(&conn, &a.id, "nope").unwrap();
         assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
         assert!(matches!(prep_attachment_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
+    }
+
+    #[test]
+    fn a_put_step_error_is_always_temporary() {
+        // An expired target (403 from the storage host) is not the user's
+        // file being refused: the next retry restarts the direct upload.
+        for e in [
+            ApiError::Server { status: 403, message: "expired".into() },
+            ApiError::Validation { errors: vec!["x".into()] },
+            ApiError::NotFound("x".into()),
+            ApiError::Server { status: 400, message: "bad".into() },
+        ] {
+            match put_outcome(&e) {
+                Outcome::LeavePending(reason) => assert!(reason.contains("restart")),
+                _ => panic!("PUT error must stay pending"),
+            }
+        }
     }
 }

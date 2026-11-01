@@ -245,24 +245,6 @@ pub fn retry_failed(conn: &Connection, id: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Remove a `failed` row and its unsent queue entries. Returns the row so the
-/// caller can delete its outbox copy (and, for an inline image, strip its
-/// placeholder). `None` for any other state: pending rows are cancelled by JRST-202.
-pub fn remove_failed(conn: &Connection, id: &str) -> Result<Option<Attachment>> {
-    let Some(a) = get(conn, id)? else { return Ok(None) };
-    if a.upload_state != UploadState::Failed {
-        return Ok(None);
-    }
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM sync_queue WHERE entity_id = ?1 AND entity_type IN (?2, ?3) AND synced_at IS NULL",
-        params![id, UPLOAD_ENTITY, ATTACHMENT_ENTITY],
-    )?;
-    tx.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
-    tx.commit()?;
-    Ok(Some(a))
-}
-
 /// An owner's attachments: server-known ones in remote `id` order, then
 /// local pending/failed ones (no remote id yet) oldest first.
 pub fn list_for_owner(conn: &Connection, kind: OwnerKind, owner_id: &str) -> Result<Vec<Attachment>> {
@@ -375,42 +357,94 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Attachment>> {
     .optional()
 }
 
-/// Remove a synced issue attachment locally and return the `attachment/delete`
-/// queue payload, captured before the row goes:
+/// Remove a synced attachment (issue, project or comment owner) locally and
+/// return the `attachment/delete` queue payload, captured before the row goes:
 /// `{owner_kind, team_remote_id, owner_remote_id, remote_id, restore}` where
 /// `restore` is the row snapshot used to put it back if the server answers 403.
+/// Comment owners add `parent_kind` ("issue"|"project") and `parent_remote_id`
+/// (`owner_remote_id` is then the comment's).
 /// `None` (nothing removed) for a missing row, a pending/failed one (JRST-202
-/// cancels those), a non-issue owner (JRST-216) or an owner the server has not
-/// seen.
-pub fn remove_synced_issue_attachment(conn: &Connection, id: &str) -> Result<Option<String>> {
+/// cancels those) or an owner (or comment parent) the server has not seen.
+pub fn remove_synced_attachment(conn: &Connection, id: &str) -> Result<Option<String>> {
     use crate::db::queries;
     let Some(a) = get(conn, id)? else { return Ok(None) };
     let (Some(remote_id), UploadState::Synced) = (a.remote_id, a.upload_state) else {
         return Ok(None);
     };
-    if a.owner_kind != OwnerKind::Issue.as_str() {
-        return Ok(None);
-    }
-    let Some(issue) = queries::get_issue(conn, &a.owner_id)? else { return Ok(None) };
-    let Some(owner_remote_id) = issue.remote_id else { return Ok(None) };
-    let Some(team_remote_id) = queries::remote_id_for(conn, "teams", &issue.team_id)? else {
+    // (team local id, owner remote id, extra payload fields)
+    let (team_local, owner_remote_id, extra) = match a.owner_kind.as_str() {
+        "issue" => {
+            let Some(issue) = queries::get_issue(conn, &a.owner_id)? else { return Ok(None) };
+            let Some(r) = issue.remote_id else { return Ok(None) };
+            (issue.team_id, r, serde_json::json!({}))
+        }
+        "project" => {
+            let Some(project) = queries::get_project(conn, &a.owner_id)? else { return Ok(None) };
+            let Some(r) = project.remote_id else { return Ok(None) };
+            (project.team_id, r, serde_json::json!({}))
+        }
+        "comment" => {
+            let Some(comment) = queries::get_comment(conn, &a.owner_id)? else { return Ok(None) };
+            let Some(comment_remote) = comment.remote_id else { return Ok(None) };
+            let (kind, team, parent_remote) = match comment.owner() {
+                crate::db::models::CommentOwner::Issue(iid) => {
+                    let Some(i) = queries::get_issue(conn, &iid)? else { return Ok(None) };
+                    ("issue", i.team_id, i.remote_id)
+                }
+                crate::db::models::CommentOwner::Project(pid) => {
+                    let Some(p) = queries::get_project(conn, &pid)? else { return Ok(None) };
+                    ("project", p.team_id, p.remote_id)
+                }
+            };
+            let Some(parent_remote) = parent_remote else { return Ok(None) };
+            (
+                team,
+                comment_remote,
+                serde_json::json!({ "parent_kind": kind, "parent_remote_id": parent_remote }),
+            )
+        }
+        _ => return Ok(None),
+    };
+    let Some(team_remote_id) = queries::remote_id_for(conn, "teams", &team_local)? else {
         return Ok(None);
     };
     conn.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
-    Ok(Some(
-        serde_json::json!({
-            "owner_kind": "issue",
-            "team_remote_id": team_remote_id,
-            "owner_remote_id": owner_remote_id,
-            "remote_id": remote_id,
-            "restore": {
-                "id": a.id, "owner_kind": a.owner_kind, "owner_id": a.owner_id,
-                "blob_id": a.blob_id, "filename": a.filename, "content_type": a.content_type,
-                "byte_size": a.byte_size, "checksum": a.checksum, "created_at": a.created_at,
-            },
-        })
-        .to_string(),
-    ))
+    let mut payload = serde_json::json!({
+        "owner_kind": a.owner_kind,
+        "team_remote_id": team_remote_id,
+        "owner_remote_id": owner_remote_id,
+        "remote_id": remote_id,
+        "restore": {
+            "id": a.id, "owner_kind": a.owner_kind, "owner_id": a.owner_id,
+            "blob_id": a.blob_id, "filename": a.filename, "content_type": a.content_type,
+            "byte_size": a.byte_size, "checksum": a.checksum, "created_at": a.created_at,
+        },
+    });
+    if let (Some(obj), Some(more)) = (payload.as_object_mut(), extra.as_object()) {
+        obj.extend(more.clone());
+    }
+    Ok(Some(payload.to_string()))
+}
+
+/// Cancel / remove a not-yet-uploaded (pending or failed) row: delete it, drop
+/// its unsent `upload`/`attachment` queue entries and the outbox copy. Returns
+/// whether a row was removed; synced rows are refused (use the delete path).
+pub fn remove_local(conn: &Connection, id: &str) -> Result<bool> {
+    let Some(a) = get(conn, id)? else { return Ok(false) };
+    if a.upload_state == UploadState::Synced {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM sync_queue WHERE entity_id = ?1 AND entity_type IN (?2, ?3) AND synced_at IS NULL",
+        params![id, UPLOAD_ENTITY, ATTACHMENT_ENTITY],
+    )?;
+    tx.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
+    tx.commit()?;
+    if let Some(path) = a.outbox_path.as_deref() {
+        let _ = crate::files::outbox::remove(std::path::Path::new(path));
+    }
+    Ok(true)
 }
 
 /// Put back a row captured in a delete payload's `restore` (after a 403).
@@ -630,7 +664,7 @@ mod tests {
         replace_synced(&c, OwnerKind::Issue, "i1", &[dto(7, "a.png")]).unwrap();
         let local = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap()[0].id.clone();
 
-        let payload = remove_synced_issue_attachment(&c, &local).unwrap().expect("payload");
+        let payload = remove_synced_attachment(&c, &local).unwrap().expect("payload");
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["owner_kind"], "issue");
         assert_eq!(v["team_remote_id"], 5);
@@ -650,9 +684,9 @@ mod tests {
         seed_issue(&c, Some(40));
         local_row(&c, "p", "pending");
         local_row(&c, "f", "failed");
-        assert!(remove_synced_issue_attachment(&c, "p").unwrap().is_none());
-        assert!(remove_synced_issue_attachment(&c, "f").unwrap().is_none());
-        assert!(remove_synced_issue_attachment(&c, "nope").unwrap().is_none());
+        assert!(remove_synced_attachment(&c, "p").unwrap().is_none());
+        assert!(remove_synced_attachment(&c, "f").unwrap().is_none());
+        assert!(remove_synced_attachment(&c, "nope").unwrap().is_none());
         assert_eq!(names(&c).len(), 2);
     }
 
@@ -662,8 +696,86 @@ mod tests {
         seed_issue(&c, None);
         replace_synced(&c, OwnerKind::Issue, "i1", &[dto(7, "a.png")]).unwrap();
         let local = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap()[0].id.clone();
-        assert!(remove_synced_issue_attachment(&c, &local).unwrap().is_none());
+        assert!(remove_synced_attachment(&c, &local).unwrap().is_none());
         assert_eq!(names(&c).len(), 1);
+    }
+
+    fn seed_project(c: &Connection, remote: Option<i64>) {
+        let now = "2026-01-01T00:00:00.000Z";
+        c.execute(
+            "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+             VALUES ('p1', ?2, 't1', 'P', ?1, ?1)",
+            params![now, remote],
+        )
+        .unwrap();
+    }
+
+    fn seed_comment(c: &Connection, id: &str, issue: Option<&str>, project: Option<&str>, remote: Option<i64>) {
+        let now = "2026-01-01T00:00:00.000Z";
+        c.execute(
+            "INSERT INTO comments (id, remote_id, issue_id, project_id, body, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'b', ?5, ?5)",
+            params![id, remote, issue, project, now],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn removing_a_project_attachment_yields_a_restorable_payload() {
+        let c = conn();
+        seed_issue(&c, Some(40));
+        seed_project(&c, Some(60));
+        replace_synced(&c, OwnerKind::Project, "p1", &[dto(8, "p.png")]).unwrap();
+        let local = list_for_owner(&c, OwnerKind::Project, "p1").unwrap()[0].id.clone();
+
+        let payload = remove_synced_attachment(&c, &local).unwrap().expect("payload");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["owner_kind"], "project");
+        assert_eq!(v["team_remote_id"], 5);
+        assert_eq!(v["owner_remote_id"], 60);
+        assert_eq!(v["remote_id"], 8);
+        assert!(list_for_owner(&c, OwnerKind::Project, "p1").unwrap().is_empty());
+
+        restore_from_snapshot(&c, &v["restore"], 8).unwrap();
+        assert_eq!(list_for_owner(&c, OwnerKind::Project, "p1").unwrap()[0].id, local);
+    }
+
+    #[test]
+    fn removing_a_comment_attachment_records_the_comment_and_its_parent() {
+        let c = conn();
+        seed_issue(&c, Some(40));
+        seed_project(&c, Some(60));
+        seed_comment(&c, "ci", Some("i1"), None, Some(71));
+        seed_comment(&c, "cp", None, Some("p1"), Some(72));
+        replace_synced(&c, OwnerKind::Comment, "ci", &[dto(9, "a")]).unwrap();
+        replace_synced(&c, OwnerKind::Comment, "cp", &[dto(10, "b")]).unwrap();
+
+        let id_of = |owner: &str| list_for_owner(&c, OwnerKind::Comment, owner).unwrap()[0].id.clone();
+        let v: serde_json::Value =
+            serde_json::from_str(&remove_synced_attachment(&c, &id_of("ci")).unwrap().unwrap()).unwrap();
+        assert_eq!(v["owner_kind"], "comment");
+        assert_eq!(v["parent_kind"], "issue");
+        assert_eq!(v["parent_remote_id"], 40);
+        assert_eq!(v["owner_remote_id"], 71);
+        assert_eq!(v["team_remote_id"], 5);
+        assert_eq!(v["remote_id"], 9);
+
+        let v: serde_json::Value =
+            serde_json::from_str(&remove_synced_attachment(&c, &id_of("cp")).unwrap().unwrap()).unwrap();
+        assert_eq!(v["parent_kind"], "project");
+        assert_eq!(v["parent_remote_id"], 60);
+        assert_eq!(v["owner_remote_id"], 72);
+    }
+
+    #[test]
+    fn a_comment_the_server_has_not_seen_keeps_its_attachment() {
+        let c = conn();
+        seed_issue(&c, Some(40));
+        seed_comment(&c, "ci", Some("i1"), None, None);
+        replace_synced(&c, OwnerKind::Comment, "ci", &[dto(9, "a")]).unwrap();
+        let id = list_for_owner(&c, OwnerKind::Comment, "ci").unwrap()[0].id.clone();
+        assert!(remove_synced_attachment(&c, &id).unwrap().is_none());
+        assert_eq!(list_for_owner(&c, OwnerKind::Comment, "ci").unwrap().len(), 1);
     }
 
     #[test]
@@ -726,15 +838,30 @@ mod tests {
     }
 
     #[test]
-    fn remove_failed_deletes_row_and_queue_entries_and_returns_it() {
+    fn remove_local_cancels_a_pending_upload_row_queue_and_outbox_file() {
         let c = conn();
-        let keep = add_pending(&c, &new_pending("other.bin")).unwrap();
-        let a = add_pending(&c, &new_pending("big.bin")).unwrap();
-        mark_failed(&c, &a.id, "nope").unwrap();
-        let gone = remove_failed(&c, &a.id).unwrap().expect("removed");
-        assert_eq!(gone.outbox_path.as_deref(), Some("/tmp/outbox/x"));
-        assert!(get(&c, &a.id).unwrap().is_none());
+        let dir = std::env::temp_dir().join(format!("rm-local-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("blob");
+        std::fs::write(&file, b"x").unwrap();
+        let mut n = new_pending("spec.pdf");
+        n.outbox_path = file.to_string_lossy().into_owned();
+        let a = add_pending(&c, &n).unwrap();
+        let keep = add_pending(&c, &new_pending("keep.pdf")).unwrap();
+        assert!(remove_local(&c, &a.id).unwrap());
+        assert_eq!(names(&c), vec!["keep.pdf"]);
+        assert!(!file.exists());
         assert!(queue(&c).iter().all(|(_, _, id)| *id == keep.id));
-        assert!(remove_failed(&c, &keep.id).unwrap().is_none(), "pending rows are cancelled elsewhere");
+        assert!(!remove_local(&c, &a.id).unwrap(), "already gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_local_refuses_synced_rows() {
+        let c = conn();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(9, "a.png")]).unwrap();
+        let id = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap()[0].id.clone();
+        assert!(!remove_local(&c, &id).unwrap());
+        assert_eq!(names(&c), vec!["a.png"]);
     }
 }
