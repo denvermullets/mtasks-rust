@@ -37,11 +37,19 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Messag
         type_label(&a.content_type, &a.filename),
         format_size(a.byte_size)
     );
+    // Pending marker: the file is safe in the outbox but not on the server yet.
+    let pending = (a.upload_state == UploadState::Pending)
+        .then(|| text("Pending upload").size(11).color(t::accent()));
     let info = column![]
         .spacing(2)
         .width(Length::Fill)
         .push(text(&a.filename).size(13).color(t::text_primary()))
-        .push(text(meta).size(11).color(t::text_muted()));
+        .push(
+            row![]
+                .spacing(8)
+                .push(text(meta).size(11).color(t::text_muted()))
+                .push_maybe(pending),
+        );
     // Only files the server has can be deleted this way; pending/failed ones
     // are cancelled or removed by the upload tickets.
     let delete = (a.upload_state == UploadState::Synced).then(|| {

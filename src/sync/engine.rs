@@ -22,9 +22,11 @@ use rusqlite::Connection;
 
 use crate::api::deleted::{self, TombstoneDto};
 use crate::api::dto::{CommentDto, IssueDto, LabelDto, PulledDependency, ProjectDto};
+use crate::api::attachments as attachments_api;
 use crate::api::recurring_issues::RecurringIssueDto;
+use crate::db::attachments::{self, Attachment, UploadState};
 use crate::api::{
-    attachments, comments, dependencies, issues, labels, lanes, members, projects, recurring_issues, teams,
+    comments, dependencies, issues, labels, lanes, members, projects, recurring_issues, teams,
     users, ApiClient, ApiError, CommentParams, CommentTarget, Conditional, Direction, IssueParams,
     LabelParams, MeDto, ProjectParams, RecurringIssueParams,
 };
@@ -404,6 +406,8 @@ async fn process(
         ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
         ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
         ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
+        ("upload", "create") => upload_create(client, &entry.entity_id).await,
+        ("attachment", "create") => attachment_create(client, &entry.entity_id).await,
         ("attachment", "delete") => attachment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
@@ -2233,7 +2237,7 @@ fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> 
 #[derive(Debug, PartialEq)]
 struct AttachmentDeletePrep {
     team_remote_id: i64,
-    owner: attachments::AttachmentOwner,
+    owner: attachments_api::AttachmentOwner,
     remote_id: i64,
 }
 
@@ -2249,7 +2253,7 @@ fn prep_attachment_delete(payload: Option<&str>) -> Prep<AttachmentDeletePrep> {
     };
     let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
     let owner = match (parsed.get("owner_kind").and_then(|v| v.as_str()), field("owner_remote_id")) {
-        (Some("issue"), Some(issue_id)) => attachments::AttachmentOwner::Issue { issue_id },
+        (Some("issue"), Some(issue_id)) => attachments_api::AttachmentOwner::Issue { issue_id },
         _ => {
             return Prep::Done(Outcome::DropAndLog(
                 "attachment delete: unsupported or incomplete owner".into(),
@@ -2272,7 +2276,7 @@ async fn attachment_delete(client: &ApiClient, payload: Option<&str>) -> Outcome
         Prep::Ready(p) => p,
         Prep::Done(o) => return o,
     };
-    let result = attachments::delete(client, prep.team_remote_id, prep.owner, prep.remote_id).await;
+    let result = attachments_api::delete(client, prep.team_remote_id, prep.owner, prep.remote_id).await;
     let forbidden = matches!(&result, Err(ApiError::Forbidden(m)) if !is_token_scope_message(m));
     if forbidden {
         restore_deleted_attachment(payload, prep.remote_id);
@@ -2651,6 +2655,200 @@ async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
     }
 }
 
+// ── Attachment uploads ────────────────────────────────────────────────────
+//
+// `upload/create` and `attachment/create` entries (entity_id = the attachment's
+// local id), queued together by `db::attachments::add_pending`. Both wait while
+// the owner has no remote id; the attach also waits for the upload's
+// `signed_id`. Any upload error retries for now (see [`upload_outcome`]); the
+// failed state is a later ticket.
+
+/// What an `upload/create` entry needs to run.
+struct UploadPrep {
+    attachment_id: String,
+    outbox_path: String,
+    blob: attachments_api::BlobParams,
+}
+
+/// What an `attachment/create` entry needs to run.
+struct AttachPrep {
+    attachment_id: String,
+    team_remote_id: i64,
+    issue_remote_id: i64,
+    signed_id: String,
+    outbox_path: Option<String>,
+}
+
+/// Remote id of an attachment's owner; `Err` is the wait/drop outcome.
+fn owner_remote_id(conn: &Connection, a: &Attachment) -> Result<i64, Outcome> {
+    let found = match a.owner_kind.as_str() {
+        "issue" => queries::get_issue(conn, &a.owner_id).map(|o| o.map(|i| i.remote_id)),
+        "project" => queries::get_project(conn, &a.owner_id).map(|o| o.map(|p| p.remote_id)),
+        _ => queries::get_comment(conn, &a.owner_id).map(|o| o.map(|c| c.remote_id)),
+    };
+    match found {
+        Ok(Some(Some(r))) => Ok(r),
+        Ok(Some(None)) => Err(Outcome::LeavePending(format!("{} not synced yet", a.owner_kind))),
+        Ok(None) => Err(Outcome::DropAndLog(format!(
+            "attachment owner ({}) missing locally",
+            a.owner_kind
+        ))),
+        Err(e) => Err(Outcome::LeavePending(format!("db: {e}"))),
+    }
+}
+
+fn prep_upload_create_in(conn: &Connection, entity_id: &str) -> Prep<UploadPrep> {
+    let a = match attachments::get(conn, entity_id) {
+        Ok(Some(a)) => a,
+        // Removed before it ran (cancel).
+        Ok(None) => return Prep::Done(Outcome::Success),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    if a.signed_id.is_some() || a.upload_state != UploadState::Pending {
+        return Prep::Done(Outcome::Success);
+    }
+    if let Err(o) = owner_remote_id(conn, &a) {
+        return Prep::Done(o);
+    }
+    let Some(outbox_path) = a.outbox_path.clone() else {
+        return Prep::Done(Outcome::LeavePending("no outbox copy".into()));
+    };
+    Prep::Ready(UploadPrep {
+        attachment_id: a.id,
+        outbox_path,
+        blob: attachments_api::BlobParams {
+            filename: a.filename,
+            byte_size: a.byte_size.max(0) as u64,
+            checksum: a.checksum.unwrap_or_default(),
+            content_type: a.content_type,
+        },
+    })
+}
+
+fn prep_attachment_create_in(conn: &Connection, entity_id: &str) -> Prep<AttachPrep> {
+    let a = match attachments::get(conn, entity_id) {
+        Ok(Some(a)) => a,
+        Ok(None) => return Prep::Done(Outcome::Success),
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    if a.upload_state == UploadState::Synced {
+        return Prep::Done(Outcome::Success);
+    }
+    let Some(signed_id) = a.signed_id.clone() else {
+        return Prep::Done(Outcome::LeavePending("upload not finished yet".into()));
+    };
+    let issue_remote_id = match owner_remote_id(conn, &a) {
+        Ok(r) => r,
+        Err(o) => return Prep::Done(o),
+    };
+    if a.owner_kind != "issue" {
+        return Prep::Done(Outcome::LeavePending(format!(
+            "attaching to a {} is not supported yet",
+            a.owner_kind
+        )));
+    }
+    let team_remote_id = match queries::get_issue(conn, &a.owner_id)
+        .ok()
+        .flatten()
+        .and_then(|i| queries::remote_id_for(conn, "teams", &i.team_id).ok().flatten())
+    {
+        Some(t) => t,
+        None => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
+    };
+    Prep::Ready(AttachPrep {
+        attachment_id: a.id,
+        team_remote_id,
+        issue_remote_id,
+        signed_id,
+        outbox_path: a.outbox_path,
+    })
+}
+
+/// Every upload error is temporary for now: a permanent classification would
+/// drop the entry and silently lose the user's file. The failed state
+/// (JRST-200) replaces this with a permanent/temporary split. An expired PUT
+/// target (403) is retried by starting the direct upload again, which is what
+/// every retry does (the target is never stored).
+fn upload_outcome(err: &ApiError) -> Outcome {
+    match classify(err) {
+        Outcome::DropAndLog(reason) => Outcome::LeavePending(reason),
+        other => other,
+    }
+}
+
+async fn upload_create(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match prep_upload_create_in(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let bytes = match std::fs::read(&prep.outbox_path) {
+        Ok(b) => b,
+        Err(e) => return Outcome::LeavePending(format!("outbox copy unreadable: {e}")),
+    };
+    let direct = match attachments_api::create_direct_upload(client, &prep.blob).await {
+        Ok(d) => d,
+        Err(e) => return upload_outcome(&e),
+    };
+    if let Err(e) = attachments_api::put_bytes(client, &direct.direct_upload, bytes).await {
+        return upload_outcome(&e);
+    }
+    let blob_filename = direct.filename.unwrap_or(prep.blob.filename);
+    let saved = open().and_then(|c| {
+        attachments::set_uploaded(&c, &prep.attachment_id, &direct.signed_id, &blob_filename)
+            .map_err(|e| format!("db: {e}"))
+    });
+    match saved {
+        Ok(()) => Outcome::Success,
+        Err(e) => Outcome::LeavePending(e),
+    }
+}
+
+async fn attachment_create(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match prep_attachment_create_in(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let result = attachments_api::attach_to_issue(
+        client,
+        prep.team_remote_id,
+        prep.issue_remote_id,
+        std::slice::from_ref(&prep.signed_id),
+    )
+    .await;
+    match result {
+        Ok(rows) => {
+            let Some(dto) = rows.into_iter().next() else {
+                return Outcome::LeavePending("attach returned no attachment".into());
+            };
+            let saved = open().and_then(|c| {
+                attachments::mark_attached(&c, &prep.attachment_id, &dto)
+                    .map_err(|e| format!("db: {e}"))
+            });
+            match saved {
+                Ok(()) => {
+                    if let Some(p) = prep.outbox_path {
+                        let _ = crate::files::outbox::remove(std::path::Path::new(&p));
+                    }
+                    Outcome::Success
+                }
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
+        // Owner gone or refused for good: kept pending until the failed state
+        // exists (JRST-200), never dropped.
+        Err(e) => match classify_in_team(&e, prep.team_remote_id) {
+            Outcome::DropAndLog(reason) => Outcome::LeavePending(reason),
+            other => other,
+        },
+    }
+}
+
 // ── Issue dependencies ────────────────────────────────────────────────────
 
 struct DependencyCreatePrep {
@@ -2857,6 +3055,15 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
             let team_id: String = conn
                 .query_row("SELECT team_id FROM saved_views WHERE id = ?1", [id], |r| r.get(0))
                 .ok()?;
+            team_remote(&team_id)
+        }
+        ("upload", _) | ("attachment", _) => {
+            let a = attachments::get(conn, id).ok()??;
+            let team_id = match a.owner_kind.as_str() {
+                "issue" => queries::get_issue(conn, &a.owner_id).ok()??.team_id,
+                "project" => queries::get_project(conn, &a.owner_id).ok()??.team_id,
+                _ => return None,
+            };
             team_remote(&team_id)
         }
         ("comment", _) => {
@@ -4519,7 +4726,7 @@ mod tests {
                 r,
                 AttachmentDeletePrep {
                     team_remote_id: 3,
-                    owner: attachments::AttachmentOwner::Issue { issue_id: 9 },
+                    owner: attachments_api::AttachmentOwner::Issue { issue_id: 9 },
                     remote_id: 12
                 }
             ),
@@ -7126,5 +7333,84 @@ mod tests {
     fn other_issues_ignore_the_move() {
         let (conn, _) = moved_locally();
         assert_eq!(move_order(&conn, "i1", i64::MAX).unwrap(), None);
+    }
+
+    // ── Attachment uploads (JRST-197) ──
+
+    fn pending_upload(conn: &Connection, issue: &str) -> Attachment {
+        attachments::add_pending(
+            conn,
+            &attachments::NewPending {
+                owner_kind: crate::db::attachments::OwnerKind::Issue,
+                owner_id: issue.into(),
+                filename: "spec.pdf".into(),
+                content_type: "application/pdf".into(),
+                byte_size: 12,
+                checksum: "abc==".into(),
+                outbox_path: "/tmp/outbox/x".into(),
+                kind: crate::files::validate::UploadKind::Attachment,
+                placeholder_uuid: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn upload_waits_for_an_owner_with_no_remote_id() {
+        let conn = setup_labels_db(); // i1 has no remote id
+        let a = pending_upload(&conn, "i1");
+        assert!(matches!(
+            prep_upload_create_in(&conn, &a.id),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        assert!(matches!(
+            prep_attachment_create_in(&conn, &a.id),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+    }
+
+    #[test]
+    fn upload_is_ready_once_the_owner_is_synced_and_attach_waits_for_the_signed_id() {
+        let conn = setup_dependency_db(); // i1 remote 1, team remote 700
+        let a = pending_upload(&conn, "i1");
+        match prep_upload_create_in(&conn, &a.id) {
+            Prep::Ready(p) => {
+                assert_eq!(p.blob.filename, "spec.pdf");
+                assert_eq!(p.blob.checksum, "abc==");
+            }
+            _ => panic!("expected the upload to be ready"),
+        }
+        assert!(matches!(
+            prep_attachment_create_in(&conn, &a.id),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+
+        attachments::set_uploaded(&conn, &a.id, "signed", "spec.pdf").unwrap();
+        // The upload is not redone, and the attach now has everything.
+        assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
+        match prep_attachment_create_in(&conn, &a.id) {
+            Prep::Ready(p) => {
+                assert_eq!((p.team_remote_id, p.issue_remote_id), (700, 1));
+                assert_eq!(p.signed_id, "signed");
+            }
+            _ => panic!("expected the attach to be ready"),
+        }
+    }
+
+    #[test]
+    fn a_removed_row_is_a_finished_entry() {
+        let conn = setup_dependency_db();
+        assert!(matches!(prep_upload_create_in(&conn, "gone"), Prep::Done(Outcome::Success)));
+        assert!(matches!(prep_attachment_create_in(&conn, "gone"), Prep::Done(Outcome::Success)));
+    }
+
+    #[test]
+    fn upload_errors_never_drop_the_entry() {
+        let e = ApiError::Validation { errors: vec!["too big".into()] };
+        assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
+        let e = ApiError::Server { status: 403, message: "expired".into() };
+        assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
+        let e = ApiError::NotFound("x".into());
+        assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
     }
 }

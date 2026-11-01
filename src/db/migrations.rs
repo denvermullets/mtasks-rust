@@ -667,6 +667,26 @@ const MIGRATIONS: &[Migration] = &[
                 ON file_cache (last_accessed);
         ",
     },
+    Migration {
+        version: 32,
+        name: "attachments_pending_upload",
+        up: "
+            -- Pending-upload state lives on the attachment row itself (only
+            -- meaningful while upload_state is 'pending' or 'failed').
+            -- outbox_path: the staged copy of the bytes. upload_kind:
+            -- 'attachment' (listed on the owner) or 'inline_image' (a bare
+            -- blob referenced from a body). placeholder_uuid: the token an
+            -- inline image's `jait-pending://<uuid>` URL carries.
+            -- signed_id / blob_filename: set once the direct upload (and its
+            -- PUT) completed; the attach / body rewrite uses them.
+            ALTER TABLE attachments ADD COLUMN outbox_path TEXT;
+            ALTER TABLE attachments ADD COLUMN upload_kind TEXT NOT NULL DEFAULT 'attachment'
+                CHECK (upload_kind IN ('attachment', 'inline_image'));
+            ALTER TABLE attachments ADD COLUMN placeholder_uuid TEXT;
+            ALTER TABLE attachments ADD COLUMN signed_id TEXT;
+            ALTER TABLE attachments ADD COLUMN blob_filename TEXT;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with

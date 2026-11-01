@@ -34,6 +34,24 @@ pub enum UploadKind {
     InlineImage,
 }
 
+impl UploadKind {
+    /// Value stored in `attachments.upload_kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UploadKind::Attachment => "attachment",
+            UploadKind::InlineImage => "inline_image",
+        }
+    }
+
+    pub fn from_db(s: &str) -> Self {
+        if s == "inline_image" {
+            UploadKind::InlineImage
+        } else {
+            UploadKind::Attachment
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Validation {
     Ok,
@@ -42,6 +60,7 @@ pub enum Validation {
 }
 
 impl Validation {
+    #[allow(dead_code)] // used by the paste tickets (JRST-210)
     pub fn is_ok(&self) -> bool {
         matches!(self, Validation::Ok)
     }

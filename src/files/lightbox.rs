@@ -91,6 +91,11 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             upload_state: UploadState::Synced,
             failure_reason: None,
+            outbox_path: None,
+            upload_kind: crate::files::validate::UploadKind::Attachment,
+            placeholder_uuid: None,
+            signed_id: None,
+            blob_filename: None,
         }
     }
 
