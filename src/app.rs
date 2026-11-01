@@ -93,6 +93,8 @@ pub enum Message {
     OpenDashboard(String),
     /// Move a dashboard group (local id) up or down.
     MoveDashboardGroup(String, crate::db::dashboards::MoveDirection),
+    /// Pick a dashboard filter tab (Today / Week / Hot / Open).
+    SetDashboardFilter(crate::dashboard_eval::Filter),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -614,6 +616,15 @@ impl View {
     fn is_cross_team(&self) -> bool {
         matches!(self, View::MyIssues | View::Dashboard(_))
     }
+
+    /// An open dashboard that a pull (or a local delete) removed falls back to
+    /// the default board; every other view is unchanged.
+    fn without_missing_dashboard(self, dashboards: &[crate::db::dashboards::Dashboard]) -> View {
+        match self {
+            View::Dashboard(id) if !dashboards.iter().any(|d| d.id == id) => View::Board,
+            other => other,
+        }
+    }
 }
 
 /// Sort key for the Projects table (mirrors the Rails index sort options).
@@ -903,6 +914,13 @@ impl App {
         self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         self.dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+
+        let kept = self.view.clone().without_missing_dashboard(&self.dashboards);
+        if kept != self.view {
+            self.view = kept;
+            self.focused_lane = 0;
+            self.focused_issue = 0;
+        }
 
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
@@ -2610,15 +2628,21 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        let dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         // Open the stored Home page; anything unresolvable falls back to the
         // first team's board.
-        let launch = crate::db::home_page::launch_target(home_page.as_ref(), &teams, &saved_views);
-        let (selected_team_id, launch_view) = match launch {
-            crate::db::home_page::LaunchTarget::Team(id) => (Some(id), None),
-            crate::db::home_page::LaunchTarget::View { view_id, team_id } => {
-                (Some(team_id), Some(view_id))
-            }
-            crate::db::home_page::LaunchTarget::Default => (default_team_id(&teams), None),
+        let launch = crate::db::home_page::launch_target(
+            home_page.as_ref(),
+            &teams,
+            &saved_views,
+            &dashboards,
+        );
+        use crate::db::home_page::LaunchTarget;
+        let (selected_team_id, launch_view, launch_dashboard) = match launch {
+            LaunchTarget::Team(id) => (Some(id), None, None),
+            LaunchTarget::View { view_id, team_id } => (Some(team_id), Some(view_id), None),
+            LaunchTarget::Dashboard(id) => (default_team_id(&teams), None, Some(id)),
+            LaunchTarget::Default => (default_team_id(&teams), None, None),
         };
 
         let (lanes, issues, projects, members, labels, issue_labels) =
@@ -2696,7 +2720,7 @@ impl App {
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views,
-            dashboards: crate::db::dashboards::list(&conn).unwrap_or_default(),
+            dashboards,
             dashboard_form: DashboardForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
@@ -2716,9 +2740,10 @@ impl App {
             sync_paused_auth: false,
         };
 
-        let task = match launch_view {
-            Some(view_id) => app.update_inner(Message::OpenSavedView(view_id)),
-            None => Task::none(),
+        let task = match (launch_view, launch_dashboard) {
+            (Some(view_id), _) => app.update_inner(Message::OpenSavedView(view_id)),
+            (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
+            _ => Task::none(),
         };
         (app, task)
     }
@@ -3444,6 +3469,12 @@ impl App {
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
                 self.switch_view(View::Dashboard(id));
+            }
+
+            Message::SetDashboardFilter(filter) => {
+                self.dashboard_header.filter = filter;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
             }
 
             Message::NavigateToView(view) => {
@@ -5885,6 +5916,7 @@ impl App {
                     },
                     self.focused_lane,
                     self.focused_issue,
+                    self.dashboard_header,
                     self.sync_read_only,
                 )
             }
@@ -6586,6 +6618,26 @@ mod tests {
     }
 
     use super::*;
+
+    fn dash(id: &str) -> crate::db::dashboards::Dashboard {
+        crate::db::dashboards::Dashboard {
+            id: id.into(),
+            remote_id: None,
+            name: id.into(),
+            description: String::new(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn open_dashboard_removed_by_a_pull_falls_back_to_the_board() {
+        let list = [dash("a")];
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&list), View::Dashboard("a".into()));
+        assert_eq!(View::Dashboard("gone".into()).without_missing_dashboard(&list), View::Board);
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&[]), View::Board);
+        assert_eq!(View::MyIssues.without_missing_dashboard(&[]), View::MyIssues);
+    }
 
     fn team(id: &str, archived: bool) -> Team {
         Team {
