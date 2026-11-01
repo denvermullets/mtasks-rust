@@ -102,6 +102,8 @@ pub enum Message {
     ToggleTeamMenu(String),
     /// Make a team's board the user's Home page (local UUID).
     SetTeamAsHome(String),
+    /// Make a dashboard the user's Home page (local UUID).
+    SetDashboardAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
     /// Open the read-only members panel for a team (local UUID).
@@ -3726,6 +3728,24 @@ impl App {
                 }
             }
 
+            Message::SetDashboardAsHome(dashboard_id) => {
+                let found = self.dashboards.iter().find(|d| d.id == dashboard_id).map(|d| d.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(Some(rid)) = found {
+                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "dashboard", rid) {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
+                } else if found.is_some() {
+                    self.push_toast("This dashboard hasn't synced yet", ToastKind::Error, false);
+                }
+            }
+
             Message::SetSavedViewAsHome(view_id) => {
                 let found = self
                     .saved_views
@@ -6151,6 +6171,10 @@ impl App {
                     self.focused_issue,
                     self.dashboard_header.clone(),
                     self.sync_read_only,
+                    self.dashboards
+                        .iter()
+                        .find(|d| d.id == *id)
+                        .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
                 )
             }
         };
