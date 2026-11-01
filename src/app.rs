@@ -149,6 +149,10 @@ pub enum Message {
     /// Activity fetch for an issue's detail finished (JRST-149); `true` when entries were stored.
     /// Issue id and how many Activity entries the fetch stored.
     ActivityFetched(String, usize),
+    /// A file card was clicked: open the Attachment in its default app (JRST-186).
+    OpenAttachment(crate::db::attachments::Attachment),
+    /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
+    AttachmentDownloaded(crate::db::attachments::Attachment, Result<Vec<u8>, String>),
     ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
@@ -1621,6 +1625,58 @@ impl App {
         match queries::get_issue(&conn, id) {
             Ok(Some(issue)) => self.fetch_activity_task(&issue),
             _ => Task::none(),
+        }
+    }
+
+    /// Open an Attachment in its default app: straight from the file cache on a
+    /// hit, otherwise download it (authenticated, redirect followed) first.
+    fn open_attachment(&mut self, att: crate::db::attachments::Attachment) -> Task<Message> {
+        let (Some(key), Some(remote_id)) = (crate::files::open::blob_key(&att), att.remote_id)
+        else {
+            self.push_toast(
+                format!("{} hasn't finished uploading yet", att.filename),
+                ToastKind::Error,
+                false,
+            );
+            return Task::none();
+        };
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.open_cached_attachment(&att, &key, &path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.push_toast("Sign in to download files", ToastKind::Error, false);
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                crate::api::attachments::download(&client, remote_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |r| Message::AttachmentDownloaded(att.clone(), r),
+        )
+    }
+
+    /// Copy a cached blob to its real filename and hand it to the OS.
+    fn open_cached_attachment(
+        &mut self,
+        att: &crate::db::attachments::Attachment,
+        key: &str,
+        cached: &std::path::Path,
+    ) {
+        let root = crate::files::default_root();
+        let opened = crate::files::open::materialize(&root, key, &att.filename, cached)
+            .and_then(|p| crate::files::open::open_in_default_app(&p));
+        if let Err(e) = opened {
+            self.push_toast(
+                format!("Couldn't open {}: {e}", att.filename),
+                ToastKind::Error,
+                false,
+            );
         }
     }
 
@@ -3101,6 +3157,27 @@ impl App {
                     self.reload_data();
                 }
             }
+            Message::OpenAttachment(att) => return self.open_attachment(att),
+            Message::AttachmentDownloaded(att, result) => match result {
+                Ok(bytes) => {
+                    let conn = self.db();
+                    let cache = crate::files::cache::FileCache::at_default_root();
+                    let key = crate::files::open::blob_key(&att).unwrap_or_default();
+                    match cache.put(&conn, &key, &bytes) {
+                        Ok(path) => self.open_cached_attachment(&att, &key, &path),
+                        Err(e) => self.push_toast(
+                            format!("Couldn't cache {}: {e}", att.filename),
+                            ToastKind::Error,
+                            false,
+                        ),
+                    }
+                }
+                Err(e) => self.push_toast(
+                    format!("Couldn't download {}: {e}", att.filename),
+                    ToastKind::Error,
+                    false,
+                ),
+            },
             Message::ActivityFetched(issue_id, stored) => {
                 // Only refresh when entries landed and that issue is still open.
                 if stored > 0
