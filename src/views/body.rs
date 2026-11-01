@@ -231,7 +231,7 @@ fn paragraph<'a>(inlines: &[Inline], size: f32, plain: Color, ctx: &BodyCtx<'a>)
         .collect();
     hover_rich(spans, Message::OpenBodyLink)
         .size(size)
-        .on_hover(Message::BodyHover)
+        .on_hover(|owner, h| Message::BodyHover(owner, h))
         .into()
 }
 
@@ -280,7 +280,8 @@ fn push_runs(inlines: &[Inline], resolve: &impl Fn(&str) -> Option<LinkTarget>, 
 fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> {
     match r {
         Run::Plain(s) => span(s).color(plain),
-        Run::Mention(s) => span(s).color(t::highlight()),
+        // Tagged so a mention hover card (JRST-310) can identify the span.
+        Run::Mention(s) => span(s.clone()).color(t::highlight()).link(LinkTarget::Mention(s)),
         Run::Reference { text, target: Some(target) } => {
             span(text).color(t::accent()).underline(true).link(target)
         }
