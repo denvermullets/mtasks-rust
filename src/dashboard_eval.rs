@@ -94,6 +94,9 @@ pub struct Header {
     /// Raw view-search text. Narrows rows only (never counts); matched like
     /// the other lists: title, or team identifier plus number.
     pub search: String,
+    /// Local id of the team the picker narrows to. A value that isn't one of
+    /// the dashboard's source teams is ignored (see `source_teams`).
+    pub team: Option<String>,
     /// Mine: only issues assigned to the current user (any of their member rows).
     pub mine: bool,
 }
@@ -126,6 +129,10 @@ pub struct Evaluation<'a> {
     pub due_today: usize,
     /// Distinct issues across all groups with effective due < today.
     pub overdue: usize,
+    /// The accessible teams behind the dashboard's sources (team sources,
+    /// project sources' teams, label sources' teams), in mirror (sidebar)
+    /// order. The team, assignee, label and status pickers read this.
+    pub source_teams: Vec<&'a Team>,
 }
 
 pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
@@ -145,6 +152,20 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         .map(|mem| mem.id.as_str())
         .collect();
 
+    let source_teams = source_teams(input.groups, m, &accessible);
+    let valid_team = input
+        .header
+        .team
+        .as_deref()
+        .filter(|id| source_teams.iter().any(|t| t.id == *id))
+        .map(str::to_string);
+    let input = &Input {
+        groups: input.groups,
+        mirror: input.mirror,
+        current_user_remote_id: input.current_user_remote_id,
+        today: input.today,
+        header: Header { team: valid_team, ..input.header.clone() },
+    };
     // Ids across all groups' refined base sets, deduplicated for the counts.
     let mut counted: HashSet<&str> = HashSet::new();
     let needle = crate::views::header::needle(&input.header.search);
@@ -172,7 +193,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         })
         .collect();
     let (due_today, overdue) = due_counts(&counted, m, input.today);
-    Evaluation { groups, due_today, overdue }
+    Evaluation { groups, due_today, overdue, source_teams }
 }
 
 /// A group's pool narrowed to the starting set rows and counts both read.
@@ -189,12 +210,42 @@ fn base_set<'a>(
         .iter()
         .filter(|i| pool.contains(i.id.as_str()) && is_active(i, m.lanes))
         .filter(|i| passes_mine(i, input.header.mine, my_members))
+        .filter(|i| passes_team(i, input.header.team.as_deref()))
         .collect()
 }
+
 
 /// Mine off keeps everything; on keeps issues assigned to one of my member rows.
 fn passes_mine(i: &Issue, mine: bool, my_members: &HashSet<&str>) -> bool {
     !mine || i.assignee_id.as_deref().is_some_and(|a| my_members.contains(a))
+}
+
+
+/// The team picker: no team means no narrowing. `evaluate` has already
+/// dropped a value that isn't a source team.
+fn passes_team(i: &Issue, team: Option<&str>) -> bool {
+    team.is_none_or(|id| i.team_id == id)
+}
+
+/// Accessible teams behind the sources of every group, in mirror order.
+fn source_teams<'a>(
+    groups: &[GroupConfig],
+    m: &Mirror<'a>,
+    accessible: &HashSet<&str>,
+) -> Vec<&'a Team> {
+    let mut ids: HashSet<&str> = HashSet::new();
+    for s in groups.iter().flat_map(|g| g.sources.iter()) {
+        match s.source_type {
+            SourceType::Team => ids.extend(team_of_source(s, m).map(|t| t.id.as_str())),
+            SourceType::Project => {
+                ids.extend(project_of_source(s, m, accessible).map(|p| p.team_id.as_str()))
+            }
+            SourceType::Label => {
+                ids.extend(label_of_source(s, m, accessible).map(|l| l.team_id.as_str()))
+            }
+        }
+    }
+    m.teams.iter().filter(|t| accessible.contains(t.id.as_str()) && ids.contains(t.id.as_str())).collect()
 }
 
 /// (due today, overdue) over distinct issue ids, by effective due date.
@@ -1218,6 +1269,51 @@ mod tests {
         fx.issues[0].lane_id = "done".into();
         let g = vec![cfg("g", vec![team_src(1, true)])];
         assert_eq!(counts(&fx, g, Header::default()), (0, 1));
+    }
+
+    #[test]
+    fn team_picker_narrows_rows_and_counts() {
+        let mut fx = Fx::new();
+        let mut a = issue("ia", "a", "la");
+        a.due_date = Some("2026-10-30".into());
+        let mut b = issue("ib", "b", "lb");
+        b.due_date = Some("2026-10-30".into());
+        fx.issues = vec![a, b];
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        let header =
+            Header { filter: Filter::Open, team: Some("b".into()), ..Header::default() };
+        let ev = fx.eval_with(&groups, Some(99), header);
+        let got: Vec<&str> = ev.groups[0].issues.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(got, ["ib"]);
+        assert_eq!(ev.overdue, 1);
+    }
+
+    #[test]
+    fn team_picker_ignores_a_bad_value() {
+        let mut fx = Fx::new();
+        fx.issues = vec![issue("ia", "a", "la"), issue("ib", "b", "lb")];
+        // "b" exists but isn't behind this dashboard; "zzz" doesn't exist.
+        let groups = vec![cfg("g", vec![team_src(1, true)])];
+        for bad in ["b", "zzz"] {
+            let header =
+                Header { filter: Filter::Open, team: Some(bad.into()), ..Header::default() };
+            let ev = fx.eval_with(&groups, Some(99), header);
+            let got: Vec<&str> = ev.groups[0].issues.iter().map(|i| i.id.as_str()).collect();
+            assert_eq!(got, ["ia"], "{bad}");
+        }
+    }
+
+    #[test]
+    fn source_teams_cover_all_source_kinds_in_mirror_order() {
+        let mut fx = Fx::new();
+        fx.labels = vec![label("l1", "b", 50)];
+        let groups = vec![
+            cfg("g1", vec![team_src(3, true), team_src(1, true)]),
+            cfg("g2", vec![label_src(50)]),
+        ];
+        let ev = fx.eval(&groups, Some(99));
+        let ids: Vec<&str> = ev.source_teams.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
     }
 
     fn mine_fx() -> Fx {
