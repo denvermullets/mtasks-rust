@@ -517,4 +517,66 @@ mod tests {
         i.due_date = Some("2026-01-01".into());
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 1, 1));
     }
+
+    /// Issue ids per group with `search` typed into the header.
+    fn run_search(fx: &Fx, groups: &[GroupConfig], search: &str) -> Vec<Vec<String>> {
+        let header = Header { search: search.into(), ..Header::default() };
+        evaluate(&Input {
+            groups,
+            mirror: Mirror {
+                teams: &fx.teams,
+                projects: &fx.projects,
+                labels: &fx.labels,
+                lanes: &fx.lanes,
+                members: &fx.members,
+                issues: &fx.issues,
+                issue_labels: &fx.issue_labels,
+            },
+            current_user_remote_id: Some(99),
+            today: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            header,
+        })
+        .groups
+        .iter()
+        .map(|g| g.issues.iter().map(|i| i.id.clone()).collect())
+        .collect()
+    }
+
+    fn search_fixture() -> (Fx, Vec<GroupConfig>) {
+        let mut fx = Fx::new();
+        let mut a12 = issue("a12", "a", "la");
+        a12.team_number = Some(12);
+        a12.title = "Fix login".into();
+        let mut a3 = issue("a3", "a", "la");
+        a3.team_number = Some(3);
+        a3.title = "Login page".into();
+        let mut b12 = issue("b12", "b", "lb");
+        b12.team_number = Some(12);
+        b12.title = "Other".into();
+        fx.issues = vec![a12, a3, b12];
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        (fx, groups)
+    }
+
+    #[test]
+    fn search_matches_title_across_teams() {
+        let (fx, groups) = search_fixture();
+        assert_eq!(run_search(&fx, &groups, "LOGIN"), vec![ids(&["a12", "a3"])]);
+    }
+
+    #[test]
+    fn search_matches_team_identifier_and_number() {
+        let (fx, groups) = search_fixture();
+        assert_eq!(run_search(&fx, &groups, "a-12"), vec![ids(&["a12"])]);
+        assert_eq!(run_search(&fx, &groups, " B-12 "), vec![ids(&["b12"])]);
+        assert_eq!(run_search(&fx, &groups, "-12"), vec![ids(&["a12", "b12"])]);
+    }
+
+    #[test]
+    fn empty_search_restores_all_rows_and_applies_to_every_group() {
+        let (fx, mut groups) = search_fixture();
+        groups.push(cfg("g2", vec![team_src(1, true)]));
+        assert_eq!(run_search(&fx, &groups, "a-3"), vec![ids(&["a3"]), ids(&["a3"])]);
+        assert_eq!(run_search(&fx, &groups, "  "), vec![ids(&["a12", "a3", "b12"]), ids(&["a12", "a3"])]);
+    }
 }
