@@ -2473,6 +2473,11 @@ impl App {
                         return self.update(msg);
                     }
                 }
+                if matches!(self.view, View::IssueDetail(_)) && !modal_open {
+                    if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
                 }
