@@ -10,7 +10,7 @@ use iced::{Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::dashboards::{GroupDraft, SourceType, GROUP_SWATCHES};
-use crate::db::models::Team;
+use crate::db::models::{Project, ProjectStatus, Team};
 use crate::theme as t;
 
 pub fn name_input_id() -> text_input::Id {
@@ -25,6 +25,7 @@ pub fn pickable_teams(teams: &[Team]) -> Vec<&Team> {
 pub fn modal<'a>(
     draft: &'a GroupDraft,
     teams: &'a [Team],
+    projects: &'a [Project],
     error: Option<&'static str>,
 ) -> Element<'a, Message> {
     let mut content = column![]
@@ -53,7 +54,7 @@ pub fn modal<'a>(
         )
         .push(swatches(&draft.color))
         .push(text("Sources").size(13).color(t::text_secondary()))
-        .push(scrollable(source_picker(draft, teams)).height(Length::Fixed(200.0)))
+        .push(scrollable(source_picker(draft, teams, projects)).height(Length::Fixed(200.0)))
         .push(
             row![]
                 .spacing(8)
@@ -112,10 +113,76 @@ fn swatches<'a>(selected: &str) -> Element<'a, Message> {
     r.into()
 }
 
-/// All source sections. Teams today; projects and labels add their own.
-fn source_picker<'a>(draft: &'a GroupDraft, teams: &'a [Team]) -> Element<'a, Message> {
+/// All source sections. Teams and projects today; labels add their own.
+fn source_picker<'a>(
+    draft: &'a GroupDraft,
+    teams: &'a [Team],
+    projects: &'a [Project],
+) -> Element<'a, Message> {
     let mut col: Column<'a, Message> = column![].spacing(6);
     col = col.push(team_sources(draft, teams));
+    col = col.push(project_sources(draft, teams, projects));
+    col.into()
+}
+
+/// Projects the picker offers under one team: synced (remote id) and not
+/// completed, plus any completed project the draft already uses so it can be
+/// unchecked. A null status counts as open.
+pub fn pickable_projects<'a>(
+    projects: &'a [Project],
+    team_id: &str,
+    draft: &GroupDraft,
+) -> Vec<&'a Project> {
+    projects
+        .iter()
+        .filter(|p| p.team_id == team_id)
+        .filter(|p| {
+            let Some(rid) = p.remote_id else { return false };
+            p.status != Some(ProjectStatus::Completed)
+                || draft.is_selected(SourceType::Project, rid)
+        })
+        .collect()
+}
+
+fn project_sources<'a>(
+    draft: &'a GroupDraft,
+    teams: &'a [Team],
+    projects: &'a [Project],
+) -> Element<'a, Message> {
+    let mut col: Column<'a, Message> = column![].spacing(4);
+    let mut any = false;
+    for team in pickable_teams(teams) {
+        let offered = pickable_projects(projects, &team.id, draft);
+        if offered.is_empty() {
+            continue;
+        }
+        if !any {
+            col = col.push(text("Projects").size(12).color(t::text_muted()));
+            any = true;
+        }
+        col = col.push(text(team.name.as_str()).size(12).color(t::text_secondary()));
+        for project in offered {
+            let remote_id = project.remote_id.expect("filtered to projects with a remote id");
+            let selected = draft.is_selected(SourceType::Project, remote_id);
+            let mut line = row![].spacing(12).push(
+                checkbox(project.name.as_str(), selected)
+                    .on_toggle(move |_| Message::GroupToggleSource(SourceType::Project, remote_id))
+                    .size(16)
+                    .text_size(13),
+            );
+            if selected {
+                line = line.push(
+                    checkbox("All issues", draft.include_all(SourceType::Project, remote_id))
+                        .on_toggle(move |on| {
+                            Message::GroupSetIncludeAll(SourceType::Project, remote_id, on)
+                        })
+                        .size(14)
+                        .text_size(12),
+                );
+            }
+            col = col.push(line);
+        }
+    }
     col.into()
 }
 
@@ -165,6 +232,46 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    fn project(id: &str, team: &str, remote: Option<i64>, st: Option<ProjectStatus>) -> Project {
+        Project {
+            id: id.into(),
+            remote_id: remote,
+            team_id: team.into(),
+            name: id.into(),
+            description: None,
+            status: st,
+            priority: 0,
+            lead_id: None,
+            start_date: None,
+            due_date: None,
+            roadmap_commitment: None,
+            velocity_score: 0,
+            completed_issues_count: 0,
+            total_issues_count: 0,
+            progress_percentage: 0,
+            behind_schedule: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn projects_are_synced_open_and_a_used_completed_one_stays() {
+        let ps = [
+            project("open", "t", Some(1), Some(ProjectStatus::Started)),
+            project("nostatus", "t", Some(2), None),
+            project("unsynced", "t", None, Some(ProjectStatus::Started)),
+            project("done", "t", Some(3), Some(ProjectStatus::Completed)),
+            project("done_used", "t", Some(4), Some(ProjectStatus::Completed)),
+            project("other_team", "u", Some(5), None),
+        ];
+        let mut draft = GroupDraft::default();
+        draft.toggle_source(SourceType::Project, 4);
+        let names: Vec<_> =
+            pickable_projects(&ps, "t", &draft).iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["open", "nostatus", "done_used"]);
     }
 
     #[test]
