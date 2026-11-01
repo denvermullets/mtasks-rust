@@ -1,7 +1,7 @@
 //! Reusable file-card list for an owner's attachments (issue, project or
 //! comment). Callers load the rows with `db::attachments::list_for_owner`.
 
-use iced::widget::{column, container, row, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
@@ -39,17 +39,25 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
     // Pending marker: the file is safe in the outbox but not on the server yet.
     let pending = (a.upload_state == UploadState::Pending)
         .then(|| text("Pending upload").size(11).color(t::accent()));
-    container(
-        column![]
-            .spacing(2)
-            .push(text(&a.filename).size(13).color(t::text_primary()))
-            .push(
-                row![]
-                    .spacing(8)
-                    .push(text(meta).size(11).color(t::text_muted()))
-                    .push_maybe(pending),
-            ),
-    )
+    let info = column![]
+        .spacing(2)
+        .width(Length::Fill)
+        .push(text(&a.filename).size(13).color(t::text_primary()))
+        .push(
+            row![]
+                .spacing(8)
+                .push(text(meta).size(11).color(t::text_muted()))
+                .push_maybe(pending),
+        );
+    // Only files the server has can be deleted this way; pending/failed ones
+    // are cancelled or removed by the upload tickets.
+    let delete = (a.upload_state == UploadState::Synced).then(|| {
+        button(text("Delete").size(11).color(t::text_muted()))
+            .on_press(Message::ConfirmDeleteAttachment(a.id.clone()))
+            .padding(0)
+            .style(button::text)
+    });
+    let body = container(row![info].spacing(8).push_maybe(delete))
     .padding(10)
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
@@ -60,8 +68,14 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
             radius: 6.0.into(),
         },
         ..Default::default()
-    })
-    .into()
+    });
+    // Clicking the card opens the file in its default app.
+    button(body)
+        .padding(0)
+        .width(Length::Fill)
+        .on_press(Message::OpenAttachment(a.clone()))
+        .style(|_theme: &Theme, _status| button::Style::default())
+        .into()
 }
 
 /// Byte count as "999 B", "1.5 KB", "1.2 MB", "3.0 GB" (1024-based, one decimal).

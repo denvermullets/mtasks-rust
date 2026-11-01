@@ -10,6 +10,7 @@
 #[allow(dead_code)]
 pub mod cache;
 pub mod intake;
+pub mod open;
 pub mod outbox;
 pub mod validate;
 

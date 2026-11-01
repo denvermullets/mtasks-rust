@@ -334,6 +334,10 @@ pub struct ProjectDto {
     pub labels: Option<Vec<LabelRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issues_count: Option<i64>,
+    /// Files attached to the project (detail payload only). `None` when the
+    /// payload has no `files` key (the index never carries it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<AttachmentDto>>,
 }
 
 impl ProjectDto {
@@ -378,6 +382,7 @@ impl ProjectDto {
             updated_at: project.updated_at.clone(),
             labels: Some(labels),
             issues_count: None,
+            files: None,
         })
     }
 

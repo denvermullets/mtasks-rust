@@ -408,6 +408,7 @@ async fn process(
         ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
         ("upload", "create") => upload_create(client, &entry.entity_id).await,
         ("attachment", "create") => attachment_create(client, &entry.entity_id).await,
+        ("attachment", "delete") => attachment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
@@ -2231,6 +2232,67 @@ fn comment_delete_outcome(result: Result<(), ApiError>, team_remote_id: i64) -> 
     }
 }
 
+/// What an `attachment/delete` entry needs, parsed from its payload (the local
+/// row is gone by drain time). See `db::attachments::remove_synced_issue_attachment`.
+#[derive(Debug, PartialEq)]
+struct AttachmentDeletePrep {
+    team_remote_id: i64,
+    owner: attachments_api::AttachmentOwner,
+    remote_id: i64,
+}
+
+fn prep_attachment_delete(payload: Option<&str>) -> Prep<AttachmentDeletePrep> {
+    let Some(raw) = payload else {
+        return Prep::Done(Outcome::DropAndLog("attachment delete: no payload".into()));
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Prep::Done(Outcome::DropAndLog(format!("attachment delete: bad payload: {e}")))
+        }
+    };
+    let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
+    let owner = match (parsed.get("owner_kind").and_then(|v| v.as_str()), field("owner_remote_id")) {
+        (Some("issue"), Some(issue_id)) => attachments_api::AttachmentOwner::Issue { issue_id },
+        _ => {
+            return Prep::Done(Outcome::DropAndLog(
+                "attachment delete: unsupported or incomplete owner".into(),
+            ))
+        }
+    };
+    match (field("team_remote_id"), field("remote_id")) {
+        (Some(team_remote_id), Some(remote_id)) => {
+            Prep::Ready(AttachmentDeletePrep { team_remote_id, owner, remote_id })
+        }
+        _ => Prep::Done(Outcome::DropAndLog("attachment delete: incomplete payload".into())),
+    }
+}
+
+/// Same rules as `comment/delete` (204/404 = gone, 403 dropped with a toast),
+/// and a 403 also puts the row back from the payload's `restore` snapshot so
+/// the attachment reappears without waiting for the owner to change upstream.
+async fn attachment_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let prep = match prep_attachment_delete(payload) {
+        Prep::Ready(p) => p,
+        Prep::Done(o) => return o,
+    };
+    let result = attachments_api::delete(client, prep.team_remote_id, prep.owner, prep.remote_id).await;
+    let forbidden = matches!(&result, Err(ApiError::Forbidden(m)) if !is_token_scope_message(m));
+    if forbidden {
+        restore_deleted_attachment(payload, prep.remote_id);
+    }
+    comment_delete_outcome(result, prep.team_remote_id)
+}
+
+fn restore_deleted_attachment(payload: Option<&str>, remote_id: i64) {
+    let snap = payload
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| v.get("restore").cloned());
+    if let (Some(snap), Ok(conn)) = (snap, open()) {
+        let _ = crate::db::attachments::restore_from_snapshot(&conn, &snap, remote_id);
+    }
+}
+
 /// `PATCH /notifications/:id/read`. Idempotent, so a retry is safe.
 async fn notification_read(client: &ApiClient, entity_id: &str) -> Outcome {
     let Ok(remote_id) = entity_id.parse::<i64>() else {
@@ -3686,9 +3748,10 @@ async fn pull_projects_step(
             .map_err(|e| format!("db (pull cursor): {e}"))?
             .and_then(|c| cursor::since_with_overlap(&c))
     };
-    let page = projects::list_page(client, team_remote_id, since.as_deref())
+    let mut page = projects::list_page(client, team_remote_id, since.as_deref())
         .await
         .map_err(|e| format!("projects: {e}"))?;
+    attach_project_details(client, team_remote_id, &mut page.rows).await?;
     sync_log(
         &phase_scope("pull_projects", Some(team_remote_id)),
         "ok",
@@ -3697,6 +3760,24 @@ async fn pull_projects_step(
 
     let conn = open()?;
     apply_pulled_projects(&conn, local_team_id, page.rows, page.server_time.as_deref())
+}
+
+/// The project index omits `files`; only the detail payload carries them. An
+/// error fails the step before the cursor moves, so the rows are retried.
+async fn attach_project_details(
+    client: &ApiClient,
+    team_remote_id: i64,
+    rows: &mut [ProjectDto],
+) -> Result<(), String> {
+    for dto in rows.iter_mut() {
+        match projects::get(client, team_remote_id, dto.id).await {
+            Ok(detail) => dto.files = Some(detail.files.unwrap_or_default()),
+            // Deleted since the listing: nothing to store.
+            Err(ApiError::NotFound(_)) => {}
+            Err(e) => return Err(format!("project {} detail: {e}", dto.id)),
+        }
+    }
+    Ok(())
 }
 
 /// Write pulled project rows (idempotent, so overlap re-delivery is safe),
@@ -3723,11 +3804,22 @@ fn apply_pulled_projects(
         }
 
         let existing_uuid = existing.as_ref().map(|p| p.id.clone());
+        // `None` (index row, no detail) leaves stored attachments alone.
+        let pulled_files = dto.files.clone();
         let project: Project = dto
             .into_model(conn, local_team_id.to_string(), existing_uuid)
             .map_err(|e| format!("convert project: {e}"))?;
         queries::upsert_project(conn, &project)
             .map_err(|e| format!("db (upsert project): {e}"))?;
+        if let Some(files) = pulled_files {
+            crate::db::attachments::replace_synced(
+                conn,
+                crate::db::attachments::OwnerKind::Project,
+                &project.id,
+                &files,
+            )
+            .map_err(|e| format!("db (project attachments): {e}"))?;
+        }
     }
     // project_labels join not populated in this ticket; documented as TODO.
     if let Some(t) = server_time {
@@ -4623,6 +4715,30 @@ mod tests {
                 prep_comment_delete(bad),
                 Prep::Done(Outcome::DropAndLog(_))
             ));
+        }
+    }
+
+    #[test]
+    fn attachment_delete_payload_parses_for_an_issue_owner() {
+        let p = r#"{"owner_kind":"issue","team_remote_id":3,"owner_remote_id":9,"remote_id":12,"restore":{}}"#;
+        match prep_attachment_delete(Some(p)) {
+            Prep::Ready(r) => assert_eq!(
+                r,
+                AttachmentDeletePrep {
+                    team_remote_id: 3,
+                    owner: attachments_api::AttachmentOwner::Issue { issue_id: 9 },
+                    remote_id: 12
+                }
+            ),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn attachment_delete_bad_payloads_are_dropped() {
+        let bad = r#"{"owner_kind":"x","owner_remote_id":1,"team_remote_id":1,"remote_id":1}"#;
+        for p in [None, Some("nope"), Some(r#"{"owner_kind":"issue"}"#), Some(bad)] {
+            assert!(matches!(prep_attachment_delete(p), Prep::Done(Outcome::DropAndLog(_))));
         }
     }
 
@@ -6373,6 +6489,49 @@ mod tests {
         // `files` missing from a detail payload means no files.
         let third = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
         assert_eq!(apply_pulled_issues(&conn, "t1", vec![third]), 0);
+        assert_eq!(names(&conn), ["pend"]);
+    }
+
+    #[test]
+    fn pulled_project_replaces_attachments_and_keeps_pending() {
+        use crate::db::attachments::{list_for_owner, OwnerKind};
+        let conn = setup_dependency_db();
+        let names = |conn: &Connection| -> Vec<String> {
+            let p = queries::find_project_by_remote_id(conn, 9).unwrap().unwrap();
+            list_for_owner(conn, OwnerKind::Project, &p.id)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.filename)
+                .collect()
+        };
+        let with = |files: serde_json::Value, ts: &str| {
+            let mut d = project_dto(9, "P", ts);
+            d.files = Some(serde_json::from_value(files).unwrap());
+            d
+        };
+        let first = with(serde_json::json!([file_json(2, "b"), file_json(1, "a")]), "2026-01-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![first], None).unwrap();
+        assert_eq!(names(&conn), ["a", "b"]);
+
+        let p = queries::find_project_by_remote_id(&conn, 9).unwrap().unwrap();
+        conn.execute(
+            "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state)
+             VALUES ('pp1', 'project', ?1, 'pend', '2026-02-01T00:00:00.000Z', 'pending')",
+            rusqlite::params![p.id],
+        )
+        .unwrap();
+        let second = with(serde_json::json!([file_json(1, "a"), file_json(3, "c")]), "2026-02-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![second], None).unwrap();
+        assert_eq!(names(&conn), ["a", "c", "pend"]);
+
+        // An index row (no `files`) leaves attachments alone.
+        let index_row = project_dto(9, "P", "2026-03-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![index_row], None).unwrap();
+        assert_eq!(names(&conn), ["a", "c", "pend"]);
+
+        // A detail payload with an empty list clears synced rows only.
+        let empty = with(serde_json::json!([]), "2026-04-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![empty], None).unwrap();
         assert_eq!(names(&conn), ["pend"]);
     }
 

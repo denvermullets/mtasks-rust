@@ -117,13 +117,6 @@ fn from_row(r: &Row) -> Result<Attachment> {
     })
 }
 
-/// One attachment by local id.
-pub fn get(conn: &Connection, id: &str) -> Result<Option<Attachment>> {
-    let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM attachments WHERE id = ?1"))?;
-    let mut rows = stmt.query_map(params![id], from_row)?;
-    rows.next().transpose()
-}
-
 /// Everything needed to record a file the user added.
 #[derive(Debug, Clone)]
 pub struct NewPending {
@@ -227,6 +220,22 @@ pub fn list_for_owner(conn: &Connection, kind: OwnerKind, owner_id: &str) -> Res
     rows.collect()
 }
 
+/// Files for each of the given comments, keyed by the comment's LOCAL id.
+/// Comments without files get no entry.
+pub fn list_for_comments(
+    conn: &Connection,
+    comment_ids: &[&str],
+) -> Result<HashMap<String, Vec<Attachment>>> {
+    let mut map = HashMap::new();
+    for id in comment_ids {
+        let files = list_for_owner(conn, OwnerKind::Comment, id)?;
+        if !files.is_empty() {
+            map.insert((*id).to_string(), files);
+        }
+    }
+    Ok(map)
+}
+
 /// Make the owner's `synced` rows match the server's list. Unchanged files
 /// keep their local id and are refreshed in place, new ones are inserted,
 /// missing ones are deleted. Pending and failed rows are left alone.
@@ -299,6 +308,85 @@ pub fn replace_synced(
             Err(e)
         }
     }
+}
+
+/// One attachment by local id.
+pub fn get(conn: &Connection, id: &str) -> Result<Option<Attachment>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        &format!("SELECT {COLUMNS} FROM attachments WHERE id = ?1"),
+        params![id],
+        from_row,
+    )
+    .optional()
+}
+
+/// Remove a synced issue attachment locally and return the `attachment/delete`
+/// queue payload, captured before the row goes:
+/// `{owner_kind, team_remote_id, owner_remote_id, remote_id, restore}` where
+/// `restore` is the row snapshot used to put it back if the server answers 403.
+/// `None` (nothing removed) for a missing row, a pending/failed one (JRST-202
+/// cancels those), a non-issue owner (JRST-216) or an owner the server has not
+/// seen.
+pub fn remove_synced_issue_attachment(conn: &Connection, id: &str) -> Result<Option<String>> {
+    use crate::db::queries;
+    let Some(a) = get(conn, id)? else { return Ok(None) };
+    let (Some(remote_id), UploadState::Synced) = (a.remote_id, a.upload_state) else {
+        return Ok(None);
+    };
+    if a.owner_kind != OwnerKind::Issue.as_str() {
+        return Ok(None);
+    }
+    let Some(issue) = queries::get_issue(conn, &a.owner_id)? else { return Ok(None) };
+    let Some(owner_remote_id) = issue.remote_id else { return Ok(None) };
+    let Some(team_remote_id) = queries::remote_id_for(conn, "teams", &issue.team_id)? else {
+        return Ok(None);
+    };
+    conn.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
+    Ok(Some(
+        serde_json::json!({
+            "owner_kind": "issue",
+            "team_remote_id": team_remote_id,
+            "owner_remote_id": owner_remote_id,
+            "remote_id": remote_id,
+            "restore": {
+                "id": a.id, "owner_kind": a.owner_kind, "owner_id": a.owner_id,
+                "blob_id": a.blob_id, "filename": a.filename, "content_type": a.content_type,
+                "byte_size": a.byte_size, "checksum": a.checksum, "created_at": a.created_at,
+            },
+        })
+        .to_string(),
+    ))
+}
+
+/// Put back a row captured in a delete payload's `restore` (after a 403).
+/// A no-op when the row (by remote id) is already there again.
+pub fn restore_from_snapshot(conn: &Connection, snap: &serde_json::Value, remote_id: i64) -> Result<()> {
+    let s = |k: &str| snap.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let (Some(id), Some(kind), Some(owner_id), Some(filename), Some(created_at)) =
+        (s("id"), s("owner_kind"), s("owner_id"), s("filename"), s("created_at"))
+    else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT INTO attachments (id, remote_id, owner_kind, owner_id, blob_id,
+             filename, content_type, byte_size, checksum, created_at, upload_state)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'synced'
+         WHERE NOT EXISTS (SELECT 1 FROM attachments WHERE remote_id = ?2)",
+        params![
+            id,
+            remote_id,
+            kind,
+            owner_id,
+            snap.get("blob_id").and_then(|v| v.as_i64()),
+            filename,
+            s("content_type").unwrap_or_default(),
+            snap.get("byte_size").and_then(|v| v.as_i64()).unwrap_or(0),
+            s("checksum"),
+            created_at,
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -459,5 +547,81 @@ mod tests {
         let a = add_pending(&c, &new_pending("spec.pdf")).unwrap();
         mark_attached(&c, &a.id, &dto(9, "spec.pdf")).unwrap();
         assert_eq!(list_for_owner(&c, OwnerKind::Issue, "i1").unwrap().len(), 1);
+    }
+
+    fn seed_issue(c: &Connection, remote: Option<i64>) {
+        let now = "2026-01-01T00:00:00.000Z";
+        c.execute(
+            "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at) VALUES ('t1','T','T',5,?1,?1)",
+            params![now],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l1','B',0,'t1',?1,?1)",
+            params![now],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, remote_id, created_at, updated_at)
+             VALUES ('i1','i',4,'l1','t1',?2,?1,?1)",
+            params![now, remote],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn removing_a_synced_issue_attachment_yields_a_restorable_payload() {
+        let c = conn();
+        seed_issue(&c, Some(40));
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(7, "a.png")]).unwrap();
+        let local = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap()[0].id.clone();
+
+        let payload = remove_synced_issue_attachment(&c, &local).unwrap().expect("payload");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["owner_kind"], "issue");
+        assert_eq!(v["team_remote_id"], 5);
+        assert_eq!(v["owner_remote_id"], 40);
+        assert_eq!(v["remote_id"], 7);
+        assert!(names(&c).is_empty());
+
+        restore_from_snapshot(&c, &v["restore"], 7).unwrap();
+        restore_from_snapshot(&c, &v["restore"], 7).unwrap(); // idempotent
+        assert_eq!(names(&c), ["a.png"]);
+        assert_eq!(list_for_owner(&c, OwnerKind::Issue, "i1").unwrap()[0].id, local);
+    }
+
+    #[test]
+    fn pending_failed_and_unknown_attachments_are_not_removed_this_way() {
+        let c = conn();
+        seed_issue(&c, Some(40));
+        local_row(&c, "p", "pending");
+        local_row(&c, "f", "failed");
+        assert!(remove_synced_issue_attachment(&c, "p").unwrap().is_none());
+        assert!(remove_synced_issue_attachment(&c, "f").unwrap().is_none());
+        assert!(remove_synced_issue_attachment(&c, "nope").unwrap().is_none());
+        assert_eq!(names(&c).len(), 2);
+    }
+
+    #[test]
+    fn an_issue_the_server_has_not_seen_keeps_the_attachment() {
+        let c = conn();
+        seed_issue(&c, None);
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(7, "a.png")]).unwrap();
+        let local = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap()[0].id.clone();
+        assert!(remove_synced_issue_attachment(&c, &local).unwrap().is_none());
+        assert_eq!(names(&c).len(), 1);
+    }
+
+    #[test]
+    fn list_for_comments_keys_by_comment_and_skips_empty() {
+        let c = conn();
+        replace_synced(&c, OwnerKind::Comment, "c1", &[dto(1, "a")]).unwrap();
+        replace_synced(&c, OwnerKind::Comment, "c2", &[dto(2, "b"), dto(3, "c")]).unwrap();
+        replace_synced(&c, OwnerKind::Issue, "c3", &[dto(4, "issue-file")]).unwrap();
+        let map = list_for_comments(&c, &["c1", "c2", "c3"]).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["c1"].len(), 1);
+        assert_eq!(map["c2"].iter().map(|a| a.filename.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+        assert!(!map.contains_key("c3"), "issue files are not comment files");
     }
 }

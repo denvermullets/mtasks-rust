@@ -138,6 +138,9 @@ pub enum Message {
     /// "Delete" pressed on one of the user's own unsynced comments (local id).
     ConfirmDeleteComment(String),
     DeleteCommentConfirmed,
+    /// "Delete" pressed on a synced attachment card (local attachment id).
+    ConfirmDeleteAttachment(String),
+    DeleteAttachmentConfirmed,
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -149,6 +152,10 @@ pub enum Message {
     /// Activity fetch for an issue's detail finished (JRST-149); `true` when entries were stored.
     /// Issue id and how many Activity entries the fetch stored.
     ActivityFetched(String, usize),
+    /// A file card was clicked: open the Attachment in its default app (JRST-186).
+    OpenAttachment(crate::db::attachments::Attachment),
+    /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
+    AttachmentDownloaded(crate::db::attachments::Attachment, Result<Vec<u8>, String>),
     ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
@@ -411,6 +418,8 @@ pub enum Modal {
     DeleteProjectConfirm(String),
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
+    /// Confirm deleting a synced attachment (local attachment id).
+    DeleteAttachmentConfirm(String),
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
@@ -642,6 +651,11 @@ pub struct App {
     /// Files attached to the open issue (synced, then pending/failed). Repopulated
     /// each reload only while `view` is `IssueDetail`.
     detail_attachments: Vec<crate::db::attachments::Attachment>,
+    /// Files attached to each comment of the open issue/project, keyed by the
+    /// comment's local id (comments without files have no entry). Repopulated
+    /// each reload while `view` is `IssueDetail` or `ProjectDetail`.
+    detail_comment_attachments:
+        std::collections::HashMap<String, Vec<crate::db::attachments::Attachment>>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
     /// Title of the recurring issue that spawned the open issue detail, if any.
@@ -913,21 +927,36 @@ impl App {
                 issue_id,
             )
             .unwrap_or_default();
+            self.load_comment_attachments(conn);
         } else if let View::ProjectDetail(ref project_id) = self.view {
-            self.detail_attachments.clear();
+            self.detail_attachments = crate::db::attachments::list_for_owner(
+                conn,
+                crate::db::attachments::OwnerKind::Project,
+                project_id,
+            )
+            .unwrap_or_default();
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments =
                 queries::comments_for_project(conn, project_id).unwrap_or_default();
             self.detail_activity.clear();
+            self.load_comment_attachments(conn);
             return;
         } else {
+            self.detail_comment_attachments.clear();
             self.detail_attachments.clear();
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments.clear();
             self.detail_activity.clear();
         }
+    }
+
+    /// Refill `detail_comment_attachments` for the comments in `detail_comments`.
+    fn load_comment_attachments(&mut self, conn: &rusqlite::Connection) {
+        let ids: Vec<&str> = self.detail_comments.iter().map(|c| c.id.as_str()).collect();
+        self.detail_comment_attachments =
+            crate::db::attachments::list_for_comments(conn, &ids).unwrap_or_default();
     }
 
     /// Local "Referenced In": scan the open issue's team (descriptions in
@@ -1611,6 +1640,58 @@ impl App {
         }
     }
 
+    /// Open an Attachment in its default app: straight from the file cache on a
+    /// hit, otherwise download it (authenticated, redirect followed) first.
+    fn open_attachment(&mut self, att: crate::db::attachments::Attachment) -> Task<Message> {
+        let (Some(key), Some(remote_id)) = (crate::files::open::blob_key(&att), att.remote_id)
+        else {
+            self.push_toast(
+                format!("{} hasn't finished uploading yet", att.filename),
+                ToastKind::Error,
+                false,
+            );
+            return Task::none();
+        };
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.open_cached_attachment(&att, &key, &path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.push_toast("Sign in to download files", ToastKind::Error, false);
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                crate::api::attachments::download(&client, remote_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |r| Message::AttachmentDownloaded(att.clone(), r),
+        )
+    }
+
+    /// Copy a cached blob to its real filename and hand it to the OS.
+    fn open_cached_attachment(
+        &mut self,
+        att: &crate::db::attachments::Attachment,
+        key: &str,
+        cached: &std::path::Path,
+    ) {
+        let root = crate::files::default_root();
+        let opened = crate::files::open::materialize(&root, key, &att.filename, cached)
+            .and_then(|p| crate::files::open::open_in_default_app(&p));
+        if let Err(e) = opened {
+            self.push_toast(
+                format!("Couldn't open {}: {e}", att.filename),
+                ToastKind::Error,
+                false,
+            );
+        }
+    }
+
     /// Build the async task that fetches an issue's Activity into the local
     /// cache. `Task::none()` when no client can be built; the fetch itself skips
     /// issues that are not synced yet.
@@ -2095,6 +2176,7 @@ impl App {
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
+            detail_comment_attachments: Default::default(),
             detail_references: Vec::new(),
             detail_origin: None,
             issue_picker: None,
@@ -3087,6 +3169,27 @@ impl App {
                     self.reload_data();
                 }
             }
+            Message::OpenAttachment(att) => return self.open_attachment(att),
+            Message::AttachmentDownloaded(att, result) => match result {
+                Ok(bytes) => {
+                    let conn = self.db();
+                    let cache = crate::files::cache::FileCache::at_default_root();
+                    let key = crate::files::open::blob_key(&att).unwrap_or_default();
+                    match cache.put(&conn, &key, &bytes) {
+                        Ok(path) => self.open_cached_attachment(&att, &key, &path),
+                        Err(e) => self.push_toast(
+                            format!("Couldn't cache {}: {e}", att.filename),
+                            ToastKind::Error,
+                            false,
+                        ),
+                    }
+                }
+                Err(e) => self.push_toast(
+                    format!("Couldn't download {}: {e}", att.filename),
+                    ToastKind::Error,
+                    false,
+                ),
+            },
             Message::ActivityFetched(issue_id, stored) => {
                 // Only refresh when entries landed and that issue is still open.
                 if stored > 0
@@ -4293,6 +4396,31 @@ impl App {
                 self.reload_data();
             }
 
+            Message::ConfirmDeleteAttachment(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete an attachment",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteAttachmentConfirm(id);
+                }
+            }
+
+            Message::DeleteAttachmentConfirmed => {
+                if let Modal::DeleteAttachmentConfirm(ref id) = self.modal {
+                    let conn = self.db();
+                    if let Ok(Some(payload)) =
+                        crate::db::attachments::remove_synced_issue_attachment(&conn, id)
+                    {
+                        self.enqueue_sync("attachment", id, "delete", Some(payload.as_str()));
+                    }
+                }
+                self.modal = Modal::None;
+                self.reload_data();
+            }
+
             Message::DeleteProjectConfirmed => {
                 if let Modal::DeleteProjectConfirm(ref project_id) = self.modal {
                     let conn = self.db();
@@ -4776,6 +4904,8 @@ impl App {
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,
+                            &self.detail_attachments,
+                            &self.detail_comment_attachments,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -4820,6 +4950,7 @@ impl App {
                             &self.detail_activity,
                             &self.detail_references,
                             &self.detail_attachments,
+                            &self.detail_comment_attachments,
                             &self.issues,
                             parent,
                             sub_issues,
@@ -5032,6 +5163,19 @@ impl App {
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
+            }
+            Modal::DeleteAttachmentConfirm(id) => {
+                let name = crate::db::attachments::get(&self.db(), id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.filename)
+                    .unwrap_or_default();
+                let body = format!("Delete the attachment \"{name}\"? This can't be undone.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Attachment?", body, Message::DeleteAttachmentConfirmed)
+                ]
+                .into()
             }
             Modal::IssuePicker => match (&self.issue_picker, &self.issue_detail) {
                 (Some(picker), Some(detail)) => {

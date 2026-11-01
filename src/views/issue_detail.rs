@@ -107,6 +107,7 @@ pub fn view<'a>(
     activity: &'a [ActivityItem],
     references: &'a [Reference],
     attachments: &'a [Attachment],
+    comment_attachments: &'a CommentAttachments,
     issues: &'a [Issue],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
@@ -201,6 +202,7 @@ pub fn view<'a>(
                 reply_to: detail.reply_to.as_deref(),
                 reply_composer: &detail.reply_composer,
                 suggest: detail.suggest.as_ref(),
+                comment_attachments,
             },
         ));
 
@@ -884,7 +886,12 @@ pub struct ThreadCtx<'a, 'b> {
     pub reply_to: Option<&'a str>,
     pub reply_composer: &'a text_editor::Content,
     pub suggest: Option<&'a SuggestState>,
+    /// Files per comment, keyed by the comment's local id.
+    pub comment_attachments: &'a CommentAttachments,
 }
+
+/// Comment local id -> its files (absent when it has none).
+pub type CommentAttachments = std::collections::HashMap<String, Vec<Attachment>>;
 
 /// Append a threaded run of comments (indented replies, inline reply composer
 /// under the comment being replied to).
@@ -1052,6 +1059,11 @@ fn comment_row<'a>(
         issues,
         members,
     ));
+    col = col.push_maybe(
+        ctx.comment_attachments
+            .get(&comment.id)
+            .and_then(|files| crate::views::attachments::section(files)),
+    );
     // Delete is offered on the user's own comments, synced or not.
     let can_delete = comment
         .author_id
