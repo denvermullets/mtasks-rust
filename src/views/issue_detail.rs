@@ -1,5 +1,5 @@
 use iced::widget::{
-    button, column, container, pick_list, rich_text, row, scrollable, span, text, text_editor,
+    button, column, container, pick_list, row, scrollable, text, text_editor,
     text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Theme};
@@ -10,7 +10,7 @@ use crate::files::images::ImageStore;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
-use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
+use crate::mentions::{EditorTarget, Reference, SuggestState};
 use crate::theme as t;
 use crate::views::body::BodyCtx;
 use crate::views::issue_form::LaneOption;
@@ -27,6 +27,8 @@ pub struct IssueDetailState {
     pub issue_id: String,
     pub title: String,
     pub description: text_editor::Content,
+    /// True while the description editor is open; otherwise it is drawn rendered.
+    pub editing_description: bool,
     /// "YYYY-MM-DD" or "".
     pub due_date: String,
     /// Numeric text (e.g. "3", "2.5") or "".
@@ -72,6 +74,7 @@ impl IssueDetailState {
             issue_id: issue.id.clone(),
             title: issue.title.clone(),
             description: text_editor::Content::with_text(&body),
+            editing_description: false,
             due_date: issue.due_date.clone().unwrap_or_default(),
             estimate: issue
                 .estimate
@@ -179,26 +182,9 @@ pub fn view<'a>(
                 .as_deref()
                 .map(|e| text(e).size(12).color(t::danger())),
         )
-        .push(
-            text_editor(&detail.description)
-                .placeholder("Add description…  (@ to mention, # to link an issue)")
-                .on_action(Message::IssueDetailDescriptionChanged)
-                .key_binding(paste_image_binding(
-                    editor_binding(
-                        None,
-                        suggesting(detail.suggest.as_ref(), EditorTarget::Description),
-                    ),
-                    Message::PasteImageIntoDescription,
-                ))
-                .padding(10)
-                .size(14)
-                .height(Length::Fixed(220.0)),
-        )
-        .push_maybe(suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
-        .push_maybe(description_preview(
-            &detail.description_text(),
+        .push(description_section(
+            detail,
             &BodyCtx {
-                team,
                 teams,
                 issues,
                 members,
@@ -231,7 +217,6 @@ pub fn view<'a>(
             detail,
             &ThreadCtx {
                 members,
-                team,
                 teams,
                 issues,
                 my_member_ids,
@@ -627,7 +612,7 @@ fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element
 /// issue, plus a trailing `×` that removes the relationship. The identifier is
 /// tinted with the section's dependency color.
 fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Element<'a, Message> {
-    row![]
+    let line = row![]
         .spacing(6)
         .align_y(Alignment::Center)
         .push(
@@ -647,8 +632,9 @@ fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Elemen
                 .on_press(Message::RemoveDependency(link.dep_id.clone()))
                 .padding(0)
                 .style(button::text),
-        )
-        .into()
+        );
+    // The wrapper never captures events, so the × still removes the edge.
+    issue_row_anchor(line, &link.issue_id)
 }
 
 /// Editor key bindings: Cmd/Ctrl+Enter submits (when `on_submit` is given).
@@ -800,65 +786,212 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         .into()
 }
 
-/// Body text with `@mentions` and `IDENT-n` references highlighted. Own-team
-/// references that resolve to a local issue are clickable. Spans own their
-/// text so this also works for live editor content.
-pub(crate) fn rich_body<'a>(
-    body: &str,
-    size: f32,
-    plain: iced::Color,
-    team: Option<&Team>,
-    teams: &[Team],
-    issues: &[Issue],
-    members: &[Member],
-) -> Element<'a, Message> {
-    let ident = team.map(|t| t.identifier.as_str()).unwrap_or("");
-    let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
-    let spans: Vec<text::Span<'a, String, iced::Font>> = mentions::segments(body, ident, &names)
-        .into_iter()
-        .map(|seg| match seg {
-            Segment::Text(s) => span(s.to_string()).color(plain),
-            Segment::Mention(s) => span(s.to_string()).color(t::highlight()),
-            Segment::Issue { text, .. } => {
-                // Resolves own-team and cross-team identifiers alike.
-                let target = mentions::parse_ident(text)
-                    .and_then(|(p, n)| mentions::resolve_issue(issues, teams, p, n));
-                match target {
-                    Some(i) => span(text.to_string())
-                        .color(t::accent())
-                        .underline(true)
-                        .link(i.id.clone()),
-                    None => span(text.to_string()).color(t::accent()),
-                }
-            }
-        })
-        .collect();
-    let el: Element<'a, String> = rich_text(spans).size(size).into();
-    el.map(Message::OpenIssueDetail)
+/// How an editable markdown description is drawn (issue and project detail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DescriptionDisplay {
+    Editor,
+    Rendered,
+    /// Empty and not being edited: an "Add description…" prompt.
+    Empty,
 }
 
-/// Rendered (highlighted, clickable) view of the description, shown only when
-/// it contains at least one token; the editor itself is plain text.
-pub(crate) fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
-    let ident = ctx.team.map(|t| t.identifier.as_str()).unwrap_or("");
-    let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
-    let has_token = mentions::segments(body, ident, &names)
-        .iter()
-        .any(|s| !matches!(s, Segment::Text(_)))
-        || crate::views::body::has_images(body, ctx.host);
-    if !has_token {
-        return None;
+/// Editing wins; otherwise a blank buffer shows the prompt and anything else
+/// is rendered. Decided from the buffered text so unsaved edits show.
+pub(crate) fn description_display(buffered: &str, editing: bool) -> DescriptionDisplay {
+    if editing {
+        DescriptionDisplay::Editor
+    } else if buffered.trim().is_empty() {
+        DescriptionDisplay::Empty
+    } else {
+        DescriptionDisplay::Rendered
     }
-    Some(
-        container(
-            column![]
-                .spacing(4)
-                .push(text("Preview").size(10).color(t::text_muted()))
-                .push(crate::views::body::view(body, 12.0, t::text_secondary(), ctx)),
-        )
-        .padding([6, 10])
-        .into(),
+}
+
+/// Container id used to find the description editor for focusing.
+pub(crate) fn description_editor_id() -> iced::widget::container::Id {
+    iced::widget::container::Id::new("issue-description-editor")
+}
+
+/// Focuses the first focusable widget inside the container `target`
+/// (text_editor has no id of its own in iced 0.13) and unfocuses the rest.
+pub(crate) struct FocusFirstIn {
+    target: iced::advanced::widget::Id,
+    done: bool,
+}
+
+impl FocusFirstIn {
+    pub(crate) fn new(target: iced::widget::container::Id) -> Self {
+        Self { target: target.into(), done: false }
+    }
+}
+
+struct FocusFirst<'a>(&'a mut bool);
+
+impl iced::advanced::widget::Operation<()> for FocusFirst<'_> {
+    fn container(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
+    ) {
+        operate_on_children(self);
+    }
+
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        _id: Option<&iced::advanced::widget::Id>,
+    ) {
+        if !*self.0 {
+            state.focus();
+            *self.0 = true;
+        }
+    }
+}
+
+impl iced::advanced::widget::Operation<()> for FocusFirstIn {
+    fn container(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
+    ) {
+        if id == Some(&self.target) {
+            operate_on_children(&mut FocusFirst(&mut self.done));
+        } else {
+            operate_on_children(self);
+        }
+    }
+
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        _id: Option<&iced::advanced::widget::Id>,
+    ) {
+        // Anything focused outside the target loses focus.
+        state.unfocus();
+    }
+}
+
+/// Reports whether a focusable widget outside the container `target` has
+/// focus. Run on Escape: the description editor is left unless the pointer's
+/// keyboard focus is in another editor (the comment composer), where Escape
+/// isn't about the description. iced 0.13 can't query focus directly, but an
+/// operation can read it widget by widget.
+pub(crate) struct FocusedOutside {
+    target: iced::advanced::widget::Id,
+    inside: bool,
+    outside: bool,
+}
+
+impl FocusedOutside {
+    pub(crate) fn new(target: iced::widget::container::Id) -> Self {
+        Self { target: target.into(), inside: false, outside: false }
+    }
+}
+
+impl iced::advanced::widget::Operation<bool> for FocusedOutside {
+    fn container(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<bool>),
+    ) {
+        let was_inside = self.inside;
+        self.inside |= id == Some(&self.target);
+        operate_on_children(self);
+        self.inside = was_inside;
+    }
+
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        _id: Option<&iced::advanced::widget::Id>,
+    ) {
+        if !self.inside && state.is_focused() {
+            self.outside = true;
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<bool> {
+        iced::advanced::widget::operation::Outcome::Some(self.outside)
+    }
+}
+
+/// The description: rendered markdown (click to edit), an empty prompt, or the editor.
+fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let text_now = detail.description_text();
+    description_block(
+        description_display(&text_now, detail.editing_description),
+        description_editor_id(),
+        Message::EditIssueDescription,
+        || {
+            let editor = text_editor(&detail.description)
+                .placeholder("Add description…  (@ to mention, # to link an issue)")
+                .on_action(Message::IssueDetailDescriptionChanged)
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        None,
+                        suggesting(detail.suggest.as_ref(), EditorTarget::Description),
+                    ),
+                    Message::PasteImageIntoDescription,
+                ))
+                .padding(10)
+                .size(14)
+                .height(Length::Fixed(220.0));
+            (editor.into(), suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
+        },
+        || crate::views::body::view(&text_now, 14.0, t::text_secondary(), ctx),
     )
+}
+
+/// Shared by issue and project detail: lays out one of the three description
+/// modes. `editor` is only built while editing and returns the editor plus an
+/// optional suggestion list; clicking the prompt or the rendered body sends `edit`.
+pub(crate) fn description_block<'a>(
+    display: DescriptionDisplay,
+    editor_id: iced::widget::container::Id,
+    edit: Message,
+    editor: impl FnOnce() -> (Element<'a, Message>, Option<Element<'a, Message>>),
+    rendered: impl FnOnce() -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    match display {
+        DescriptionDisplay::Editor => {
+            let (editor, suggestions) = editor();
+            column![]
+                .push(container(editor).id(editor_id))
+                .push_maybe(suggestions)
+                .into()
+        }
+        DescriptionDisplay::Empty => iced::widget::mouse_area(
+            container(text("Add description…").size(14).color(t::text_muted()))
+                .padding(10)
+                .width(Length::Fill),
+        )
+        .on_press(edit)
+        .interaction(iced::mouse::Interaction::Text)
+        .into(),
+        DescriptionDisplay::Rendered => {
+            iced::widget::mouse_area(container(rendered()).padding(10).width(Length::Fill))
+                .on_press(edit)
+                .interaction(iced::mouse::Interaction::Text)
+                .into()
+        }
+    }
+}
+
+/// Makes a row the hover-card anchor for the issue with local id `issue_id`.
+/// Never captures events, so the row's buttons and focus work as before.
+fn issue_row_anchor<'a>(
+    row: impl Into<Element<'a, Message>>,
+    issue_id: &str,
+) -> Element<'a, Message> {
+    crate::views::row_hover::row_hover(
+        row,
+        crate::body_hover::Anchor::Issue(issue_id.to_string()),
+        Message::RowHover,
+    )
+    .into()
 }
 
 /// "Referenced in" block: one clickable row per issue whose description or
@@ -880,29 +1013,28 @@ fn referenced_in_section<'a>(
             (true, false) => "description",
             _ => "comment",
         };
-        col = col.push(
-            button(
-                row![]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(
-                        text(issue_identifier(src, team))
-                            .size(12)
-                            .color(t::text_muted()),
-                    )
-                    .push(
-                        text(&src.title)
-                            .size(13)
-                            .color(t::text_primary())
-                            .width(Length::Fill),
-                    )
-                    .push(text(via).size(11).color(t::text_muted())),
-            )
-            .on_press(Message::OpenIssueDetail(src.id.clone()))
-            .padding([6, 8])
-            .width(Length::Fill)
-            .style(button::text),
-        );
+        let row_button = button(
+            row![]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(
+                    text(issue_identifier(src, team))
+                        .size(12)
+                        .color(t::text_muted()),
+                )
+                .push(
+                    text(&src.title)
+                        .size(13)
+                        .color(t::text_primary())
+                        .width(Length::Fill),
+                )
+                .push(text(via).size(11).color(t::text_muted())),
+        )
+        .on_press(Message::OpenIssueDetail(src.id.clone()))
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(button::text);
+        col = col.push(issue_row_anchor(row_button, &src.id));
     }
     col.into()
 }
@@ -945,7 +1077,6 @@ fn comments_section<'a>(
 /// rendering plus the open reply composer. Shared by issue and project detail.
 pub struct ThreadCtx<'a, 'b> {
     pub members: &'a [Member],
-    pub team: Option<&'a Team>,
     pub teams: &'a [Team],
     pub issues: &'a [Issue],
     /// Local ids of the current user's members; gates the Delete action.
@@ -1056,7 +1187,7 @@ fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
 /// A null actor shows the text alone; a Pending item is marked as unsynced.
 fn activity_row<'a>(item: &'a ActivityItem) -> Element<'a, Message> {
     let pending = item.origin == ItemOrigin::Pending;
-    row![]
+    let line = row![]
         .spacing(6)
         .align_y(Alignment::Center)
         .push(text("•").size(11).color(t::text_muted()))
@@ -1072,8 +1203,17 @@ fn activity_row<'a>(item: &'a ActivityItem) -> Element<'a, Message> {
             text(relative_time(&item.at))
                 .size(11)
                 .color(t::text_muted()),
-        )
-        .into()
+        );
+    // Only an incoming reference with a cached source issue has a card.
+    match &item.source_issue_id {
+        Some(id) => {
+            let clickable = iced::widget::mouse_area(line)
+                .on_press(Message::OpenIssueDetail(id.clone()))
+                .interaction(iced::mouse::Interaction::Pointer);
+            issue_row_anchor(clickable, id)
+        }
+        None => line.into(),
+    }
 }
 
 /// Left indent (px) per nesting level.
@@ -1139,7 +1279,6 @@ fn comment_row<'a>(
 ) -> Element<'a, Message> {
     let ThreadCtx {
         members,
-        team,
         teams,
         issues,
         my_member_ids,
@@ -1169,7 +1308,6 @@ fn comment_row<'a>(
         13.0,
         t::text_primary(),
         &BodyCtx {
-            team,
             teams,
             issues,
             members,
@@ -1246,5 +1384,60 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
         placeholder: t::text_muted(),
         value: t::text_primary(),
         selection: t::accent(),
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    #[test]
+    fn description_display_table() {
+        let cases = [
+            ("", false, DescriptionDisplay::Empty),
+            ("  \n ", false, DescriptionDisplay::Empty),
+            ("hello **x**", false, DescriptionDisplay::Rendered),
+            ("hello", true, DescriptionDisplay::Editor),
+            ("", true, DescriptionDisplay::Editor),
+        ];
+        for (text, editing, want) in cases {
+            assert_eq!(description_display(text, editing), want, "{text:?} {editing}");
+        }
+    }
+
+    struct Fake(bool);
+
+    impl iced::advanced::widget::operation::Focusable for Fake {
+        fn is_focused(&self) -> bool {
+            self.0
+        }
+        fn focus(&mut self) {
+            self.0 = true;
+        }
+        fn unfocus(&mut self) {
+            self.0 = false;
+        }
+    }
+
+    #[test]
+    fn escape_probe_sees_focus_only_outside_the_description_editor() {
+        use iced::advanced::widget::Operation;
+        let editor = description_editor_id();
+        let editor_id: iced::advanced::widget::Id = editor.clone().into();
+        // (focused inside the editor, focused outside it) -> reported "elsewhere"
+        let cases = [(false, false, false), (true, false, false), (false, true, true), (true, true, true)];
+        for (inside, outside, want) in cases {
+            let mut op = FocusedOutside::new(editor.clone());
+            op.container(None, iced::Rectangle::default(), &mut |op| {
+                op.focusable(&mut Fake(outside), None);
+                op.container(Some(&editor_id), iced::Rectangle::default(), &mut |op| {
+                    op.focusable(&mut Fake(inside), None);
+                });
+                // Back outside the editor after leaving it.
+                op.focusable(&mut Fake(false), None);
+            });
+            let got = matches!(op.finish(), iced::advanced::widget::operation::Outcome::Some(true));
+            assert_eq!(got, want, "inside {inside} outside {outside}");
+        }
     }
 }

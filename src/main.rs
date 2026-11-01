@@ -1,13 +1,19 @@
 mod api;
 mod app;
+mod body_cache;
+mod body_hover;
+mod card_placement;
 mod config;
 mod csv_io;
 mod dashboard_eval;
 mod dashboard_session;
 mod db;
 mod display;
+mod document;
 mod files;
 mod fonts;
+mod hover_card;
+mod highlight;
 mod inbox;
 mod issue_match;
 mod keys;
@@ -25,6 +31,7 @@ mod views;
 use iced::{window, Size};
 
 fn main() -> iced::Result {
+    highlight::preload();
     let cfg = config::load().0;
     theme::set_by_key(&cfg.theme);
     let font_key = cfg.font;
@@ -32,7 +39,8 @@ fn main() -> iced::Result {
     for bytes in fonts::FONT_BYTES {
         app = app.font(bytes);
     }
-    app.default_font(fonts::font_for_key(&font_key))
+    fonts::set_active(fonts::font_for_key(&font_key));
+    app.default_font(fonts::active())
         .subscription(app::App::subscription)
         .theme(app::App::theme)
         .window(window::Settings {

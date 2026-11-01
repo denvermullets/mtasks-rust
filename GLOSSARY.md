@@ -14,6 +14,10 @@ _Avoid_: Global search, quick open, Cmd+K search
 The Cmd+F text that narrows the current view's list in place.
 _Avoid_: Header search, global search
 
+**Hover card**:
+The small panel that appears under an issue reference or mention in a body when the pointer rests on it, showing a summary of the thing referenced. It appears after a short delay and goes away shortly after the pointer leaves.
+_Avoid_: Tooltip, popover, preview
+
 ### Views
 
 **Saved view**:

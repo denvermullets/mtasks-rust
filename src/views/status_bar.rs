@@ -52,7 +52,7 @@ pub fn view<'a>(
     };
 
     let shortcuts = if show_help {
-        "[n]ew  [e]dit  [m]ove  [M]ove back  [t]eam move  [d]elete  [L]abels  [I]nbox  [j/k]\u{2195}  [h/l]\u{2194}  [v]iew board/list  [c]ollapse section  [1-4]priority  [s]ync  [\u{2318}K]command palette  Issue detail: [a]ttach file  Inbox: [j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]close help"
+        "[n]ew  [e]dit  [m]ove  [M]ove back  [t]eam move  [d]elete  [L]abels  [I]nbox  [j/k]\u{2195}  [h/l]\u{2194}  [v]iew board/list  [c]ollapse section  [1-4]priority  [s]ync  [\u{2318}K]command palette  Issue detail: [a]ttach file  [e] edit description  Project detail: [e] edit description  Inbox: [j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]close help"
     } else if in_inbox {
         "[j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]help"
     } else {

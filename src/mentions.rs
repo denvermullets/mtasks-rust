@@ -138,64 +138,6 @@ pub fn find_mentions(text: &str, names: &[&str]) -> Vec<MentionToken> {
     out
 }
 
-// ── Rendering segments ──
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Segment<'a> {
-    Text(&'a str),
-    /// Issue reference; `number` is set only when the prefix is the team's.
-    Issue {
-        text: &'a str,
-        number: Option<i64>,
-    },
-    Mention(&'a str),
-}
-
-/// Split `text` into plain/issue/mention segments for display.
-pub fn segments<'a>(
-    text: &'a str,
-    team_identifier: &str,
-    member_names: &[&str],
-) -> Vec<Segment<'a>> {
-    enum Kind {
-        Issue(Option<i64>),
-        Mention,
-    }
-    let mut spans: Vec<(usize, usize, Kind)> = Vec::new();
-    for t in find_issue_tokens(text) {
-        let own = t.prefix.eq_ignore_ascii_case(team_identifier);
-        spans.push((t.start, t.end, Kind::Issue(own.then_some(t.number))));
-    }
-    for m in find_mentions(text, member_names) {
-        spans.push((m.start, m.end, Kind::Mention));
-    }
-    spans.sort_by_key(|s| s.0);
-
-    let mut out = Vec::new();
-    let mut pos = 0;
-    for (start, end, kind) in spans {
-        if start < pos {
-            continue; // overlapping token
-        }
-        if start > pos {
-            out.push(Segment::Text(&text[pos..start]));
-        }
-        let slice = &text[start..end];
-        out.push(match kind {
-            Kind::Issue(number) => Segment::Issue {
-                text: slice,
-                number,
-            },
-            Kind::Mention => Segment::Mention(slice),
-        });
-        pos = end;
-    }
-    if pos < text.len() {
-        out.push(Segment::Text(&text[pos..]));
-    }
-    out
-}
-
 // ── Body segments: text runs and image blocks ──
 
 /// Path prefix of a JAIT (Rails ActiveStorage) blob redirect URL.
@@ -238,7 +180,7 @@ fn is_uuid(s: &str) -> bool {
 
 /// Classify an image URL. Only JAIT blob URLs and pending placeholders pass;
 /// `host` is the configured base URL (trailing slash tolerated).
-fn classify_image_src<'a>(src: &'a str, host: &str) -> Option<ImageKind<'a>> {
+pub(crate) fn classify_image_src<'a>(src: &'a str, host: &str) -> Option<ImageKind<'a>> {
     if let Some(id) = src.strip_prefix(PENDING_SCHEME) {
         return is_uuid(id).then_some(ImageKind::Pending(id));
     }
@@ -637,6 +579,24 @@ pub fn resolve_issue<'a>(
         .find(|i| i.team_id == team.id && i.team_number.map(i64::from) == Some(number))
 }
 
+/// What a link in rendered body text points at. Later link kinds (mentions,
+/// external URLs) are new variants; the renderer and app routing stay put.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// Local issue UUID.
+    Issue(String),
+    /// External URL.
+    External(String),
+    /// Mention text including the `@` (resolved to a member at hover time).
+    Mention(String),
+}
+
+/// Typed target for an `IDENT-n` token, if it resolves to a local issue.
+pub fn issue_link_target(issues: &[Issue], teams: &[Team], token: &str) -> Option<LinkTarget> {
+    let (prefix, number) = parse_ident(token)?;
+    resolve_issue(issues, teams, prefix, number).map(|i| LinkTarget::Issue(i.id.clone()))
+}
+
 /// Text of the cursor's line up to the cursor. `col` is the editor's column
 /// (a byte offset; clamped defensively to a char boundary).
 pub fn line_before_cursor(line: &str, col: usize) -> &str {
@@ -770,28 +730,6 @@ mod body_segment_tests {
         );
     }
 
-    #[test]
-    fn mentions_and_references_still_segment_in_text_runs() {
-        let t = format!("ping @Ann re PROJ-7 ![a]({BLOB}) PROJ-8");
-        let segs = body_segments(&t, HOST);
-        let BodySegment::Text(first) = segs[0] else {
-            panic!("expected text first");
-        };
-        assert_eq!(
-            segments(first, "PROJ", &["Ann"]),
-            vec![
-                Segment::Text("ping "),
-                Segment::Mention("@Ann"),
-                Segment::Text(" re "),
-                Segment::Issue {
-                    text: "PROJ-7",
-                    number: Some(7)
-                },
-                Segment::Text(" "),
-            ]
-        );
-        assert_eq!(segs.len(), 3);
-    }
 }
 
 #[cfg(test)]
@@ -891,29 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn segments_split_text() {
-        let s = segments("ping @Bob re JAIT-4 / OTH-1", "JAIT", &["Bob"]);
-        assert_eq!(
-            s,
-            vec![
-                Segment::Text("ping "),
-                Segment::Mention("@Bob"),
-                Segment::Text(" re "),
-                Segment::Issue {
-                    text: "JAIT-4",
-                    number: Some(4)
-                },
-                Segment::Text(" / "),
-                Segment::Issue {
-                    text: "OTH-1",
-                    number: None
-                },
-            ]
-        );
-        assert_eq!(segments("plain", "JAIT", &[]), vec![Segment::Text("plain")]);
-    }
-
-    #[test]
     fn trailing_query_detects_triggers() {
         assert_eq!(
             trailing_query("hello @an"),
@@ -988,6 +903,28 @@ mod tests {
         assert!(resolve_issue(&issues, std::slice::from_ref(&t), "OTH", 6).is_none());
         t.identifier = "ZZZ".into();
         assert!(resolve_issue(&issues, &[t], "OTH", 5).is_none());
+    }
+
+    #[test]
+    fn issue_token_resolves_to_a_typed_issue_target() {
+        let a = issue("a-id", 5, None);
+        let t = Team {
+            id: "t".into(),
+            name: "T".into(),
+            identifier: "OTH".into(),
+            remote_id: None,
+            archived_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let issues = [a];
+        let teams = [t];
+        assert_eq!(
+            issue_link_target(&issues, &teams, "#oth-5"),
+            Some(LinkTarget::Issue("a-id".into()))
+        );
+        assert_eq!(issue_link_target(&issues, &teams, "OTH-6"), None);
+        assert_eq!(issue_link_target(&issues, &teams, "nonsense"), None);
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub struct ProjectDetailState {
     pub project_id: String,
     pub name: String,
     pub description: text_editor::Content,
+    /// True while the description editor is open; otherwise it is drawn rendered.
+    pub editing_description: bool,
     /// "YYYY-MM-DD" or "".
     pub start_date: String,
     pub due_date: String,
@@ -43,6 +45,7 @@ impl ProjectDetailState {
             project_id: p.id.clone(),
             name: p.name.clone(),
             description: text_editor::Content::with_text(&body),
+            editing_description: false,
             start_date: p.start_date.clone().unwrap_or_default(),
             due_date: p.due_date.clone().unwrap_or_default(),
             error: None,
@@ -151,31 +154,15 @@ pub fn view<'a>(
                 .as_deref()
                 .map(|e| text(e).size(12).color(t::danger())),
         )
-        .push(
-            text_editor(&detail.description)
-                .placeholder("Add description…")
-                .on_action(Message::ProjectDetailDescriptionChanged)
-                .key_binding(crate::views::issue_detail::paste_image_binding(
-                    text_editor::Binding::from_key_press,
-                    Message::PasteImageIntoProjectDescription,
-                ))
-                .padding(10)
-                .size(14)
-                .height(Length::Fixed(160.0)),
-        )
-        .push_maybe(crate::views::issue_detail::description_preview(
-            &detail.description_text(),
-            &crate::views::body::BodyCtx {
-                team,
-                teams,
-                issues,
-                members,
-                images,
-                host,
-                pending_paths: Some(pending_paths),
-                on_image: Some(Message::OpenInlineImage),
-            },
-        ))
+        .push(description_section(detail, &crate::views::body::BodyCtx {
+            teams,
+            issues,
+            members,
+            images,
+            host,
+            pending_paths: Some(pending_paths),
+            on_image: Some(Message::OpenInlineImage),
+        }))
         .push(
             button(text("+ Attach file").size(12).color(t::accent()))
                 .on_press(Message::PickAttachmentFiles)
@@ -186,7 +173,7 @@ pub fn view<'a>(
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(
-            comments, detail, members, team, teams, issues, comment_attachments, images, host,
+            comments, detail, members, teams, issues, comment_attachments, images, host,
             pending_paths,
         ));
 
@@ -306,7 +293,6 @@ fn discussion_section<'a>(
     comments: &'a [Comment],
     detail: &'a ProjectDetailState,
     members: &'a [Member],
-    team: Option<&'a Team>,
     teams: &'a [Team],
     issues: &'a [Issue],
     comment_attachments: &'a CommentAttachments,
@@ -322,7 +308,6 @@ fn discussion_section<'a>(
     }
     let ctx = ThreadCtx {
         members,
-        team,
         teams,
         issues,
         my_member_ids: &[],
@@ -550,4 +535,37 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
         value: t::text_primary(),
         selection: t::accent(),
     }
+}
+
+/// The description: rendered markdown (click to edit), an empty prompt, or the editor.
+fn description_section<'a>(
+    detail: &'a ProjectDetailState,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
+    use crate::views::issue_detail as detail_view;
+    let text_now = detail.description_text();
+    detail_view::description_block(
+        detail_view::description_display(&text_now, detail.editing_description),
+        description_editor_id(),
+        Message::EditProjectDescription,
+        || {
+            let editor = text_editor(&detail.description)
+                .placeholder("Add description…")
+                .on_action(Message::ProjectDetailDescriptionChanged)
+                .key_binding(detail_view::paste_image_binding(
+                    text_editor::Binding::from_key_press,
+                    Message::PasteImageIntoProjectDescription,
+                ))
+                .padding(10)
+                .size(14)
+                .height(Length::Fixed(160.0));
+            (editor.into(), None)
+        },
+        || crate::views::body::view(&text_now, 14.0, t::text_secondary(), ctx),
+    )
+}
+
+/// Container id used to find the project description editor for focusing.
+pub(crate) fn description_editor_id() -> container::Id {
+    container::Id::new("project-description-editor")
 }

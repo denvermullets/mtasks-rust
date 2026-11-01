@@ -759,6 +759,36 @@ pub fn get_issue(conn: &Connection, issue_id: &str) -> Result<Option<Issue>> {
     .optional()
 }
 
+/// Everything an issue's hover card shows, read straight from the local
+/// database: the issue and the team, lane, assignee and project it points at,
+/// whichever team they belong to. Anything missing is left out, and an unknown
+/// issue gives empty records. Local only, never the network.
+pub fn card_records(conn: &Connection, issue_id: &str) -> Result<crate::body_hover::OwnedRecords> {
+    let mut out = crate::body_hover::OwnedRecords::default();
+    let Some(issue) = get_issue(conn, issue_id)? else { return Ok(out) };
+    out.teams = all_teams(conn)?.into_iter().filter(|t| t.id == issue.team_id).collect();
+    out.lanes = lanes_for_team(conn, &issue.team_id)?.into_iter().filter(|l| l.id == issue.lane_id).collect();
+    if let Some(id) = &issue.assignee_id {
+        out.members = members_for_team(conn, &issue.team_id)?.into_iter().filter(|m| m.id == *id).collect();
+    }
+    if let Some(id) = &issue.project_id {
+        out.projects = get_project(conn, id)?.into_iter().collect();
+    }
+    out.issues = vec![issue];
+    Ok(out)
+}
+
+/// Records for a mention card in a body that belongs to `team_id`: that team's
+/// members and issues (the issues give the open count). The body's team, not
+/// the selected one, so a body opened from My Issues resolves its own people.
+pub fn mention_records(conn: &Connection, team_id: &str) -> Result<crate::body_hover::OwnedRecords> {
+    Ok(crate::body_hover::OwnedRecords {
+        members: members_for_team(conn, team_id)?,
+        issues: issues_for_team(conn, team_id)?,
+        ..Default::default()
+    })
+}
+
 pub fn get_project(conn: &Connection, project_id: &str) -> Result<Option<Project>> {
     conn.query_row(
         "SELECT id, remote_id, team_id, name, description, status, priority,
@@ -2024,6 +2054,91 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn mention_card_resolves_on_the_bodys_team_not_a_same_named_member_elsewhere() {
+        let conn = setup(); // team t1 is the "selected" one in the app
+        for sql in [
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t2', 'Other', 'OTH', '2026-01-01', '2026-01-01')",
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l2', 'Doing', 0, 't2', '2026-01-01', '2026-01-01')",
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at) VALUES ('m1', 't1', 'Ann', 'ann@one.io', '2026-01-01', '2026-01-01')",
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at) VALUES ('m2', 't2', 'Ann', 'ann@two.io', '2026-01-01', '2026-01-01')",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, assignee_id, team_number, created_at, updated_at)
+             VALUES ('a1', 'one', 1, 'l1', 't1', 'm1', 1, '2026-01-01', '2026-01-01')",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, assignee_id, team_number, created_at, updated_at)
+             VALUES ('b1', 'two', 1, 'l2', 't2', 'm2', 1, '2026-01-01', '2026-01-01')",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, assignee_id, team_number, created_at, updated_at)
+             VALUES ('b2', 'two more', 1, 'l2', 't2', 'm2', 2, '2026-01-01', '2026-01-01')",
+        ] {
+            conn.execute(sql, []).unwrap();
+        }
+        let card = |team: &str| {
+            let rec = mention_records(&conn, team).unwrap();
+            match crate::body_hover::content_for(
+                &crate::body_hover::Anchor::Mention("@Ann".into()),
+                &rec.records(),
+            ) {
+                Some(crate::body_hover::CardContent::Member(m)) => (m.email, m.open_issues),
+                other => panic!("{other:?}"),
+            }
+        };
+        // A body on t2 (t1 selected) gets t2's Ann, with t2's open issues.
+        assert_eq!(card("t2"), ("ann@two.io".to_string(), 2));
+        assert_eq!(card("t1"), ("ann@one.io".to_string(), 1));
+        // A team with nobody by that name draws no card.
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t3', 'Empty', 'EMP', '2026-01-01', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        let rec = mention_records(&conn, "t3").unwrap();
+        assert!(crate::body_hover::content_for(
+            &crate::body_hover::Anchor::Mention("@Ann".into()),
+            &rec.records()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn card_records_follow_an_issue_into_another_team() {
+        let conn = setup();
+        for sql in [
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t2', 'Other', 'OTH', '2026-01-01', '2026-01-01')",
+            "INSERT INTO lanes (id, name, position, team_id, created_at, updated_at) VALUES ('l2', 'Doing', 0, 't2', '2026-01-01', '2026-01-01')",
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at) VALUES ('m2', 't2', 'Ann', 'a@x.y', '2026-01-01', '2026-01-01')",
+            "INSERT INTO projects (id, team_id, name, created_at, updated_at) VALUES ('p2', 't2', 'Proj', '2026-01-01', '2026-01-01')",
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, assignee_id, project_id, team_number, created_at, updated_at)
+             VALUES ('x1', 'Far', 1, 'l2', 't2', 'm2', 'p2', 5, '2026-01-01', '2026-01-01')",
+        ] {
+            conn.execute(sql, []).unwrap();
+        }
+        let rec = card_records(&conn, "x1").unwrap();
+        assert_eq!(rec.issues.len(), 1);
+        assert_eq!(rec.teams[0].identifier, "OTH");
+        assert_eq!(rec.lanes[0].name, "Doing");
+        assert_eq!(rec.members[0].name, "Ann");
+        assert_eq!(rec.projects[0].name, "Proj");
+        let card = crate::body_hover::content_for(
+            &crate::body_hover::Anchor::Issue("x1".into()),
+            &rec.records(),
+        );
+        let Some(crate::body_hover::CardContent::Issue(card)) = card else { panic!("card expected") };
+        assert_eq!(card.identifier, "OTH-5");
+        assert_eq!(card.assignee.as_deref(), Some("Ann"));
+        assert_eq!(card.project.as_deref(), Some("Proj"));
+        assert_eq!(card.lane.unwrap().name, "Doing");
+
+        // Unresolved references: no records, no card. Bare issue: no extras.
+        let none = card_records(&conn, "nope").unwrap();
+        assert!(none.issues.is_empty());
+        assert!(crate::body_hover::content_for(
+            &crate::body_hover::Anchor::Issue("nope".into()),
+            &none.records()
+        )
+        .is_none());
+        let bare = card_records(&conn, "i1").unwrap();
+        assert!(bare.members.is_empty() && bare.projects.is_empty());
     }
 
     #[test]

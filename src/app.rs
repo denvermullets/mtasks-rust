@@ -140,6 +140,11 @@ pub enum Message {
     // Issue detail — buffered text fields (committed on Enter / nav-away)
     IssueDetailTitleChanged(String),
     IssueDetailDescriptionChanged(iced::widget::text_editor::Action),
+    /// Click on the rendered description: open the editor with focus.
+    EditIssueDescription,
+    StopEditingIssueDescription,
+    EditProjectDescription,
+    StopEditingProjectDescription,
     IssueDetailDueDateChanged(String),
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
@@ -213,6 +218,23 @@ pub enum Message {
     /// click on a linked dependency row). Rebuilds the detail buffer, unlike
     /// `NavigateToView(View::IssueDetail(_))` which only swaps the view.
     OpenIssueDetail(String),
+    /// Click on a link in rendered body text, carrying its typed target.
+    OpenBodyLink(crate::mentions::LinkTarget),
+    /// The hovered body span changed (`None` = pointer left). JRST-299 consumes it.
+    /// A body paragraph's hovered span changed. The id is the reporting
+    /// widget's owner id (see `hover_rich::HoverRich::on_hover`).
+    BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// The pointer entered (`Some`) or left (`None`) a row that anchors a hover
+    /// card, with the row's window rectangle (`views::row_hover`). The id is
+    /// the row widget's owner id.
+    RowHover(u64, Option<(crate::body_hover::Anchor, iced::Rectangle)>),
+    /// A hover-card timer elapsed (see `hover_card::Effect`).
+    HoverTimer(u64),
+    /// The pointer entered or left the hover card itself.
+    HoverCardEntered,
+    HoverCardLeft,
+    /// The mouse wheel or trackpad scrolled somewhere.
+    HoverScrolled,
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -789,6 +811,10 @@ pub struct App {
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
+    /// Members of the open detail's own team: what its bodies and comments
+    /// resolve mentions against. Not `members`, which is the selected team's
+    /// (or every team's in My Issues). Empty outside a detail view.
+    detail_members: Vec<Member>,
     /// The open issue detail was reached from My Issues, so Back returns there.
     detail_from_my_issues: bool,
     /// The open issue detail was reached from the Inbox (Back returns there).
@@ -879,6 +905,11 @@ pub struct App {
     sync_next_delay: Option<std::time::Duration>,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
+    /// Hover card over body references (JRST-299).
+    body_hover: crate::body_hover::BodyHover,
+    /// The open hover card's content, read from the local database when the
+    /// card opened (never on the view path). `None` content = no card.
+    hover_content: Option<(crate::body_hover::Anchor, Option<crate::body_hover::CardContent>)>,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
     next_toast_id: u64,
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
@@ -1212,6 +1243,10 @@ impl App {
     /// Resolve dependency edges for the open detail issue so the sidebar can
     /// render them; other views don't need this, so keep it cheap.
     fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
+        self.detail_members = self
+            .detail_team_id()
+            .map(|team_id| queries::members_for_team(conn, team_id).unwrap_or_default())
+            .unwrap_or_default();
         if let View::IssueDetail(ref issue_id) = self.view {
             self.detail_deps =
                 queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
@@ -1486,6 +1521,21 @@ impl App {
                 Self::insert_suggestion(content, &s, idx);
             }
         }
+    }
+
+    /// The team the open detail's issue or project belongs to. Its bodies are
+    /// resolved against this team, whichever team is selected.
+    fn detail_team_id(&self) -> Option<&str> {
+        match &self.view {
+            View::IssueDetail(id) => self.issues.iter().find(|i| i.id == *id).map(|i| i.team_id.as_str()),
+            View::ProjectDetail(id) => self.projects.iter().find(|p| p.id == *id).map(|p| p.team_id.as_str()),
+            _ => None,
+        }
+    }
+
+    fn detail_team(&self) -> Option<&Team> {
+        let id = self.detail_team_id()?;
+        self.teams.iter().find(|t| t.id == id)
     }
 
     fn selected_team(&self) -> Option<&Team> {
@@ -2862,6 +2912,7 @@ impl App {
             labels,
             issue_labels,
             detail_deps: Default::default(),
+            detail_members: Vec::new(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_from_dashboard: None,
@@ -2922,6 +2973,8 @@ impl App {
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
+            body_hover: crate::body_hover::BodyHover::new(),
+            hover_content: None,
             next_toast_id: 0,
             sync_paused_auth: false,
         };
@@ -2986,9 +3039,21 @@ impl App {
             _ => None,
         });
 
+        // Scrolling moves content out from under a card, so it closes.
+        let scrolls = event::listen_with(|event, _status, _id| match event {
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
+                Some(Message::HoverScrolled)
+            }
+            _ => None,
+        });
+
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
 
         let mut subs = vec![keys, activity, banner_clicks];
+        // Only listen for wheel events while a card is pending or showing.
+        if self.body_hover.is_active() {
+            subs.push(scrolls);
+        }
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(
@@ -3003,6 +3068,16 @@ impl App {
             );
         }
         Subscription::batch(subs)
+    }
+
+    /// Turn a hover-card effect into the delayed message the machine asked for.
+    fn hover_timer(effect: Option<crate::hover_card::Effect>) -> Task<Message> {
+        match effect {
+            Some(e) => Task::perform(tokio::time::sleep(e.delay), move |_| {
+                Message::HoverTimer(e.generation)
+            }),
+            None => Task::none(),
+        }
     }
 
     /// Feed the sync scheduler an event, re-arm its timer, and start the cycle
@@ -3093,10 +3168,47 @@ impl App {
         self.push_toast(msg, ToastKind::Error, false);
     }
 
+    /// Apply a detail-view key message. Leaving a description editor is
+    /// skipped when another editor (the comment composer) has focus, so
+    /// Escape there doesn't also close the description. Focus is read with
+    /// an operation, then the stop is sent.
+    fn update_unless_focus_elsewhere(&mut self, msg: Message) -> Task<Message> {
+        let (editor, stop): (_, fn() -> Message) = match msg {
+            Message::StopEditingIssueDescription => {
+                (issue_detail::description_editor_id(), || Message::StopEditingIssueDescription)
+            }
+            Message::StopEditingProjectDescription => {
+                (project_detail::description_editor_id(), || Message::StopEditingProjectDescription)
+            }
+            other => return self.update(other),
+        };
+        iced::advanced::widget::operate(issue_detail::FocusedOutside::new(editor)).then(move |elsewhere| {
+            if elsewhere { Task::none() } else { Task::done(stop()) }
+        })
+    }
+
+    /// Whether either detail view has its description editor open.
+    fn editing_description(&self) -> bool {
+        self.issue_detail.as_ref().is_some_and(|d| d.editing_description)
+            || self.project_detail.as_ref().is_some_and(|d| d.editing_description)
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
-        let task = self.update_inner(message);
+        let view_before = self.view.clone();
+        let editing_before = self.editing_description();
+        let mut task = self.update_inner(message);
+        // The one place that closes hover cards on a view change, modal open
+        // or description editor toggle, whatever message caused it (keyboard
+        // included).
+        if self.view != view_before
+            || self.modal != Modal::None
+            || self.editing_description() != editing_before
+        {
+            let effect = self.body_hover.event(crate::hover_card::Event::ViewChanged);
+            task = Task::batch([task, Self::hover_timer(effect)]);
+        }
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
@@ -3121,6 +3233,13 @@ impl App {
         }
         match message {
             Message::KeyPressed(key, modifiers) => {
+                // Esc with a hover card open only closes the card.
+                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                    && self.body_hover.is_open()
+                {
+                    let effect = self.body_hover.event(crate::hover_card::Event::Escape);
+                    return Self::hover_timer(effect);
+                }
                 // Esc with an autocomplete list open only closes the list.
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
                     if let Some(slot) = self.open_suggest_mut() {
@@ -3148,8 +3267,17 @@ impl App {
                     }
                 }
                 if matches!(self.view, View::IssueDetail(_)) && !modal_open {
-                    if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers) {
-                        return self.update(msg);
+                    let editing_description =
+                        self.issue_detail.as_ref().is_some_and(|d| d.editing_description);
+                    if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers, editing_description) {
+                        return self.update_unless_focus_elsewhere(msg);
+                    }
+                }
+                if matches!(self.view, View::ProjectDetail(_)) && !modal_open {
+                    let editing_description =
+                        self.project_detail.as_ref().is_some_and(|d| d.editing_description);
+                    if let Some(msg) = keys::handle_project_detail_key(&key, modifiers, editing_description) {
+                        return self.update_unless_focus_elsewhere(msg);
                     }
                 }
                 if matches!(self.view, View::Dashboard(_)) && !modal_open {
@@ -4206,6 +4334,36 @@ impl App {
                 self.refresh_suggestions(crate::mentions::EditorTarget::Description);
             }
 
+            Message::StopEditingIssueDescription => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.editing_description = false;
+                }
+            }
+            Message::EditIssueDescription => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.editing_description = true;
+                    return iced::advanced::widget::operate(issue_detail::FocusFirstIn::new(
+                        issue_detail::description_editor_id(),
+                    ))
+                    .discard();
+                }
+            }
+
+            Message::StopEditingProjectDescription => {
+                if let Some(d) = &mut self.project_detail {
+                    d.editing_description = false;
+                }
+            }
+            Message::EditProjectDescription => {
+                if let Some(d) = &mut self.project_detail {
+                    d.editing_description = true;
+                    return iced::advanced::widget::operate(issue_detail::FocusFirstIn::new(
+                        project_detail::description_editor_id(),
+                    ))
+                    .discard();
+                }
+            }
+
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
                 if let Some(d) = self.comment_drafts_mut() {
@@ -4441,7 +4599,69 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
+            Message::HoverScrolled => {
+                let effect = self.body_hover.event(crate::hover_card::Event::Scrolled);
+                return Self::hover_timer(effect);
+            }
+            // No cards behind a modal.
+            Message::BodyHover(..) | Message::RowHover(..) if self.modal != Modal::None => {}
+            Message::RowHover(owner, hover) => {
+                let effect = self
+                    .body_hover
+                    .body_hover(owner, hover.map(|(anchor, rect)| (Some(anchor), rect)));
+                return Self::hover_timer(effect);
+            }
+            Message::BodyHover(owner, hover) => {
+                let span = hover.map(|h| {
+                    let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
+                    // The widget saw no pointer move yet (fresh after a rebuild):
+                    // fall back to the content-space rectangle.
+                    let rect = h.window_bounds.unwrap_or(h.bounds);
+                    (anchor, rect)
+                });
+                let effect = self.body_hover.body_hover(owner, span);
+                return Self::hover_timer(effect);
+            }
+            Message::HoverTimer(generation) => {
+                // A card opening afresh re-reads, so edits made while it was
+                // closed show.
+                if !self.body_hover.is_open() {
+                    self.hover_content = None;
+                }
+                let effect = self.body_hover.event(crate::hover_card::Event::TimerFired(generation));
+                self.refresh_hover_content();
+                return Self::hover_timer(effect);
+            }
+            Message::HoverCardEntered => {
+                let effect = self.body_hover.event(crate::hover_card::Event::EnteredCard);
+                return Self::hover_timer(effect);
+            }
+            Message::HoverCardLeft => {
+                let effect = self.body_hover.event(crate::hover_card::Event::LeftCard);
+                return Self::hover_timer(effect);
+            }
+            Message::OpenBodyLink(target) => {
+                // A click ends the hover: close the card, cancel a pending one.
+                self.body_hover.event(crate::hover_card::Event::Clicked);
+                match target {
+                    crate::mentions::LinkTarget::Issue(id) => {
+                        return self.update(Message::OpenIssueDetail(id));
+                    }
+                    crate::mentions::LinkTarget::External(url) => {
+                        // Defence in depth: the document module already filters.
+                        if crate::document::is_openable_link(&url) {
+                            if let Err(e) = std::process::Command::new("open").arg(url.trim()).spawn() {
+                                self.push_toast(format!("Couldn't open link: {e}"), ToastKind::Error, false);
+                            }
+                        }
+                    }
+                    // A later ticket fills this.
+                    crate::mentions::LinkTarget::Mention(_) => {}
+                }
+            }
             Message::OpenIssueDetail(issue_id) => {
+                // A click on a row ends its hover (the view may not change).
+                self.body_hover.event(crate::hover_card::Event::Clicked);
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
                 }
@@ -4471,6 +4691,8 @@ impl App {
                 self.modal = Modal::None;
             }
             Message::RemoveDependency(dep_id) => {
+                // The row (and its hover anchor) is about to vanish.
+                self.body_hover.event(crate::hover_card::Event::Clicked);
                 self.remove_dependency(&dep_id);
             }
             Message::OpenMoveTeamPicker(issue_id) => {
@@ -6183,6 +6405,52 @@ impl App {
         Task::none()
     }
 
+    /// Keep `hover_content` in step with the card on screen: read the local
+    /// database once when a card opens on a new anchor, drop it when the card
+    /// closes. Called where a card can open (the show timer), not per frame.
+    fn refresh_hover_content(&mut self) {
+        let Some((anchor, _)) = self.body_hover.current() else {
+            self.hover_content = None;
+            return;
+        };
+        if self.hover_content.as_ref().is_some_and(|(a, _)| a == anchor) {
+            return;
+        }
+        let anchor = anchor.clone();
+        let content = match &anchor {
+            crate::body_hover::Anchor::Issue(id) => {
+                let conn = self.db();
+                crate::db::queries::card_records(&conn, id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }
+            // A mention resolves on the body's team, whichever team is
+            // selected: that team's members and issues, read once as the
+            // card opens.
+            crate::body_hover::Anchor::Mention(_) => self.detail_team_id().and_then(|team_id| {
+                let conn = self.db();
+                crate::db::queries::mention_records(&conn, team_id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }),
+        };
+        self.hover_content = Some((anchor, content));
+    }
+
+    /// The hover card for the current anchor, positioned under its span.
+    fn hover_card_overlay(&self) -> Option<Element<'_, Message>> {
+        if self.modal != Modal::None {
+            return None;
+        }
+        let (anchor, rect) = self.body_hover.current()?;
+        let (cached, content) = self.hover_content.as_ref()?;
+        if cached != anchor {
+            return None;
+        }
+        let content = content.as_ref()?;
+        Some(crate::views::hover_card_view::overlay(content, rect))
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let team_sidebar = team_list::view(team_list::SidebarState {
             teams: &self.teams,
@@ -6314,8 +6582,8 @@ impl App {
                         project_detail::view(
                             project,
                             detail,
-                            self.selected_team(),
-                            &self.members,
+                            self.detail_team(),
+                            &self.detail_members,
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
                             self.board_display(),
@@ -6360,11 +6628,11 @@ impl App {
                         issue_detail::view(
                             issue,
                             detail,
-                            self.selected_team(),
+                            self.detail_team(),
                             &self.teams,
                             &self.lanes,
                             &self.projects,
-                            &self.members,
+                            &self.detail_members,
                             project_name,
                             &self.detail_deps,
                             &self.detail_comments,
@@ -6751,6 +7019,11 @@ impl App {
                 iced::widget::stack![base, command_palette::view(palette)].into()
             }
             Modal::None => base,
+        };
+
+        let content = match self.hover_card_overlay() {
+            Some(card) => iced::widget::stack![content, card].into(),
+            None => content,
         };
 
         // Toasts sit above everything, including any open modal.
