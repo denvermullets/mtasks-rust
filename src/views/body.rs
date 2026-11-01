@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, image, row, span, text};
+use iced::widget::{button, column, container, image, row, scrollable, span, text};
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
@@ -91,7 +91,7 @@ fn collect_images(blocks: &[Block], out: &mut Vec<InlineImage>) {
             Block::Image(img) => out.extend(InlineImage::from_document(img)),
             Block::List(list) => list.items.iter().for_each(|item| collect_images(item, out)),
             Block::Quote(inner) => collect_images(inner, out),
-            Block::Paragraph(_) => {}
+            Block::Paragraph(_) | Block::Code(_) => {}
         }
     }
 }
@@ -165,8 +165,76 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
         }
         Block::Image(img) => image_block(img, ctx),
         Block::List(list) => list_block(list, size, plain, ctx),
+        Block::Code(code) => code_block(code, size),
         Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx),
     }
+}
+
+/// A piece of code text and its color. The seam for syntax highlighting:
+/// [`code_spans`] is the only place that decides colors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeSpan {
+    text: String,
+    color: CodeColor,
+}
+
+/// A color role inside a code block, resolved to a real color at draw time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeColor {
+    Plain,
+}
+
+impl CodeColor {
+    fn color(self) -> Color {
+        match self {
+            CodeColor::Plain => t::CODE_BLOCK_TEXT,
+        }
+    }
+}
+
+/// Split a code block into colored spans. Concatenating the span texts gives
+/// back `text` exactly. Today everything is `Plain`; a highlighter keyed on
+/// `lang` replaces the body (add `CodeColor` roles as it needs them).
+fn code_spans(_lang: Option<&str>, text: &str) -> Vec<CodeSpan> {
+    vec![CodeSpan { text: text.to_string(), color: CodeColor::Plain }]
+}
+
+/// A code block: monospace text in a fixed dark frame. Lines never wrap.
+fn code_block<'a>(code: &document::CodeBlock, size: f32) -> Element<'a, Message> {
+    let spans: Vec<text::Span<'a, Message, iced::Font>> = code_spans(code.lang.as_deref(), &code.text)
+        .into_iter()
+        .map(|s| span(s.text).color(s.color.color()))
+        .collect();
+    let body = iced::widget::rich_text(spans)
+        .font(fonts::code())
+        .size(size)
+        .wrapping(text::Wrapping::None);
+    // Long lines scroll sideways inside the frame. `Both` (not `Horizontal`)
+    // on purpose: a horizontal-only scrollable turns the vertical wheel into
+    // sideways motion and captures it, so the page would stop scrolling over
+    // a code block. With `Both`, vertical wheel input goes to the vertical
+    // axis, which never overflows (height shrinks to the text), so the event
+    // is left uncaptured and the page scrolls. Sideways trackpad motion and
+    // shift+wheel scroll the block. The padding is inside the scrollable so
+    // the scrollbar sits in the bottom padding instead of over the text.
+    let scroll = scrollable(container(body).padding(t::space::S3))
+        .direction(scrollable::Direction::Both {
+            vertical: scrollable::Scrollbar::new().width(0).scroller_width(0),
+            horizontal: scrollable::Scrollbar::new().width(6).scroller_width(6),
+        })
+        .style(|theme: &Theme, status| {
+            let mut s = scrollable::default(theme, status);
+            s.horizontal_rail.scroller.color = Color { a: 0.35, ..t::CODE_BLOCK_TEXT };
+            s
+        });
+    container(scroll)
+        .width(iced::Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::CODE_BLOCK_BG)),
+            border: Border { radius: t::radius::MD.into(), ..Border::default() },
+            ..Default::default()
+        })
+        .into()
 }
 
 /// A quote: a muted left rule beside the content column. Nested quotes get
@@ -248,6 +316,8 @@ enum Run {
     /// A run drawn bold. Wraps the run it styles, so it composes with
     /// other styles (a bold link, a bold mention).
     Bold(Box<Run>),
+    /// Inline code: monospace on a subtle background.
+    Code(String),
 }
 
 /// Map inlines to runs. `resolve` turns an `IDENT-n` token into a link target.
@@ -268,6 +338,7 @@ fn push_runs(inlines: &[Inline], resolve: &impl Fn(&str) -> Option<LinkTarget>, 
                 target: resolve(&format!("{prefix}-{number}")),
             }),
             Inline::Link { text, url } => out.push(Run::Link { text: text.clone(), url: url.clone() }),
+            Inline::Code(s) => out.push(Run::Code(s.clone())),
             Inline::Strong(inner) => {
                 let mut runs = Vec::new();
                 push_runs(inner, resolve, &mut runs);
@@ -287,6 +358,12 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
         }
         Run::Reference { text, target: None } => span(text).color(t::accent()),
         Run::Link { text, url } => span(text).color(t::accent()).link(LinkTarget::External(url)),
+        Run::Code(s) => span(s)
+            .color(plain)
+            .font(fonts::code())
+            .background(t::bg_card())
+            .border(Border { radius: t::radius::SM.into(), ..Border::default() })
+            .padding(iced::Padding { top: 0.0, bottom: 0.0, left: t::space::S1, right: t::space::S1 }),
         Run::Bold(inner) => {
             let mut s = span_for(*inner, plain);
             s.font = Some(fonts::bold(s.font.unwrap_or_else(fonts::active)));
@@ -498,6 +575,44 @@ mod tests {
         assert_eq!(s.color, Some(Color::WHITE));
         let plain = span_for(Run::Plain("x".into()), Color::WHITE);
         assert_eq!(plain.font, None);
+    }
+
+    #[test]
+    fn inline_code_maps_to_code_runs_without_tokens() {
+        let doc = document::parse_with("see `PROJ-7 @Ann` and PROJ-7", "", &["Ann"]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(
+            runs(inl, resolve),
+            [
+                Run::Plain("see ".into()),
+                Run::Code("PROJ-7 @Ann".into()),
+                Run::Plain(" and ".into()),
+                Run::Reference { text: "PROJ-7".into(), target: Some(LinkTarget::Issue("id-7".into())) },
+            ]
+        );
+    }
+
+    #[test]
+    fn code_spans_use_the_code_font_on_the_card_background() {
+        let s = span_for(Run::Code("x".into()), Color::WHITE);
+        assert_eq!(s.font, Some(fonts::code()));
+        assert_eq!(s.highlight.map(|h| h.background), Some(iced::Background::Color(t::bg_card())));
+    }
+
+    #[test]
+    fn code_spans_keep_the_text_exactly() {
+        for text in ["", "a", "if a {\n    b();\n\n\tc();\n}", "ABC-12 @Ann ![x](y)"] {
+            let joined: String = code_spans(Some("rust"), text).into_iter().map(|s| s.text).collect();
+            assert_eq!(joined, text);
+        }
+    }
+
+    #[test]
+    fn code_frame_is_dark_with_legible_text_on_every_theme() {
+        // Relative luminance, sRGB approximated by the channel mean.
+        let lum = |c: Color| (c.r + c.g + c.b) / 3.0;
+        assert!(lum(t::CODE_BLOCK_BG) < 0.2);
+        assert!(lum(CodeColor::Plain.color()) > 0.7);
     }
 
     #[test]

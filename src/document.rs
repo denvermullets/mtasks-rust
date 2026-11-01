@@ -15,7 +15,7 @@
 //! further work. Add the `Block` variant and one renderer arm too.
 
 use crate::mentions::{classify_image_src, find_issue_tokens, find_mentions, ImageKind as MentionKind};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 /// A parsed body.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -35,6 +35,19 @@ pub enum Block {
     List(List),
     /// A `>` quote: any blocks, including lists and further quotes.
     Quote(Vec<Block>),
+    /// A fenced or indented code block: verbatim text, never tokenized.
+    Code(CodeBlock),
+}
+
+/// A code block's language tag and exact text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeBlock {
+    /// First word of the fence's info string (`rust` from a `rust ignore`
+    /// fence); `None` for indented blocks and bare fences.
+    pub lang: Option<String>,
+    /// The lines as written, newlines and indentation kept, without the
+    /// final newline.
+    pub text: String,
 }
 
 /// A list: each item is its own block sequence, so an item can hold
@@ -90,6 +103,9 @@ pub enum Inline {
     /// references in bold text stay tokens. Wrapper inlines for other styles
     /// (emphasis, strikethrough) nest the same way.
     Strong(Vec<Inline>),
+    /// `` `inline code` ``: kept verbatim, never tokenized. Inside link or
+    /// image text it is flattened into the surrounding string.
+    Code(String),
 }
 
 /// Whether a link target may be opened: only `http`, `https` and `mailto`
@@ -239,6 +255,8 @@ struct Builder {
     /// Open wrappers (strong), innermost last: the buffer each one wraps into
     /// and its constructor. The wrapper's own content is in `current`.
     wrappers: Vec<(Vec<Inline>, fn(Vec<Inline>) -> Inline)>,
+    /// The code block being read: (language, text so far).
+    code: Option<(Option<String>, String)>,
 }
 
 /// An open container and what it has collected so far.
@@ -295,6 +313,23 @@ impl Builder {
     }
 
     fn event(&mut self, ev: Event) {
+        if let Some((_, text)) = &mut self.code {
+            match ev {
+                Event::Text(s) => text.push_str(&s),
+                Event::End(TagEnd::CodeBlock) => {
+                    let (lang, mut text) = self.code.take().unwrap_or_default();
+                    if text.ends_with('\n') {
+                        text.pop();
+                        if text.ends_with('\r') {
+                            text.pop();
+                        }
+                    }
+                    self.push_block(Block::Code(CodeBlock { lang, text }));
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Some((_, text)) = &mut self.link {
             match ev {
                 Event::Text(s) | Event::Code(s) => text.push_str(&s),
@@ -363,7 +398,10 @@ impl Builder {
                 }
             }
             Event::Text(s) => self.push_text(&s),
-            Event::Code(s) => self.push_literal(&s),
+            Event::Code(s) if self.html_depth == 0 => {
+                self.flush_pending();
+                self.current.push(Inline::Code(s.to_string()));
+            }
             Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => {
                 self.flush_pending();
@@ -374,9 +412,13 @@ impl Builder {
                 self.literal_depth += 1;
             }
             // A block start ends the text of a tight list item before it.
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) if self.html_depth == 0 => {
                 self.flush();
-                self.literal_depth += 1;
+                let lang = match kind {
+                    CodeBlockKind::Fenced(info) => info.split_whitespace().next().map(str::to_string),
+                    CodeBlockKind::Indented => None,
+                };
+                self.code = Some((lang, String::new()));
             }
             Event::Start(Tag::BlockQuote(_)) => self.open(Frame::Quote(Vec::new())),
             Event::End(TagEnd::BlockQuote(_)) => self.close(),
@@ -385,12 +427,7 @@ impl Builder {
             }
             Event::Start(Tag::HtmlBlock) => self.html_depth += 1,
             Event::End(TagEnd::HtmlBlock) => self.html_depth = self.html_depth.saturating_sub(1),
-            Event::End(end) if is_block_end(&end) => {
-                if end == TagEnd::CodeBlock {
-                    self.literal_depth = self.literal_depth.saturating_sub(1);
-                }
-                self.flush();
-            }
+            Event::End(end) if is_block_end(&end) => self.flush(),
             _ => {}
         }
     }
@@ -493,7 +530,6 @@ fn is_block_end(end: &TagEnd) -> bool {
         end,
         TagEnd::Paragraph
             | TagEnd::Heading(_)
-            | TagEnd::CodeBlock
             | TagEnd::TableCell
             | TagEnd::TableRow
             | TagEnd::TableHead
@@ -506,6 +542,9 @@ mod tests {
 
     fn text(s: &str) -> Inline {
         Inline::Text(s.to_string())
+    }
+    fn code(s: &str) -> Inline {
+        Inline::Code(s.to_string())
     }
     fn para(runs: Vec<Inline>) -> Block {
         Block::Paragraph(runs)
@@ -643,7 +682,7 @@ mod tests {
             (
                 "code inside strong stays one literal run",
                 "**run `x` now**",
-                vec![para(vec![strong(vec![text("run x now")])])],
+                vec![para(vec![strong(vec![text("run "), code("x"), text(" now")])])],
             ),
             (
                 "link inside strong",
@@ -661,7 +700,7 @@ mod tests {
             (
                 "strong in code is literal",
                 "`**x**`",
-                vec![para(vec![text("**x**")])],
+                vec![para(vec![code("**x**")])],
             ),
             (
                 "strong in a second paragraph",
@@ -672,6 +711,75 @@ mod tests {
         for (name, body, want) in cases {
             assert_eq!(parse_with(body, "", &["Ann"]).blocks, want, "{name}");
         }
+    }
+
+    fn code_block(lang: Option<&str>, text: &str) -> Block {
+        Block::Code(CodeBlock { lang: lang.map(str::to_string), text: text.to_string() })
+    }
+
+    #[test]
+    fn parses_code_blocks() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("bare fence", "```\nlet x = 1;\n```", vec![code_block(None, "let x = 1;")]),
+            ("language kept", "```rust\nfn main() {}\n```", vec![code_block(Some("rust"), "fn main() {}")]),
+            ("info string trimmed to first word", "```rust ignore\nx\n```", vec![code_block(Some("rust"), "x")]),
+            ("tilde fence", "~~~py\nx\n~~~", vec![code_block(Some("py"), "x")]),
+            (
+                "line breaks and indentation kept",
+                "```\nif a {\n    b();\n\n\tc();\n}\n```",
+                vec![code_block(None, "if a {\n    b();\n\n\tc();\n}")],
+            ),
+            ("blank first and last lines kept", "```\n\nx\n\n```", vec![code_block(None, "\nx\n")]),
+            ("empty block", "```\n```", vec![code_block(None, "")]),
+            ("indented block", "    a\n      b", vec![code_block(None, "a\n  b")]),
+            ("crlf line endings become newlines", "```\r\na\r\nb\r\n```", vec![code_block(None, "a\nb")]),
+            ("unclosed fence runs to the end", "```\nopen\nmore", vec![code_block(None, "open\nmore")]),
+            (
+                "tokens and markdown stay as written",
+                "```\nABC-12 @Ann **x** [a](http://x.y)\n```",
+                vec![code_block(None, "ABC-12 @Ann **x** [a](http://x.y)")],
+            ),
+            (
+                "between paragraphs",
+                "before\n\n```\nx\n```\n\nafter",
+                vec![para(vec![text("before")]), code_block(None, "x"), para(vec![text("after")])],
+            ),
+            (
+                "inside a list item",
+                "- a\n\n  ```\n  x\n  ```",
+                vec![list(vec![vec![para(vec![text("a")]), code_block(None, "x")]])],
+            ),
+            (
+                "text after a block is not literal",
+                "```\nx\n```\nsee [a](http://x.y)",
+                vec![code_block(None, "x"), para(vec![text("see "), Inline::Link { text: "a".into(), url: "http://x.y".into() }])],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["Ann"]).blocks, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn parses_inline_code() {
+        let cases: Vec<(&str, &str, Vec<Inline>)> = vec![
+            ("simple", "run `ls -la` now", vec![text("run "), code("ls -la"), text(" now")]),
+            ("only code", "`x`", vec![code("x")]),
+            ("two spans", "`a` and `b`", vec![code("a"), text(" and "), code("b")]),
+            ("double backticks hold one", "``a ` b``", vec![code("a ` b")]),
+            ("markers stay literal", "`**x** _y_`", vec![code("**x** _y_")]),
+            ("tokens stay literal", "`ABC-12 @Ann`", vec![code("ABC-12 @Ann")]),
+            ("tokens beside code still tokenize", "@Ann `x` ABC-1", vec![Inline::Mention("@Ann".into()), text(" "), code("x"), text(" "), issue_ref("ABC-1", "ABC", 1)]),
+            ("unclosed stays text", "a `b", vec![text("a `b")]),
+            ("in a link, flattened", "[`x` y](http://a.b)", vec![Inline::Link { text: "x y".into(), url: "http://a.b".into() }]),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["Ann"]).blocks, vec![para(want)], "{name}");
+        }
+    }
+
+    fn issue_ref(t: &str, p: &str, n: i64) -> Inline {
+        Inline::IssueRef { text: t.into(), prefix: p.into(), number: n }
     }
 
     fn list(items: Vec<Vec<Block>>) -> Block {
@@ -731,7 +839,7 @@ mod tests {
             (
                 "inline code in an item stays literal",
                 "- `PROJ-1`",
-                vec![list(vec![vec![para(vec![text("PROJ-1")])]])],
+                vec![list(vec![vec![para(vec![code("PROJ-1")])]])],
             ),
             ("empty item", "- \n- b", vec![list(vec![vec![], vec![para(vec![text("b")])]])]),
             (
@@ -945,17 +1053,17 @@ mod tests {
             (
                 "fenced code is not an image",
                 format!("```\n![a]({BLOB})\n```"),
-                vec![para(vec![text(&format!("![a]({BLOB})\n"))])],
+                vec![code_block(None, &format!("![a]({BLOB})"))],
             ),
             (
                 "inline code is not an image",
                 format!("see `![a]({BLOB})` here"),
-                vec![para(vec![text(&format!("see ![a]({BLOB}) here"))])],
+                vec![para(vec![text(&format!("see ")), code(&format!("![a]({BLOB})")), text(" here")])],
             ),
             (
                 "indented code is not an image",
                 format!("    ![a]({BLOB})"),
-                vec![para(vec![text(&format!("![a]({BLOB})"))])],
+                vec![code_block(None, &format!("![a]({BLOB})"))],
             ),
             (
                 "broken image syntax stays text",
@@ -1003,11 +1111,11 @@ mod tests {
                 "**PROJ-1** and *@ann*",
                 vec![Inline::Strong(vec![issue("PROJ-1", "PROJ", 1)]), text(" and "), mention("@ann")],
             ),
-            ("inline code not tokenized", "`PROJ-1 @ann` x", vec![text("PROJ-1 @ann x")]),
+            ("inline code not tokenized", "`PROJ-1 @ann` x", vec![code("PROJ-1 @ann"), text(" x")]),
             (
                 "code between tokens",
                 "PROJ-1 `PROJ-2` PROJ-3",
-                vec![issue("PROJ-1", "PROJ", 1), text(" PROJ-2 "), issue("PROJ-3", "PROJ", 3)],
+                vec![issue("PROJ-1", "PROJ", 1), text(" "), code("PROJ-2"), text(" "), issue("PROJ-3", "PROJ", 3)],
             ),
             (
                 "link text not tokenized",
@@ -1019,7 +1127,6 @@ mod tests {
                 "<http://a.b/PROJ-1>",
                 vec![Inline::Link { text: "http://a.b/PROJ-1".into(), url: "http://a.b/PROJ-1".into() }],
             ),
-            ("code block not tokenized", "```\nPROJ-1 @ann\n```", vec![text("PROJ-1 @ann\n")]),
         ];
         for (name, body, want) in cases {
             assert_eq!(parse_with(body, "", &names).blocks, vec![para(want)], "{name}");
@@ -1122,7 +1229,7 @@ mod tests {
                 "PROJ-2 [a](http://x.y) PROJ-3",
                 vec![para(vec![issue("PROJ-2", "PROJ", 2), text(" "), link("a", "http://x.y"), text(" "), issue("PROJ-3", "PROJ", 3)])],
             ),
-            ("link in code stays text", "`[a](http://x.y)`", vec![para(vec![text("[a](http://x.y)")])]),
+            ("link in code stays text", "`[a](http://x.y)`", vec![para(vec![code("[a](http://x.y)")])]),
         ];
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
@@ -1178,8 +1285,12 @@ mod tests {
             ("not at a word start", "xhttps://a.b", vec![para(vec![text("xhttps://a.b")])]),
             ("other schemes stay text", "ftp://a.b file:///x javascript:x", vec![para(vec![text("ftp://a.b file:///x javascript:x")])]),
             ("www alone stays text", "www.a.b", vec![para(vec![text("www.a.b")])]),
-            ("inline code stays code", "`https://a.b`", vec![para(vec![text("https://a.b")])]),
-            ("code block stays text", "```\nhttps://a.b\n```", vec![para(vec![text("https://a.b\n")])]),
+            ("inline code stays code", "`https://a.b`", vec![para(vec![Inline::Code("https://a.b".into())])]),
+            (
+                "code block stays text",
+                "```\nhttps://a.b\n```",
+                vec![Block::Code(CodeBlock { lang: None, text: "https://a.b".into() })],
+            ),
             (
                 "existing link is untouched",
                 "[https://x.y](https://a.b)",
