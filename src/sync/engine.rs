@@ -427,6 +427,9 @@ async fn process(
         (dashboards::GROUP_ENTITY_TYPE, "create") => {
             dashboard_group_create(client, &entry.entity_id, entry_id).await
         }
+        (dashboards::GROUP_ENTITY_TYPE, "update") => {
+            dashboard_group_update(client, &entry.entity_id, entry_id).await
+        }
         (dashboards::GROUP_ENTITY_TYPE, "delete") => {
             dashboard_group_delete(client, entry.payload.as_deref()).await
         }
@@ -2769,6 +2772,112 @@ async fn dashboard_group_create(client: &ApiClient, entity_id: &str, entry_id: i
                 Err(e) => Outcome::LeavePending(e),
             }
         }
+        Err(e) => classify(&e),
+    }
+}
+
+struct DashboardGroupUpdatePrep {
+    local_id: String,
+    dashboard_remote_id: i64,
+    remote_id: i64,
+    name: String,
+    description: String,
+    color: String,
+    sources: Vec<dashboards::GroupSource>,
+}
+
+/// Re-read the group, its parent and its sources. Waits (`LeavePending`) while
+/// the group or its dashboard has no server id: their create entries are
+/// earlier in the queue and drain first.
+fn dashboard_group_update_prep(conn: &Connection, entity_id: &str) -> Prep<DashboardGroupUpdatePrep> {
+    let group = match dashboards::get_group(conn, entity_id) {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "dashboard group {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let Some(remote_id) = group.remote_id else {
+        return Prep::Done(Outcome::LeavePending("dashboard group create not yet drained".into()));
+    };
+    let dashboard_remote_id = match dashboards::get(conn, &group.dashboard_id) {
+        Ok(Some(d)) => match d.remote_id {
+            Some(r) => r,
+            None => {
+                return Prep::Done(Outcome::LeavePending("dashboard create not yet drained".into()))
+            }
+        },
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "dashboard group {entity_id}: dashboard missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let sources = match dashboards::sources_for(conn, &group.id) {
+        Ok(s) => s,
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    Prep::Ready(DashboardGroupUpdatePrep {
+        local_id: group.id,
+        dashboard_remote_id,
+        remote_id,
+        name: group.name,
+        description: group.description,
+        color: group.color,
+        sources,
+    })
+}
+
+/// Retire the queue entry, then let the returned sources replace the local
+/// ones (unless a newer edit is already queued), in one transaction.
+fn commit_dashboard_group_update(
+    conn: &mut Connection,
+    entry_id: i64,
+    local_id: &str,
+    dto: &crate::api::dashboards::GroupDto,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
+    sync_queue::mark_synced(&tx, entry_id).map_err(|e| format!("mark_synced: {e}"))?;
+    dashboards::adopt_updated_group(&tx, local_id, dto).map_err(|e| format!("adopt group: {e}"))?;
+    tx.commit().map_err(|e| format!("commit: {e}"))
+}
+
+/// `PATCH /dashboards/:id/groups/:id`. A 404 means it is gone on the server:
+/// done (the next snapshot removes the row).
+async fn dashboard_group_update(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match dashboard_group_update_prep(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let result = crate::api::dashboards::update_group(
+        client,
+        prep.dashboard_remote_id,
+        prep.remote_id,
+        &prep.name,
+        &prep.description,
+        &prep.color,
+        &prep.sources,
+    )
+    .await;
+    match result {
+        Ok(dto) => {
+            let mut conn = match open() {
+                Ok(c) => c,
+                Err(e) => return Outcome::LeavePending(e),
+            };
+            match commit_dashboard_group_update(&mut conn, entry_id, &prep.local_id, &dto) {
+                // The commit already retired the entry.
+                Ok(()) => Outcome::Created,
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
+        Err(ApiError::NotFound(_)) => Outcome::Success,
         Err(e) => classify(&e),
     }
 }
@@ -8312,6 +8421,74 @@ mod tests {
         let g = dashboards::groups_for(&conn, &did).unwrap();
         assert_eq!((g[0].remote_id, g[0].position), (Some(41), 2));
         assert!(!sync_queue::has_pending_entry(&conn, dashboards::GROUP_ENTITY_TYPE, &gid).unwrap());
+    }
+
+    fn group_entry(conn: &Connection, action: &str) -> i64 {
+        sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.entity_type == dashboards::GROUP_ENTITY_TYPE && e.action == action)
+            .and_then(|e| e.id)
+            .unwrap()
+    }
+
+    #[test]
+    fn committing_a_group_update_replaces_sources_with_the_returned_ones_and_retires_the_entry() {
+        let (mut conn, did, gid) = group_prep_db();
+        conn.execute("UPDATE dashboards SET remote_id = 9 WHERE id = ?1", [&did]).unwrap();
+        conn.execute("UPDATE dashboard_groups SET remote_id = 41 WHERE id = ?1", [&gid]).unwrap();
+        let mut draft = dashboards::group_draft(&conn, &gid).unwrap().unwrap();
+        draft.toggle_source(dashboards::SourceType::Team, 4);
+        draft.toggle_source(dashboards::SourceType::Team, 5);
+        dashboards::update_group_local(&conn, &gid, &draft).unwrap();
+        // The server dropped team 5.
+        let dto: crate::api::dashboards::GroupDto = serde_json::from_value(serde_json::json!({
+            "id": 41, "name": "G", "team_ids": [3, 4]
+        }))
+        .unwrap();
+        let entry = group_entry(&conn, "update");
+        commit_dashboard_group_update(&mut conn, entry, &gid, &dto).unwrap();
+        let ids: Vec<_> =
+            dashboards::sources_for(&conn, &gid).unwrap().iter().map(|s| s.remote_id).collect();
+        assert_eq!(ids, [3, 4]);
+        let pending_updates = sync_queue::pending_entries(&conn)
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == "update")
+            .count();
+        assert_eq!(pending_updates, 0);
+    }
+
+    #[test]
+    fn group_update_waits_for_the_group_and_dashboard_creates_then_is_ready() {
+        let (conn, did, gid) = group_prep_db();
+        dashboards::update_group_local(
+            &conn,
+            &gid,
+            &dashboards::group_draft(&conn, &gid).unwrap().unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            dashboard_group_update_prep(&conn, &gid),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        conn.execute("UPDATE dashboard_groups SET remote_id = 41 WHERE id = ?1", [&gid]).unwrap();
+        assert!(matches!(
+            dashboard_group_update_prep(&conn, &gid),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        conn.execute("UPDATE dashboards SET remote_id = 9 WHERE id = ?1", [&did]).unwrap();
+        match dashboard_group_update_prep(&conn, &gid) {
+            Prep::Ready(p) => {
+                assert_eq!((p.dashboard_remote_id, p.remote_id, p.sources.len()), (9, 41, 1));
+            }
+            _ => panic!("expected Ready"),
+        }
+        conn.execute("DELETE FROM dashboard_groups WHERE id = ?1", [&gid]).unwrap();
+        assert!(matches!(
+            dashboard_group_update_prep(&conn, &gid),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
     }
 
     #[test]

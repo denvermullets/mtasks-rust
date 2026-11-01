@@ -86,8 +86,28 @@ pub async fn create_group(
         .await
 }
 
+/// `PATCH /api/v1/dashboards/:dashboard_id/groups/:id`: every field and all
+/// source lists (a full replace). Returns the group in list shape; the caller
+/// adopts the returned sources.
+pub async fn update_group(
+    client: &ApiClient,
+    dashboard_remote_id: i64,
+    id: i64,
+    name: &str,
+    description: &str,
+    color: &str,
+    sources: &[GroupSource],
+) -> Result<GroupDto, ApiError> {
+    client
+        .patch(
+            &format!("api/v1/dashboards/{dashboard_remote_id}/groups/{id}"),
+            &group_body(name, description, color, sources),
+        )
+        .await
+}
+
 /// `{dashboard_group:{..}}` with the five id lists, as remote ids. Shared by
-/// create and (later) edit. `all_*` lists carry only ids that are also sources.
+/// create and edit. `all_*` lists carry only ids that are also sources.
 pub fn group_body(
     name: &str,
     description: &str,

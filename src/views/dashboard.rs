@@ -87,10 +87,15 @@ pub fn view<'a>(
             continue;
         }
         if g.issues.is_empty() {
+            let mut line = row![]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(text(empty_message(g)).size(13).color(t::text_muted()));
+            if g.no_sources {
+                line = line.push(add_sources_button(&g.group.id, read_only));
+            }
             list = list.push(
-                container(text(empty_message(g)).size(13).color(t::text_muted()))
-                    .padding([4, 16])
-                    .height(Length::Fixed(EMPTY_H)),
+                container(line).padding([4, 16]).height(Length::Fixed(EMPTY_H)),
             );
         }
         for (issue_idx, issue) in g.issues.iter().copied().enumerate() {
@@ -283,7 +288,7 @@ fn mine_toggle<'a>(on: bool) -> Element<'a, Message> {
 /// Why a group shows no rows: no sources, unreachable sources, or no matches.
 fn empty_message(g: &GroupResult<'_>) -> &'static str {
     if g.no_sources {
-        "No sources yet. Edit this group to add teams, projects or labels."
+        "No sources yet."
     } else if g.inaccessible {
         "This group's sources are no longer reachable (left, archived or outside your access). Edit or delete the group."
     } else {
@@ -319,6 +324,7 @@ fn group_header<'a>(
     }
     r = r
         .push(horizontal_space())
+        .push(edit_group_button(&g.group.id, read_only))
         .push(move_buttons(&g.group.id, index, count, read_only))
         .push(delete_group_button(&g.group.id, read_only));
     mouse_area(
@@ -343,6 +349,24 @@ pub fn toggle_group(collapsed: &mut CollapsedGroups, dashboard_id: &str, group_i
         set.insert(group_id.to_string());
         true
     }
+}
+
+/// "Add sources" on a group with none: the same edit modal; disabled while read-only.
+fn add_sources_button<'a>(group_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Add sources").size(12))
+        .on_press_maybe((!read_only).then(|| Message::OpenEditGroup(group_id.to_string())))
+        .padding([2, 8])
+        .style(button::secondary)
+        .into()
+}
+
+/// "Edit" on a group header: opens the group modal pre-filled; disabled while read-only.
+fn edit_group_button<'a>(group_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Edit").size(12))
+        .on_press_maybe((!read_only).then(|| Message::OpenEditGroup(group_id.to_string())))
+        .padding([2, 8])
+        .style(button::text)
+        .into()
 }
 
 /// "Delete" on a group header (asks to confirm): disabled while read-only.

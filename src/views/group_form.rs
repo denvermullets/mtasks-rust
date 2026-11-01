@@ -9,7 +9,7 @@ use iced::widget::{button, checkbox, column, container, row, scrollable, text, t
 use iced::{Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::dashboards::{GroupDraft, SourceType, GROUP_SWATCHES};
+use crate::db::dashboards::{GroupDraft, GroupSource, SourceType, GROUP_SWATCHES};
 use crate::db::models::{Label, Project, ProjectStatus, Team};
 use crate::theme as t;
 
@@ -28,10 +28,12 @@ pub fn modal<'a>(
     projects: &'a [Project],
     labels: &'a [Label],
     error: Option<&'static str>,
+    editing: bool,
 ) -> Element<'a, Message> {
+    let (title, submit_label) = if editing { ("Edit group", "Save") } else { ("Add group", "Add group") };
     let mut content = column![]
         .spacing(12)
-        .push(text("Add group").size(18).color(t::text_primary()))
+        .push(text(title).size(18).color(t::text_primary()))
         .push(
             text_input("Name", &draft.name)
                 .id(name_input_id())
@@ -60,7 +62,7 @@ pub fn modal<'a>(
             row![]
                 .spacing(8)
                 .push(
-                    button(text("Add group").size(14))
+                    button(text(submit_label).size(14))
                         .on_press(Message::GroupSubmit)
                         .padding([8, 24])
                         .style(button::primary),
@@ -125,6 +127,80 @@ fn source_picker<'a>(
     col = col.push(team_sources(draft, teams));
     col = col.push(project_sources(draft, teams, projects));
     col = col.push(label_sources(draft, teams, labels));
+    col = col.push(unavailable_section(draft, teams, projects, labels));
+    col.into()
+}
+
+/// Sources of the draft that the pickers above don't offer (not mirrored here,
+/// team archived or unsynced, project or label gone). They stay in the group
+/// until removed, so they are listed apart. Same rules as the pickers.
+pub fn unavailable_sources(
+    draft: &GroupDraft,
+    teams: &[Team],
+    projects: &[Project],
+    labels: &[Label],
+) -> Vec<GroupSource> {
+    let pickable = pickable_teams(teams);
+    let offered_team = |remote: i64| pickable.iter().any(|t| t.remote_id == Some(remote));
+    let offered_project = |remote: i64| {
+        pickable.iter().any(|t| {
+            pickable_projects(projects, &t.id, draft).iter().any(|p| p.remote_id == Some(remote))
+        })
+    };
+    let offered_label = |remote: i64| {
+        pickable
+            .iter()
+            .any(|t| pickable_labels(labels, &t.id).iter().any(|l| l.remote_id == Some(remote)))
+    };
+    draft
+        .sources
+        .iter()
+        .copied()
+        .filter(|s| {
+            !match s.source_type {
+                SourceType::Team => offered_team(s.remote_id),
+                SourceType::Project => offered_project(s.remote_id),
+                SourceType::Label => offered_label(s.remote_id),
+            }
+        })
+        .collect()
+}
+
+fn unavailable_section<'a>(
+    draft: &'a GroupDraft,
+    teams: &'a [Team],
+    projects: &'a [Project],
+    labels: &'a [Label],
+) -> Element<'a, Message> {
+    let missing = unavailable_sources(draft, teams, projects, labels);
+    let mut col: Column<'a, Message> = column![].spacing(4);
+    if missing.is_empty() {
+        return col.into();
+    }
+    col = col.push(text("Unavailable").size(12).color(t::text_muted()));
+    for s in missing {
+        let kind = match s.source_type {
+            SourceType::Team => "Team",
+            SourceType::Project => "Project",
+            SourceType::Label => "Label",
+        };
+        col = col.push(
+            row![]
+                .spacing(12)
+                .align_y(iced::Alignment::Center)
+                .push(
+                    text(format!("{kind} #{} (not available here)", s.remote_id))
+                        .size(13)
+                        .color(t::text_secondary()),
+                )
+                .push(
+                    button(text("Remove").size(12))
+                        .on_press(Message::GroupToggleSource(s.source_type, s.remote_id))
+                        .padding([2, 8])
+                        .style(button::text),
+                ),
+        );
+    }
     col.into()
 }
 
@@ -335,6 +411,50 @@ mod tests {
         let ls = [l("bug", "t", Some(1)), l("Aardvark", "t", Some(2)), l("local", "t", None), l("x", "u", Some(3))];
         let names: Vec<_> = pickable_labels(&ls, "t").iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["Aardvark", "bug"]);
+    }
+
+    #[test]
+    fn sources_the_pickers_dont_offer_are_listed_as_unavailable() {
+        let teams = [team("t", Some(1), false), team("old", Some(2), true)];
+        let ps = [project("p", "t", Some(10), None)];
+        let l = |n: &str, r: i64| Label {
+            id: n.into(),
+            remote_id: Some(r),
+            team_id: "t".into(),
+            name: n.into(),
+            color: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let ls = [l("bug", 20)];
+        let mut draft = GroupDraft::default();
+        for (ty, id) in [
+            (SourceType::Team, 1),
+            (SourceType::Team, 2),
+            (SourceType::Team, 99),
+            (SourceType::Project, 10),
+            (SourceType::Project, 98),
+            (SourceType::Label, 20),
+            (SourceType::Label, 97),
+        ] {
+            draft.toggle_source(ty, id);
+        }
+        let got: Vec<_> = unavailable_sources(&draft, &teams, &ps, &ls)
+            .iter()
+            .map(|s| (s.source_type, s.remote_id))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (SourceType::Team, 2),
+                (SourceType::Team, 99),
+                (SourceType::Project, 98),
+                (SourceType::Label, 97)
+            ]
+        );
+        // Removing one is the same toggle the checkboxes use.
+        draft.toggle_source(SourceType::Team, 99);
+        assert_eq!(unavailable_sources(&draft, &teams, &ps, &ls).len(), 3);
     }
 
     #[test]
