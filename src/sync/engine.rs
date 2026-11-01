@@ -31,7 +31,7 @@ use crate::api::{
     LabelParams, MeDto, ProjectParams, RecurringIssueParams,
 };
 use crate::db::models::{CommentOwner, Issue, Priority, Project, SyncQueueEntry};
-use crate::db::{connection, queries, sync_queue};
+use crate::db::{connection, dashboards, queries, sync_queue};
 use crate::sync::cursor;
 
 #[derive(Debug, Default, Clone)]
@@ -421,6 +421,9 @@ async fn process(
         }
         ("saved_view", "rename") => saved_view_update(client, &entry.entity_id, true).await,
         ("saved_view", "delete") => saved_view_delete(client, entry.payload.as_deref()).await,
+        (dashboards::ENTITY_TYPE, "create") => {
+            dashboard_create(client, &entry.entity_id, entry_id).await
+        }
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -2549,6 +2552,73 @@ fn resolve_query_placeholders(
 fn log_dropped_placeholders(entity_id: &str, dropped: &[String]) {
     for d in dropped {
         eprintln!("saved_view {entity_id}: left unresolved placeholder out of push ({d})");
+    }
+}
+
+// ── Dashboards ────────────────────────────────────────────────────────────
+//
+// Dashboards are user-level (no team), so errors go through plain `classify`.
+// A later dashboard entry that needs a parent's server id follows
+// `dashboard_create_prep`: read the row and `LeavePending` while `remote_id`
+// is still `None` (the earlier create entry drains first, FIFO).
+
+struct DashboardCreatePrep {
+    local_id: String,
+    name: String,
+    description: String,
+}
+
+fn dashboard_create_prep(conn: &Connection, entity_id: &str) -> Prep<DashboardCreatePrep> {
+    match dashboards::get(conn, entity_id) {
+        Ok(Some(d)) if d.remote_id.is_some() => Prep::Done(Outcome::Success),
+        Ok(Some(d)) => Prep::Ready(DashboardCreatePrep {
+            local_id: d.id,
+            name: d.name,
+            description: d.description,
+        }),
+        // Deleted before it was ever pushed.
+        Ok(None) => Prep::Done(Outcome::DropAndLog(format!(
+            "dashboard {entity_id} missing locally"
+        ))),
+        Err(e) => Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    }
+}
+
+/// Adopt the server's row and retire the queue entry together.
+fn commit_dashboard_create(
+    conn: &mut Connection,
+    entry_id: i64,
+    local_id: &str,
+    dto: &crate::api::dashboards::DashboardDto,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
+    dashboards::adopt_created(&tx, local_id, dto).map_err(|e| format!("adopt dashboard: {e}"))?;
+    sync_queue::mark_synced(&tx, entry_id).map_err(|e| format!("mark_synced: {e}"))?;
+    tx.commit().map_err(|e| format!("commit: {e}"))
+}
+
+/// `POST /dashboards`. Rails has no lookup for these, so a re-drain after a
+/// lost response creates a second server row that the pull mirrors separately.
+async fn dashboard_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match dashboard_create_prep(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    match crate::api::dashboards::create(client, &prep.name, &prep.description).await {
+        Ok(dto) => {
+            let mut conn = match open() {
+                Ok(c) => c,
+                Err(e) => return Outcome::LeavePending(e),
+            };
+            match commit_dashboard_create(&mut conn, entry_id, &prep.local_id, &dto) {
+                Ok(()) => Outcome::Created,
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
+        Err(e) => classify(&e),
     }
 }
 
