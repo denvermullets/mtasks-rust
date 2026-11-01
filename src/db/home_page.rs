@@ -289,6 +289,16 @@ mod tests {
     }
 
     #[test]
+    fn setting_a_dashboard_stores_it_and_queues_the_dashboard_kind() {
+        let conn = mem();
+        set_local(&conn, "team", 7).unwrap();
+        set_local(&conn, "dashboard", 3).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Dashboard(3) }));
+        let pending = crate::db::sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(parse_payload(pending[1].payload.as_deref()), Some(("dashboard".into(), 3)));
+    }
+
+    #[test]
     fn a_pending_set_is_not_overwritten_by_me() {
         let conn = mem();
         apply_me(&conn, Some(&dto("team", 1))).unwrap();

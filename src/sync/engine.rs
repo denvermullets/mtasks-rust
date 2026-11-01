@@ -427,6 +427,10 @@ async fn process(
         (dashboards::GROUP_ENTITY_TYPE, "create") => {
             dashboard_group_create(client, &entry.entity_id, entry_id).await
         }
+        (dashboards::ENTITY_TYPE, "update") => dashboard_update(client, &entry.entity_id).await,
+        (dashboards::ENTITY_TYPE, "delete") => {
+            dashboard_delete(client, entry.payload.as_deref()).await
+        }
         (et, ac) => Outcome::DropAndLog(format!("unsupported ({et},{ac})")),
     }
 }
@@ -2625,6 +2629,43 @@ async fn dashboard_create(client: &ApiClient, entity_id: &str, entry_id: i64) ->
     }
 }
 
+struct DashboardUpdatePrep {
+    remote_id: i64,
+    name: String,
+    description: String,
+}
+
+/// Waits (`LeavePending`) while the dashboard's create hasn't been adopted.
+fn dashboard_update_prep(conn: &Connection, entity_id: &str) -> Prep<DashboardUpdatePrep> {
+    match dashboards::get(conn, entity_id) {
+        Ok(Some(d)) => match d.remote_id {
+            Some(remote_id) => Prep::Ready(DashboardUpdatePrep {
+                remote_id,
+                name: d.name,
+                description: d.description,
+            }),
+            None => Prep::Done(Outcome::LeavePending("dashboard create not yet drained".into())),
+        },
+        Ok(None) => Prep::Done(Outcome::DropAndLog(format!("dashboard {entity_id} missing locally"))),
+        Err(e) => Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    }
+}
+
+/// `PATCH /dashboards/:id`. A 404 means it is gone on the server: done (the
+/// next snapshot removes the row).
+async fn dashboard_update(client: &ApiClient, entity_id: &str) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match dashboard_update_prep(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let result =
+        crate::api::dashboards::update(client, prep.remote_id, &prep.name, &prep.description).await;
+    done_if_gone(result, |_| {})
+}
+
 struct DashboardGroupCreatePrep {
     local_id: String,
     /// The parent dashboard's server id, resolved at push time.
@@ -2933,6 +2974,18 @@ fn saved_view_delete_id(payload: Option<&str>) -> Option<i64> {
 }
 
 fn saved_view_delete_outcome(result: Result<(), ApiError>) -> Outcome {
+    done_if_gone(result, |()| {})
+}
+
+/// `DELETE /dashboards/:id`. A 404 means it is already gone: done.
+async fn dashboard_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let Some(remote_id) = saved_view_delete_id(payload) else {
+        return Outcome::DropAndLog("dashboard delete: bad payload".into());
+    };
+    dashboard_delete_outcome(crate::api::dashboards::delete(client, remote_id).await)
+}
+
+fn dashboard_delete_outcome(result: Result<(), ApiError>) -> Outcome {
     done_if_gone(result, |()| {})
 }
 
@@ -6065,6 +6118,19 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_delete_treats_success_and_404_as_done_and_retries_the_rest() {
+        assert!(matches!(dashboard_delete_outcome(Ok(())), Outcome::Success));
+        assert!(matches!(
+            dashboard_delete_outcome(Err(ApiError::NotFound("gone".into()))),
+            Outcome::Success
+        ));
+        assert!(matches!(
+            dashboard_delete_outcome(Err(ApiError::MissingToken)),
+            Outcome::LeavePending(_)
+        ));
+    }
+
+    #[test]
     fn saved_view_delete_treats_success_and_404_as_done() {
         assert!(matches!(saved_view_delete_outcome(Ok(())), Outcome::Success));
         assert!(matches!(
@@ -6129,6 +6195,25 @@ mod tests {
         assert!(is_legacy_rename_payload(Some(r#"{"only":"name"}"#)));
         assert!(!is_legacy_rename_payload(Some("{}")));
         assert!(!is_legacy_rename_payload(None));
+    }
+
+    #[test]
+    fn dashboard_update_waits_for_the_create_then_pushes_the_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let d = dashboards::create_local(&conn, "A", "").unwrap();
+        dashboards::update_local(&conn, &d.id, "B", "z").unwrap();
+        assert!(matches!(
+            dashboard_update_prep(&conn, &d.id),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        conn.execute("UPDATE dashboards SET remote_id = 9 WHERE id = ?1", [&d.id]).unwrap();
+        let Prep::Ready(p) = dashboard_update_prep(&conn, &d.id) else { panic!("ready") };
+        assert_eq!((p.remote_id, p.name.as_str(), p.description.as_str()), (9, "B", "z"));
+        assert!(matches!(
+            dashboard_update_prep(&conn, "nope"),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
     }
 
     #[test]

@@ -83,6 +83,8 @@ pub enum Message {
     RevertSavedView,
     /// Ask to delete a Saved view (local id).
     ConfirmDeleteSavedView(String),
+    ConfirmDeleteDashboard(String),
+    DeleteDashboardConfirmed,
     OpenRenameSavedView(String),
     DeleteSavedViewConfirmed,
     /// Make a Saved view (local id) the user's Home page.
@@ -102,6 +104,8 @@ pub enum Message {
     ToggleTeamMenu(String),
     /// Make a team's board the user's Home page (local UUID).
     SetTeamAsHome(String),
+    /// Make a dashboard the user's Home page (local UUID).
+    SetDashboardAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
     /// Open the read-only members panel for a team (local UUID).
@@ -272,6 +276,8 @@ pub enum Message {
     // Header bar
     /// Header search box changed; filters the current view's items.
     HeaderSearchChanged(String),
+    /// Dashboard header: flip the Mine toggle.
+    ToggleDashboardMine,
     /// Focus the header search box (Cmd+F).
     FocusSearch,
     /// "Display" button: open the display-options popover.
@@ -288,6 +294,9 @@ pub enum Message {
     SaveViewSubmit,
     /// Sidebar "New dashboard": open the create modal.
     OpenNewDashboard,
+    /// Opens the rename/description modal for the dashboard with this local id.
+    OpenEditDashboard(String),
+    EditDashboardSubmit,
     NewDashboardNameChanged(String),
     NewDashboardDescriptionChanged(String),
     NewDashboardSubmit,
@@ -306,6 +315,8 @@ pub enum Message {
     ToggleViewMode,
     /// List mode: collapse/expand the section with this title (header click).
     ToggleSection(String),
+    /// Collapse/expand a dashboard group (its local id) on the open dashboard.
+    ToggleDashboardGroup(String),
     /// List mode `c`: collapse/expand the focused section.
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
@@ -493,10 +504,13 @@ pub enum Modal {
     DeleteRecurringConfirm(String),
     /// Confirm deleting a Saved view (local id) from the sidebar.
     DeleteSavedViewConfirm(String),
+    DeleteDashboardConfirm(String),
     /// Name prompt for saving the current board as a new Saved view.
     SaveView,
     /// "New dashboard" form; state in `App::dashboard_form`.
     NewDashboard,
+    /// Rename/description form; target id in `DashboardForm::editing`.
+    EditDashboard,
     /// "Add group" form on the open dashboard; state in `App::group_form`.
     NewGroup,
     /// Name prompt for renaming a Saved view (local id).
@@ -694,6 +708,8 @@ impl SortDir {
 /// Dashboard name/description modal state; the rename ticket reuses it.
 #[derive(Debug, Default, Clone)]
 pub struct DashboardForm {
+    /// Local id of the dashboard being edited (None when creating).
+    pub editing: Option<String>,
     pub name: String,
     pub description: String,
     /// Inline validation error under the name field.
@@ -719,6 +735,8 @@ pub struct App {
     dashboard_groups: Vec<crate::dashboard_eval::GroupConfig>,
     /// Header state of the open dashboard. Per-dashboard memory is a later ticket.
     dashboard_header: crate::dashboard_eval::Header,
+    /// Collapsed group ids per dashboard, for the session.
+    collapsed_dashboard_groups: crate::views::dashboard::CollapsedGroups,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -1051,12 +1069,32 @@ impl App {
             },
             current_user_remote_id: self.config.current_user_remote_id,
             today: chrono::Local::now().date_naive(),
-            header: self.dashboard_header,
+            header: crate::dashboard_eval::Header {
+                search: self.active_search().to_string(),
+                ..self.dashboard_header.clone()
+            },
         })
     }
 
     /// Switch to `view`, reloading data when crossing in or out of the
     /// cross-team views (their data replaces the per-team data).
+    /// Remove a dashboard locally and queue its server delete if it was pushed.
+    fn delete_dashboard(&mut self, id: &str) {
+        match crate::db::dashboards::delete_local(&self.db(), id) {
+            Ok(Some(payload)) => {
+                self.enqueue_sync(
+                    crate::db::dashboards::ENTITY_TYPE,
+                    id,
+                    "delete",
+                    Some(payload.as_str()),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[dashboards] delete failed: {e}"),
+        }
+        self.reload_data();
+    }
+
     fn switch_view(&mut self, view: View) {
         let crossing = self.view.is_cross_team() != view.is_cross_team()
             || matches!(view, View::Dashboard(_));
@@ -1584,6 +1622,7 @@ impl App {
             self.view,
             View::Board
                 | View::MyIssues
+                | View::Dashboard(_)
                 | View::ProjectList
                 | View::ProjectDetail(_)
                 | View::Roadmap
@@ -1676,9 +1715,30 @@ impl App {
         }
     }
 
+    /// Whether j/k/h/l use list-mode navigation: the list display mode, or a
+    /// dashboard (always a list of groups).
+    fn list_nav_active(&self) -> bool {
+        matches!(self.view, View::Dashboard(_)) || self.board_display().view_mode == ViewMode::List
+    }
+
     /// Per-section counts for list-mode navigation: collapsed sections count
     /// as empty so j/k and h/l skip their hidden rows.
     fn list_nav_counts(&self) -> Vec<usize> {
+        if let View::Dashboard(did) = &self.view {
+            let collapsed = self.collapsed_dashboard_groups.get(did);
+            return self
+                .dashboard_evaluation()
+                .groups
+                .iter()
+                .map(|g| {
+                    if collapsed.is_some_and(|c| c.contains(&g.group.id)) {
+                        0
+                    } else {
+                        g.issues.len()
+                    }
+                })
+                .collect();
+        }
         self.board_columns()
             .iter()
             .map(|c| {
@@ -1695,6 +1755,40 @@ impl App {
     /// view. Positions come from fixed element heights (see `scroll`); the
     /// current offset and viewport height come from `Message::Scrolled`.
     fn scroll_to_focus(&mut self) -> Task<Message> {
+        if let View::Dashboard(did) = &self.view {
+            let collapsed = self.collapsed_dashboard_groups.get(did);
+            let groups: Vec<crate::views::dashboard::SpanGroup> = self
+                .dashboard_evaluation()
+                .groups
+                .iter()
+                .map(|g| crate::views::dashboard::SpanGroup {
+                    len: g.issues.len(),
+                    collapsed: collapsed.is_some_and(|c| c.contains(&g.group.id)),
+                })
+                .collect();
+            if self.focused_issue >= groups.get(self.focused_lane).map_or(0, |g| g.len)
+                || groups[self.focused_lane].collapsed
+            {
+                return Task::none();
+            }
+            let (top, height) =
+                crate::views::dashboard::focused_span(&groups, self.focused_lane, self.focused_issue);
+            let key = issue_list::SCROLL_KEY;
+            let (offset, viewport) = self
+                .scroll_state
+                .get(&key)
+                .copied()
+                .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+            let new = scroll::offset_to_reveal(top, height, offset, viewport);
+            if (new - offset).abs() < 0.5 {
+                return Task::none();
+            }
+            self.scroll_state.insert(key, (new, viewport));
+            return scrollable::scroll_to(
+                crate::views::dashboard::scroll_id(),
+                scrollable::AbsoluteOffset { x: 0.0, y: new },
+            );
+        }
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
@@ -2753,6 +2847,7 @@ impl App {
             group_form: GroupForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
+            collapsed_dashboard_groups: Default::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -2994,6 +3089,18 @@ impl App {
                         return self.update(msg);
                     }
                 }
+                if matches!(self.view, View::Dashboard(_)) && !modal_open {
+                    if let Some(msg) = keys::handle_dashboard_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
+                if matches!(self.view, View::Dashboard(_))
+                    && !modal_open
+                    && modifiers.is_empty()
+                    && matches!(&key, iced::keyboard::Key::Character(c) if c.as_str() == "c")
+                {
+                    return self.update(Message::ToggleFocusedSection);
+                }
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
                 }
@@ -3089,6 +3196,62 @@ impl App {
                     self.dashboard_form = DashboardForm::default();
                     self.modal = Modal::NewDashboard;
                     return text_input::focus(dashboard_name_input_id());
+                }
+            }
+
+            Message::OpenEditDashboard(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't edit a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Ok(Some(d)) = crate::db::dashboards::get(&self.db(), &id) {
+                    self.dashboard_form = DashboardForm {
+                        editing: Some(d.id),
+                        name: d.name,
+                        description: d.description,
+                        error: None,
+                    };
+                    self.modal = Modal::EditDashboard;
+                    return text_input::focus(dashboard_name_input_id());
+                }
+            }
+
+            Message::EditDashboardSubmit => {
+                if self.modal != Modal::EditDashboard {
+                    return Task::none();
+                }
+                let Some(id) = self.dashboard_form.editing.clone() else {
+                    return Task::none();
+                };
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't edit a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::update_local(
+                    &self.db(),
+                    &id,
+                    &self.dashboard_form.name,
+                    &self.dashboard_form.description,
+                ) {
+                    Ok(_) => {
+                        self.modal = Modal::None;
+                        self.dashboard_form = DashboardForm::default();
+                        self.reload_data();
+                    }
+                    Err(crate::db::dashboards::CreateError::Name(e)) => {
+                        self.dashboard_form.error = Some(e.message());
+                    }
+                    Err(crate::db::dashboards::CreateError::Db(e)) => {
+                        eprintln!("[dashboards] update failed: {e}");
+                        self.dashboard_form.error = Some("Couldn't save the dashboard");
+                    }
                 }
             }
 
@@ -3371,6 +3534,30 @@ impl App {
                 }
             }
 
+            Message::ConfirmDeleteDashboard(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete a dashboard",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteDashboardConfirm(id);
+                }
+            }
+
+            Message::DeleteDashboardConfirmed => {
+                let Modal::DeleteDashboardConfirm(id) =
+                    std::mem::replace(&mut self.modal, Modal::None)
+                else {
+                    return Task::none();
+                };
+                self.delete_dashboard(&id);
+                if self.view == View::Dashboard(id) {
+                    return self.update_inner(Message::NavigateToView(View::Board));
+                }
+            }
+
             Message::DeleteSavedViewConfirmed => {
                 let Modal::DeleteSavedViewConfirm(view_id) =
                     std::mem::replace(&mut self.modal, Modal::None)
@@ -3578,6 +3765,12 @@ impl App {
                 self.focused_issue = 0;
             }
 
+            Message::ToggleDashboardMine => {
+                self.dashboard_header.mine = !self.dashboard_header.mine;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
             Message::SetDashboardFilter(filter) => {
                 self.dashboard_header.filter = filter;
                 self.focused_lane = 0;
@@ -3621,6 +3814,24 @@ impl App {
                     self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
                 } else {
                     self.push_toast("This team hasn't synced yet", ToastKind::Error, false);
+                }
+            }
+
+            Message::SetDashboardAsHome(dashboard_id) => {
+                let found = self.dashboards.iter().find(|d| d.id == dashboard_id).map(|d| d.remote_id);
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't change the Home page",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else if let Some(Some(rid)) = found {
+                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "dashboard", rid) {
+                        eprintln!("[home_page] set failed: {e}");
+                    }
+                    self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
+                } else if found.is_some() {
+                    self.push_toast("This dashboard hasn't synced yet", ToastKind::Error, false);
                 }
             }
 
@@ -4239,7 +4450,7 @@ impl App {
             }
 
             Message::FocusNextIssue | Message::FocusPrevIssue
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: j/k walk rows top-to-bottom across sections.
                 let counts = self.list_nav_counts();
@@ -4253,7 +4464,7 @@ impl App {
                 return self.scroll_to_focus();
             }
             Message::FocusNextLane | Message::FocusPrevLane
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: h/l jump to the next/previous non-empty section.
                 let counts = self.list_nav_counts();
@@ -4309,6 +4520,9 @@ impl App {
                 if matches!(self.view, View::Board | View::MyIssues) {
                     self.focused_issue = 0;
                     self.clamp_focus();
+                } else if matches!(self.view, View::Dashboard(_)) {
+                    self.focused_lane = 0;
+                    self.focused_issue = 0;
                 }
             }
             Message::FocusSearch => {
@@ -4332,6 +4546,25 @@ impl App {
             Message::ToggleSection(title) => {
                 if !self.collapsed_sections.remove(&title) {
                     self.collapsed_sections.insert(title);
+                }
+            }
+            Message::ToggleDashboardGroup(group_id) => {
+                if let View::Dashboard(did) = self.view.clone() {
+                    crate::views::dashboard::toggle_group(
+                        &mut self.collapsed_dashboard_groups,
+                        &did,
+                        &group_id,
+                    );
+                }
+            }
+            Message::ToggleFocusedSection if matches!(self.view, View::Dashboard(_)) => {
+                let gid = self
+                    .dashboard_evaluation()
+                    .groups
+                    .get(self.focused_lane)
+                    .map(|g| g.group.id.clone());
+                if let Some(gid) = gid {
+                    return self.update(Message::ToggleDashboardGroup(gid));
                 }
             }
             Message::ToggleFocusedSection => {
@@ -6022,10 +6255,15 @@ impl App {
                         issue_labels: &self.issue_labels,
                         display: self.board_display(),
                     },
+                    self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
                     self.focused_lane,
                     self.focused_issue,
-                    self.dashboard_header,
+                    self.dashboard_header.clone(),
                     self.sync_read_only,
+                    self.dashboards
+                        .iter()
+                        .find(|d| d.id == *id)
+                        .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
                 )
             }
         };
@@ -6173,7 +6411,22 @@ impl App {
             }
             Modal::NewDashboard => iced::widget::stack![
                 base,
-                dashboard_form_modal("New dashboard", "Create", &self.dashboard_form)
+                dashboard_form_modal(
+                    "New dashboard",
+                    "Create",
+                    Message::NewDashboardSubmit,
+                    &self.dashboard_form
+                )
+            ]
+            .into(),
+            Modal::EditDashboard => iced::widget::stack![
+                base,
+                dashboard_form_modal(
+                    "Edit dashboard",
+                    "Save",
+                    Message::EditDashboardSubmit,
+                    &self.dashboard_form
+                )
             ]
             .into(),
             Modal::NewGroup => iced::widget::stack![
@@ -6195,6 +6448,22 @@ impl App {
                 save_view_modal("Rename view", &self.save_view_name, self.save_view_error)
             ]
             .into(),
+            Modal::DeleteDashboardConfirm(id) => {
+                let name = self
+                    .dashboards
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default();
+                let body = format!(
+                    "Delete the dashboard \"{name}\" and its groups? Issues are not affected."
+                );
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Dashboard?", body, Message::DeleteDashboardConfirmed)
+                ]
+                .into()
+            }
             Modal::DeleteSavedViewConfirm(view_id) => {
                 let name = self
                     .saved_views
@@ -6526,6 +6795,7 @@ fn dashboard_name_input_id() -> text_input::Id {
 fn dashboard_form_modal<'a>(
     title: &'a str,
     submit_label: &'a str,
+    submit: Message,
     form: &'a DashboardForm,
 ) -> Element<'a, Message> {
     use iced::widget::{button, text};
@@ -6537,7 +6807,7 @@ fn dashboard_form_modal<'a>(
             text_input("Name", &form.name)
                 .id(dashboard_name_input_id())
                 .on_input(Message::NewDashboardNameChanged)
-                .on_submit(Message::NewDashboardSubmit)
+                .on_submit(submit.clone())
                 .padding([6, 10])
                 .size(14)
                 .width(Length::Fixed(360.0)),
@@ -6549,7 +6819,7 @@ fn dashboard_form_modal<'a>(
         .push(
             text_input("Description (optional)", &form.description)
                 .on_input(Message::NewDashboardDescriptionChanged)
-                .on_submit(Message::NewDashboardSubmit)
+                .on_submit(submit.clone())
                 .padding([6, 10])
                 .size(14)
                 .width(Length::Fixed(360.0)),
@@ -6559,7 +6829,7 @@ fn dashboard_form_modal<'a>(
                 .spacing(8)
                 .push(
                     button(text(submit_label).size(14))
-                        .on_press(Message::NewDashboardSubmit)
+                        .on_press(submit)
                         .padding([8, 24])
                         .style(button::primary),
                 )
