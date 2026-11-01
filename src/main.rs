@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod body_cache;
 mod body_hover;
 mod config;
 mod csv_io;

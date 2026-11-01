@@ -80,7 +80,7 @@ impl InlineImage {
 /// Every image block of `body`, in reading order (JRST-193 lightbox paging).
 pub fn image_list(body: &str, host: &str) -> Vec<InlineImage> {
     let mut out = Vec::new();
-    collect_images(&document::parse_with(body, host, &[]).blocks, &mut out);
+    collect_images(&crate::body_cache::parsed(body, host, &[]).doc.blocks, &mut out);
     out
 }
 
@@ -147,7 +147,8 @@ pub struct BodyCtx<'a> {
 /// arm to [`span_for`].
 pub fn view<'a>(body: &str, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
-    let doc = document::parse_with(body, ctx.host, &names);
+    let parsed = crate::body_cache::parsed(body, ctx.host, &names);
+    let doc = &parsed.doc;
     let mut col = column![].spacing(t::space::S2);
     for b in &doc.blocks {
         col = col.push(block(b, size, plain, ctx));
