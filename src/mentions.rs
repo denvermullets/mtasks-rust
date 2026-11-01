@@ -238,7 +238,7 @@ fn is_uuid(s: &str) -> bool {
 
 /// Classify an image URL. Only JAIT blob URLs and pending placeholders pass;
 /// `host` is the configured base URL (trailing slash tolerated).
-fn classify_image_src<'a>(src: &'a str, host: &str) -> Option<ImageKind<'a>> {
+pub(crate) fn classify_image_src<'a>(src: &'a str, host: &str) -> Option<ImageKind<'a>> {
     if let Some(id) = src.strip_prefix(PENDING_SCHEME) {
         return is_uuid(id).then_some(ImageKind::Pending(id));
     }
