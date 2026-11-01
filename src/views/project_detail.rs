@@ -175,7 +175,7 @@ pub fn view<'a>(
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(
-            comments, detail, members, team, teams, issues, comment_attachments, images,
+            comments, detail, members, team, teams, issues, comment_attachments, images, host,
         ));
 
     // ---- Right sidebar: properties ----
@@ -299,6 +299,7 @@ fn discussion_section<'a>(
     issues: &'a [Issue],
     comment_attachments: &'a CommentAttachments,
     images: &'a crate::files::images::ImageStore,
+    host: &'a str,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
@@ -318,6 +319,7 @@ fn discussion_section<'a>(
         suggest: detail.suggest.as_ref(),
         comment_attachments,
         images,
+        host,
     };
     push_thread(col, Comment::thread_order(comments), &ctx)
         .push(new_comment_composer(

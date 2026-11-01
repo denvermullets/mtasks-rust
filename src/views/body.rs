@@ -69,6 +69,16 @@ pub fn fetchable_srcs(body: &str, host: &str) -> Vec<String> {
         .collect()
 }
 
+/// Fetchable (blob) image srcs across `bodies`, in order; pending placeholders skipped.
+pub fn blob_srcs<'b>(bodies: impl IntoIterator<Item = &'b str>, host: &str) -> Vec<String> {
+    bodies
+        .into_iter()
+        .flat_map(|b| image_list(b, host))
+        .filter(|i| i.key.is_some())
+        .map(|i| i.src)
+        .collect()
+}
+
 /// True when `body` has at least one image block.
 pub fn has_images(body: &str, host: &str) -> bool {
     body_segments(body, host)
@@ -211,6 +221,21 @@ mod tests {
         assert_eq!(
             fetchable_srcs(body, HOST),
             ["/rails/active_storage/blobs/redirect/AA--1/a.png"]
+        );
+    }
+
+    #[test]
+    fn blob_srcs_collects_fetchable_images_across_bodies() {
+        let a = "![one](/rails/active_storage/blobs/redirect/AA--1/one.png)";
+        let b = "text ![p](jait-pending://123e4567-e89b-12d3-a456-426614174000) \
+                 ![two](/rails/active_storage/blobs/redirect/BB--2/two.png)";
+        let srcs = blob_srcs([a, b, "none"], HOST);
+        assert_eq!(
+            srcs,
+            [
+                "/rails/active_storage/blobs/redirect/AA--1/one.png",
+                "/rails/active_storage/blobs/redirect/BB--2/two.png"
+            ]
         );
     }
 

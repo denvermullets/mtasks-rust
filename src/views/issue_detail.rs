@@ -231,6 +231,7 @@ pub fn view<'a>(
                 suggest: detail.suggest.as_ref(),
                 comment_attachments,
                 images,
+                host,
             },
         ));
 
@@ -906,6 +907,8 @@ pub struct ThreadCtx<'a, 'b> {
     pub comment_attachments: &'a CommentAttachments,
     /// Image fetch state, for attachment thumbnails.
     pub images: &'a ImageStore,
+    /// Configured JAIT base URL (resolves inline image URLs).
+    pub host: &'a str,
 }
 
 /// Comment local id -> its files (absent when it has none).
@@ -1101,14 +1104,20 @@ fn comment_row<'a>(
                     .color(t::text_muted()),
             ),
     );
-    col = col.push(rich_body(
+    col = col.push(crate::views::body::view(
         &comment.body,
         13.0,
         t::text_primary(),
-        team,
-        teams,
-        issues,
-        members,
+        &BodyCtx {
+            team,
+            teams,
+            issues,
+            members,
+            images: ctx.images,
+            host: ctx.host,
+            pending_paths: None,
+            on_image: None,
+        },
     ));
     // Delete is offered on the user's own comments, synced or not. The desktop
     // does not know member roles, so team admins are not offered it on others'
