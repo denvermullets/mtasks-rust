@@ -301,6 +301,86 @@ pub fn body_segments<'a>(text: &'a str, host: &str) -> Vec<BodySegment<'a>> {
     out
 }
 
+/// Result of [`rewrite_placeholders`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceholderRewrite {
+    /// The body with every resolved placeholder URL replaced.
+    pub body: String,
+    /// Placeholder uuids still in the body with no entry in the map, in order of
+    /// first appearance, without repeats.
+    pub unresolved: Vec<String>,
+}
+
+/// Percent-encode like the web's JS `encodeURIComponent`: everything except
+/// `A-Z a-z 0-9 - _ . ! ~ * ' ( )`.
+fn encode_uri_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Rewrite every resolved `jait-pending://<uuid>` image URL to the web's form
+/// `/rails/active_storage/blobs/redirect/<signed_id>/<filename>`. `resolved` maps
+/// placeholder uuid to `(signed_id, filename)`; the filename is encoded as the web
+/// does. Everything else is left byte-for-byte as is.
+pub fn rewrite_placeholders(
+    text: &str,
+    resolved: &std::collections::HashMap<String, (String, String)>,
+) -> PlaceholderRewrite {
+    let mut body = String::with_capacity(text.len());
+    let mut unresolved: Vec<String> = Vec::new();
+    for seg in body_segments(text, "") {
+        match seg {
+            BodySegment::Text(t) => body.push_str(t),
+            BodySegment::Image(ImageBlock { alt, src, kind }) => match kind {
+                ImageKind::Pending(id) => match resolved.get(id) {
+                    Some((signed_id, filename)) => {
+                        body.push_str(&format!(
+                            "![{alt}]({BLOB_PATH_PREFIX}{signed_id}/{})",
+                            encode_uri_component(filename)
+                        ));
+                    }
+                    None => {
+                        if !unresolved.iter().any(|u| u == id) {
+                            unresolved.push(id.to_string());
+                        }
+                        body.push_str(&format!("![{alt}]({src})"));
+                    }
+                },
+                ImageKind::Blob => body.push_str(&format!("![{alt}]({src})")),
+            },
+        }
+    }
+    PlaceholderRewrite { body, unresolved }
+}
+
+/// Remove the whole `![alt](jait-pending://<uuid>)` for one placeholder (e.g. a
+/// failed Inline image), alt text included. Only the first occurrence goes; the
+/// rest of the body is unchanged.
+pub fn strip_placeholder(text: &str, uuid: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut removed = false;
+    for seg in body_segments(text, "") {
+        match seg {
+            BodySegment::Text(t) => out.push_str(t),
+            BodySegment::Image(ImageBlock { alt, src, kind }) => {
+                if !removed && kind == ImageKind::Pending(uuid) {
+                    removed = true;
+                } else {
+                    out.push_str(&format!("![{alt}]({src})"));
+                }
+            }
+        }
+    }
+    out
+}
+
 // ── Referenced In ──
 
 /// An issue that mentions the open issue, and where.
@@ -968,5 +1048,80 @@ mod tests {
         let mut target = issue("t", 1, None);
         target.team_number = None;
         assert!(referenced_in(&target, "JAIT", &[], &[]).is_empty());
+    }
+
+    // ── placeholder rewrite ──
+
+    const U1: &str = "11111111-1111-4111-8111-111111111111";
+    const U2: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn map(entries: &[(&str, &str, &str)]) -> std::collections::HashMap<String, (String, String)> {
+        entries
+            .iter()
+            .map(|(u, s, f)| (u.to_string(), (s.to_string(), f.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn rewrite_full_map() {
+        let text = format!("a\n![x]({PENDING_SCHEME}{U1}) b ![y]({PENDING_SCHEME}{U2})");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "sig1", "a.png"), (U2, "sig2", "b.png")]));
+        assert_eq!(
+            r.body,
+            "a\n![x](/rails/active_storage/blobs/redirect/sig1/a.png) b ![y](/rails/active_storage/blobs/redirect/sig2/b.png)"
+        );
+        assert!(r.unresolved.is_empty());
+    }
+
+    #[test]
+    fn rewrite_partial_and_empty_map() {
+        let text = format!("![x]({PENDING_SCHEME}{U1})\n![y]({PENDING_SCHEME}{U2})\n![z]({PENDING_SCHEME}{U2})");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "sig1", "a.png")]));
+        assert_eq!(
+            r.body,
+            format!("![x](/rails/active_storage/blobs/redirect/sig1/a.png)\n![y]({PENDING_SCHEME}{U2})\n![z]({PENDING_SCHEME}{U2})")
+        );
+        assert_eq!(r.unresolved, vec![U2.to_string()]);
+
+        let r = rewrite_placeholders(&text, &map(&[]));
+        assert_eq!(r.body, text);
+        assert_eq!(r.unresolved, vec![U1.to_string(), U2.to_string()]);
+    }
+
+    #[test]
+    fn rewrite_leaves_other_text_untouched() {
+        let text = format!(
+            "héllo 🎉\r\n\n![](/rails/active_storage/blobs/redirect/s/k.png) [x] ![bad]( {U1}) ![y]({PENDING_SCHEME}{U1})  \n"
+        );
+        let r = rewrite_placeholders(&text, &map(&[(U1, "s", "k.png")]));
+        assert_eq!(
+            r.body,
+            "héllo 🎉\r\n\n![](/rails/active_storage/blobs/redirect/s/k.png) [x] ![bad]( 11111111-1111-4111-8111-111111111111) ![y](/rails/active_storage/blobs/redirect/s/k.png)  \n"
+        );
+        assert!(rewrite_placeholders("no images é", &map(&[])).body == "no images é");
+    }
+
+    #[test]
+    fn rewrite_encodes_filename_like_encode_uri_component() {
+        let text = format!("![x]({PENDING_SCHEME}{U1})");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "s", "my pic é+#?.png")]));
+        assert_eq!(
+            r.body,
+            "![x](/rails/active_storage/blobs/redirect/s/my%20pic%20%C3%A9%2B%23%3F.png)"
+        );
+    }
+
+    #[test]
+    fn strip_removes_exactly_one_placeholder_image() {
+        let text = format!("a ![alt text]({PENDING_SCHEME}{U1}) b ![k]({PENDING_SCHEME}{U2})\n");
+        assert_eq!(
+            strip_placeholder(&text, U1),
+            format!("a  b ![k]({PENDING_SCHEME}{U2})\n")
+        );
+        // Unknown uuid: unchanged.
+        assert_eq!(strip_placeholder(&text, "33333333-3333-4333-8333-333333333333"), text);
+        // Duplicate: only the first goes.
+        let dup = format!("![a]({PENDING_SCHEME}{U1})|![b]({PENDING_SCHEME}{U1})");
+        assert_eq!(strip_placeholder(&dup, U1), format!("|![b]({PENDING_SCHEME}{U1})"));
     }
 }
