@@ -1681,7 +1681,7 @@ impl App {
         let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
         let visible: usize = self.board_columns().iter().map(|c| c.issues.len()).sum();
         let narrowed = self.board_filters().count() > self.board_filters().assignees.len()
-            || !header::needle(self.active_search()).is_empty();
+            || !crate::search_match::needle(self.active_search()).is_empty();
         display::my_issues_empty_message(!ids.is_empty(), visible, narrowed)
     }
 
@@ -1737,7 +1737,7 @@ impl App {
             labels: &self.labels,
             issue_labels: &self.issue_labels,
         };
-        let needle = header::needle(self.active_search());
+        let needle = crate::search_match::needle(self.active_search());
         if my {
             let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
             let filters = display::my_issues_filters(self.board_filters(), &ids, &self.lanes);
@@ -1970,7 +1970,7 @@ impl App {
             _ => 0,
         };
         self.board_filters().count() - ignored
-            + usize::from(!header::needle(self.active_search()).is_empty())
+            + usize::from(!crate::search_match::needle(self.active_search()).is_empty())
     }
 
     /// The header's view actions on an open view on the Board: Update view, Save
@@ -6208,7 +6208,7 @@ impl App {
         ];
 
         let search = self.active_search();
-        let needle = header::needle(search);
+        let needle = crate::search_match::needle(search);
         let header = header::view(
             self.breadcrumb(),
             search,
@@ -7296,7 +7296,7 @@ mod tests {
     fn issue_search_matches_title_or_identifier() {
         let jait = team("JAIT", false);
         let i = issue("i1", "Header bar — Search", 184);
-        let m = |q: &str| header::issue_matches(&i, Some(&jait), &header::needle(q));
+        let m = |q: &str| crate::search_match::issue_matches(&i, Some(&jait), &crate::search_match::needle(q));
         assert!(m(""));
         assert!(m("  HEADER "));
         assert!(m("jait-184"));

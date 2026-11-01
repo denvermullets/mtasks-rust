@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
 use crate::lane_icon::{icon_for, LaneIcon};
-use crate::views::header;
 
 /// Key used for the "none" bucket of an axis (unassigned, no project, ...).
 const NONE_KEY: &str = "";
@@ -711,7 +710,7 @@ pub fn visible_from<'a>(
                 .unwrap_or(&[]);
             filters.matches(i, labels)
         })
-        .filter(|i| header::issue_matches(i, data.team_of(i), needle))
+        .filter(|i| crate::search_match::issue_matches(i, data.team_of(i), needle))
         .collect();
     order_issues(&mut out, opts.order_by);
     out

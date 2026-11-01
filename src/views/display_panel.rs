@@ -14,7 +14,6 @@ use crate::display::{
     SubGroup, ViewMode, PRIORITY_TITLES,
 };
 use crate::theme as t;
-use crate::views::header;
 
 const PANEL_WIDTH: f32 = 340.0;
 /// Header strip height, so the popover sits just beneath it.
@@ -245,7 +244,7 @@ pub fn filter_view<'a>(
     } else {
         0
     };
-    let count = filters.count() - hidden + usize::from(!header::needle(search).is_empty());
+    let count = filters.count() - hidden + usize::from(!crate::search_match::needle(search).is_empty());
 
     let mut assignees: Vec<(String, String)> = data
         .members

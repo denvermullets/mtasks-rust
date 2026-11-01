@@ -221,7 +221,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
     let source_team_ids: HashSet<&str> = source_teams.iter().map(|t| t.id.as_str()).collect();
     // Ids across all groups' refined base sets, deduplicated for the counts.
     let mut counted: HashSet<&str> = HashSet::new();
-    let needle = crate::views::header::needle(&input.header.search);
+    let needle = crate::search_match::needle(&input.header.search);
     let groups = input
         .groups
         .iter()
@@ -399,7 +399,7 @@ fn due_counts(ids: &HashSet<&str>, m: &Mirror<'_>, today: NaiveDate) -> (usize, 
 /// The view search: title text, or a team identifier plus number.
 fn matches_search(i: &Issue, teams: &[Team], needle: &str) -> bool {
     let team = teams.iter().find(|t| t.id == i.team_id);
-    crate::views::header::issue_matches(i, team, needle)
+    crate::search_match::issue_matches(i, team, needle)
 }
 
 /// The local project behind a project source, if mirrored and on an accessible team.
