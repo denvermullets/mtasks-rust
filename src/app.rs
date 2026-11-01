@@ -4532,21 +4532,25 @@ impl App {
                 let effect = self.body_hover.event(crate::hover_card::Event::LeftCard);
                 return Self::hover_timer(effect);
             }
-            Message::OpenBodyLink(target) => match target {
-                crate::mentions::LinkTarget::Issue(id) => {
-                    return self.update(Message::OpenIssueDetail(id));
-                }
-                crate::mentions::LinkTarget::External(url) => {
-                    // Defence in depth: the document module already filters.
-                    if crate::document::is_openable_link(&url) {
-                        if let Err(e) = std::process::Command::new("open").arg(url.trim()).spawn() {
-                            self.push_toast(format!("Couldn't open link: {e}"), ToastKind::Error, false);
+            Message::OpenBodyLink(target) => {
+                // A click ends the hover: close the card, cancel a pending one.
+                self.body_hover.event(crate::hover_card::Event::Clicked);
+                match target {
+                    crate::mentions::LinkTarget::Issue(id) => {
+                        return self.update(Message::OpenIssueDetail(id));
+                    }
+                    crate::mentions::LinkTarget::External(url) => {
+                        // Defence in depth: the document module already filters.
+                        if crate::document::is_openable_link(&url) {
+                            if let Err(e) = std::process::Command::new("open").arg(url.trim()).spawn() {
+                                self.push_toast(format!("Couldn't open link: {e}"), ToastKind::Error, false);
+                            }
                         }
                     }
+                    // A later ticket fills this.
+                    crate::mentions::LinkTarget::Mention(_) => {}
                 }
-                // A later ticket fills this.
-                crate::mentions::LinkTarget::Mention(_) => {}
-            },
+            }
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
