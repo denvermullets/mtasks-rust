@@ -4,6 +4,10 @@
 //! `owner_id` is the owner's LOCAL id. Synced rows are replaced from each
 //! pull of the owner's `files` ([`replace_synced`]); pending and failed rows
 //! are local-only (upload tickets own them) and are never touched by it.
+// The read side (list_for_owner, Attachment, UploadState) is consumed by the
+// display and upload tickets; only replace_synced is wired so far.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use rusqlite::{params, Connection, Result, Row};
@@ -12,8 +16,6 @@ use uuid::Uuid;
 use crate::api::AttachmentDto;
 
 /// What an attachment hangs off.
-// Project/Comment are used by the project and comment pull tickets that build on this.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerKind {
     Issue,
@@ -41,7 +43,6 @@ pub enum UploadState {
 }
 
 impl UploadState {
-    #[allow(dead_code)] // used by the upload tickets when writing rows
     pub fn as_str(self) -> &'static str {
         match self {
             UploadState::Synced => "synced",
