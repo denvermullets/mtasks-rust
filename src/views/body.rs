@@ -78,14 +78,21 @@ impl InlineImage {
 
 /// Every image block of `body`, in reading order (JRST-193 lightbox paging).
 pub fn image_list(body: &str, host: &str) -> Vec<InlineImage> {
-    document::parse_with(body, host, &[])
-        .blocks
-        .iter()
-        .filter_map(|b| match b {
-            Block::Image(img) => InlineImage::from_document(img),
-            _ => None,
-        })
-        .collect()
+    let mut out = Vec::new();
+    collect_images(&document::parse_with(body, host, &[]).blocks, &mut out);
+    out
+}
+
+/// Walk `blocks` depth first, descending into list items and quotes.
+fn collect_images(blocks: &[Block], out: &mut Vec<InlineImage>) {
+    for b in blocks {
+        match b {
+            Block::Image(img) => out.extend(InlineImage::from_document(img)),
+            Block::List(list) => list.items.iter().for_each(|item| collect_images(item, out)),
+            Block::Quote(inner) => collect_images(inner, out),
+            Block::Paragraph(_) => {}
+        }
+    }
 }
 
 /// `src` of every image in ONE `body` that can be fetched (blob images; pending skipped).
@@ -391,6 +398,23 @@ mod tests {
     use super::*;
 
     const HOST: &str = "http://localhost:3005";
+
+    #[test]
+    fn images_inside_lists_and_quotes_are_listed_in_reading_order() {
+        let a = "/rails/active_storage/blobs/redirect/aaa/a.png";
+        let b = "/rails/active_storage/blobs/redirect/bbb/b.png";
+        let c = "/rails/active_storage/blobs/redirect/ccc/c.png";
+        let d = "/rails/active_storage/blobs/redirect/ddd/d.png";
+        let body = format!(
+            "![a]({a})\n\n- item ![b]({b})\n  - nested ![c]({c})\n\n> quoted ![d]({d})\n>\n> > ![e](https://x.test/e.png)"
+        );
+        let alts: Vec<String> = image_list(&body, HOST).into_iter().map(|i| i.alt).collect();
+        assert_eq!(alts, ["a", "b", "c", "d"]);
+        assert_eq!(fetchable_srcs_of_body(&body, HOST), [a, b, c, d]);
+        assert!(has_images(&format!("> ![q]({a})"), HOST));
+        assert!(has_images(&format!("- ![q]({a})"), HOST));
+        assert!(!has_images("> - plain", HOST));
+    }
 
     #[test]
     fn task_markers_show_state() {
