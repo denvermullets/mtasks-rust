@@ -8151,3 +8151,83 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod group_order_live {
+    use super::*;
+
+    /// Live check of `dashboard_group_order` against local Rails (:3005), run
+    /// with `--ignored` and HOME pointed at a scratch dir holding a copy of
+    /// config.toml, so the engine's `open()` uses a scratch database. Creates a
+    /// dashboard with three groups, makes several quick local moves, drains the
+    /// one queue entry through the engine, reads the web order back, and always
+    /// deletes the dashboard.
+    #[tokio::test]
+    #[ignore]
+    async fn reorder_through_the_engine_matches_the_server() {
+        let (cfg, _) = crate::config::load();
+        let client = ApiClient::new(cfg.api_base_url.trim(), cfg.api_token.unwrap_or_default()).unwrap();
+        let created = crate::api::dashboards::create(&client, "zz order check", "").await.unwrap();
+        let outcome = run_live(&client, created.id).await;
+        crate::api::dashboards::delete(&client, created.id).await.unwrap();
+        outcome.unwrap();
+    }
+
+    async fn run_live(client: &ApiClient, dashboard: i64) -> Result<(), String> {
+        let mut remote_ids = Vec::new();
+        for name in ["one", "two", "three"] {
+            let body = serde_json::json!({"dashboard_group": {"name": name, "description": "",
+                "color": "#6366f1", "team_ids": [], "project_ids": [], "label_ids": [],
+                "all_team_ids": [], "all_project_ids": []}});
+            let g: crate::db::dashboards::GroupIn = client
+                .post(&format!("api/v1/dashboards/{dashboard}/groups"), &body)
+                .await
+                .map_err(|e| format!("create group: {e}"))?;
+            remote_ids.push(g.id);
+        }
+        let conn = open()?;
+        let rows = crate::api::dashboards::list(client).await.map_err(|e| e.to_string())?;
+        dashboards::apply_snapshot(&conn, &rows).map_err(|e| e.to_string())?;
+        let d = dashboards::find_by_remote_id(&conn, dashboard).unwrap().unwrap();
+        let ids: Vec<String> =
+            dashboards::groups_for(&conn, &d.id).unwrap().into_iter().map(|g| g.id).collect();
+        use dashboards::MoveDirection::{Down, Up};
+        for (i, dir) in [(2, Up), (2, Up), (1, Down), (0, Down)] {
+            dashboards::move_group(&conn, &ids[i], dir).unwrap();
+        }
+        let want: Vec<i64> = dashboards::groups_for(&conn, &d.id)
+            .unwrap()
+            .into_iter()
+            .map(|g| g.remote_id.unwrap())
+            .collect();
+        let entries = sync_queue::pending_entries(&conn).unwrap();
+        let order: Vec<_> =
+            entries.iter().filter(|e| e.entity_type == dashboards::GROUP_ORDER_ENTITY_TYPE).collect();
+        if order.len() != 1 {
+            return Err(format!("expected one coalesced entry, got {}", order.len()));
+        }
+        let entry_id = order[0].id.unwrap();
+        match dashboard_group_order(client, &d.id, entry_id).await {
+            Outcome::Success => {}
+            _ => return Err("engine did not report success".into()),
+        }
+        if sync_queue::has_pending_entry(&conn, dashboards::GROUP_ORDER_ENTITY_TYPE, &d.id).unwrap() {
+            return Err("entry still pending".into());
+        }
+        let web = crate::api::dashboards::list(client).await.map_err(|e| e.to_string())?;
+        let web_order: Vec<i64> = web
+            .iter()
+            .find(|x| x.id == dashboard)
+            .map(|x| x.groups.iter().map(|g| g.id).collect())
+            .unwrap_or_default();
+        let local: Vec<i64> = dashboards::groups_for(&conn, &d.id)
+            .unwrap()
+            .into_iter()
+            .map(|g| g.remote_id.unwrap())
+            .collect();
+        if web_order != want || local != want {
+            return Err(format!("want {want:?}, web {web_order:?}, local {local:?}"));
+        }
+        Ok(())
+    }
+}
