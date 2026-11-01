@@ -229,6 +229,8 @@ pub enum Message {
     /// The pointer entered or left the hover card itself.
     HoverCardEntered,
     HoverCardLeft,
+    /// The mouse wheel or trackpad scrolled somewhere.
+    HoverScrolled,
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -3005,9 +3007,17 @@ impl App {
             _ => None,
         });
 
+        // Scrolling moves content out from under a card, so it closes.
+        let scrolls = event::listen_with(|event, _status, _id| match event {
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
+                Some(Message::HoverScrolled)
+            }
+            _ => None,
+        });
+
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
 
-        let mut subs = vec![keys, activity, banner_clicks];
+        let mut subs = vec![keys, activity, scrolls, banner_clicks];
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(
@@ -3125,7 +3135,13 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
-        let task = self.update_inner(message);
+        let view_before = self.view.clone();
+        let mut task = self.update_inner(message);
+        // The one place that closes hover cards on a view change, whatever message caused it (keyboard included).
+        if self.view != view_before {
+            let effect = self.body_hover.event(crate::hover_card::Event::ViewChanged);
+            task = Task::batch([task, Self::hover_timer(effect)]);
+        }
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
@@ -4508,6 +4524,10 @@ impl App {
             }
             Message::BackToDashboard => {
                 self.back_to_dashboard();
+            }
+            Message::HoverScrolled => {
+                let effect = self.body_hover.event(crate::hover_card::Event::Scrolled);
+                return Self::hover_timer(effect);
             }
             Message::BodyHover(owner, hover) => {
                 let span = hover.map(|h| {
