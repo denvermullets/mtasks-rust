@@ -2721,7 +2721,7 @@ struct UploadPrep {
 struct AttachPrep {
     attachment_id: String,
     team_remote_id: i64,
-    issue_remote_id: i64,
+    owner: attachments_api::AttachmentOwner,
     signed_id: String,
     outbox_path: Option<String>,
 }
@@ -2788,20 +2788,29 @@ fn prep_attachment_create_in(conn: &Connection, entity_id: &str) -> Prep<AttachP
     let Some(signed_id) = a.signed_id.clone() else {
         return Prep::Done(Outcome::LeavePending("upload not finished yet".into()));
     };
-    let issue_remote_id = match owner_remote_id(conn, &a) {
+    let owner_remote = match owner_remote_id(conn, &a) {
         Ok(r) => r,
         Err(o) => return Prep::Done(o),
     };
-    if a.owner_kind != "issue" {
-        return Prep::Done(Outcome::LeavePending(format!(
-            "attaching to a {} is not supported yet",
-            a.owner_kind
-        )));
-    }
-    let team_remote_id = match queries::get_issue(conn, &a.owner_id)
-        .ok()
-        .flatten()
-        .and_then(|i| queries::remote_id_for(conn, "teams", &i.team_id).ok().flatten())
+    use attachments_api::AttachmentOwner;
+    let (owner, team_local_id) = match a.owner_kind.as_str() {
+        "issue" => (
+            AttachmentOwner::Issue { issue_id: owner_remote },
+            queries::get_issue(conn, &a.owner_id).ok().flatten().map(|i| i.team_id),
+        ),
+        "project" => (
+            AttachmentOwner::Project { project_id: owner_remote },
+            queries::get_project(conn, &a.owner_id).ok().flatten().map(|p| p.team_id),
+        ),
+        // Comment files ride on the comment's own create (JRST-206).
+        other => {
+            return Prep::Done(Outcome::LeavePending(format!(
+                "attaching to a {other} is not supported yet"
+            )))
+        }
+    };
+    let team_remote_id = match team_local_id
+        .and_then(|t| queries::remote_id_for(conn, "teams", &t).ok().flatten())
     {
         Some(t) => t,
         None => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
@@ -2809,7 +2818,7 @@ fn prep_attachment_create_in(conn: &Connection, entity_id: &str) -> Prep<AttachP
     Prep::Ready(AttachPrep {
         attachment_id: a.id,
         team_remote_id,
-        issue_remote_id,
+        owner,
         signed_id,
         outbox_path: a.outbox_path,
     })
@@ -2909,13 +2918,16 @@ async fn attachment_create(client: &ApiClient, entity_id: &str) -> Outcome {
         },
         Err(e) => return Outcome::LeavePending(e),
     };
-    let result = attachments_api::attach_to_issue(
-        client,
-        prep.team_remote_id,
-        prep.issue_remote_id,
-        std::slice::from_ref(&prep.signed_id),
-    )
-    .await;
+    let ids = std::slice::from_ref(&prep.signed_id);
+    let result = match prep.owner {
+        attachments_api::AttachmentOwner::Project { project_id } => {
+            attachments_api::attach_to_project(client, prep.team_remote_id, project_id, ids).await
+        }
+        attachments_api::AttachmentOwner::Issue { issue_id } => {
+            attachments_api::attach_to_issue(client, prep.team_remote_id, issue_id, ids).await
+        }
+        _ => return Outcome::LeavePending("unsupported attachment owner".into()),
+    };
     match result {
         Ok(rows) => {
             let Some(dto) = rows.into_iter().next() else {
@@ -7509,10 +7521,47 @@ mod tests {
         assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
         match prep_attachment_create_in(&conn, &a.id) {
             Prep::Ready(p) => {
-                assert_eq!((p.team_remote_id, p.issue_remote_id), (700, 1));
+                assert_eq!(
+                    (p.team_remote_id, p.owner),
+                    (700, attachments_api::AttachmentOwner::Issue { issue_id: 1 })
+                );
                 assert_eq!(p.signed_id, "signed");
             }
             _ => panic!("expected the attach to be ready"),
+        }
+    }
+
+    #[test]
+    fn a_project_attach_is_ready_with_its_project_remote_id() {
+        let conn = setup_dependency_db(); // team t1 remote 700
+        conn.execute(
+            "INSERT INTO projects (id, remote_id, team_id, name, created_at, updated_at)
+             VALUES ('p1', 50, 't1', 'P', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let a = attachments::add_pending(
+            &conn,
+            &attachments::NewPending {
+                owner_kind: crate::db::attachments::OwnerKind::Project,
+                owner_id: "p1".into(),
+                filename: "spec.pdf".into(),
+                content_type: "application/pdf".into(),
+                byte_size: 12,
+                checksum: "abc==".into(),
+                outbox_path: "/tmp/outbox/x".into(),
+                kind: crate::files::validate::UploadKind::Attachment,
+                placeholder_uuid: None,
+            },
+        )
+        .unwrap();
+        attachments::set_uploaded(&conn, &a.id, "signed", "spec.pdf").unwrap();
+        match prep_attachment_create_in(&conn, &a.id) {
+            Prep::Ready(p) => assert_eq!(
+                (p.team_remote_id, p.owner),
+                (700, attachments_api::AttachmentOwner::Project { project_id: 50 })
+            ),
+            _ => panic!("expected the project attach to be ready"),
         }
     }
 

@@ -171,6 +171,12 @@ pub fn view<'a>(
                 on_image: None,
             },
         ))
+        .push(
+            button(text("+ Attach file").size(12).color(t::accent()))
+                .on_press(Message::PickAttachmentFiles)
+                .padding(0)
+                .style(button::text),
+        )
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))

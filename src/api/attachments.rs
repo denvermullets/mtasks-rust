@@ -139,6 +139,26 @@ pub async fn attach_to_issue(
         .await
 }
 
+pub(crate) fn project_attachments_path(team_id: i64, project_id: i64) -> String {
+    format!("api/v1/teams/{team_id}/projects/{project_id}/attachments")
+}
+
+/// `POST .../projects/:project_id/attachments` with `{signed_ids}`; same
+/// contract as [`attach_to_issue`].
+pub async fn attach_to_project(
+    client: &ApiClient,
+    team_id: i64,
+    project_id: i64,
+    signed_ids: &[String],
+) -> Result<Vec<AttachmentDto>, ApiError> {
+    client
+        .post(
+            &project_attachments_path(team_id, project_id),
+            &AttachBody { signed_ids },
+        )
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +239,6 @@ mod tests {
             serde_json::json!({"signed_ids": ["s1"]})
         );
         assert_eq!(issue_attachments_path(4, 9), "api/v1/teams/4/issues/9/attachments");
+        assert_eq!(project_attachments_path(4, 9), "api/v1/teams/4/projects/9/attachments");
     }
 }
