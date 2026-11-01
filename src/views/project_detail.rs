@@ -168,7 +168,7 @@ pub fn view<'a>(
                 images,
                 host,
                 pending_paths: None,
-                on_image: None,
+                on_image: Some(Message::OpenInlineImage),
             },
         ))
         .push_maybe(crate::views::attachments::section(attachments, images))

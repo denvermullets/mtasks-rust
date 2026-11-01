@@ -199,7 +199,7 @@ pub fn view<'a>(
                 images,
                 host,
                 pending_paths: Some(pending_paths),
-                on_image: None,
+                on_image: Some(Message::OpenInlineImage),
             },
         ))
         .push(
@@ -1157,7 +1157,7 @@ fn comment_row<'a>(
             images: ctx.images,
             host: ctx.host,
             pending_paths: None,
-            on_image: None,
+            on_image: Some(Message::OpenInlineImage),
         },
     ));
     // Delete is offered on the user's own comments, synced or not. The desktop

@@ -162,6 +162,10 @@ pub enum Message {
     OpenAttachment(crate::db::attachments::Attachment),
     /// An image Attachment card was clicked: open the lightbox on it.
     OpenLightbox(crate::db::attachments::Attachment),
+    /// An inline image in a description/comment was clicked: open the lightbox on it.
+    OpenInlineImage(crate::views::body::InlineImage),
+    /// ←/→ in the lightbox: step by this many images.
+    LightboxStep(isize),
     /// `o` in the lightbox: open the current image in the default app (Preview).
     OpenLightboxExternally,
     /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
@@ -1815,6 +1819,48 @@ impl App {
         Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
     }
 
+    /// Lightbox set for the open issue/project detail, in reading order.
+    fn lightbox_images(&self) -> Vec<crate::files::lightbox::LightboxImage> {
+        use crate::files::lightbox::{reading_order_images, CommentImages};
+        let description = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::IssueDetail(_), Some(d), _) => d.description_text(),
+            (View::ProjectDetail(_), _, Some(d)) => d.description_text(),
+            _ => return Vec::new(),
+        };
+        let comments: Vec<CommentImages> = Comment::thread_order(&self.detail_comments)
+            .into_iter()
+            .map(|(_, c)| CommentImages {
+                body: &c.body,
+                attachments: self
+                    .detail_comment_attachments
+                    .get(&c.id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]),
+            })
+            .collect();
+        reading_order_images(
+            &description,
+            &self.detail_attachments,
+            &comments,
+            &self.config.api_base_url,
+        )
+    }
+
+    /// Fetch the lightbox's current image and its neighbours (Attachments and Inline).
+    fn request_lightbox_images(&mut self) -> Task<Message> {
+        let Modal::Lightbox(state) = &self.modal else {
+            return Task::none();
+        };
+        let lo = state.index.saturating_sub(1);
+        let wanted: Vec<_> = state.images[lo..(state.index + 2).min(state.images.len())].to_vec();
+        Task::batch(wanted.iter().map(|i| match i {
+            crate::files::lightbox::LightboxImage::Attachment(a) => self.request_image(a),
+            crate::files::lightbox::LightboxImage::Inline { src, .. } => {
+                self.request_inline_image(src)
+            }
+        }))
+    }
+
     /// `request_image` for every Attachment currently rendered in the open detail view.
     fn request_visible_images(&mut self) -> Task<Message> {
         let atts: Vec<crate::db::attachments::Attachment> = self
@@ -3358,24 +3404,29 @@ impl App {
             }
             Message::OpenAttachment(att) => return self.open_attachment(att),
             Message::OpenLightbox(att) => {
-                // Siblings in the same list (issue/project files, or one comment's) form the set.
-                let group: &[crate::db::attachments::Attachment] =
-                    if self.detail_attachments.iter().any(|a| a.id == att.id) {
-                        &self.detail_attachments
-                    } else {
-                        self.detail_comment_attachments
-                            .values()
-                            .find(|v| v.iter().any(|a| a.id == att.id))
-                            .map(|v| v.as_slice())
-                            .unwrap_or(&[])
-                    };
-                if let Some(state) =
-                    crate::files::lightbox::LightboxState::for_attachment(group, &att.id)
-                {
+                if let Some(state) = crate::files::lightbox::LightboxState::at(
+                    self.lightbox_images(),
+                    |i| matches!(i, crate::files::lightbox::LightboxImage::Attachment(a) if a.id == att.id),
+                ) {
                     self.modal = Modal::Lightbox(state);
-                    return self.request_visible_images();
+                    return self.request_lightbox_images();
                 }
                 return self.open_attachment(att);
+            }
+            Message::OpenInlineImage(img) => {
+                if let Some(state) = crate::files::lightbox::LightboxState::at(
+                    self.lightbox_images(),
+                    |i| i.key() == img.key,
+                ) {
+                    self.modal = Modal::Lightbox(state);
+                    return self.request_lightbox_images();
+                }
+            }
+            Message::LightboxStep(delta) => {
+                if let Modal::Lightbox(state) = &mut self.modal {
+                    state.step(delta);
+                    return self.request_lightbox_images();
+                }
             }
             Message::OpenLightboxExternally => {
                 let target = match &self.modal {
