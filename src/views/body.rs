@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, image, row, span, text};
+use iced::widget::{button, column, container, image, row, scrollable, span, text};
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
@@ -208,9 +208,26 @@ fn code_block<'a>(code: &document::CodeBlock, size: f32) -> Element<'a, Message>
         .font(fonts::code())
         .size(size)
         .wrapping(text::Wrapping::None);
-    container(body)
+    // Long lines scroll sideways inside the frame. `Both` (not `Horizontal`)
+    // on purpose: a horizontal-only scrollable turns the vertical wheel into
+    // sideways motion and captures it, so the page would stop scrolling over
+    // a code block. With `Both`, vertical wheel input goes to the vertical
+    // axis, which never overflows (height shrinks to the text), so the event
+    // is left uncaptured and the page scrolls. Sideways trackpad motion and
+    // shift+wheel scroll the block. The padding is inside the scrollable so
+    // the scrollbar sits in the bottom padding instead of over the text.
+    let scroll = scrollable(container(body).padding(t::space::S3))
+        .direction(scrollable::Direction::Both {
+            vertical: scrollable::Scrollbar::new().width(0).scroller_width(0),
+            horizontal: scrollable::Scrollbar::new().width(6).scroller_width(6),
+        })
+        .style(|theme: &Theme, status| {
+            let mut s = scrollable::default(theme, status);
+            s.horizontal_rail.scroller.color = Color { a: 0.35, ..t::CODE_BLOCK_TEXT };
+            s
+        });
+    container(scroll)
         .width(iced::Length::Fill)
-        .padding(t::space::S3)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::CODE_BLOCK_BG)),
             border: Border { radius: t::radius::MD.into(), ..Border::default() },
