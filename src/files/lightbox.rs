@@ -13,7 +13,7 @@ use crate::files::images::is_thumbnailable;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LightboxImage {
     Attachment(Attachment),
-    Inline { key: String, filename: String },
+    Inline { key: String, src: String, filename: String },
 }
 
 impl LightboxImage {
@@ -34,6 +34,49 @@ impl LightboxImage {
     }
 }
 
+/// One comment's contribution to the reading-order list.
+pub struct CommentImages<'a> {
+    pub body: &'a str,
+    pub attachments: &'a [Attachment],
+}
+
+/// Every lightbox-able image of an issue or project, in reading order:
+/// the description's inline images, the description-level image attachments,
+/// then for each comment (caller passes them in thread order) its inline
+/// images followed by its image attachments. Pending inline placeholders
+/// (no blob yet) and non-image attachments are skipped. Pure; shared by issue
+/// and project detail.
+pub fn reading_order_images(
+    description: &str,
+    attachments: &[Attachment],
+    comments: &[CommentImages<'_>],
+    host: &str,
+) -> Vec<LightboxImage> {
+    let mut out = Vec::new();
+    let mut push_group = |body: &str, atts: &[Attachment]| {
+        out.extend(crate::views::body::image_list(body, host).into_iter().filter_map(|i| {
+            let key = i.key?;
+            let filename = if i.alt.trim().is_empty() {
+                i.src.rsplit('/').next().unwrap_or("image").to_string()
+            } else {
+                i.alt
+            };
+            Some(LightboxImage::Inline { key, src: i.src, filename })
+        }));
+        out.extend(
+            atts.iter()
+                .filter(|a| is_thumbnailable(&a.content_type))
+                .cloned()
+                .map(LightboxImage::Attachment),
+        );
+    };
+    push_group(description, attachments);
+    for c in comments {
+        push_group(c.body, c.attachments);
+    }
+    out
+}
+
 /// `Modal::Lightbox` payload: `images[index]` is on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LightboxState {
@@ -52,19 +95,21 @@ impl LightboxState {
         Some(Self { images, index })
     }
 
-    /// Open on the Attachment with local id `att_id`, among the image
-    /// Attachments in `group` (in order). `None` if it isn't an image there.
-    pub fn for_attachment(group: &[Attachment], att_id: &str) -> Option<Self> {
-        let images: Vec<LightboxImage> = group
-            .iter()
-            .filter(|a| is_thumbnailable(&a.content_type))
-            .cloned()
-            .map(LightboxImage::Attachment)
-            .collect();
-        let index = images
-            .iter()
-            .position(|i| matches!(i, LightboxImage::Attachment(a) if a.id == att_id))?;
+    /// Open on the first entry matching `pick`, `None` if none does.
+    pub fn at(images: Vec<LightboxImage>, pick: impl Fn(&LightboxImage) -> bool) -> Option<Self> {
+        let index = images.iter().position(pick)?;
         Self::new(images, index)
+    }
+
+    /// Move `delta` images forward (negative = back), stopping at the ends.
+    pub fn step(&mut self, delta: isize) {
+        let last = self.images.len() as isize - 1;
+        self.index = (self.index as isize + delta).clamp(0, last) as usize;
+    }
+
+    /// "3 of 7"; `None` when there is only one image.
+    pub fn position_label(&self) -> Option<String> {
+        (self.images.len() > 1).then(|| format!("{} of {}", self.index + 1, self.images.len()))
     }
 
     pub fn current(&self) -> &LightboxImage {
@@ -117,7 +162,7 @@ mod tests {
         let mut store = ImageStore::default();
         let a = LightboxState::new(vec![LightboxImage::Attachment(att("a", "image/png"))], 0).unwrap();
         let i = LightboxState::new(
-            vec![LightboxImage::Inline { key: "inline-k".into(), filename: "p.png".into() }],
+            vec![LightboxImage::Inline { key: "inline-k".into(), src: "s".into(), filename: "p.png".into() }],
             0,
         )
         .unwrap();
@@ -134,7 +179,10 @@ mod tests {
     #[test]
     fn opens_on_the_clicked_image_among_images_only() {
         let group = [att("a", "application/pdf"), att("b", "image/png"), att("c", "image/jpeg")];
-        let s = LightboxState::for_attachment(&group, "c").unwrap();
+        let s = LightboxState::at(reading_order_images("", &group, &[], ""), |i| {
+            matches!(i, LightboxImage::Attachment(a) if a.id == "c")
+        })
+        .unwrap();
         assert_eq!(s.images.len(), 2);
         assert_eq!(s.index, 1);
         assert_eq!(s.current().filename(), "c.bin");
@@ -143,14 +191,19 @@ mod tests {
     #[test]
     fn non_image_or_unknown_attachment_does_not_open() {
         let group = [att("a", "application/pdf"), att("b", "image/png")];
-        assert!(LightboxState::for_attachment(&group, "a").is_none());
-        assert!(LightboxState::for_attachment(&group, "zzz").is_none());
+        let pick = |id: &'static str| {
+            LightboxState::at(reading_order_images("", &group, &[], ""), move |i| {
+                matches!(i, LightboxImage::Attachment(a) if a.id == id)
+            })
+        };
+        assert!(pick("a").is_none());
+        assert!(pick("zzz").is_none());
     }
 
     #[test]
     fn empty_list_does_not_open_and_index_clamps() {
         assert!(LightboxState::new(vec![], 0).is_none());
-        let imgs = vec![LightboxImage::Inline { key: "k".into(), filename: "x.png".into() }];
+        let imgs = vec![LightboxImage::Inline { key: "k".into(), src: "s".into(), filename: "x.png".into() }];
         assert_eq!(LightboxState::new(imgs, 5).unwrap().index, 0);
     }
 
@@ -158,8 +211,43 @@ mod tests {
     fn keys_come_from_the_blob_for_attachments_and_verbatim_for_inline() {
         let a = LightboxImage::Attachment(att("a", "image/png"));
         assert_eq!(a.key().as_deref(), Some("blob-70"));
-        let i = LightboxImage::Inline { key: "inline-k".into(), filename: "p.png".into() };
+        let i = LightboxImage::Inline { key: "inline-k".into(), src: "s".into(), filename: "p.png".into() };
         assert_eq!(i.key().as_deref(), Some("inline-k"));
         assert_eq!(i.filename(), "p.png");
+    }
+
+    #[test]
+    fn step_clamps_at_both_ends_and_labels_position() {
+        let imgs: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|k| LightboxImage::Inline { key: (*k).into(), src: "s".into(), filename: "f".into() })
+            .collect();
+        let mut s = LightboxState::new(imgs, 1).unwrap();
+        assert_eq!(s.position_label().as_deref(), Some("2 of 3"));
+        s.step(1);
+        s.step(1);
+        assert_eq!(s.index, 2);
+        s.step(-5);
+        assert_eq!(s.index, 0);
+        let one = LightboxState::new(vec![LightboxImage::Inline { key: "a".into(), src: "s".into(), filename: "f".into() }], 0).unwrap();
+        assert!(one.position_label().is_none());
+    }
+
+    #[test]
+    fn reading_order_is_description_then_comments_inline_before_attachments() {
+        const HOST: &str = "http://localhost:3005";
+        let img = |n: &str| format!("![{n}](/rails/active_storage/blobs/redirect/{n}--1/{n}.png)");
+        let desc = format!("{} text {}", img("d1"), "![p](jait-pending://abc)");
+        let da = [att("da", "image/png"), att("pdf", "application/pdf")];
+        let c1 = [att("c1a", "image/png")];
+        let b1 = img("c1i");
+        let b2 = img("c2i");
+        let comments = [
+            CommentImages { body: &b1, attachments: &c1 },
+            CommentImages { body: &b2, attachments: &[] },
+        ];
+        let list = reading_order_images(&desc, &da, &comments, HOST);
+        let names: Vec<_> = list.iter().map(|i| i.filename().to_string()).collect();
+        assert_eq!(names, ["d1", "da.bin", "c1i", "c1a.bin", "c2i"]);
     }
 }

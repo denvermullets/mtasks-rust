@@ -108,12 +108,14 @@ pub fn handle_issue_detail_key(key: &Key, modifiers: Modifiers) -> Option<Messag
 
 /// Keys bound only while the lightbox modal is open. Checked before the
 /// modal fallthrough in `handle_key_press`; `None` falls through to it
-/// (Esc closes). Extend here for stepping (JRST-193).
+/// (Esc closes). ←/→ step through the issue's images.
 pub fn handle_lightbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
     match key {
         Key::Character(c) if modifiers.is_empty() && c.as_str() == "o" => {
             Some(Message::OpenLightboxExternally)
         }
+        Key::Named(keyboard::key::Named::ArrowRight) if modifiers.is_empty() => Some(Message::LightboxStep(1)),
+        Key::Named(keyboard::key::Named::ArrowLeft) if modifiers.is_empty() => Some(Message::LightboxStep(-1)),
         _ => None,
     }
 }
@@ -133,6 +135,21 @@ mod tests {
         assert!(handle_lightbox_key(&Key::Character("x".into()), Modifiers::empty()).is_none());
         // Inert in the global handler (no lightbox open).
         assert!(press("o", false, true).is_none());
+    }
+
+    #[test]
+    fn arrows_step_the_lightbox() {
+        let right = Key::Named(keyboard::key::Named::ArrowRight);
+        let left = Key::Named(keyboard::key::Named::ArrowLeft);
+        assert!(matches!(
+            handle_lightbox_key(&right, Modifiers::empty()),
+            Some(Message::LightboxStep(1))
+        ));
+        assert!(matches!(
+            handle_lightbox_key(&left, Modifiers::empty()),
+            Some(Message::LightboxStep(-1))
+        ));
+        assert!(handle_lightbox_key(&right, Modifiers::SHIFT).is_none());
     }
 
     #[test]

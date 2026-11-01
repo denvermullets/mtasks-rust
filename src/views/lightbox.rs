@@ -33,7 +33,13 @@ pub fn view<'a>(state: &'a LightboxState, images: &'a ImageStore) -> Element<'a,
         .align_x(Alignment::Center)
         .push(picture)
         .push(
-            text(format!("{}  ·  o: open in Preview", current.filename()))
+            text(match state.position_label() {
+                Some(pos) => format!(
+                    "{pos}  ·  {}  ·  ←/→: step  ·  o: open in Preview",
+                    current.filename()
+                ),
+                None => format!("{}  ·  o: open in Preview", current.filename()),
+            })
                 .size(13)
                 .color(t::text_muted()),
         );
