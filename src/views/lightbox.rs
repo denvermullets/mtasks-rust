@@ -32,7 +32,11 @@ pub fn view<'a>(state: &'a LightboxState, images: &'a ImageStore) -> Element<'a,
         .spacing(12)
         .align_x(Alignment::Center)
         .push(picture)
-        .push(text(current.filename()).size(13).color(t::text_muted()));
+        .push(
+            text(format!("{}  ·  o: open in Preview", current.filename()))
+                .size(13)
+                .color(t::text_muted()),
+        );
     // The whole backdrop is one button so a click anywhere dismisses.
     button(
         container(content)

@@ -162,6 +162,8 @@ pub enum Message {
     OpenAttachment(crate::db::attachments::Attachment),
     /// An image Attachment card was clicked: open the lightbox on it.
     OpenLightbox(crate::db::attachments::Attachment),
+    /// `o` in the lightbox: open the current image in the default app (Preview).
+    OpenLightboxExternally,
     /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
     AttachmentDownloaded(crate::db::attachments::Attachment, Result<Vec<u8>, String>),
     /// Bytes for an image fetched into the cache for display (JRST-187), keyed by blob key.
@@ -2568,6 +2570,11 @@ impl App {
                 {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
                 }
+                if let Modal::Lightbox(_) = self.modal {
+                    if let Some(msg) = keys::handle_lightbox_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
                 let modal_open = self.modal != Modal::None;
                 let palette_open = matches!(self.modal, Modal::CommandPalette(_));
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
@@ -3352,6 +3359,29 @@ impl App {
                     return self.request_visible_images();
                 }
                 return self.open_attachment(att);
+            }
+            Message::OpenLightboxExternally => {
+                let target = match &self.modal {
+                    Modal::Lightbox(state) => state
+                        .open_target(&self.images)
+                        .map(|(key, name, path)| (key, name.to_string(), path)),
+                    _ => return Task::none(),
+                };
+                match target {
+                    Some((key, name, cached)) => {
+                        let root = crate::files::default_root();
+                        let opened = crate::files::open::materialize(&root, &key, &name, &cached)
+                            .and_then(|p| crate::files::open::open_in_default_app(&p));
+                        if let Err(e) = opened {
+                            self.push_toast(
+                                format!("Couldn't open {name}: {e}"),
+                                ToastKind::Error,
+                                false,
+                            );
+                        }
+                    }
+                    None => self.push_toast("Image hasn't loaded yet", ToastKind::Error, false),
+                }
             }
             Message::AttachmentDownloaded(att, result) => match result {
                 Ok(bytes) => {
