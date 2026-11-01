@@ -128,7 +128,7 @@ pub const THEMES: [Tokens; 15] = [
         0x98a6b4,
         0xb8bfc9,
         0x1a8aaa,
-        0x1a7a9a,
+        0x197492,
         0xd0d4dc,
         [
             0x040915, 0x121a27, 0x212c38, 0x364452, 0x4a5866, 0x6a7a8a, 0x8a9aaa, 0xb8bfc9,
@@ -236,7 +236,7 @@ pub const THEMES: [Tokens; 15] = [
     ),
     dark!(
         "ash", "Ash", 0x1e1e1e, 0x282828, 0x2c2c2c, 0x303030, 0xb0b0b0, 0x484848, 0xff5a3c,
-        0xe04830, 0x333333
+        0xc53f2a, 0x333333
     ),
     light!(
         "chalk",
@@ -248,7 +248,7 @@ pub const THEMES: [Tokens; 15] = [
         0x7a7870,
         0xd0cec8,
         0x0a6870,
-        0x208088,
+        0x1e7a81,
         0xeae8e4,
         [
             0x0a0808, 0x141210, 0x2a2820, 0x3a3830, 0x5c5850, 0x7a7870, 0x9a9890, 0xc0beb8,
@@ -583,17 +583,12 @@ mod tests {
 
     #[test]
     fn label_on_accent_fill_meets_4_5_to_1() {
-        // At rest on every theme. Hovered on Default and Warm Paper only: the
-        // `accent_hover` tokens of Cool Linen (4.36), Ash (3.71) and Chalk
-        // (4.29) fall short with either label color.
         for t in THEMES.iter() {
-            let ratio = contrast_ratio(on_accent_for(t, false), t.accent);
-            assert!(ratio >= 4.5, "{}: {ratio:.2}:1", t.name);
-        }
-        for key in ["default", "warm-paper"] {
-            let t = tokens_for(key);
-            let ratio = contrast_ratio(on_accent_for(t, true), t.accent_hover);
-            assert!(ratio >= 4.5, "{} hovered: {ratio:.2}:1", t.name);
+            for hovered in [false, true] {
+                let fill = if hovered { t.accent_hover } else { t.accent };
+                let ratio = contrast_ratio(on_accent_for(t, hovered), fill);
+                assert!(ratio >= 4.5, "{} hovered={hovered}: {ratio:.2}:1", t.name);
+            }
         }
     }
 

@@ -203,7 +203,7 @@ pub fn view<'a>(
                         .padding([8, 24])
                         .style(move |_theme: &Theme, status| button::Style {
                             background: Some(iced::Background::Color(t::accent_fill(status))),
-                            text_color: t::bg_primary(),
+                            text_color: t::on_accent(status),
                             border: Border {
                                 radius: 4.0.into(),
                                 ..Default::default()

@@ -220,7 +220,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                 .padding([8, 16])
                 .style(move |_theme: &Theme, status| button::Style {
                     background: Some(iced::Background::Color(t::accent_fill(status))),
-                    text_color: t::bg_primary(),
+                    text_color: t::on_accent(status),
                     border: Border {
                         radius: 4.0.into(),
                         ..Default::default()
@@ -265,7 +265,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                                     background: Some(iced::Background::Color(t::accent_fill(
                                         status,
                                     ))),
-                                    text_color: t::bg_primary(),
+                                    text_color: t::on_accent(status),
                                     border: Border {
                                         radius: 4.0.into(),
                                         ..Default::default()
@@ -337,7 +337,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                     .padding([8, 24])
                     .style(move |_theme: &Theme, status| button::Style {
                         background: Some(iced::Background::Color(t::accent_fill(status))),
-                        text_color: t::bg_primary(),
+                        text_color: t::on_accent(status),
                         border: Border {
                             radius: 4.0.into(),
                             ..Default::default()
