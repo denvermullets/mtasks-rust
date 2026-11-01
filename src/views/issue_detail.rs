@@ -1,5 +1,5 @@
 use iced::widget::{
-    button, column, container, pick_list, rich_text, row, scrollable, span, text, text_editor,
+    button, column, container, pick_list, row, scrollable, text, text_editor,
     text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Theme};
@@ -10,7 +10,7 @@ use crate::files::images::ImageStore;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
-use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
+use crate::mentions::{EditorTarget, Reference, SuggestState};
 use crate::theme as t;
 use crate::views::body::BodyCtx;
 use crate::views::issue_form::LaneOption;
@@ -800,50 +800,11 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         .into()
 }
 
-/// Body text with `@mentions` and `IDENT-n` references highlighted. Own-team
-/// references that resolve to a local issue are clickable. Spans own their
-/// text so this also works for live editor content.
-pub(crate) fn rich_body<'a>(
-    body: &str,
-    size: f32,
-    plain: iced::Color,
-    team: Option<&Team>,
-    teams: &[Team],
-    issues: &[Issue],
-    members: &[Member],
-) -> Element<'a, Message> {
-    let ident = team.map(|t| t.identifier.as_str()).unwrap_or("");
-    let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
-    let spans: Vec<text::Span<'a, mentions::LinkTarget, iced::Font>> = mentions::segments(body, ident, &names)
-        .into_iter()
-        .map(|seg| match seg {
-            Segment::Text(s) => span(s.to_string()).color(plain),
-            Segment::Mention(s) => span(s.to_string()).color(t::highlight()),
-            Segment::Issue { text, .. } => {
-                // Resolves own-team and cross-team identifiers alike.
-                match mentions::issue_link_target(issues, teams, text) {
-                    Some(target) => span(text.to_string())
-                        .color(t::accent())
-                        .underline(true)
-                        .link(target),
-                    None => span(text.to_string()).color(t::accent()),
-                }
-            }
-        })
-        .collect();
-    let el: Element<'a, mentions::LinkTarget> = rich_text(spans).size(size).into();
-    el.map(Message::OpenBodyLink)
-}
-
 /// Rendered (highlighted, clickable) view of the description, shown only when
 /// it contains at least one token; the editor itself is plain text.
 pub(crate) fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
-    let ident = ctx.team.map(|t| t.identifier.as_str()).unwrap_or("");
     let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
-    let has_token = mentions::segments(body, ident, &names)
-        .iter()
-        .any(|s| !matches!(s, Segment::Text(_)))
-        || crate::views::body::has_images(body, ctx.host);
+    let has_token = crate::views::body::has_rich_content(body, ctx.host, &names);
     if !has_token {
         return None;
     }

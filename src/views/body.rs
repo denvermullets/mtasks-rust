@@ -12,14 +12,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, image, row, text};
+use iced::widget::{button, column, container, image, rich_text, row, span, text};
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Issue, Member, Team};
 use crate::files::images::{ImageState, ImageStore};
 use crate::files::inline;
-use crate::mentions::{body_segments, BodySegment, ImageBlock, ImageKind};
+use crate::document::{self, Block, Inline};
+use crate::mentions::{self, body_segments, LinkTarget, BodySegment, ImageBlock, ImageKind};
 use crate::theme as t;
 
 /// Widest an inline image is drawn.
@@ -118,30 +119,102 @@ pub struct BodyCtx<'a> {
     pub on_image: Option<fn(InlineImage) -> Message>,
 }
 
-/// Render `body`: text runs via `issue_detail::rich_body`, images as blocks.
+/// Render `body` by parsing it into a [`document::Document`] and drawing each
+/// block. Mentions and references resolve against `ctx` here, at draw time.
+///
+/// Adding a block type: add the `Block` variant and parse it in `document.rs`,
+/// then add one arm to [`block`]. Adding an inline: add the `Inline` variant,
+/// one arm to [`runs`] (and a `Run` variant if it needs new styling), and one
+/// arm to [`span_for`].
 pub fn view<'a>(body: &str, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
-    let mut col = column![].spacing(8);
-    for seg in body_segments(body, ctx.host) {
-        match seg {
-            BodySegment::Text(run) => {
-                let run = run.trim_matches('\n');
-                if run.trim().is_empty() {
-                    continue;
-                }
-                col = col.push(crate::views::issue_detail::rich_body(
-                    run,
-                    size,
-                    plain,
-                    ctx.team,
-                    ctx.teams,
-                    ctx.issues,
-                    ctx.members,
-                ));
-            }
-            BodySegment::Image(block) => col = col.push(image_block(&block, ctx)),
-        }
+    let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
+    let doc = document::parse_with(body, ctx.host, &names);
+    let mut col = column![].spacing(t::space::S2);
+    for b in &doc.blocks {
+        col = col.push(block(b, size, plain, ctx));
     }
     col.into()
+}
+
+/// True when the body has anything beyond plain text (a token or an image).
+pub fn has_rich_content(body: &str, host: &str, member_names: &[&str]) -> bool {
+    let doc = document::parse_with(body, host, member_names);
+    doc.blocks.iter().any(|b| match b {
+        Block::Paragraph(inlines) => inlines
+            .iter()
+            .any(|i| !matches!(i, Inline::Text(_) | Inline::HardBreak)),
+        _ => true,
+    })
+}
+
+/// Draw one block.
+fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    match b {
+        Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
+        Block::Image(img) => image_block(img, ctx),
+    }
+}
+
+/// A reflowing run of inlines.
+fn paragraph<'a>(inlines: &[Inline], size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let resolve = |token: &str| mentions::issue_link_target(ctx.issues, ctx.teams, token);
+    let spans: Vec<text::Span<'a, LinkTarget, iced::Font>> = runs(inlines, resolve)
+        .into_iter()
+        .map(|r| span_for(r, plain))
+        .collect();
+    let el: Element<'a, LinkTarget> = rich_text(spans).size(size).into();
+    el.map(Message::OpenBodyLink)
+}
+
+/// A styled stretch of text, before it becomes an Iced span. Pure, so the
+/// inline-to-run mapping is testable without a widget tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Run {
+    Plain(String),
+    Mention(String),
+    /// An issue reference; `target` is set when it resolves to a local issue.
+    Reference { text: String, target: Option<LinkTarget> },
+}
+
+/// Map inlines to runs. `resolve` turns an `IDENT-n` token into a link target.
+fn runs(inlines: &[Inline], resolve: impl Fn(&str) -> Option<LinkTarget>) -> Vec<Run> {
+    inlines
+        .iter()
+        .map(|i| match i {
+            Inline::Text(s) => Run::Plain(s.clone()),
+            Inline::HardBreak => Run::Plain("\n".to_string()),
+            Inline::Mention(s) => Run::Mention(s.clone()),
+            Inline::IssueRef { text, prefix, number } => Run::Reference {
+                text: text.clone(),
+                target: resolve(&format!("{prefix}-{number}")),
+            },
+        })
+        .collect()
+}
+
+fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> {
+    match r {
+        Run::Plain(s) => span(s).color(plain),
+        Run::Mention(s) => span(s).color(t::highlight()),
+        Run::Reference { text, target: Some(target) } => {
+            span(text).color(t::accent()).underline(true).link(target)
+        }
+        Run::Reference { text, target: None } => span(text).color(t::accent()),
+    }
+}
+
+/// The document image in the shape the image helpers below take.
+fn legacy(img: &document::ImageBlock) -> ImageBlock<'_> {
+    ImageBlock {
+        alt: &img.alt,
+        src: &img.src,
+        kind: match &img.kind {
+            document::ImageKind::Blob => ImageKind::Blob,
+            document::ImageKind::Pending(id) => ImageKind::Pending(id),
+            // Not fetchable: an empty pending id has no path, so it draws as the alt card.
+            document::ImageKind::Foreign => ImageKind::Pending(""),
+        },
+    }
 }
 
 /// Where the image's bytes are on disk, if they are.
@@ -157,7 +230,8 @@ fn image_path(block: &ImageBlock<'_>, ctx: &BodyCtx<'_>) -> Option<PathBuf> {
     }
 }
 
-fn image_block<'a>(block: &ImageBlock<'_>, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+fn image_block<'a>(img: &document::ImageBlock, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let block = &legacy(img);
     let loading = matches!(block.kind, ImageKind::Blob)
         && inline::blob_key(block.src)
             .and_then(|k| ctx.images.state(&k).cloned())
@@ -246,6 +320,41 @@ mod tests {
     use super::*;
 
     const HOST: &str = "http://localhost:3005";
+
+    fn resolve(token: &str) -> Option<LinkTarget> {
+        (token == "PROJ-7").then(|| LinkTarget::Issue("id-7".into()))
+    }
+
+    #[test]
+    fn inlines_map_to_runs_resolving_references_at_draw_time() {
+        let doc = document::parse_with("hi @Ann see PROJ-7 and OTH-1\nnext", "", &["Ann"]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(
+            runs(inl, resolve),
+            [
+                Run::Plain("hi ".into()),
+                Run::Mention("@Ann".into()),
+                Run::Plain(" see ".into()),
+                Run::Reference { text: "PROJ-7".into(), target: Some(LinkTarget::Issue("id-7".into())) },
+                Run::Plain(" and ".into()),
+                Run::Reference { text: "OTH-1".into(), target: None },
+                Run::Plain(" next".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rich_content_means_tokens_or_images_and_raw_html_is_gone() {
+        for (body, want) in [
+            ("plain\ntext", false),
+            ("<b>hi</b>", false),
+            ("ping @Ann", true),
+            ("see PROJ-7", true),
+            ("![a](https://x.test/a.png)", true),
+        ] {
+            assert_eq!(has_rich_content(body, "", &["Ann"]), want, "{body}");
+        }
+    }
 
     #[test]
     fn image_list_is_in_reading_order_and_skips_text_and_foreign_urls() {
