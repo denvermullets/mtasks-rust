@@ -4366,7 +4366,7 @@ impl App {
                 if let Modal::DeleteAttachmentConfirm(ref id) = self.modal {
                     let conn = self.db();
                     if let Ok(Some(payload)) =
-                        crate::db::attachments::remove_synced_issue_attachment(&conn, id)
+                        crate::db::attachments::remove_synced_attachment(&conn, id)
                     {
                         self.enqueue_sync("attachment", id, "delete", Some(payload.as_str()));
                     }

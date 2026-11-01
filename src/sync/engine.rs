@@ -2248,8 +2248,22 @@ fn prep_attachment_delete(payload: Option<&str>) -> Prep<AttachmentDeletePrep> {
         }
     };
     let field = |k: &str| parsed.get(k).and_then(|v| v.as_i64());
-    let owner = match (parsed.get("owner_kind").and_then(|v| v.as_str()), field("owner_remote_id")) {
-        (Some("issue"), Some(issue_id)) => attachments::AttachmentOwner::Issue { issue_id },
+    let owner = match (
+        parsed.get("owner_kind").and_then(|v| v.as_str()),
+        parsed.get("parent_kind").and_then(|v| v.as_str()),
+        field("owner_remote_id"),
+        field("parent_remote_id"),
+    ) {
+        (Some("issue"), _, Some(issue_id), _) => attachments::AttachmentOwner::Issue { issue_id },
+        (Some("project"), _, Some(project_id), _) => {
+            attachments::AttachmentOwner::Project { project_id }
+        }
+        (Some("comment"), Some("issue"), Some(comment_id), Some(issue_id)) => {
+            attachments::AttachmentOwner::IssueComment { issue_id, comment_id }
+        }
+        (Some("comment"), Some("project"), Some(comment_id), Some(project_id)) => {
+            attachments::AttachmentOwner::ProjectComment { project_id, comment_id }
+        }
         _ => {
             return Prep::Done(Outcome::DropAndLog(
                 "attachment delete: unsupported or incomplete owner".into(),
@@ -4525,6 +4539,29 @@ mod tests {
             ),
             Prep::Done(o) => panic!("expected ready, got {o:?}"),
         }
+    }
+
+    #[test]
+    fn attachment_delete_payload_parses_for_project_and_comment_owners() {
+        let ready = |p: &str| match prep_attachment_delete(Some(p)) {
+            Prep::Ready(r) => r.owner,
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        };
+        assert_eq!(
+            ready(r#"{"owner_kind":"project","team_remote_id":3,"owner_remote_id":4,"remote_id":12}"#),
+            attachments::AttachmentOwner::Project { project_id: 4 }
+        );
+        assert_eq!(
+            ready(r#"{"owner_kind":"comment","parent_kind":"issue","parent_remote_id":9,"team_remote_id":3,"owner_remote_id":5,"remote_id":12}"#),
+            attachments::AttachmentOwner::IssueComment { issue_id: 9, comment_id: 5 }
+        );
+        assert_eq!(
+            ready(r#"{"owner_kind":"comment","parent_kind":"project","parent_remote_id":4,"team_remote_id":3,"owner_remote_id":5,"remote_id":12}"#),
+            attachments::AttachmentOwner::ProjectComment { project_id: 4, comment_id: 5 }
+        );
+        // A comment payload without its parent cannot be addressed.
+        let no_parent = r#"{"owner_kind":"comment","team_remote_id":3,"owner_remote_id":5,"remote_id":12}"#;
+        assert!(matches!(prep_attachment_delete(Some(no_parent)), Prep::Done(Outcome::DropAndLog(_))));
     }
 
     #[test]

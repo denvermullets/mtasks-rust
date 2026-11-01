@@ -13,12 +13,18 @@ use crate::theme as t;
 /// Returns `None` when there are no files so callers can `push_maybe` it and
 /// the section stays hidden.
 pub fn section<'a>(attachments: &'a [Attachment]) -> Option<Element<'a, Message>> {
+    section_with(attachments, true)
+}
+
+/// [`section`] with the Delete action switched on or off for every card (comment
+/// attachments: only the comment's author may delete).
+pub fn section_with<'a>(attachments: &'a [Attachment], deletable: bool) -> Option<Element<'a, Message>> {
     if attachments.is_empty() {
         return None;
     }
     let cards = attachments
         .iter()
-        .fold(column![].spacing(8), |col, a| col.push(card(a)));
+        .fold(column![].spacing(8), |col, a| col.push(card(a, deletable)));
     Some(
         column![]
             .spacing(8)
@@ -30,7 +36,9 @@ pub fn section<'a>(attachments: &'a [Attachment]) -> Option<Element<'a, Message>
 
 /// One file card: filename, then "TYPE · size". Later tickets hang the
 /// thumbnail, open, delete and pending/failed states off this.
-pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
+/// `deletable` is the permission to show Delete (which still shows on synced
+/// rows only).
+pub fn card<'a>(a: &'a Attachment, deletable: bool) -> Element<'a, Message> {
     let meta = format!(
         "{} · {}",
         type_label(&a.content_type, &a.filename),
@@ -43,7 +51,7 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
         .push(text(meta).size(11).color(t::text_muted()));
     // Only files the server has can be deleted this way; pending/failed ones
     // are cancelled or removed by the upload tickets.
-    let delete = (a.upload_state == UploadState::Synced).then(|| {
+    let delete = (deletable && a.upload_state == UploadState::Synced).then(|| {
         button(text("Delete").size(11).color(t::text_muted()))
             .on_press(Message::ConfirmDeleteAttachment(a.id.clone()))
             .padding(0)

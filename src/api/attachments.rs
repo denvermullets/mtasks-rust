@@ -14,11 +14,14 @@ pub async fn download(client: &ApiClient, remote_id: i64) -> Result<Vec<u8>, Api
     client.get_bytes(&download_path(remote_id)).await
 }
 
-/// What an attachment hangs off, as remote ids. JRST-216 adds the project and
-/// comment variants.
+/// What an attachment hangs off, as remote ids. Comment variants carry the
+/// comment's parent too, since Rails nests comment routes under it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentOwner {
     Issue { issue_id: i64 },
+    Project { project_id: i64 },
+    IssueComment { issue_id: i64, comment_id: i64 },
+    ProjectComment { project_id: i64, comment_id: i64 },
 }
 
 fn member_path(team_id: i64, owner: AttachmentOwner, attachment_id: i64) -> String {
@@ -26,6 +29,15 @@ fn member_path(team_id: i64, owner: AttachmentOwner, attachment_id: i64) -> Stri
         AttachmentOwner::Issue { issue_id } => {
             format!("api/v1/teams/{team_id}/issues/{issue_id}/attachments/{attachment_id}")
         }
+        AttachmentOwner::Project { project_id } => {
+            format!("api/v1/teams/{team_id}/projects/{project_id}/attachments/{attachment_id}")
+        }
+        AttachmentOwner::IssueComment { issue_id, comment_id } => format!(
+            "api/v1/teams/{team_id}/issues/{issue_id}/comments/{comment_id}/attachments/{attachment_id}"
+        ),
+        AttachmentOwner::ProjectComment { project_id, comment_id } => format!(
+            "api/v1/teams/{team_id}/projects/{project_id}/comments/{comment_id}/attachments/{attachment_id}"
+        ),
     }
 }
 
@@ -61,6 +73,22 @@ mod tests {
         delete(&client, env("ATT_TEAM"), owner, env("ATT_ID")).await.unwrap();
         let again = delete(&client, env("ATT_TEAM"), owner, env("ATT_ID")).await;
         assert!(matches!(again, Err(ApiError::NotFound(_))), "{again:?}");
+    }
+
+    #[test]
+    fn project_and_comment_attachment_paths_nest_under_their_owner() {
+        assert_eq!(
+            member_path(3, AttachmentOwner::Project { project_id: 4 }, 12),
+            "api/v1/teams/3/projects/4/attachments/12"
+        );
+        assert_eq!(
+            member_path(3, AttachmentOwner::IssueComment { issue_id: 9, comment_id: 5 }, 12),
+            "api/v1/teams/3/issues/9/comments/5/attachments/12"
+        );
+        assert_eq!(
+            member_path(3, AttachmentOwner::ProjectComment { project_id: 4, comment_id: 5 }, 12),
+            "api/v1/teams/3/projects/4/comments/5/attachments/12"
+        );
     }
 
     #[test]
