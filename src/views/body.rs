@@ -16,6 +16,7 @@ use iced::widget::{button, column, container, image, rich_text, row, span, text}
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
+use crate::document::{self, Block};
 use crate::db::models::{Issue, Member, Team};
 use crate::files::images::{ImageState, ImageStore};
 use crate::files::inline;
@@ -52,6 +53,16 @@ pub struct InlineImage {
 }
 
 impl InlineImage {
+    /// `None` for foreign images, which are never fetched or paged.
+    fn from_document(b: &document::ImageBlock) -> Option<Self> {
+        let key = match b.kind {
+            document::ImageKind::Blob => inline::blob_key(&b.src),
+            document::ImageKind::Pending(_) => None,
+            document::ImageKind::Foreign => return None,
+        };
+        Some(InlineImage { key, src: b.src.clone(), alt: b.alt.clone() })
+    }
+
     fn from_block(b: &ImageBlock<'_>) -> Self {
         InlineImage {
             key: match b.kind {
@@ -66,11 +77,12 @@ impl InlineImage {
 
 /// Every image block of `body`, in reading order (JRST-193 lightbox paging).
 pub fn image_list(body: &str, host: &str) -> Vec<InlineImage> {
-    body_segments(body, host)
+    document::parse_with(body, host, &[])
+        .blocks
         .iter()
-        .filter_map(|s| match s {
-            BodySegment::Image(b) => Some(InlineImage::from_block(b)),
-            BodySegment::Text(_) => None,
+        .filter_map(|b| match b {
+            Block::Image(img) => InlineImage::from_document(img),
+            _ => None,
         })
         .collect()
 }
@@ -97,9 +109,7 @@ pub fn fetchable_srcs_of_bodies<'b>(
 
 /// True when `body` has at least one image block.
 pub fn has_images(body: &str, host: &str) -> bool {
-    body_segments(body, host)
-        .iter()
-        .any(|s| matches!(s, BodySegment::Image(_)))
+    !image_list(body, host).is_empty()
 }
 
 /// Everything the renderer needs besides the body text itself.
@@ -368,6 +378,18 @@ mod tests {
         );
         assert_eq!(list[0].key.as_deref(), Some("inline-AA--1"));
         assert_eq!(list[1].key.as_deref(), Some("inline-BB--2"));
+    }
+
+    #[test]
+    fn images_in_code_are_never_listed_fetched_or_counted() {
+        let blob = "![a](/rails/active_storage/blobs/redirect/AA--1/a.png)";
+        let body = format!("```\n{blob}\n```\n\n`{blob}`");
+        assert!(image_list(&body, HOST).is_empty());
+        assert!(fetchable_srcs_of_body(&body, HOST).is_empty());
+        assert!(!has_images(&body, HOST));
+        let mixed = format!("```\n{blob}\n```\n\n![b](/rails/active_storage/blobs/redirect/BB--2/b.png)");
+        assert_eq!(image_list(&mixed, HOST).len(), 1);
+        assert!(has_images(&mixed, HOST));
     }
 
     #[test]
