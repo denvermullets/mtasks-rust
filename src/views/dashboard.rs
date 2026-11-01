@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header, Sort};
+use crate::dashboard_eval::{AssigneeFilter, Evaluation, Filter, GroupResult, Header, Sort};
 use crate::db::dashboards::{Dashboard, MoveDirection};
 use crate::theme as t;
 use crate::views::board::CardData;
@@ -145,6 +145,7 @@ fn controls<'a>(
             .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
             .push(team_picker(evaluation, header.team.as_deref()))
+            .push(assignee_picker(evaluation, header.assignee))
             .push(reset_button())
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
@@ -184,6 +185,39 @@ fn team_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Mess
     }));
     let selected = options.iter().find(|o| o.id.as_deref() == active).cloned();
     pick_list(options, selected, |c| Message::SetDashboardTeam(c.id)).text_size(13).into()
+}
+
+/// The assignee picker: members of the source teams plus "Unassigned".
+/// Hidden when no member is known.
+fn assignee_picker<'a>(
+    e: &Evaluation<'a>,
+    active: Option<AssigneeFilter>,
+) -> Element<'a, Message> {
+    if e.assignees.is_empty() {
+        return horizontal_space().width(0).into();
+    }
+    let mut options = vec![AssigneeChoice { pick: None, label: "Anyone".into() }];
+    options.extend(e.assignees.iter().map(|a| AssigneeChoice {
+        pick: Some(AssigneeFilter::User(a.remote_id)),
+        label: a.name.clone(),
+    }));
+    options.push(AssigneeChoice { pick: Some(AssigneeFilter::Unassigned), label: "Unassigned".into() });
+    let selected = options.iter().find(|o| o.pick == active).cloned();
+    pick_list(options, selected, |c| Message::SetDashboardAssignee(c.pick))
+        .text_size(13)
+        .into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssigneeChoice {
+    pick: Option<AssigneeFilter>,
+    label: String,
+}
+
+impl std::fmt::Display for AssigneeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
