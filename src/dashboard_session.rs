@@ -41,7 +41,11 @@ mod tests {
 
     fn custom() -> Session {
         Session {
-            header: Header { filter: Filter::Open, sort: Sort::Priority, search: "bug".into(), ..Header::default() },
+            header: Header {
+                filter: Filter::Open, sort: Sort::Priority,
+                search: "bug".into(),
+                ..Header::default()
+            },
             focused_lane: 2,
             focused_issue: 3,
         }
