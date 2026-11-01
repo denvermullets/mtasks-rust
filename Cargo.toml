@@ -18,6 +18,8 @@ thiserror = "1"
 csv = "1"
 rfd = "0.15"
 mac-notification-sys = "0.6.15"
+md-5 = "0.10"
+base64 = "0.22"
 
 # Bundle metadata for `cargo bundle` (cargo-bundle). The identifier is fixed:
 # macOS keys notification permission and settings off it. Do not change it.
