@@ -87,10 +87,13 @@ impl std::fmt::Display for Sort {
 }
 
 /// The header state. Held in memory per dashboard; not persisted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Header {
     pub filter: Filter,
     pub sort: Sort,
+    /// Raw view-search text. Narrows rows only (never counts); matched like
+    /// the other lists: title, or team identifier plus number.
+    pub search: String,
 }
 
 pub struct Input<'a> {
@@ -142,6 +145,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
 
     // Ids across all groups' refined base sets, deduplicated for the counts.
     let mut counted: HashSet<&str> = HashSet::new();
+    let needle = crate::views::header::needle(&input.header.search);
     let groups = input
         .groups
         .iter()
@@ -154,6 +158,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
             let mut issues: Vec<&Issue> = base
                 .into_iter()
                 .filter(|i| passes_filter(i, input.header.filter, input.today, m.projects))
+                .filter(|i| matches_search(i, m.teams, &needle))
                 .collect();
             sort(&mut issues, input.header.sort, m.projects);
             GroupResult {
@@ -191,6 +196,12 @@ fn due_counts(ids: &HashSet<&str>, m: &Mirror<'_>, today: NaiveDate) -> (usize, 
         }
     }
     (due_today, overdue)
+}
+
+/// The view search: title text, or a team identifier plus number.
+fn matches_search(i: &Issue, teams: &[Team], needle: &str) -> bool {
+    let team = teams.iter().find(|t| t.id == i.team_id);
+    crate::views::header::issue_matches(i, team, needle)
 }
 
 /// The local project behind a project source, if mirrored and on an accessible team.
@@ -804,6 +815,68 @@ mod tests {
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 2, 2));
         i.due_date = Some("2026-01-01".into());
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 1, 1));
+    }
+
+    /// Issue ids per group with `search` typed into the header.
+    fn run_search(fx: &Fx, groups: &[GroupConfig], search: &str) -> Vec<Vec<String>> {
+        let header = Header { filter: Filter::Open, search: search.into(), ..Header::default() };
+        evaluate(&Input {
+            groups,
+            mirror: Mirror {
+                teams: &fx.teams,
+                projects: &fx.projects,
+                labels: &fx.labels,
+                lanes: &fx.lanes,
+                members: &fx.members,
+                issues: &fx.issues,
+                issue_labels: &fx.issue_labels,
+            },
+            current_user_remote_id: Some(99),
+            today: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            header,
+        })
+        .groups
+        .iter()
+        .map(|g| g.issues.iter().map(|i| i.id.clone()).collect())
+        .collect()
+    }
+
+    fn search_fixture() -> (Fx, Vec<GroupConfig>) {
+        let mut fx = Fx::new();
+        let mut a12 = issue("a12", "a", "la");
+        a12.team_number = Some(12);
+        a12.title = "Fix login".into();
+        let mut a3 = issue("a3", "a", "la");
+        a3.team_number = Some(3);
+        a3.title = "Login page".into();
+        let mut b12 = issue("b12", "b", "lb");
+        b12.team_number = Some(12);
+        b12.title = "Other".into();
+        fx.issues = vec![a12, a3, b12];
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        (fx, groups)
+    }
+
+    #[test]
+    fn search_matches_title_across_teams() {
+        let (fx, groups) = search_fixture();
+        assert_eq!(run_search(&fx, &groups, "LOGIN"), vec![ids(&["a12", "a3"])]);
+    }
+
+    #[test]
+    fn search_matches_team_identifier_and_number() {
+        let (fx, groups) = search_fixture();
+        assert_eq!(run_search(&fx, &groups, "a-12"), vec![ids(&["a12"])]);
+        assert_eq!(run_search(&fx, &groups, " B-12 "), vec![ids(&["b12"])]);
+        assert_eq!(run_search(&fx, &groups, "-12"), vec![ids(&["a12", "b12"])]);
+    }
+
+    #[test]
+    fn empty_search_restores_all_rows_and_applies_to_every_group() {
+        let (fx, mut groups) = search_fixture();
+        groups.push(cfg("g2", vec![team_src(1, true)]));
+        assert_eq!(run_search(&fx, &groups, "a-3"), vec![ids(&["a3"]), ids(&["a3"])]);
+        assert_eq!(run_search(&fx, &groups, "  "), vec![ids(&["a12", "a3", "b12"]), ids(&["a12", "a3"])]);
     }
 
     fn filter_ids(fx: &Fx, filter: Filter) -> Vec<String> {

@@ -1055,7 +1055,10 @@ impl App {
             },
             current_user_remote_id: self.config.current_user_remote_id,
             today: chrono::Local::now().date_naive(),
-            header: self.dashboard_header,
+            header: crate::dashboard_eval::Header {
+                search: self.active_search().to_string(),
+                ..self.dashboard_header.clone()
+            },
         })
     }
 
@@ -1588,6 +1591,7 @@ impl App {
             self.view,
             View::Board
                 | View::MyIssues
+                | View::Dashboard(_)
                 | View::ProjectList
                 | View::ProjectDetail(_)
                 | View::Roadmap
@@ -4336,6 +4340,9 @@ impl App {
                 if matches!(self.view, View::Board | View::MyIssues) {
                     self.focused_issue = 0;
                     self.clamp_focus();
+                } else if matches!(self.view, View::Dashboard(_)) {
+                    self.focused_lane = 0;
+                    self.focused_issue = 0;
                 }
             }
             Message::FocusSearch => {
@@ -6071,7 +6078,7 @@ impl App {
                     self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
                     self.focused_lane,
                     self.focused_issue,
-                    self.dashboard_header,
+                    self.dashboard_header.clone(),
                     self.sync_read_only,
                 )
             }
