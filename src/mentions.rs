@@ -138,64 +138,6 @@ pub fn find_mentions(text: &str, names: &[&str]) -> Vec<MentionToken> {
     out
 }
 
-// ── Rendering segments ──
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Segment<'a> {
-    Text(&'a str),
-    /// Issue reference; `number` is set only when the prefix is the team's.
-    Issue {
-        text: &'a str,
-        number: Option<i64>,
-    },
-    Mention(&'a str),
-}
-
-/// Split `text` into plain/issue/mention segments for display.
-pub fn segments<'a>(
-    text: &'a str,
-    team_identifier: &str,
-    member_names: &[&str],
-) -> Vec<Segment<'a>> {
-    enum Kind {
-        Issue(Option<i64>),
-        Mention,
-    }
-    let mut spans: Vec<(usize, usize, Kind)> = Vec::new();
-    for t in find_issue_tokens(text) {
-        let own = t.prefix.eq_ignore_ascii_case(team_identifier);
-        spans.push((t.start, t.end, Kind::Issue(own.then_some(t.number))));
-    }
-    for m in find_mentions(text, member_names) {
-        spans.push((m.start, m.end, Kind::Mention));
-    }
-    spans.sort_by_key(|s| s.0);
-
-    let mut out = Vec::new();
-    let mut pos = 0;
-    for (start, end, kind) in spans {
-        if start < pos {
-            continue; // overlapping token
-        }
-        if start > pos {
-            out.push(Segment::Text(&text[pos..start]));
-        }
-        let slice = &text[start..end];
-        out.push(match kind {
-            Kind::Issue(number) => Segment::Issue {
-                text: slice,
-                number,
-            },
-            Kind::Mention => Segment::Mention(slice),
-        });
-        pos = end;
-    }
-    if pos < text.len() {
-        out.push(Segment::Text(&text[pos..]));
-    }
-    out
-}
-
 // ── Body segments: text runs and image blocks ──
 
 /// Path prefix of a JAIT (Rails ActiveStorage) blob redirect URL.
@@ -788,28 +730,6 @@ mod body_segment_tests {
         );
     }
 
-    #[test]
-    fn mentions_and_references_still_segment_in_text_runs() {
-        let t = format!("ping @Ann re PROJ-7 ![a]({BLOB}) PROJ-8");
-        let segs = body_segments(&t, HOST);
-        let BodySegment::Text(first) = segs[0] else {
-            panic!("expected text first");
-        };
-        assert_eq!(
-            segments(first, "PROJ", &["Ann"]),
-            vec![
-                Segment::Text("ping "),
-                Segment::Mention("@Ann"),
-                Segment::Text(" re "),
-                Segment::Issue {
-                    text: "PROJ-7",
-                    number: Some(7)
-                },
-                Segment::Text(" "),
-            ]
-        );
-        assert_eq!(segs.len(), 3);
-    }
 }
 
 #[cfg(test)]
@@ -906,29 +826,6 @@ mod tests {
         let m = find_mentions(text, &names);
         let got: Vec<_> = m.iter().map(|m| &text[m.start..m.end]).collect();
         assert_eq!(got, vec!["@ann lee", "@Ann"]);
-    }
-
-    #[test]
-    fn segments_split_text() {
-        let s = segments("ping @Bob re JAIT-4 / OTH-1", "JAIT", &["Bob"]);
-        assert_eq!(
-            s,
-            vec![
-                Segment::Text("ping "),
-                Segment::Mention("@Bob"),
-                Segment::Text(" re "),
-                Segment::Issue {
-                    text: "JAIT-4",
-                    number: Some(4)
-                },
-                Segment::Text(" / "),
-                Segment::Issue {
-                    text: "OTH-1",
-                    number: None
-                },
-            ]
-        );
-        assert_eq!(segments("plain", "JAIT", &[]), vec![Segment::Text("plain")]);
     }
 
     #[test]

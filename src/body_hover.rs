@@ -15,7 +15,7 @@
 //! change. A source outside body text (a row, say) needs its own owner id and
 //! window rectangle, then calls [`BodyHover::body_hover`] the same way.
 
-use iced::{Point, Rectangle};
+use iced::Rectangle;
 
 use crate::db::models::{Issue, Lane, Member, Priority, Project, Team};
 use crate::hover_card::{Effect, Event, HoverCard};
@@ -278,7 +278,7 @@ fn open_issue_count(member: &Member, issues: &[Issue]) -> usize {
 mod tests {
     use super::*;
     use crate::hover_card::SHOW_DELAY;
-    use iced::Size;
+    use iced::{Point, Size};
 
     fn rect() -> Rectangle {
         Rectangle::new(Point::new(10.0, 20.0), Size::new(30.0, 14.0))

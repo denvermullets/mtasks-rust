@@ -217,7 +217,6 @@ pub fn view<'a>(
             detail,
             &ThreadCtx {
                 members,
-                team,
                 teams,
                 issues,
                 my_member_ids,
@@ -1078,7 +1077,6 @@ fn comments_section<'a>(
 /// rendering plus the open reply composer. Shared by issue and project detail.
 pub struct ThreadCtx<'a, 'b> {
     pub members: &'a [Member],
-    pub team: Option<&'a Team>,
     pub teams: &'a [Team],
     pub issues: &'a [Issue],
     /// Local ids of the current user's members; gates the Delete action.
@@ -1281,7 +1279,6 @@ fn comment_row<'a>(
 ) -> Element<'a, Message> {
     let ThreadCtx {
         members,
-        team,
         teams,
         issues,
         my_member_ids,

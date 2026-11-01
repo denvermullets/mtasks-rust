@@ -477,6 +477,7 @@ pub fn hex_to_color(hex: &str) -> Option<Color> {
 
 /// The web's Tailwind v4 default type scale, in logical pixels (rem * 16).
 /// Each size pairs with the web's line height as a multiple of the size.
+// Whole Tailwind scale kept; the polish tickets (JRST-315 to 320) will use the rest.
 #[allow(dead_code)]
 pub mod type_scale {
     pub const XS: f32 = 12.0;
@@ -501,6 +502,7 @@ pub mod type_scale {
 
 /// The web's Tailwind v4 spacing scale: `N` steps of 0.25rem (4px), named by the Tailwind step.
 /// Use for padding, gaps and margins.
+// Whole Tailwind scale kept; the polish tickets (JRST-315 to 320) will use the rest.
 #[allow(dead_code)]
 pub mod space {
     pub const S0_5: f32 = 2.0;
@@ -520,6 +522,7 @@ pub mod space {
 
 /// The web's Tailwind v4 corner radii in logical pixels (rounded-sm = 0.25rem, md = 0.375rem,
 /// lg = 0.5rem, xl = 0.75rem, 2xl = 1rem). `FULL` is `rounded-full`: large enough to make a pill.
+// Whole Tailwind scale kept; the polish tickets (JRST-315 to 320) will use the rest.
 #[allow(dead_code)]
 pub mod radius {
     pub const XS: f32 = 2.0;

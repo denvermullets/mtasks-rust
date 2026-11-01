@@ -118,6 +118,23 @@ pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
     }
 }
 
+/// The description keys both detail views share: Escape leaves the editor
+/// while editing (once rendered it falls through to the global handler), and
+/// plain `e` starts editing.
+fn description_key(
+    key: &Key,
+    modifiers: Modifiers,
+    editing_description: bool,
+    stop: Message,
+    edit: Message,
+) -> Option<Message> {
+    match key {
+        Key::Named(keyboard::key::Named::Escape) if editing_description => Some(stop),
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "e" => Some(edit),
+        _ => None,
+    }
+}
+
 /// Keys bound only while an issue detail is showing. Checked before the
 /// global handler; `None` falls through to it.
 pub fn handle_issue_detail_key(
@@ -125,38 +142,35 @@ pub fn handle_issue_detail_key(
     modifiers: Modifiers,
     editing_description: bool,
 ) -> Option<Message> {
-    match key {
-        // Esc leaves the description editor first; once rendered, it falls
-        // through to the global handler as it always did.
-        Key::Named(keyboard::key::Named::Escape) if editing_description => {
-            Some(Message::StopEditingIssueDescription)
-        }
+    description_key(
+        key,
+        modifiers,
+        editing_description,
+        Message::StopEditingIssueDescription,
+        Message::EditIssueDescription,
+    )
+    .or_else(|| match key {
         Key::Character(c) if modifiers.is_empty() && c.as_str() == "a" => {
             Some(Message::PickAttachmentFiles)
         }
-        Key::Character(c) if modifiers.is_empty() && c.as_str() == "e" => {
-            Some(Message::EditIssueDescription)
-        }
         _ => None,
-    }
+    })
 }
 
-/// Keys bound only while a project detail is showing; same shape as the
-/// issue detail handler, for the project description.
+/// Keys bound only while a project detail is showing; same description keys
+/// as the issue detail handler.
 pub fn handle_project_detail_key(
     key: &Key,
     modifiers: Modifiers,
     editing_description: bool,
 ) -> Option<Message> {
-    match key {
-        Key::Named(keyboard::key::Named::Escape) if editing_description => {
-            Some(Message::StopEditingProjectDescription)
-        }
-        Key::Character(c) if modifiers.is_empty() && c.as_str() == "e" => {
-            Some(Message::EditProjectDescription)
-        }
-        _ => None,
-    }
+    description_key(
+        key,
+        modifiers,
+        editing_description,
+        Message::StopEditingProjectDescription,
+        Message::EditProjectDescription,
+    )
 }
 
 /// Keys bound only while the lightbox modal is open. Checked before the

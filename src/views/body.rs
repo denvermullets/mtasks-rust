@@ -24,7 +24,7 @@ use crate::files::images::{ImageState, ImageStore};
 use crate::files::inline;
 use crate::fonts;
 use crate::document::Inline;
-use crate::mentions::{self, body_segments, LinkTarget, BodySegment, ImageBlock, ImageKind};
+use crate::mentions::{self, LinkTarget};
 use crate::theme as t;
 use crate::views::hover_rich::hover_rich;
 
@@ -67,16 +67,6 @@ impl InlineImage {
         Some(InlineImage { key, src: b.src.clone(), alt: b.alt.clone() })
     }
 
-    fn from_block(b: &ImageBlock<'_>) -> Self {
-        InlineImage {
-            key: match b.kind {
-                ImageKind::Blob => inline::blob_key(b.src),
-                ImageKind::Pending(_) => None,
-            },
-            src: b.src.to_string(),
-            alt: b.alt.to_string(),
-        }
-    }
 }
 
 /// Every image block of `body`, in reading order (JRST-193 lightbox paging).
@@ -121,11 +111,6 @@ pub fn fetchable_srcs_of_bodies<'b>(
         .into_iter()
         .flat_map(|b| fetchable_srcs_of_body(b, host))
         .collect()
-}
-
-/// True when `body` has at least one image block.
-pub fn has_images(body: &str, host: &str) -> bool {
-    !image_list(body, host).is_empty()
 }
 
 /// Everything the renderer needs besides the body text itself. `members` are
@@ -541,63 +526,50 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
     }
 }
 
-/// The document image in the shape the image helpers below take.
-fn legacy(img: &document::ImageBlock) -> ImageBlock<'_> {
-    ImageBlock {
-        alt: &img.alt,
-        src: &img.src,
-        kind: match &img.kind {
-            document::ImageKind::Blob => ImageKind::Blob,
-            document::ImageKind::Pending(id) => ImageKind::Pending(id),
-            // Not fetchable: an empty pending id has no path, so it draws as the alt card.
-            document::ImageKind::Foreign => ImageKind::Pending(""),
-        },
-    }
-}
-
-/// Where the image's bytes are on disk, if they are.
-fn image_path(block: &ImageBlock<'_>, ctx: &BodyCtx<'_>) -> Option<PathBuf> {
-    match block.kind {
-        ImageKind::Pending(uuid) => ctx.pending_paths
+/// Where the image's bytes are on disk, if they are. A foreign image is never
+/// fetched, so it has none.
+fn image_path(img: &document::ImageBlock, ctx: &BodyCtx<'_>) -> Option<PathBuf> {
+    match &img.kind {
+        document::ImageKind::Pending(uuid) => ctx.pending_paths
             .and_then(|m| m.get(uuid))
             .map(|p| &p.path)
             .filter(|p| p.exists())
             .cloned(),
-        ImageKind::Blob => inline::blob_key(block.src)
+        document::ImageKind::Blob => inline::blob_key(&img.src)
             .and_then(|k| ctx.images.path(&k).map(|p| p.to_path_buf())),
+        document::ImageKind::Foreign => None,
     }
 }
 
 fn image_block<'a>(img: &document::ImageBlock, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
-    let block = &legacy(img);
-    let loading = matches!(block.kind, ImageKind::Blob)
-        && inline::blob_key(block.src)
+    let loading = img.kind == document::ImageKind::Blob
+        && inline::blob_key(&img.src)
             .and_then(|k| ctx.images.state(&k).cloned())
             .is_some_and(|s| s == ImageState::Loading);
-    let el: Element<'a, Message> = match image_path(block, ctx) {
+    let el: Element<'a, Message> = match image_path(img, ctx) {
         Some(path) => container(image(path).content_fit(ContentFit::ScaleDown))
             .max_width(MAX_IMAGE_WIDTH)
             .into(),
         None if loading => placeholder(),
-        None => alt_card(block.alt),
+        None => alt_card(&img.alt),
     };
-    let el: Element<'a, Message> = match ctx.on_image {
-        Some(on_image) => button(el)
+    let el: Element<'a, Message> = match ctx.on_image.zip(InlineImage::from_document(img)) {
+        Some((on_image, inline_image)) => button(el)
             .padding(0)
             .style(|_theme: &Theme, _status| button::Style::default())
-            .on_press(on_image(InlineImage::from_block(block)))
+            .on_press(on_image(inline_image))
             .into(),
         None => el,
     };
-    match failed_inline(block, ctx) {
+    match failed_inline(img, ctx) {
         Some((id, reason)) => column![el, failed_row(id, reason)].spacing(4).into(),
         None => el,
     }
 }
 
 /// The failed upload behind a pending-placeholder block: (attachment id, reason).
-fn failed_inline<'a>(block: &ImageBlock<'_>, ctx: &BodyCtx<'a>) -> Option<(String, String)> {
-    let ImageKind::Pending(uuid) = block.kind else { return None };
+fn failed_inline<'a>(img: &document::ImageBlock, ctx: &BodyCtx<'a>) -> Option<(String, String)> {
+    let document::ImageKind::Pending(uuid) = &img.kind else { return None };
     let p = ctx.pending_paths?.get(uuid)?;
     Some((p.id.clone(), p.failure.clone()?))
 }
@@ -706,9 +678,9 @@ mod tests {
         let alts: Vec<String> = image_list(&body, HOST).into_iter().map(|i| i.alt).collect();
         assert_eq!(alts, ["a", "b", "c", "d"]);
         assert_eq!(fetchable_srcs_of_body(&body, HOST), [a, b, c, d]);
-        assert!(has_images(&format!("> ![q]({a})"), HOST));
-        assert!(has_images(&format!("- ![q]({a})"), HOST));
-        assert!(!has_images("> - plain", HOST));
+        assert_eq!(image_list(&format!("> ![q]({a})"), HOST).len(), 1);
+        assert_eq!(image_list(&format!("- ![q]({a})"), HOST).len(), 1);
+        assert!(image_list("> - plain", HOST).is_empty());
     }
 
     #[test]
@@ -916,15 +888,13 @@ mod tests {
     }
 
     #[test]
-    fn images_in_code_are_never_listed_fetched_or_counted() {
+    fn images_in_code_are_never_listed_or_fetched() {
         let blob = "![a](/rails/active_storage/blobs/redirect/AA--1/a.png)";
         let body = format!("```\n{blob}\n```\n\n`{blob}`");
         assert!(image_list(&body, HOST).is_empty());
         assert!(fetchable_srcs_of_body(&body, HOST).is_empty());
-        assert!(!has_images(&body, HOST));
         let mixed = format!("```\n{blob}\n```\n\n![b](/rails/active_storage/blobs/redirect/BB--2/b.png)");
         assert_eq!(image_list(&mixed, HOST).len(), 1);
-        assert!(has_images(&mixed, HOST));
     }
 
     #[test]
@@ -958,7 +928,6 @@ mod tests {
         let list = image_list(body, HOST);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].key, None);
-        assert!(has_images(body, HOST));
-        assert!(!has_images("plain text", HOST));
+        assert!(image_list("plain text", HOST).is_empty());
     }
 }
