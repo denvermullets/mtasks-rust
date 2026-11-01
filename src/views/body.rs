@@ -163,6 +163,10 @@ pub fn has_rich_content(body: &str, host: &str, member_names: &[&str]) -> bool {
 fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     match b {
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
+        // Never fetched: an alt-text link that opens in the browser.
+        Block::Image(img) if img.kind == document::ImageKind::Foreign => {
+            paragraph(&[document::foreign_image_inline(img, ctx.host)], size, plain, ctx)
+        }
         Block::Image(img) => image_block(img, ctx),
         Block::List(list) => list_block(list, size, plain, ctx),
     }

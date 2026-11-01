@@ -124,6 +124,21 @@ pub fn resolve_link(url: &str, host: &str) -> Option<String> {
     is_openable_link(url).then(|| url.to_string())
 }
 
+/// How a foreign image is drawn: never fetched, but a link labelled with its
+/// alt text ("Image" when empty) that opens in the browser, under the same
+/// scheme allowlist as other links. A disallowed source is the label as plain
+/// text.
+pub fn foreign_image_inline(img: &ImageBlock, host: &str) -> Inline {
+    let label = match img.alt.trim() {
+        "" => "Image".to_string(),
+        alt => alt.to_string(),
+    };
+    match resolve_link(&img.src, host) {
+        Some(url) => Inline::Link { text: label, url },
+        None => Inline::Text(label),
+    }
+}
+
 /// Byte ranges of bare `http://` and `https://` addresses in `text`, as the
 /// web autolinks them. The scheme is case-insensitive and must start a word.
 /// An address ends at whitespace or `<`/`>`; trailing sentence punctuation
@@ -1122,6 +1137,27 @@ mod tests {
         ];
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn foreign_images_draw_as_links() {
+        let img = |alt: &str, src: &str| ImageBlock { alt: alt.into(), src: src.into(), kind: ImageKind::Foreign };
+        let link = |t: &str, u: &str| Inline::Link { text: t.into(), url: u.into() };
+        let cases = [
+            ("alt text link", img("cat", "https://example.com/cat.png"), link("cat", "https://example.com/cat.png")),
+            ("empty alt falls back", img("", "https://example.com/c.png"), link("Image", "https://example.com/c.png")),
+            ("blank alt falls back", img("  ", "http://e.com/c.png"), link("Image", "http://e.com/c.png")),
+            ("mixed case scheme", img("c", "HTTPS://e.com/c.png"), link("c", "HTTPS://e.com/c.png")),
+            ("relative non-blob resolves to host", img("c", "/files/c.png"), link("c", "https://h.x/files/c.png")),
+            ("javascript is inert", img("c", "javascript:alert(1)"), text("c")),
+            ("data is inert", img("c", "data:image/png;base64,AA"), text("c")),
+            ("protocol-relative is inert", img("c", "//evil.example/c.png"), text("c")),
+            ("file is inert", img("", "file:///etc/passwd"), text("Image")),
+            ("bad pending id is inert", img("c", "jait-pending://nope"), text("c")),
+        ];
+        for (name, image, want) in cases {
+            assert_eq!(foreign_image_inline(&image, "https://h.x"), want, "{name}");
         }
     }
 
