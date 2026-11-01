@@ -106,8 +106,9 @@ pub struct Input<'a> {
 pub struct GroupResult<'a> {
     pub group: &'a DashboardGroup,
     /// Every source was dropped as unreachable. Not widened to show everything.
-    #[allow(dead_code)]
     pub inaccessible: bool,
+    /// The group has no sources at all.
+    pub no_sources: bool,
     /// Sorted issues.
     pub issues: Vec<&'a Issue>,
 }
@@ -115,6 +116,11 @@ pub struct GroupResult<'a> {
 pub struct Evaluation<'a> {
     /// In the order of `Input::groups`.
     pub groups: Vec<GroupResult<'a>>,
+    /// Distinct issues across all groups with effective due = today. Computed
+    /// from the refined base sets, so it ignores the filter tab (and search).
+    pub due_today: usize,
+    /// Distinct issues across all groups with effective due < today.
+    pub overdue: usize,
 }
 
 pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
@@ -134,28 +140,57 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         .map(|mem| mem.id.as_str())
         .collect();
 
+    // Ids across all groups' refined base sets, deduplicated for the counts.
+    let mut counted: HashSet<&str> = HashSet::new();
     let groups = input
         .groups
         .iter()
         .map(|cfg| {
             let pool = pool(cfg, m, &accessible, &my_members);
             let pool = apply_label_sources(cfg, m, &accessible, pool);
-            let mut issues: Vec<&Issue> = m
-                .issues
-                .iter()
-                .filter(|i| pool.contains(i.id.as_str()) && is_active(i, m.lanes))
+            // The refined base set: counts read this, rows narrow it further.
+            let base = base_set(input, &pool);
+            counted.extend(base.iter().map(|i| i.id.as_str()));
+            let mut issues: Vec<&Issue> = base
+                .into_iter()
                 .filter(|i| passes_filter(i, input.header.filter, input.today, m.projects))
                 .collect();
             sort(&mut issues, input.header.sort, m.projects);
             GroupResult {
                 group: &cfg.group,
-                inaccessible: !cfg.sources.is_empty()
-                    && cfg.sources.iter().all(|s| dropped(s, m, &accessible)),
+                inaccessible: is_inaccessible(cfg, m, &accessible),
+                no_sources: cfg.sources.is_empty(),
                 issues,
             }
         })
         .collect();
-    Evaluation { groups }
+    let (due_today, overdue) = due_counts(&counted, m, input.today);
+    Evaluation { groups, due_today, overdue }
+}
+
+/// A group's pool narrowed to the starting set rows and counts both read.
+/// Refinements (Mine, team, assignee, label, status) plug in here, so rows and
+/// counts narrow together. The status picker swaps `is_active` for a
+/// lane-name match in this function.
+fn base_set<'a>(input: &Input<'a>, pool: &HashSet<&'a str>) -> Vec<&'a Issue> {
+    let m = &input.mirror;
+    m.issues
+        .iter()
+        .filter(|i| pool.contains(i.id.as_str()) && is_active(i, m.lanes))
+        .collect()
+}
+
+/// (due today, overdue) over distinct issue ids, by effective due date.
+fn due_counts(ids: &HashSet<&str>, m: &Mirror<'_>, today: NaiveDate) -> (usize, usize) {
+    let (mut due_today, mut overdue) = (0, 0);
+    for i in m.issues.iter().filter(|i| ids.contains(i.id.as_str())) {
+        match effective_due(i, m.projects) {
+            Some(d) if d == today => due_today += 1,
+            Some(d) if d < today => overdue += 1,
+            _ => {}
+        }
+    }
+    (due_today, overdue)
 }
 
 /// The local project behind a project source, if mirrored and on an accessible team.
@@ -173,6 +208,20 @@ fn project_of_source<'a>(
 /// The local team behind a team source, if mirrored.
 fn team_of_source<'a>(s: &GroupSource, m: &Mirror<'a>) -> Option<&'a Team> {
     m.teams.iter().find(|t| t.remote_id == Some(s.remote_id))
+}
+
+/// A group is inaccessible when, for either kind (team/project; label), it has
+/// sources of that kind and every one was dropped. A kind with none doesn't count.
+fn is_inaccessible(cfg: &GroupConfig, m: &Mirror<'_>, accessible: &HashSet<&str>) -> bool {
+    let all_dropped = |label: bool| {
+        let kind: Vec<&GroupSource> = cfg
+            .sources
+            .iter()
+            .filter(|s| (s.source_type == SourceType::Label) == label)
+            .collect();
+        !kind.is_empty() && kind.iter().all(|s| dropped(s, m, accessible))
+    };
+    all_dropped(false) || all_dropped(true)
 }
 
 /// A source pointing at something outside the accessible teams.
@@ -990,5 +1039,99 @@ mod tests {
         fx.issue_labels.insert("outside".into(), vec![fx.labels[0].clone()]);
         let got = fx.run(vec![cfg("g", vec![proj_src(10, true), label_src(20)])], Some(99));
         assert_eq!(got, vec![ids(&["mine"])]);
+    }
+
+    #[test]
+    fn inaccessible_when_one_kind_lost_access_even_with_other_kind() {
+        let fx = label_fx();
+        let groups = vec![
+            // Live team source, but its only label source is on an archived team.
+            cfg("labels_lost", vec![team_src(1, true), label_src(13)]),
+            // Live label source, but its only team source is unmirrored.
+            cfg("teams_lost", vec![team_src(77, true), label_src(10)]),
+            cfg("all_live", vec![team_src(1, true), label_src(10)]),
+        ];
+        let ev = fx.eval(&groups, Some(99));
+        let flags: Vec<bool> = ev.groups.iter().map(|g| g.inaccessible).collect();
+        assert_eq!(flags, [true, true, false]);
+        assert!(ev.groups[0].issues.is_empty());
+    }
+
+    #[test]
+    fn project_kind_lost_with_live_label_is_inaccessible() {
+        let mut fx = project_fx();
+        fx.labels = vec![label("bug_a", "a", 20)];
+        let groups = vec![cfg("g", vec![proj_src(11, true), label_src(20)])];
+        assert!(fx.eval(&groups, Some(99)).groups[0].inaccessible);
+    }
+
+    #[test]
+    fn no_sources_and_reachable_but_empty_are_distinct_states() {
+        let fx = Fx::new();
+        let groups = vec![cfg("none", vec![]), cfg("empty", vec![team_src(1, true)])];
+        let ev = fx.eval(&groups, Some(99));
+        assert!(ev.groups.iter().all(|g| !g.inaccessible && g.issues.is_empty()));
+        assert!(ev.groups[0].no_sources);
+        assert!(!ev.groups[1].no_sources);
+    }
+
+    fn counts(fx: &Fx, groups: Vec<GroupConfig>, header: Header) -> (usize, usize) {
+        let e = fx.eval_with(&groups, Some(99), header);
+        (e.due_today, e.overdue)
+    }
+
+    fn count_fx() -> Fx {
+        let mut fx = Fx::new();
+        let mut a = dated("today", Some("2026-11-01"), 3);
+        let mut b = dated("late", Some("2026-10-30"), 3);
+        let mut c = dated("soon", Some("2026-11-03"), 3);
+        let d = dated("none", None, 3);
+        for i in [&mut a, &mut b, &mut c] {
+            i.team_id = "a".into();
+            i.lane_id = "la".into();
+        }
+        let mut d = d;
+        d.team_id = "a".into();
+        d.lane_id = "la".into();
+        a.title = "findme".into();
+        fx.issues = vec![a, b, c, d];
+        fx
+    }
+
+    #[test]
+    fn counts_split_today_and_overdue_by_effective_due() {
+        let fx = count_fx();
+        let g = vec![cfg("g", vec![team_src(1, true)])];
+        assert_eq!(counts(&fx, g, Header::default()), (1, 1));
+    }
+
+    #[test]
+    fn counts_dedupe_issue_in_several_groups() {
+        let fx = count_fx();
+        let g = vec![cfg("g1", vec![team_src(1, true)]), cfg("g2", vec![team_src(1, true)])];
+        assert_eq!(counts(&fx, g, Header::default()), (1, 1));
+    }
+
+    #[test]
+    fn counts_ignore_the_filter_tab() {
+        let fx = count_fx();
+        for filter in Filter::ALL {
+            let g = vec![cfg("g", vec![team_src(1, true)])];
+            let h = Header { filter, ..Header::default() };
+            assert_eq!(counts(&fx, g, h), (1, 1), "{filter:?}");
+        }
+        // Hot shows no rows (all priority 3) yet the counts stay.
+        let g = vec![cfg("g", vec![team_src(1, true)])];
+        let e = fx.eval_with(&g, Some(99), Header { filter: Filter::Hot, ..Header::default() });
+        assert!(e.groups[0].issues.is_empty());
+        assert_eq!(e.due_today, 1);
+    }
+
+    #[test]
+    fn counts_skip_closed_issues() {
+        let mut fx = count_fx();
+        fx.issues[0].lane_id = "done".into();
+        let g = vec![cfg("g", vec![team_src(1, true)])];
+        assert_eq!(counts(&fx, g, Header::default()), (0, 1));
     }
 }

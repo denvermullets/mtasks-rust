@@ -3,8 +3,11 @@
 //!
 //! Focus uses the same `(group index, issue index in group)` pair as the list.
 
+use std::collections::{HashMap, HashSet};
+
 use iced::widget::{
-    button, column, container, horizontal_rule, horizontal_space, pick_list, row, scrollable, text,
+    button, column, container, horizontal_rule, horizontal_space, mouse_area, pick_list, row,
+    scrollable, text,
     Column,
 };
 use iced::{Alignment, Element, Length, Theme};
@@ -20,6 +23,7 @@ pub fn view<'a>(
     dashboard: Option<&'a Dashboard>,
     evaluation: &Evaluation<'a>,
     data: CardData<'a>,
+    collapsed: &HashSet<String>,
     focused_group: usize,
     focused_issue: usize,
     header: Header,
@@ -32,10 +36,14 @@ pub fn view<'a>(
 
     let mut list: Column<'a, Message> = column![].spacing(8).width(Length::Fill).padding([8, 12]);
     for (group_idx, g) in evaluation.groups.iter().enumerate() {
-        list = list.push(group_header(g, group_idx, evaluation.groups.len(), read_only));
+        let is_collapsed = collapsed.contains(&g.group.id);
+        list = list.push(group_header(g, group_idx, evaluation.groups.len(), read_only, is_collapsed));
+        if is_collapsed {
+            continue;
+        }
         if g.issues.is_empty() {
             list = list.push(
-                container(text("No issues").size(13).color(t::text_muted())).padding([4, 16]),
+                container(text(empty_message(g)).size(13).color(t::text_muted())).padding([4, 16]),
             );
         }
         for (issue_idx, issue) in g.issues.iter().copied().enumerate() {
@@ -46,7 +54,7 @@ pub fn view<'a>(
 
     container(
         column![]
-            .push(controls(dashboard, header, read_only, is_home))
+            .push(controls(dashboard, header, evaluation, read_only, is_home))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
             .push(scrollable(list).height(Length::Fill)),
@@ -65,6 +73,7 @@ pub fn view<'a>(
 fn controls<'a>(
     dashboard: &'a Dashboard,
     header: Header,
+    evaluation: &Evaluation<'a>,
     read_only: bool,
     is_home: bool,
 ) -> Element<'a, Message> {
@@ -74,6 +83,7 @@ fn controls<'a>(
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
             .push(filter_tabs(header.filter))
+            .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
             .push(add_group_button(read_only))
             .push(set_home_button(dashboard, read_only, is_home)),
@@ -81,6 +91,16 @@ fn controls<'a>(
     .padding([8, 16])
     .width(Length::Fill)
     .into()
+}
+
+/// "N due today" and "N overdue" for the whole dashboard.
+fn due_counts<'a>(e: &Evaluation<'a>) -> Element<'a, Message> {
+    let overdue = if e.overdue > 0 { t::danger() } else { t::text_muted() };
+    row![]
+        .spacing(10)
+        .push(text(format!("{} due today", e.due_today)).size(12).color(t::text_secondary()))
+        .push(text(format!("{} overdue", e.overdue)).size(12).color(overdue))
+        .into()
 }
 
 /// The sort order picker.
@@ -128,12 +148,24 @@ fn filter_tabs<'a>(active: Filter) -> Element<'a, Message> {
     r.into()
 }
 
+/// Why a group shows no rows: no sources, unreachable sources, or no matches.
+fn empty_message(g: &GroupResult<'_>) -> &'static str {
+    if g.no_sources {
+        "No sources yet. Edit this group to add teams, projects or labels."
+    } else if g.inaccessible {
+        "This group's sources are no longer reachable (left, archived or outside your access). Edit or delete the group."
+    } else {
+        "No issues"
+    }
+}
+
 /// A group's section header: color swatch, name, description and issue count.
 fn group_header<'a>(
     g: &GroupResult<'a>,
     index: usize,
     count: usize,
     read_only: bool,
+    is_collapsed: bool,
 ) -> Element<'a, Message> {
     let color = t::hex_to_color(&g.group.color).unwrap_or_else(t::accent);
     let swatch = container(text(""))
@@ -146,6 +178,7 @@ fn group_header<'a>(
     let mut r = row![]
         .spacing(8)
         .align_y(Alignment::Center)
+        .push(text(if is_collapsed { "▸" } else { "▾" }).size(12).color(t::text_muted()))
         .push(swatch)
         .push(text(g.group.name.clone()).size(14).color(t::text_primary()))
         .push(text(g.issues.len().to_string()).size(13).color(t::text_muted()));
@@ -153,7 +186,23 @@ fn group_header<'a>(
         r = r.push(text(g.group.description.clone()).size(12).color(t::text_secondary()));
     }
     r = r.push(horizontal_space()).push(move_buttons(&g.group.id, index, count, read_only));
-    container(r).padding([6, 4]).width(Length::Fill).into()
+    mouse_area(container(r).padding([6, 4]).width(Length::Fill))
+        .on_press(Message::ToggleDashboardGroup(g.group.id.clone()))
+        .into()
+}
+
+/// Collapsed group ids, kept per dashboard (local ids) for the session.
+pub type CollapsedGroups = HashMap<String, HashSet<String>>;
+
+/// Flip a group's collapsed state on a dashboard. Returns true if it is now collapsed.
+pub fn toggle_group(collapsed: &mut CollapsedGroups, dashboard_id: &str, group_id: &str) -> bool {
+    let set = collapsed.entry(dashboard_id.to_string()).or_default();
+    if set.remove(group_id) {
+        false
+    } else {
+        set.insert(group_id.to_string());
+        true
+    }
 }
 
 /// Move-up / move-down buttons; disabled at the edges and when read-only.
@@ -178,4 +227,21 @@ fn centered<'a>(msg: &'static str) -> Element<'a, Message> {
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_is_per_dashboard_and_reversible() {
+        let mut c = CollapsedGroups::new();
+        assert!(toggle_group(&mut c, "d1", "g1"));
+        assert!(c["d1"].contains("g1"));
+        assert!(c.get("d2").map_or(true, |s| s.is_empty()));
+        assert!(toggle_group(&mut c, "d2", "g1"));
+        assert!(!toggle_group(&mut c, "d1", "g1"));
+        assert!(!c["d1"].contains("g1"));
+        assert!(c["d2"].contains("g1"));
+    }
 }
