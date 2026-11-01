@@ -20,7 +20,7 @@ use crate::document::{self, Block};
 use crate::db::models::{Issue, Member, Team};
 use crate::files::images::{ImageState, ImageStore};
 use crate::files::inline;
-use crate::document::{self, Block, Inline};
+use crate::document::Inline;
 use crate::mentions::{self, body_segments, LinkTarget, BodySegment, ImageBlock, ImageKind};
 use crate::theme as t;
 
