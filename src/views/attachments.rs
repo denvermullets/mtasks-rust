@@ -14,12 +14,22 @@ use crate::theme as t;
 /// Returns `None` when there are no files so callers can `push_maybe` it and
 /// the section stays hidden.
 pub fn section<'a>(attachments: &'a [Attachment], images: &'a ImageStore) -> Option<Element<'a, Message>> {
+    section_with(attachments, images, true)
+}
+
+/// [`section`] with the Delete action switched on or off for every card (comment
+/// attachments: only the comment's author may delete).
+pub fn section_with<'a>(
+    attachments: &'a [Attachment],
+    images: &'a ImageStore,
+    deletable: bool,
+) -> Option<Element<'a, Message>> {
     if attachments.is_empty() {
         return None;
     }
     let cards = attachments
         .iter()
-        .fold(column![].spacing(8), |col, a| col.push(card(a, images)));
+        .fold(column![].spacing(8), |col, a| col.push(card(a, images, deletable)));
     Some(
         column![]
             .spacing(8)
@@ -31,7 +41,9 @@ pub fn section<'a>(attachments: &'a [Attachment], images: &'a ImageStore) -> Opt
 
 /// One file card: filename, then "TYPE · size". Later tickets hang the
 /// thumbnail, open, delete and pending/failed states off this.
-pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Message> {
+/// `deletable` is the permission to show Delete (which still shows on synced
+/// rows only).
+pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore, deletable: bool) -> Element<'a, Message> {
     let meta = format!(
         "{} · {}",
         type_label(&a.content_type, &a.filename),
@@ -52,7 +64,7 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Messag
         );
     // Only files the server has can be deleted this way; pending/failed ones
     // are cancelled or removed by the upload tickets.
-    let delete = (a.upload_state == UploadState::Synced).then(|| {
+    let delete = (deletable && a.upload_state == UploadState::Synced).then(|| {
         button(text("Delete").size(11).color(t::text_muted()))
             .on_press(Message::ConfirmDeleteAttachment(a.id.clone()))
             .padding(0)
@@ -84,11 +96,18 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Messag
         },
         ..Default::default()
     });
-    // Clicking the card opens the file in its default app.
+    // Clicking opens an image in the lightbox, any other file in its default app.
+    let on_press = if crate::files::images::is_thumbnailable(&a.content_type)
+        && crate::files::open::blob_key(a).is_some()
+    {
+        Message::OpenLightbox(a.clone())
+    } else {
+        Message::OpenAttachment(a.clone())
+    };
     button(body)
         .padding(0)
         .width(Length::Fill)
-        .on_press(Message::OpenAttachment(a.clone()))
+        .on_press(on_press)
         .style(|_theme: &Theme, _status| button::Style::default())
         .into()
 }
