@@ -368,7 +368,13 @@ token_fn! {
     border => |t: &Tokens| t.stroke;
     accent => |t: &Tokens| t.accent;
     accent_hover => |t: &Tokens| t.accent_hover;
+    /// Web `text-gray-100`: titles and emphasised text.
+    #[allow(dead_code)]
+    text_strong => |t: &Tokens| t.gray[0];
     text_primary => |t: &Tokens| t.gray[1];
+    /// Web `text-gray-300`: markdown and running body text.
+    #[allow(dead_code)]
+    text_body => |t: &Tokens| t.gray[2];
     text_secondary => |t: &Tokens| t.gray[3];
     text_muted => |t: &Tokens| t.gray[4];
     dep_blocks => |t: &Tokens| t.dep[0];
@@ -682,6 +688,22 @@ mod tests {
         assert_eq!(p.danger, danger());
         set_by_key(DEFAULT_THEME_KEY);
         assert_ne!(iced_theme().palette().background, p.background);
+
+        // Text strength: strong >= body > secondary in contrast against the
+        // background, on every theme.
+        for t in THEMES.iter() {
+            set_by_key(t.key);
+            let contrast = |c: Color| (lum(c) - lum(bg_primary())).abs();
+            let (strong, primary, body, secondary) =
+                (text_strong(), text_primary(), text_body(), text_secondary());
+            assert_eq!(strong, t.gray[0], "{}", t.key);
+            assert_eq!(body, t.gray[2], "{}", t.key);
+            assert!(contrast(strong) >= contrast(primary), "{} strong", t.key);
+            assert!(contrast(primary) >= contrast(body), "{} body", t.key);
+            assert!(contrast(body) >= contrast(secondary), "{} secondary", t.key);
+            assert!(contrast(body) > 0.4, "{} body readable", t.key);
+        }
+        set_by_key(DEFAULT_THEME_KEY);
 
         set_by_key("no-such-theme");
         assert_eq!(tok().key, DEFAULT_THEME_KEY);
