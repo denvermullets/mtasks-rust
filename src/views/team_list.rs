@@ -4,6 +4,7 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{Message, TeamWebSection, View};
+use crate::db::dashboards::Dashboard;
 use crate::db::home_page::HomePage;
 use crate::db::models::Team;
 use crate::db::saved_views::SavedView;
@@ -22,6 +23,10 @@ pub struct SidebarState<'a> {
     pub saved_views: &'a HashMap<String, Vec<SavedView>>,
     pub open_view_id: Option<&'a str>,
     pub home: Option<&'a HomePage>,
+    /// Mirrored dashboards (any order; the view sorts them).
+    pub dashboards: &'a [Dashboard],
+    /// Local id of the open dashboard (set once dashboards can be opened).
+    pub open_dashboard_id: Option<&'a str>,
 }
 
 pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
@@ -37,6 +42,8 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         saved_views,
         open_view_id,
         home,
+        dashboards,
+        open_dashboard_id,
     } = state;
     let mut col = column![].spacing(0).width(Length::Fill);
 
@@ -49,6 +56,25 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         14,
     ));
     col = col.push(inbox_row(*current_view == View::Inbox, unread_count));
+
+    // Dashboards section: nothing at all while there are none.
+    if !dashboards.is_empty() {
+        col = col.push(section_header("DASHBOARDS"));
+        for d in ordered_dashboards(dashboards) {
+            let active = open_dashboard_id == Some(d.id.as_str());
+            // Rows don't open anything yet (the open ticket wires this up).
+            col = col.push(
+                container(text(&d.name).size(13).color(if active {
+                    t::text_primary()
+                } else {
+                    t::text_secondary()
+                }))
+                .padding([6, 14])
+                .width(Length::Fill)
+                .style(move |_theme: &Theme| selected_row_container_style(active)),
+            );
+        }
+    }
 
     // Teams section. The archived toggle only appears once there's something
     // archived to reveal.
@@ -245,6 +271,13 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         .into()
 }
 
+/// Dashboards in sidebar order: server position, then id.
+pub fn ordered_dashboards(dashboards: &[Dashboard]) -> Vec<&Dashboard> {
+    let mut v: Vec<&Dashboard> = dashboards.iter().collect();
+    v.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.id.cmp(&b.id)));
+    v
+}
+
 /// True when `home` is this team. A team without a remote id never matches.
 pub fn is_home_team(home: Option<&HomePage>, team: &Team) -> bool {
     home.is_some_and(|h| h.matches_team(team))
@@ -408,6 +441,15 @@ fn selected_row_style(active: bool) -> button::Style {
     }
 }
 
+fn selected_row_container_style(active: bool) -> container::Style {
+    let b = selected_row_style(active);
+    container::Style {
+        background: b.background,
+        border: b.border,
+        ..Default::default()
+    }
+}
+
 fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
     button::Style {
         background: Some(iced::Background::Color(t::bg_menu())),
@@ -423,7 +465,8 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_label, is_home_team, is_home_view};
+    use super::{badge_label, is_home_team, is_home_view, ordered_dashboards};
+    use crate::db::dashboards::Dashboard;
     use crate::db::home_page::HomePage;
     use crate::db::models::Team;
     use crate::db::saved_views::SavedView;
@@ -481,6 +524,29 @@ mod tests {
         assert!(!is_home_view(Some(&d), &sv(Some(7))));
         assert!(!is_home_team(None, &team(Some(7))));
         assert!(!is_home_view(None, &sv(Some(7))));
+    }
+
+    fn dash(id: &str, position: i64) -> Dashboard {
+        Dashboard {
+            id: id.into(),
+            remote_id: None,
+            name: format!("name-{id}"),
+            description: String::new(),
+            position,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn dashboards_ordered_by_position_then_id() {
+        let ds = vec![dash("c", 2), dash("b", 1), dash("a", 1), dash("z", 0)];
+        let ids: Vec<&str> = ordered_dashboards(&ds).iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["z", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn no_dashboards_orders_to_nothing() {
+        assert!(ordered_dashboards(&[]).is_empty());
     }
 
     #[test]

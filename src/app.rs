@@ -641,6 +641,10 @@ impl SortDir {
 
 pub struct App {
     teams: Vec<Team>,
+    /// Mirrored dashboards for the sidebar (reloaded with the rest after a sync).
+    dashboards: Vec<crate::db::dashboards::Dashboard>,
+    /// Local id of the open dashboard; set once dashboards can be opened.
+    open_dashboard_id: Option<String>,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -852,6 +856,7 @@ impl App {
         let conn = self.db();
         self.teams = queries::all_teams(&conn).unwrap_or_default();
         self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
+        self.dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
 
         if self.selected_team_id.is_none() {
@@ -2544,6 +2549,8 @@ impl App {
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views,
+            dashboards: crate::db::dashboards::list(&conn).unwrap_or_default(),
+            open_dashboard_id: None,
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -5432,6 +5439,8 @@ impl App {
             saved_views: &self.saved_views,
             open_view_id: self.open_view.as_ref().map(|v| v.view_id.as_str()),
             home: self.home_page.as_ref(),
+            dashboards: &self.dashboards,
+            open_dashboard_id: self.open_dashboard_id.as_deref(),
         });
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),

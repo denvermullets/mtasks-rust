@@ -19,7 +19,6 @@ pub const GROUP_ENTITY_TYPE: &str = "dashboard_group";
 /// `sync_queue.entity_type` for a dashboard's group order (entity_id = dashboard local id).
 pub const GROUP_ORDER_ENTITY_TYPE: &str = "dashboard_group_order";
 
-#[allow(dead_code)] // read by later tickets
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dashboard {
     /// Local uuid.
@@ -334,7 +333,6 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Dashboard>> {
 }
 
 /// Every dashboard in sidebar order (position, then name, then id).
-#[allow(dead_code)]
 pub fn list(conn: &Connection) -> Result<Vec<Dashboard>> {
     let mut stmt = conn.prepare(
         "SELECT id, remote_id, name, description, position, updated_at
