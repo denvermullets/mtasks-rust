@@ -162,7 +162,25 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
     match b {
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
         Block::Image(img) => image_block(img, ctx),
+        Block::List(list) => bullet_list(list, size, plain, ctx),
     }
+}
+
+/// Gutter holding the bullet; item content sits in its own column beside it,
+/// so wrapped lines hang under the first line rather than under the bullet.
+fn bullet_list<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let mut col = column![].spacing(t::space::S1);
+    for item in &list.items {
+        let mut content = column![].spacing(t::space::S1).width(iced::Length::Fill);
+        for b in item {
+            content = content.push(block(b, size, plain, ctx));
+        }
+        col = col.push(
+            row![container(text("•").size(size).color(plain)).width(size * 1.25), content]
+                .spacing(t::space::S1),
+        );
+    }
+    container(col).padding(iced::Padding { left: t::space::S2, ..Default::default() }).into()
 }
 
 /// A reflowing run of inlines.
