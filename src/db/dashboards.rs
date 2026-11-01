@@ -715,6 +715,8 @@ pub enum GroupError {
     Name(NameError),
     /// The parent dashboard doesn't exist locally.
     NoDashboard,
+    /// The group being edited doesn't exist locally.
+    NoGroup,
     Db(rusqlite::Error),
 }
 
@@ -765,6 +767,76 @@ pub fn create_group_local(
     sync_queue::enqueue(&tx, GROUP_ENTITY_TYPE, &id, "create", None)?;
     tx.commit()?;
     Ok(groups_for(conn, dashboard_id)?.into_iter().find(|g| g.id == id).expect("group just inserted"))
+}
+
+/// The group modal's starting state for editing: every field and source
+/// (with its "all issues" flag) as stored. `None` if the group is gone.
+pub fn group_draft(conn: &Connection, group_id: &str) -> Result<Option<GroupDraft>> {
+    let Some(g) = get_group(conn, group_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(GroupDraft {
+        name: g.name,
+        description: g.description,
+        color: g.color,
+        sources: sources_for(conn, group_id)?,
+    }))
+}
+
+/// Edit a group: validate the name, write its fields, replace its sources and
+/// queue an "update" entry without payload (the push reads the row, and waits
+/// for the group's create if it hasn't been pushed). A pull leaves the group
+/// alone while that entry is pending. A color outside the swatches is kept
+/// only if it is the group's current one (the server may hold others).
+pub fn update_group_local(
+    conn: &Connection,
+    group_id: &str,
+    draft: &GroupDraft,
+) -> std::result::Result<DashboardGroup, GroupError> {
+    let name = validate_name(&draft.name).map_err(GroupError::Name)?;
+    let Some(existing) = get_group(conn, group_id)? else {
+        return Err(GroupError::NoGroup);
+    };
+    let color = if GROUP_SWATCHES.contains(&draft.color.as_str()) || draft.color == existing.color {
+        draft.color.as_str()
+    } else {
+        GROUP_SWATCHES[0]
+    };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE dashboard_groups SET name = ?2, description = ?3, color = ?4 WHERE id = ?1",
+        params![group_id, name, draft.description.trim(), color],
+    )?;
+    tx.execute("DELETE FROM dashboard_group_sources WHERE group_id = ?1", params![group_id])?;
+    for s in &draft.sources {
+        let all = s.include_all && s.source_type != SourceType::Label;
+        tx.execute(
+            "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![group_id, s.source_type.as_str(), s.remote_id, all as i64],
+        )?;
+    }
+    sync_queue::enqueue(&tx, GROUP_ENTITY_TYPE, group_id, "update", None)?;
+    tx.commit()?;
+    Ok(get_group(conn, group_id)?.expect("group just updated"))
+}
+
+/// After a successful group `PATCH`: the sources the server returned replace
+/// the local ones (it may have dropped ids it won't accept). Fields stay as
+/// typed. Takes no transaction of its own: the caller wraps it with
+/// `mark_synced`. When a later edit is still queued the local sources are that
+/// newer edit, so they stay.
+pub fn adopt_updated_group(conn: &Connection, id: &str, dto: &GroupIn) -> Result<()> {
+    let newer_edit: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_queue
+         WHERE entity_type = ?1 AND entity_id = ?2 AND action = 'update' AND synced_at IS NULL)",
+        params![GROUP_ENTITY_TYPE, id],
+        |r| r.get(0),
+    )?;
+    if newer_edit {
+        return Ok(());
+    }
+    replace_sources(conn, id, dto)
 }
 
 pub fn find_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Dashboard>> {
@@ -1360,6 +1432,100 @@ mod tests {
         let a = apply_snapshot(&conn, &[dash(1, "Server2", 0, vec![])]).unwrap();
         assert_eq!(a.skipped_pending, 1);
         assert_eq!(get(&conn, &local.id).unwrap().unwrap().name, "Mine");
+    }
+
+    fn mirrored_group() -> (Connection, String) {
+        let conn = setup();
+        let mut g = group(5, "Server", 0);
+        g.team_ids = vec![1, 2];
+        g.all_team_ids = vec![2];
+        apply_snapshot(&conn, &[dash(1, "D", 0, vec![g])]).unwrap();
+        let d = find_by_remote_id(&conn, 1).unwrap().unwrap();
+        let gid = groups_for(&conn, &d.id).unwrap().remove(0).id;
+        (conn, gid)
+    }
+
+    #[test]
+    fn group_draft_carries_every_field_and_all_issues_flag() {
+        let (conn, gid) = mirrored_group();
+        let d = group_draft(&conn, &gid).unwrap().unwrap();
+        assert_eq!(d.name, "Server");
+        assert!(d.is_selected(SourceType::Team, 1) && !d.include_all(SourceType::Team, 1));
+        assert!(d.include_all(SourceType::Team, 2));
+        assert!(group_draft(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn update_group_local_replaces_fields_and_sources_and_queues_an_update() {
+        let (conn, gid) = mirrored_group();
+        let mut d = group_draft(&conn, &gid).unwrap().unwrap();
+        d.name = "  Renamed ".into();
+        d.description = " why ".into();
+        d.color = "#ec4899".into();
+        d.toggle_source(SourceType::Team, 1);
+        d.toggle_source(SourceType::Project, 9);
+        d.set_include_all(SourceType::Project, 9, true);
+        let g = update_group_local(&conn, &gid, &d).unwrap();
+        assert_eq!((g.name.as_str(), g.description.as_str(), g.color.as_str()), ("Renamed", "why", "#ec4899"));
+        assert_eq!(
+            sources_for(&conn, &gid).unwrap(),
+            [
+                GroupSource { source_type: SourceType::Project, remote_id: 9, include_all: true },
+                GroupSource { source_type: SourceType::Team, remote_id: 2, include_all: true },
+            ]
+        );
+        let q: Vec<_> = sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.entity_type == GROUP_ENTITY_TYPE)
+            .collect();
+        assert_eq!((q.len(), q[0].action.as_str(), q[0].entity_id.as_str()), (1, "update", gid.as_str()));
+        assert!(q[0].payload.is_none());
+    }
+
+    #[test]
+    fn update_group_local_rejects_bad_input_without_writing_and_keeps_a_server_color() {
+        let (conn, gid) = mirrored_group();
+        conn.execute("UPDATE dashboard_groups SET color = '#123456' WHERE id = ?1", [&gid]).unwrap();
+        let mut d = group_draft(&conn, &gid).unwrap().unwrap();
+        d.name = "  ".into();
+        assert!(matches!(update_group_local(&conn, &gid, &d), Err(GroupError::Name(_))));
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+        d.name = "ok".into();
+        assert!(matches!(update_group_local(&conn, "nope", &d), Err(GroupError::NoGroup)));
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+        assert_eq!(update_group_local(&conn, &gid, &d).unwrap().color, "#123456");
+        d.color = "#abcdef".into();
+        assert_eq!(update_group_local(&conn, &gid, &d).unwrap().color, "#6366f1");
+    }
+
+    #[test]
+    fn a_pull_does_not_overwrite_a_group_with_a_pending_edit() {
+        let (conn, gid) = mirrored_group();
+        let mut d = group_draft(&conn, &gid).unwrap().unwrap();
+        d.name = "Mine".into();
+        d.sources.clear();
+        update_group_local(&conn, &gid, &d).unwrap();
+        let mut server = group(5, "Server2", 0);
+        server.team_ids = vec![1, 2];
+        let a = apply_snapshot(&conn, &[dash(1, "D", 0, vec![server])]).unwrap();
+        assert_eq!(a.skipped_pending, 1);
+        assert_eq!(get_group(&conn, &gid).unwrap().unwrap().name, "Mine");
+        assert!(sources_for(&conn, &gid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn adopt_updated_group_takes_the_returned_sources_unless_a_newer_edit_is_queued() {
+        let (conn, gid) = mirrored_group();
+        let mut returned = group(5, "Server", 0);
+        returned.team_ids = vec![2];
+        adopt_updated_group(&conn, &gid, &returned).unwrap();
+        assert_eq!(sources_for(&conn, &gid).unwrap().len(), 1);
+        let mut d = group_draft(&conn, &gid).unwrap().unwrap();
+        d.sources.clear();
+        update_group_local(&conn, &gid, &d).unwrap();
+        adopt_updated_group(&conn, &gid, &returned).unwrap();
+        assert!(sources_for(&conn, &gid).unwrap().is_empty());
     }
 
     fn queue_for(conn: &Connection, entity_type: &str) -> Vec<(String, String)> {
