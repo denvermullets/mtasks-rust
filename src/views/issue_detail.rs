@@ -787,8 +787,7 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         .into()
 }
 
-/// How an editable markdown description is drawn. JRST-293 can reuse this and
-/// the focus operation below for the project description.
+/// How an editable markdown description is drawn (issue and project detail).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DescriptionDisplay {
     Editor,
@@ -878,8 +877,11 @@ impl iced::advanced::widget::Operation<()> for FocusFirstIn {
 /// The description: rendered markdown (click to edit), an empty prompt, or the editor.
 fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     let text_now = detail.description_text();
-    match description_display(&text_now, detail.editing_description) {
-        DescriptionDisplay::Editor => {
+    description_block(
+        description_display(&text_now, detail.editing_description),
+        description_editor_id(),
+        Message::EditIssueDescription,
+        || {
             let editor = text_editor(&detail.description)
                 .placeholder("Add description…  (@ to mention, # to link an issue)")
                 .on_action(Message::IssueDetailDescriptionChanged)
@@ -893,9 +895,28 @@ fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> E
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(220.0));
+            (editor.into(), suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
+        },
+        || crate::views::body::view(&text_now, 14.0, t::text_secondary(), ctx),
+    )
+}
+
+/// Shared by issue and project detail: lays out one of the three description
+/// modes. `editor` is only built while editing and returns the editor plus an
+/// optional suggestion list; clicking the prompt or the rendered body sends `edit`.
+pub(crate) fn description_block<'a>(
+    display: DescriptionDisplay,
+    editor_id: iced::widget::container::Id,
+    edit: Message,
+    editor: impl FnOnce() -> (Element<'a, Message>, Option<Element<'a, Message>>),
+    rendered: impl FnOnce() -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    match display {
+        DescriptionDisplay::Editor => {
+            let (editor, suggestions) = editor();
             column![]
-                .push(container(editor).id(description_editor_id()))
-                .push_maybe(suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
+                .push(container(editor).id(editor_id))
+                .push_maybe(suggestions)
                 .into()
         }
         DescriptionDisplay::Empty => iced::widget::mouse_area(
@@ -903,38 +924,16 @@ fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> E
                 .padding(10)
                 .width(Length::Fill),
         )
-        .on_press(Message::EditIssueDescription)
+        .on_press(edit)
         .interaction(iced::mouse::Interaction::Text)
         .into(),
-        DescriptionDisplay::Rendered => iced::widget::mouse_area(
-            container(crate::views::body::view(&text_now, 14.0, t::text_secondary(), ctx))
-                .padding(10)
-                .width(Length::Fill),
-        )
-        .on_press(Message::EditIssueDescription)
-        .interaction(iced::mouse::Interaction::Text)
-        .into(),
+        DescriptionDisplay::Rendered => {
+            iced::widget::mouse_area(container(rendered()).padding(10).width(Length::Fill))
+                .on_press(edit)
+                .interaction(iced::mouse::Interaction::Text)
+                .into()
+        }
     }
-}
-
-/// Rendered (highlighted, clickable) view of the description, shown only when
-/// it contains at least one token; the editor itself is plain text.
-pub(crate) fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
-    let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
-    let has_token = crate::views::body::has_rich_content(body, ctx.host, &names);
-    if !has_token {
-        return None;
-    }
-    Some(
-        container(
-            column![]
-                .spacing(4)
-                .push(text("Preview").size(10).color(t::text_muted()))
-                .push(crate::views::body::view(body, 12.0, t::text_secondary(), ctx)),
-        )
-        .padding([6, 10])
-        .into(),
-    )
 }
 
 /// "Referenced in" block: one clickable row per issue whose description or

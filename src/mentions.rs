@@ -645,7 +645,7 @@ pub enum LinkTarget {
     Issue(String),
     /// External URL.
     External(String),
-    /// Member id.
+    /// Mention text including the `@` (resolved to a member at hover time).
     Mention(String),
 }
 

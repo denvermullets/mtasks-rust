@@ -79,14 +79,21 @@ impl InlineImage {
 
 /// Every image block of `body`, in reading order (JRST-193 lightbox paging).
 pub fn image_list(body: &str, host: &str) -> Vec<InlineImage> {
-    document::parse_with(body, host, &[])
-        .blocks
-        .iter()
-        .filter_map(|b| match b {
-            Block::Image(img) => InlineImage::from_document(img),
-            _ => None,
-        })
-        .collect()
+    let mut out = Vec::new();
+    collect_images(&document::parse_with(body, host, &[]).blocks, &mut out);
+    out
+}
+
+/// Walk `blocks` depth first, descending into list items and quotes.
+fn collect_images(blocks: &[Block], out: &mut Vec<InlineImage>) {
+    for b in blocks {
+        match b {
+            Block::Image(img) => out.extend(InlineImage::from_document(img)),
+            Block::List(list) => list.items.iter().for_each(|item| collect_images(item, out)),
+            Block::Quote(inner) => collect_images(inner, out),
+            Block::Paragraph(_) | Block::Code(_) => {}
+        }
+    }
 }
 
 /// `src` of every image in ONE `body` that can be fetched (blob images; pending skipped).
@@ -148,24 +155,18 @@ pub fn view<'a>(body: &str, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Eleme
     col.into()
 }
 
-/// True when the body has anything beyond plain text (a token or an image).
-pub fn has_rich_content(body: &str, host: &str, member_names: &[&str]) -> bool {
-    let doc = document::parse_with(body, host, member_names);
-    doc.blocks.iter().any(|b| match b {
-        Block::Paragraph(inlines) => inlines
-            .iter()
-            .any(|i| !matches!(i, Inline::Text(_) | Inline::HardBreak)),
-        _ => true,
-    })
-}
-
 /// Draw one block.
 fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     match b {
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
+        // Never fetched: an alt-text link that opens in the browser.
+        Block::Image(img) if img.kind == document::ImageKind::Foreign => {
+            paragraph(&[document::foreign_image_inline(img, ctx.host)], size, plain, ctx)
+        }
         Block::Image(img) => image_block(img, ctx),
         Block::List(list) => list_block(list, size, plain, ctx),
         Block::Code(code) => code_block(code, size),
+        Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx),
     }
 }
 
@@ -236,6 +237,21 @@ fn code_block<'a>(code: &document::CodeBlock, size: f32) -> Element<'a, Message>
         .into()
 }
 
+/// A quote: a muted left rule beside the content column. Nested quotes get
+/// their own rule, so they read as stacked bars. Callers pass the muted text
+/// color (web: `.markdown blockquote { color: gray-400 }`, token `text_muted`).
+fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let mut content = column![].spacing(t::space::S2).width(iced::Length::Fill);
+    for b in blocks {
+        content = content.push(block(b, size, plain, ctx));
+    }
+    let rule = container(iced::widget::Space::new(0, 0))
+        .width(3)
+        .height(iced::Length::Fill)
+        .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() });
+    row![rule, content].spacing(t::space::S3).height(iced::Length::Shrink).into()
+}
+
 /// Marker for item `index` (0-based): a bullet, or the number counted from
 /// the list's start.
 fn list_marker(start: Option<u64>, index: usize) -> String {
@@ -283,7 +299,7 @@ fn paragraph<'a>(inlines: &[Inline], size: f32, plain: Color, ctx: &BodyCtx<'a>)
         .collect();
     hover_rich(spans, Message::OpenBodyLink)
         .size(size)
-        .on_hover(Message::BodyHover)
+        .on_hover(|owner, h| Message::BodyHover(owner, h))
         .into()
 }
 
@@ -335,7 +351,8 @@ fn push_runs(inlines: &[Inline], resolve: &impl Fn(&str) -> Option<LinkTarget>, 
 fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> {
     match r {
         Run::Plain(s) => span(s).color(plain),
-        Run::Mention(s) => span(s).color(t::highlight()),
+        // Tagged so a mention hover card (JRST-310) can identify the span.
+        Run::Mention(s) => span(s.clone()).color(t::highlight()).link(LinkTarget::Mention(s)),
         Run::Reference { text, target: Some(target) } => {
             span(text).color(t::accent()).underline(true).link(target)
         }
@@ -474,6 +491,23 @@ mod tests {
     const HOST: &str = "http://localhost:3005";
 
     #[test]
+    fn images_inside_lists_and_quotes_are_listed_in_reading_order() {
+        let a = "/rails/active_storage/blobs/redirect/aaa/a.png";
+        let b = "/rails/active_storage/blobs/redirect/bbb/b.png";
+        let c = "/rails/active_storage/blobs/redirect/ccc/c.png";
+        let d = "/rails/active_storage/blobs/redirect/ddd/d.png";
+        let body = format!(
+            "![a]({a})\n\n- item ![b]({b})\n  - nested ![c]({c})\n\n> quoted ![d]({d})\n>\n> > ![e](https://x.test/e.png)"
+        );
+        let alts: Vec<String> = image_list(&body, HOST).into_iter().map(|i| i.alt).collect();
+        assert_eq!(alts, ["a", "b", "c", "d"]);
+        assert_eq!(fetchable_srcs_of_body(&body, HOST), [a, b, c, d]);
+        assert!(has_images(&format!("> ![q]({a})"), HOST));
+        assert!(has_images(&format!("- ![q]({a})"), HOST));
+        assert!(!has_images("> - plain", HOST));
+    }
+
+    #[test]
     fn task_markers_show_state() {
         assert_eq!(task_marker(None), None);
         assert_eq!(task_marker(Some(false)), Some("☐"));
@@ -593,19 +627,6 @@ mod tests {
                 Run::Plain(" or no".into()),
             ]
         );
-    }
-
-    #[test]
-    fn rich_content_means_tokens_or_images_and_raw_html_is_gone() {
-        for (body, want) in [
-            ("plain\ntext", false),
-            ("<b>hi</b>", false),
-            ("ping @Ann", true),
-            ("see PROJ-7", true),
-            ("![a](https://x.test/a.png)", true),
-        ] {
-            assert_eq!(has_rich_content(body, "", &["Ann"]), want, "{body}");
-        }
     }
 
     #[test]

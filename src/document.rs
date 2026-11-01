@@ -33,6 +33,8 @@ pub enum Block {
     Image(ImageBlock),
     /// A bulleted or numbered list.
     List(List),
+    /// A `>` quote: any blocks, including lists and further quotes.
+    Quote(Vec<Block>),
     /// A fenced or indented code block: verbatim text, never tokenized.
     Code(CodeBlock),
 }
@@ -119,6 +121,88 @@ pub fn is_openable_link(url: &str) -> bool {
     }
 }
 
+/// Resolve a link target to the URL to open, or `None` when it is inert.
+/// A path-relative link (`/issues/1`) is joined onto `host` (a trailing
+/// slash on the host is fine). Protocol-relative (`//x`) and backslash
+/// forms are never resolved, because browsers read them as another host.
+/// Everything else must pass [`is_openable_link`]. Targets with control
+/// characters are inert, since browsers strip some of them mid-URL.
+pub fn resolve_link(url: &str, host: &str) -> Option<String> {
+    let url = url.trim();
+    if url.chars().any(char::is_control) {
+        return None;
+    }
+    if url.starts_with("//") || url.starts_with('\\') {
+        return None;
+    }
+    if url.starts_with('/') {
+        let host = host.trim().trim_end_matches('/');
+        return (is_openable_link(host) && !host.to_ascii_lowercase().starts_with("mailto:")).then(|| format!("{host}{url}"));
+    }
+    is_openable_link(url).then(|| url.to_string())
+}
+
+/// How a foreign image is drawn: never fetched, but a link labelled with its
+/// alt text ("Image" when empty) that opens in the browser, under the same
+/// scheme allowlist as other links. A disallowed source is the label as plain
+/// text.
+pub fn foreign_image_inline(img: &ImageBlock, host: &str) -> Inline {
+    let label = match img.alt.trim() {
+        "" => "Image".to_string(),
+        alt => alt.to_string(),
+    };
+    match resolve_link(&img.src, host) {
+        Some(url) => Inline::Link { text: label, url },
+        None => Inline::Text(label),
+    }
+}
+
+/// Byte ranges of bare `http://` and `https://` addresses in `text`, as the
+/// web autolinks them. The scheme is case-insensitive and must start a word.
+/// An address ends at whitespace or `<`/`>`; trailing sentence punctuation
+/// and unbalanced closing brackets are left out of it.
+fn find_bare_urls(text: &str) -> Vec<(usize, usize)> {
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(off) = lower[from..].find("http") {
+        let start = from + off;
+        from = start + 4;
+        if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+            continue;
+        }
+        let after = &lower[start + 4..];
+        let scheme = if after.starts_with("://") {
+            7
+        } else if after.starts_with("s://") {
+            8
+        } else {
+            continue;
+        };
+        let stop = text[start..].find(|c: char| c.is_whitespace() || c == '<' || c == '>');
+        let mut end = stop.map_or(text.len(), |i| start + i);
+        loop {
+            let cand = &text[start..end];
+            let Some(last) = cand.chars().next_back() else { break };
+            let drop = match last {
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '*' => true,
+                ')' => cand.matches(')').count() > cand.matches('(').count(),
+                ']' => cand.matches(']').count() > cand.matches('[').count(),
+                _ => false,
+            };
+            if !drop {
+                break;
+            }
+            end -= last.len_utf8();
+        }
+        if end > start + scheme {
+            out.push((start, end));
+            from = end;
+        }
+    }
+    out
+}
+
 /// Parser options: the web feature set. Hard breaks are never produced from
 /// plain newlines, so nothing to switch off.
 fn parse_options() -> Options {
@@ -184,6 +268,8 @@ enum Frame {
     /// A container with no block of its own (an item outside any list):
     /// children are spliced into the parent when it closes.
     Flat(Vec<Block>),
+    /// A block quote; becomes `Block::Quote`.
+    Quote(Vec<Block>),
 }
 
 impl Builder {
@@ -208,6 +294,7 @@ impl Builder {
                 _ => blocks.into_iter().for_each(|b| self.push_block(b)),
             },
             Some(Frame::Flat(blocks)) => blocks.into_iter().for_each(|b| self.push_block(b)),
+            Some(Frame::Quote(blocks)) => self.push_block(Block::Quote(blocks)),
             None => {}
         }
     }
@@ -215,7 +302,7 @@ impl Builder {
     /// Add a finished block to the innermost open container, or the root.
     fn push_block(&mut self, block: Block) {
         match self.stack.last_mut() {
-            Some(Frame::Item(blocks, _) | Frame::Flat(blocks)) => blocks.push(block),
+            Some(Frame::Item(blocks, _) | Frame::Flat(blocks) | Frame::Quote(blocks)) => blocks.push(block),
             // A block directly in a list (never from the parser) is kept, not lost.
             Some(Frame::List(_, items, checked)) => {
                 items.push(vec![block]);
@@ -251,7 +338,7 @@ impl Builder {
                     let (url, text) = self.link.take().unwrap_or_default();
                     self.literal_depth = self.literal_depth.saturating_sub(1);
                     self.flush_pending();
-                    if is_openable_link(&url) {
+                    if let Some(url) = resolve_link(&url, &self.host) {
                         self.current.push(Inline::Link { text, url });
                     } else {
                         self.push_plain(&text);
@@ -333,7 +420,8 @@ impl Builder {
                 };
                 self.code = Some((lang, String::new()));
             }
-            Event::Start(Tag::BlockQuote(_)) => self.flush(),
+            Event::Start(Tag::BlockQuote(_)) => self.open(Frame::Quote(Vec::new())),
+            Event::End(TagEnd::BlockQuote(_)) => self.close(),
             Event::End(TagEnd::Link | TagEnd::Image) => {
                 self.literal_depth = self.literal_depth.saturating_sub(1);
             }
@@ -373,6 +461,12 @@ impl Builder {
         }
         for m in find_mentions(&text, &names) {
             spans.push((m.start, m.end, Inline::Mention(text[m.start..m.end].to_string())));
+        }
+        for (start, end) in find_bare_urls(&text) {
+            let url = text[start..end].to_string();
+            if let Some(url) = resolve_link(&url, "") {
+                spans.push((start, end, Inline::Link { text: url.clone(), url }));
+            }
         }
         spans.sort_by_key(|s| s.0);
         let mut pos = 0;
@@ -436,7 +530,6 @@ fn is_block_end(end: &TagEnd) -> bool {
         end,
         TagEnd::Paragraph
             | TagEnd::Heading(_)
-            | TagEnd::BlockQuote(_)
             | TagEnd::TableCell
             | TagEnd::TableRow
             | TagEnd::TableHead
@@ -503,6 +596,55 @@ mod tests {
                 "a <!-- hidden --> b",
                 vec![para(vec![text("a  b")])],
             ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    fn quote(blocks: Vec<Block>) -> Block {
+        Block::Quote(blocks)
+    }
+
+    #[test]
+    fn parses_blockquotes() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("one line", "> hi", vec![quote(vec![para(vec![text("hi")])])]),
+            (
+                "lazy continuation reflows",
+                "> a\nb",
+                vec![quote(vec![para(vec![text("a b")])])],
+            ),
+            (
+                "paragraphs inside",
+                "> a\n>\n> b",
+                vec![quote(vec![para(vec![text("a")]), para(vec![text("b")])])],
+            ),
+            (
+                "text after a blank line leaves the quote",
+                "> a\n\nb",
+                vec![quote(vec![para(vec![text("a")])]), para(vec![text("b")])],
+            ),
+            (
+                "nested quote",
+                "> a\n>> b",
+                vec![quote(vec![para(vec![text("a")]), quote(vec![para(vec![text("b")])])])],
+            ),
+            (
+                "list inside",
+                "> - a\n> - b",
+                vec![quote(vec![list(vec![vec![para(vec![text("a")])], vec![para(vec![text("b")])]])])],
+            ),
+            (
+                "quote then paragraph then quote",
+                "> a\n\nb\n\n> c",
+                vec![
+                    quote(vec![para(vec![text("a")])]),
+                    para(vec![text("b")]),
+                    quote(vec![para(vec![text("c")])]),
+                ],
+            ),
+            ("empty quote", ">", vec![quote(vec![])]),
         ];
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
@@ -809,9 +951,9 @@ mod tests {
                 ])],
             ),
             (
-                "quote inside an item stays flat",
+                "quote inside an item",
                 "- a\n  > q",
-                vec![list(vec![vec![para(vec![text("a")]), para(vec![text("q")])]])],
+                vec![list(vec![vec![para(vec![text("a")]), quote(vec![para(vec![text("q")])])]])],
             ),
         ];
         for (name, body, want) in cases {
@@ -1066,7 +1208,7 @@ mod tests {
             ("mailto link", "[me](mailto:a@b.c)", vec![para(vec![link("me", "mailto:a@b.c")])]),
             ("file link is inert text", "[x](file:///etc/hosts)", vec![para(vec![text("x")])]),
             ("custom scheme is inert text", "a [x](slack://open) b", vec![para(vec![text("a x b")])]),
-            ("relative link is inert text", "[x](/foo)", vec![para(vec![text("x")])]),
+            ("relative link without a host is inert text", "[x](/foo)", vec![para(vec![text("x")])]),
             (
                 "tokens in link text stay literal",
                 "[PROJ-1 @Ann](http://x.y)",
@@ -1092,5 +1234,107 @@ mod tests {
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
         }
+    }
+
+    #[test]
+    fn resolves_links_against_the_host() {
+        let cases = [
+            ("path-relative", "/issues/1", "https://jait.example", Some("https://jait.example/issues/1")),
+            ("host trailing slash", "/issues/1", "https://jait.example/", Some("https://jait.example/issues/1")),
+            ("host with port", "/a?b=1#c", "http://localhost:3000", Some("http://localhost:3000/a?b=1#c")),
+            ("surrounding whitespace", "  /a  ", "https://h.x", Some("https://h.x/a")),
+            ("relative, no host", "/a", "", None),
+            ("relative, host is not web", "/a", "file:///etc", None),
+            ("relative, host is mailto", "/a", "mailto:a@b.c", None),
+            ("protocol-relative", "//evil.example/x", "https://h.x", None),
+            ("protocol-relative, no host", "//evil.example/x", "", None),
+            ("protocol-relative, padded", "  //evil.example", "https://h.x", None),
+            ("backslash form", "\\\\evil.example", "https://h.x", None),
+            ("slash backslash", "/\\evil.example", "https://h.x", Some("https://h.x/\\evil.example")),
+            ("tab inside", "/\t/evil.example", "https://h.x", None),
+            ("newline inside scheme", "ht\ntps://a.b", "https://h.x", None),
+            ("absolute passes through", "https://a.b/x", "https://h.x", Some("https://a.b/x")),
+            ("mixed case scheme", "HtTpS://a.b", "https://h.x", Some("HtTpS://a.b")),
+            ("padded mixed case", "  HTTP://a.b ", "", Some("HTTP://a.b")),
+            ("mailto", "MailTo:a@b.c", "", Some("MailTo:a@b.c")),
+            ("javascript", "javascript:alert(1)", "https://h.x", None),
+            ("javascript mixed case", " JaVaScRiPt:alert(1)", "https://h.x", None),
+            ("leading control char", "\u{1}javascript:x", "https://h.x", None),
+            ("data", "data:text/html,x", "https://h.x", None),
+            ("bare word is not resolved", "page.html", "https://h.x", None),
+            ("empty", "", "https://h.x", None),
+        ];
+        for (name, url, host, want) in cases {
+            assert_eq!(resolve_link(url, host).as_deref(), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn bare_urls_become_links() {
+        let link = |u: &str| Inline::Link { text: u.into(), url: u.into() };
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("pasted url", "https://a.b/x?y=1#z", vec![para(vec![link("https://a.b/x?y=1#z")])]),
+            ("in a sentence", "see http://a.b now", vec![para(vec![text("see "), link("http://a.b"), text(" now")])]),
+            ("mixed case scheme", "HTTPS://A.B/x", vec![para(vec![link("HTTPS://A.B/x")])]),
+            ("trailing period", "go to https://a.b/x.", vec![para(vec![text("go to "), link("https://a.b/x"), text(".")])]),
+            ("trailing punctuation run", "(https://a.b/x)?!", vec![para(vec![text("("), link("https://a.b/x"), text(")?!")])]),
+            ("comma", "https://a.b, https://c.d", vec![para(vec![link("https://a.b"), text(", "), link("https://c.d")])]),
+            ("balanced parens kept", "https://a.b/w_(x)", vec![para(vec![link("https://a.b/w_(x)")])]),
+            ("quote and colon", "\"https://a.b\":", vec![para(vec![text("\""), link("https://a.b"), text("\":")])]),
+            ("scheme only is text", "http:// and https://", vec![para(vec![text("http:// and https://")])]),
+            ("not at a word start", "xhttps://a.b", vec![para(vec![text("xhttps://a.b")])]),
+            ("other schemes stay text", "ftp://a.b file:///x javascript:x", vec![para(vec![text("ftp://a.b file:///x javascript:x")])]),
+            ("www alone stays text", "www.a.b", vec![para(vec![text("www.a.b")])]),
+            ("inline code stays code", "`https://a.b`", vec![para(vec![Inline::Code("https://a.b".into())])]),
+            (
+                "code block stays text",
+                "```\nhttps://a.b\n```",
+                vec![Block::Code(CodeBlock { lang: None, text: "https://a.b".into() })],
+            ),
+            (
+                "existing link is untouched",
+                "[https://x.y](https://a.b)",
+                vec![para(vec![Inline::Link { text: "https://x.y".into(), url: "https://a.b".into() }])],
+            ),
+            ("angle autolink is one link", "<https://a.b>", vec![para(vec![link("https://a.b")])]),
+            ("inside bold", "**https://a.b**", vec![para(vec![Inline::Strong(vec![link("https://a.b")])])]),
+            ("issue ref in the path is not split out", "https://a.b/PROJ-1", vec![para(vec![link("https://a.b/PROJ-1")])]),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn foreign_images_draw_as_links() {
+        let img = |alt: &str, src: &str| ImageBlock { alt: alt.into(), src: src.into(), kind: ImageKind::Foreign };
+        let link = |t: &str, u: &str| Inline::Link { text: t.into(), url: u.into() };
+        let cases = [
+            ("alt text link", img("cat", "https://example.com/cat.png"), link("cat", "https://example.com/cat.png")),
+            ("empty alt falls back", img("", "https://example.com/c.png"), link("Image", "https://example.com/c.png")),
+            ("blank alt falls back", img("  ", "http://e.com/c.png"), link("Image", "http://e.com/c.png")),
+            ("mixed case scheme", img("c", "HTTPS://e.com/c.png"), link("c", "HTTPS://e.com/c.png")),
+            ("relative non-blob resolves to host", img("c", "/files/c.png"), link("c", "https://h.x/files/c.png")),
+            ("javascript is inert", img("c", "javascript:alert(1)"), text("c")),
+            ("data is inert", img("c", "data:image/png;base64,AA"), text("c")),
+            ("protocol-relative is inert", img("c", "//evil.example/c.png"), text("c")),
+            ("file is inert", img("", "file:///etc/passwd"), text("Image")),
+            ("bad pending id is inert", img("c", "jait-pending://nope"), text("c")),
+        ];
+        for (name, image, want) in cases {
+            assert_eq!(foreign_image_inline(&image, "https://h.x"), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn relative_links_resolve_when_parsed() {
+        let doc = parse_with("[x](/issues/2) [y](//evil.example)", "https://h.x/", &[]);
+        assert_eq!(
+            doc.blocks,
+            vec![para(vec![
+                Inline::Link { text: "x".into(), url: "https://h.x/issues/2".into() },
+                text(" y"),
+            ])]
+        );
     }
 }

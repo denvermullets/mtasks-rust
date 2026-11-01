@@ -141,6 +141,24 @@ pub fn handle_issue_detail_key(
     }
 }
 
+/// Keys bound only while a project detail is showing; same shape as the
+/// issue detail handler, for the project description.
+pub fn handle_project_detail_key(
+    key: &Key,
+    modifiers: Modifiers,
+    editing_description: bool,
+) -> Option<Message> {
+    match key {
+        Key::Named(keyboard::key::Named::Escape) if editing_description => {
+            Some(Message::StopEditingProjectDescription)
+        }
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "e" => {
+            Some(Message::EditProjectDescription)
+        }
+        _ => None,
+    }
+}
+
 /// Keys bound only while the lightbox modal is open. Checked before the
 /// modal fallthrough in `handle_key_press`; `None` falls through to it
 /// (Esc closes). ←/→ step through the issue's images.
@@ -224,6 +242,27 @@ mod tests {
         ));
         // Rendered: Escape falls through to today's behavior.
         assert!(handle_issue_detail_key(&esc, Modifiers::empty(), false).is_none());
+    }
+
+    #[test]
+    fn project_escape_leaves_the_description_editor_only_while_editing() {
+        let esc = Key::Named(keyboard::key::Named::Escape);
+        assert!(matches!(
+            handle_project_detail_key(&esc, Modifiers::empty(), true),
+            Some(Message::StopEditingProjectDescription)
+        ));
+        assert!(handle_project_detail_key(&esc, Modifiers::empty(), false).is_none());
+    }
+
+    #[test]
+    fn e_edits_the_project_description_with_no_modifiers() {
+        let e = Key::Character("e".into());
+        assert!(matches!(
+            handle_project_detail_key(&e, Modifiers::empty(), false),
+            Some(Message::EditProjectDescription)
+        ));
+        assert!(handle_project_detail_key(&e, Modifiers::COMMAND, false).is_none());
+        assert!(handle_project_detail_key(&e, Modifiers::SHIFT, false).is_none());
     }
 
     #[test]

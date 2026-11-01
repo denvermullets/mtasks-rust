@@ -143,6 +143,8 @@ pub enum Message {
     /// Click on the rendered description: open the editor with focus.
     EditIssueDescription,
     StopEditingIssueDescription,
+    EditProjectDescription,
+    StopEditingProjectDescription,
     IssueDetailDueDateChanged(String),
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
@@ -219,7 +221,11 @@ pub enum Message {
     /// Click on a link in rendered body text, carrying its typed target.
     OpenBodyLink(crate::mentions::LinkTarget),
     /// The hovered body span changed (`None` = pointer left). JRST-299 consumes it.
-    BodyHover(Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// A body paragraph's hovered span changed. The id is the reporting
+    /// widget's owner id (see `hover_rich::HoverRich::on_hover`).
+    BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// A hover-card timer elapsed (see `hover_card::Effect`).
+    HoverTimer(u64),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -886,6 +892,8 @@ pub struct App {
     sync_next_delay: Option<std::time::Duration>,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
+    /// Hover card over body references (JRST-299).
+    body_hover: crate::body_hover::BodyHover,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
     next_toast_id: u64,
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
@@ -2929,6 +2937,7 @@ impl App {
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
+            body_hover: crate::body_hover::BodyHover::new(),
             next_toast_id: 0,
             sync_paused_auth: false,
         };
@@ -3010,6 +3019,16 @@ impl App {
             );
         }
         Subscription::batch(subs)
+    }
+
+    /// Turn a hover-card effect into the delayed message the machine asked for.
+    fn hover_timer(effect: Option<crate::hover_card::Effect>) -> Task<Message> {
+        match effect {
+            Some(e) => Task::perform(tokio::time::sleep(e.delay), move |_| {
+                Message::HoverTimer(e.generation)
+            }),
+            None => Task::none(),
+        }
     }
 
     /// Feed the sync scheduler an event, re-arm its timer, and start the cycle
@@ -3158,6 +3177,13 @@ impl App {
                     let editing_description =
                         self.issue_detail.as_ref().is_some_and(|d| d.editing_description);
                     if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers, editing_description) {
+                        return self.update(msg);
+                    }
+                }
+                if matches!(self.view, View::ProjectDetail(_)) && !modal_open {
+                    let editing_description =
+                        self.project_detail.as_ref().is_some_and(|d| d.editing_description);
+                    if let Some(msg) = keys::handle_project_detail_key(&key, modifiers, editing_description) {
                         return self.update(msg);
                     }
                 }
@@ -4230,6 +4256,21 @@ impl App {
                 }
             }
 
+            Message::StopEditingProjectDescription => {
+                if let Some(d) = &mut self.project_detail {
+                    d.editing_description = false;
+                }
+            }
+            Message::EditProjectDescription => {
+                if let Some(d) = &mut self.project_detail {
+                    d.editing_description = true;
+                    return iced::advanced::widget::operate(issue_detail::FocusFirstIn::new(
+                        project_detail::description_editor_id(),
+                    ))
+                    .discard();
+                }
+            }
+
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
                 if let Some(d) = self.comment_drafts_mut() {
@@ -4465,7 +4506,21 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
-            Message::BodyHover(_) => {}
+            Message::BodyHover(owner, hover) => {
+                let span = hover.map(|h| {
+                    let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
+                    // The widget saw no pointer move yet (fresh after a rebuild):
+                    // fall back to the content-space rectangle.
+                    let rect = h.window_bounds.unwrap_or(h.bounds);
+                    (anchor, rect)
+                });
+                let effect = self.body_hover.body_hover(owner, span);
+                return Self::hover_timer(effect);
+            }
+            Message::HoverTimer(generation) => {
+                let effect = self.body_hover.event(crate::hover_card::Event::TimerFired(generation));
+                return Self::hover_timer(effect);
+            }
             Message::OpenBodyLink(target) => match target {
                 crate::mentions::LinkTarget::Issue(id) => {
                     return self.update(Message::OpenIssueDetail(id));
@@ -6223,6 +6278,13 @@ impl App {
         Task::none()
     }
 
+    /// The hover card for the current anchor, positioned under its span.
+    fn hover_card_overlay(&self) -> Option<Element<'_, Message>> {
+        let (anchor, rect) = self.body_hover.current()?;
+        let content = crate::body_hover::content_for(anchor, &self.issues, &self.teams)?;
+        Some(crate::views::hover_card_view::overlay(&content, rect))
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let team_sidebar = team_list::view(team_list::SidebarState {
             teams: &self.teams,
@@ -6791,6 +6853,11 @@ impl App {
                 iced::widget::stack![base, command_palette::view(palette)].into()
             }
             Modal::None => base,
+        };
+
+        let content = match self.hover_card_overlay() {
+            Some(card) => iced::widget::stack![content, card].into(),
+            None => content,
         };
 
         // Toasts sit above everything, including any open modal.
