@@ -86,6 +86,10 @@ pub enum Inline {
     /// A link with an openable target. Text is flat (no tokens inside).
     /// Links with any other scheme are not produced: their text stays plain.
     Link { text: String, url: String },
+    /// `**strong**` text. Holds the inlines inside, so mentions and
+    /// references in bold text stay tokens. Wrapper inlines for other styles
+    /// (emphasis, strikethrough) nest the same way.
+    Strong(Vec<Inline>),
 }
 
 /// Whether a link target may be opened: only `http`, `https` and `mailto`
@@ -150,6 +154,9 @@ struct Builder {
     literal_depth: usize,
     /// The link being read: (url, text so far).
     link: Option<(String, String)>,
+    /// Open wrappers (strong), innermost last: the buffer each one wraps into
+    /// and its constructor. The wrapper's own content is in `current`.
+    wrappers: Vec<(Vec<Inline>, fn(Vec<Inline>) -> Inline)>,
 }
 
 /// An open container and what it has collected so far.
@@ -253,6 +260,11 @@ impl Builder {
                 self.literal_depth += 1;
                 self.link = Some((dest_url.to_string(), String::new()));
             }
+            Event::Start(Tag::Strong) if self.html_depth == 0 => {
+                self.flush_pending();
+                self.wrappers.push((std::mem::take(&mut self.current), Inline::Strong));
+            }
+            Event::End(TagEnd::Strong) => self.close_wrapper(),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::Start(Tag::List(start)) => self.open(Frame::List(start, Vec::new(), Vec::new())),
             Event::Start(Tag::Item) => {
@@ -355,8 +367,24 @@ impl Builder {
         }
     }
 
+    /// End the innermost open wrapper: its content becomes one inline in the
+    /// buffer it was opened from. An end with nothing open (its start was cut
+    /// short by an image) does nothing.
+    fn close_wrapper(&mut self) {
+        self.flush_pending();
+        let Some((outer, wrap)) = self.wrappers.pop() else { return };
+        let inner = std::mem::replace(&mut self.current, outer);
+        if !inner.is_empty() {
+            self.current.push(wrap(inner));
+        }
+    }
+
     fn flush(&mut self) {
         self.flush_pending();
+        // A block boundary inside a wrapper (an image) ends the wrapper.
+        while !self.wrappers.is_empty() {
+            self.close_wrapper();
+        }
         if !self.current.is_empty() {
             let runs = std::mem::take(&mut self.current);
             self.push_block(Block::Paragraph(runs));
@@ -493,6 +521,68 @@ mod tests {
         ];
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    fn strong(runs: Vec<Inline>) -> Inline {
+        Inline::Strong(runs)
+    }
+
+    #[test]
+    fn parses_strong_runs() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("asterisks", "a **b** c", vec![para(vec![text("a "), strong(vec![text("b")]), text(" c")])]),
+            ("underscores", "a __b__ c", vec![para(vec![text("a "), strong(vec![text("b")]), text(" c")])]),
+            ("whole paragraph", "**all**", vec![para(vec![strong(vec![text("all")])])]),
+            (
+                "two runs",
+                "**a** and **b**",
+                vec![para(vec![strong(vec![text("a")]), text(" and "), strong(vec![text("b")])])],
+            ),
+            ("unclosed stays literal", "**oops", vec![para(vec![text("**oops")])]),
+            ("empty marks stay literal", "a **** b", vec![para(vec![text("a **** b")])]),
+            ("single star is not strong", "a *b* c", vec![para(vec![text("a b c")])]),
+            (
+                "tokens inside strong",
+                "**ping @Ann on PROJ-7**",
+                vec![para(vec![strong(vec![
+                    text("ping "),
+                    Inline::Mention("@Ann".into()),
+                    text(" on "),
+                    Inline::IssueRef { text: "PROJ-7".into(), prefix: "PROJ".into(), number: 7 },
+                ])])],
+            ),
+            (
+                "code inside strong stays one literal run",
+                "**run `x` now**",
+                vec![para(vec![strong(vec![text("run x now")])])],
+            ),
+            (
+                "link inside strong",
+                "**see [here](https://a.b)**",
+                vec![para(vec![strong(vec![
+                    text("see "),
+                    Inline::Link { text: "here".into(), url: "https://a.b".into() },
+                ])])],
+            ),
+            (
+                "strong spans a soft break",
+                "**one\ntwo**",
+                vec![para(vec![strong(vec![text("one two")])])],
+            ),
+            (
+                "strong in code is literal",
+                "`**x**`",
+                vec![para(vec![text("**x**")])],
+            ),
+            (
+                "strong in a second paragraph",
+                "one\n\n**two**",
+                vec![para(vec![text("one")]), para(vec![strong(vec![text("two")])])],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["Ann"]).blocks, want, "{name}");
         }
     }
 
@@ -676,6 +766,21 @@ mod tests {
     }
 
     #[test]
+    fn strong_inside_a_list_item() {
+        let want = vec![list(vec![vec![para(vec![text("a "), strong(vec![text("b")])])]])];
+        assert_eq!(parse("- a **b**").blocks, want);
+    }
+
+    #[test]
+    fn an_image_inside_strong_ends_the_run_without_losing_text() {
+        let body = format!("**a ![x]({BLOB}) b**");
+        let blocks = parse(&body).blocks;
+        assert_eq!(blocks[0], para(vec![strong(vec![text("a ")])]));
+        assert!(matches!(blocks[1], Block::Image(_)));
+        assert_eq!(blocks[2], para(vec![text(" b")]));
+    }
+
+    #[test]
     fn image_inside_a_list_item_stays_in_the_item() {
         let body = format!("- see ![a]({BLOB}) now");
         let got = parse(&body).blocks;
@@ -808,7 +913,7 @@ mod tests {
             (
                 "inside emphasis",
                 "**PROJ-1** and *@ann*",
-                vec![issue("PROJ-1", "PROJ", 1), text(" and "), mention("@ann")],
+                vec![Inline::Strong(vec![issue("PROJ-1", "PROJ", 1)]), text(" and "), mention("@ann")],
             ),
             ("inline code not tokenized", "`PROJ-1 @ann` x", vec![text("PROJ-1 @ann x")]),
             (
