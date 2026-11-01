@@ -23,6 +23,7 @@ base64 = "0.22"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 png = "0.17"
 pulldown-cmark = { version = "0.13", default-features = false }
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 
 # Bundle metadata for `cargo bundle` (cargo-bundle). The identifier is fixed:
 # macOS keys notification permission and settings off it. Do not change it.

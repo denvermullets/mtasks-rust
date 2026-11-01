@@ -1,6 +1,8 @@
 mod api;
 mod app;
+mod body_cache;
 mod body_hover;
+mod card_placement;
 mod config;
 mod csv_io;
 mod dashboard_eval;
@@ -11,6 +13,7 @@ mod document;
 mod files;
 mod fonts;
 mod hover_card;
+mod highlight;
 mod inbox;
 mod issue_match;
 mod keys;
