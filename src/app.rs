@@ -217,6 +217,8 @@ pub enum Message {
     OpenIssueDetail(String),
     /// Click on a link in rendered body text, carrying its typed target.
     OpenBodyLink(crate::mentions::LinkTarget),
+    /// The hovered body span changed (`None` = pointer left). JRST-299 consumes it.
+    BodyHover(Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -4455,6 +4457,7 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
+            Message::BodyHover(_) => {}
             Message::OpenBodyLink(target) => match target {
                 crate::mentions::LinkTarget::Issue(id) => {
                     return self.update(Message::OpenIssueDetail(id));

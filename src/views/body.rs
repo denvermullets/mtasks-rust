@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, image, rich_text, row, span, text};
+use iced::widget::{button, column, container, image, row, span, text};
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
@@ -23,6 +23,7 @@ use crate::files::inline;
 use crate::document::Inline;
 use crate::mentions::{self, body_segments, LinkTarget, BodySegment, ImageBlock, ImageKind};
 use crate::theme as t;
+use crate::views::hover_rich::hover_rich;
 
 /// Widest an inline image is drawn.
 const MAX_IMAGE_WIDTH: f32 = 560.0;
@@ -190,8 +191,10 @@ fn paragraph<'a>(inlines: &[Inline], size: f32, plain: Color, ctx: &BodyCtx<'a>)
         .into_iter()
         .map(|r| span_for(r, plain))
         .collect();
-    let el: Element<'a, LinkTarget> = rich_text(spans).size(size).into();
-    el.map(Message::OpenBodyLink)
+    hover_rich(spans, Message::OpenBodyLink)
+        .size(size)
+        .on_hover(Message::BodyHover)
+        .into()
 }
 
 /// A styled stretch of text, before it becomes an Iced span. Pure, so the
