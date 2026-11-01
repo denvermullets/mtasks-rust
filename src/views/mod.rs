@@ -10,6 +10,7 @@ pub mod issue_form;
 pub mod issue_list;
 pub mod issue_picker;
 pub mod lane_icon;
+pub mod lightbox;
 pub mod labels;
 pub mod placeholder;
 pub mod progress_chart;
