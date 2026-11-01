@@ -17,8 +17,9 @@
 
 use iced::{Point, Rectangle};
 
-use crate::db::models::{Issue, Team};
+use crate::db::models::{Issue, Lane, Member, Project, Team};
 use crate::hover_card::{Effect, Event, HoverCard};
+use crate::lane_icon::{icon_for, LaneIcon};
 use crate::mentions::LinkTarget;
 
 /// What a hover card is about.
@@ -111,19 +112,44 @@ pub struct IssueCard {
     /// `IDENT-n`, or `#n` when the team isn't loaded.
     pub identifier: String,
     pub title: String,
+    /// The issue's lane; `None` when the lane isn't in the records.
+    pub lane: Option<LaneInfo>,
+}
+
+/// A lane as the card shows it: icon beside the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneInfo {
+    pub name: String,
+    pub icon: LaneIcon,
+}
+
+/// The local records a card is built from. Slices, so the caller decides
+/// where they come from.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Records<'a> {
+    pub issues: &'a [Issue],
+    pub teams: &'a [Team],
+    pub lanes: &'a [Lane],
+    pub members: &'a [Member],
+    pub projects: &'a [Project],
 }
 
 /// Card content for an anchor from local data; `None` draws no card.
-pub fn content_for(anchor: &Anchor, issues: &[Issue], teams: &[Team]) -> Option<CardContent> {
+pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
+    let Records { issues, teams, lanes, .. } = *records;
     match anchor {
         Anchor::Issue(id) => {
             let issue = issues.iter().find(|i| i.id == *id)?;
+            let lane = lanes
+                .iter()
+                .find(|l| l.id == issue.lane_id)
+                .map(|l| LaneInfo { name: l.name.clone(), icon: icon_for(l.category.as_deref()) });
             let number = issue.team_number.unwrap_or(0);
             let identifier = match teams.iter().find(|t| t.id == issue.team_id) {
                 Some(team) => format!("{}-{}", team.identifier, number),
                 None => format!("#{number}"),
             };
-            Some(CardContent::Issue(IssueCard { identifier, title: issue.title.clone() }))
+            Some(CardContent::Issue(IssueCard { identifier, title: issue.title.clone(), lane }))
         }
         Anchor::Mention(_) => None,
     }
@@ -306,6 +332,8 @@ mod tests {
             updated_at: String::new(),
         };
         let issues = [issue("a", "t", Some(7), "Fix it"), issue("b", "gone", Some(3), "Orphan")];
+        let teams = [team];
+        let records = Records { issues: &issues, teams: &teams, ..Default::default() };
         let rows = [
             (Anchor::Issue("a".into()), Some(("PROJ-7", "Fix it"))),
             (Anchor::Issue("b".into()), Some(("#3", "Orphan"))),
@@ -313,11 +341,44 @@ mod tests {
             (Anchor::Mention("@ann".into()), None),
         ];
         for (anchor, want) in rows {
-            let got = content_for(&anchor, &issues, std::slice::from_ref(&team));
+            let got = content_for(&anchor, &records);
             let want = want.map(|(i, t)| {
-                CardContent::Issue(IssueCard { identifier: i.into(), title: t.into() })
+                CardContent::Issue(IssueCard { identifier: i.into(), title: t.into(), lane: None })
             });
             assert_eq!(got, want, "{anchor:?}");
+        }
+    }
+
+    fn lane(id: &str, name: &str, category: Option<&str>) -> Lane {
+        Lane {
+            id: id.into(),
+            name: name.into(),
+            color: None,
+            position: 0,
+            team_id: "t".into(),
+            remote_id: None,
+            category: category.map(String::from),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn card_carries_the_lane_name_and_icon() {
+        let issues = [issue("a", "t", Some(1), "x")];
+        let rows = [
+            (vec![lane("l", "In Progress", Some("started"))], Some(("In Progress", LaneIcon::Started))),
+            (vec![lane("l", "Odd", None)], Some(("Odd", LaneIcon::Plain))),
+            (vec![lane("other", "Done", Some("completed"))], None),
+            (vec![], None),
+        ];
+        for (lanes, want) in rows {
+            let records = Records { issues: &issues, lanes: &lanes, ..Default::default() };
+            let Some(CardContent::Issue(card)) = content_for(&Anchor::Issue("a".into()), &records) else {
+                panic!("card expected");
+            };
+            let want = want.map(|(name, icon)| LaneInfo { name: name.into(), icon });
+            assert_eq!(card.lane, want);
         }
     }
 }

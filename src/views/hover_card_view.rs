@@ -4,7 +4,7 @@
 //! Add a field: draw it in `issue_card` (the data comes from
 //! `body_hover::content_for`). Placement is `overlay`; JRST-309 refines it.
 
-use iced::widget::{column, container, text};
+use iced::widget::{column, container, row, text};
 use iced::{Border, Element, Length, Padding, Rectangle, Theme};
 
 use crate::app::Message;
@@ -36,8 +36,17 @@ pub fn overlay<'a>(content: &CardContent, anchor: Rectangle) -> Element<'a, Mess
 }
 
 fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
+    let mut top = row![text(issue.identifier.clone()).size(t::type_scale::XS).color(t::text_secondary())]
+        .spacing(t::space::S2)
+        .align_y(iced::Alignment::Center);
+    if let Some(lane) = &issue.lane {
+        top = top
+            .push(iced::widget::horizontal_space())
+            .push(crate::views::lane_icon::view(lane.icon))
+            .push(text(lane.name.clone()).size(t::type_scale::XS).color(t::text_muted()));
+    }
     let body = column![
-        text(issue.identifier.clone()).size(t::type_scale::XS).color(t::text_secondary()),
+        top,
         text(issue.title.clone()).size(t::type_scale::SM).color(t::text_primary()),
     ]
     .spacing(t::space::S1);
