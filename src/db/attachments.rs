@@ -209,6 +209,42 @@ pub fn mark_attached(conn: &Connection, id: &str, dto: &AttachmentDto) -> Result
     tx.commit()
 }
 
+/// A permanent upload error: the row stays (with its outbox copy) as `failed`,
+/// showing `reason`, until the user retries or removes it.
+pub fn mark_failed(conn: &Connection, id: &str, reason: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE attachments SET upload_state = 'failed', failure_reason = ?2
+         WHERE id = ?1 AND upload_state = 'pending'",
+        params![id, reason],
+    )?;
+    Ok(())
+}
+
+/// Retry a `failed` row: back to `pending` and requeue what is still missing
+/// (the upload unless it already finished, plus the attach for
+/// [`UploadKind::Attachment`]), skipping anything still queued. False when the
+/// row is not failed.
+pub fn retry_failed(conn: &Connection, id: &str) -> Result<bool> {
+    use crate::db::sync_queue::{enqueue, has_pending_entry};
+    let Some(a) = get(conn, id)? else { return Ok(false) };
+    if a.upload_state != UploadState::Failed {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE attachments SET upload_state = 'pending', failure_reason = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    if a.signed_id.is_none() && !has_pending_entry(&tx, UPLOAD_ENTITY, id)? {
+        enqueue(&tx, UPLOAD_ENTITY, id, "create", None)?;
+    }
+    if a.upload_kind == UploadKind::Attachment && !has_pending_entry(&tx, ATTACHMENT_ENTITY, id)? {
+        enqueue(&tx, ATTACHMENT_ENTITY, id, "create", None)?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
 /// An owner's attachments: server-known ones in remote `id` order, then
 /// local pending/failed ones (no remote id yet) oldest first.
 pub fn list_for_owner(conn: &Connection, kind: OwnerKind, owner_id: &str) -> Result<Vec<Attachment>> {
@@ -753,6 +789,52 @@ mod tests {
         assert_eq!(map["c1"].len(), 1);
         assert_eq!(map["c2"].iter().map(|a| a.filename.as_str()).collect::<Vec<_>>(), ["b", "c"]);
         assert!(!map.contains_key("c3"), "issue files are not comment files");
+    }
+
+    #[test]
+    fn mark_failed_keeps_the_row_with_a_reason() {
+        let c = conn();
+        let a = add_pending(&c, &new_pending("big.bin")).unwrap();
+        mark_failed(&c, &a.id, "validation: too big").unwrap();
+        let row = get(&c, &a.id).unwrap().unwrap();
+        assert_eq!(row.upload_state, UploadState::Failed);
+        assert_eq!(row.failure_reason.as_deref(), Some("validation: too big"));
+        assert_eq!(row.outbox_path.as_deref(), Some("/tmp/outbox/x"), "file is never dropped");
+    }
+
+    #[test]
+    fn retry_requeues_upload_and_attach_once() {
+        let c = conn();
+        let a = add_pending(&c, &new_pending("big.bin")).unwrap();
+        mark_failed(&c, &a.id, "nope").unwrap();
+        for e in crate::db::sync_queue::pending_entries(&c).unwrap() {
+            crate::db::sync_queue::mark_synced(&c, e.id.unwrap()).unwrap();
+        }
+        assert!(retry_failed(&c, &a.id).unwrap());
+        let row = get(&c, &a.id).unwrap().unwrap();
+        assert_eq!((row.upload_state, row.failure_reason), (UploadState::Pending, None));
+        assert_eq!(
+            queue(&c),
+            vec![
+                ("upload".into(), "create".into(), a.id.clone()),
+                ("attachment".into(), "create".into(), a.id.clone()),
+            ]
+        );
+        assert!(!retry_failed(&c, &a.id).unwrap(), "only failed rows retry");
+        assert_eq!(queue(&c).len(), 2);
+    }
+
+    #[test]
+    fn retry_after_the_upload_finished_only_requeues_the_attach() {
+        let c = conn();
+        let a = add_pending(&c, &new_pending("big.bin")).unwrap();
+        set_uploaded(&c, &a.id, "signed", "big.bin").unwrap();
+        mark_failed(&c, &a.id, "owner gone").unwrap();
+        for e in crate::db::sync_queue::pending_entries(&c).unwrap() {
+            crate::db::sync_queue::mark_synced(&c, e.id.unwrap()).unwrap();
+        }
+        assert!(retry_failed(&c, &a.id).unwrap());
+        assert_eq!(queue(&c), vec![("attachment".into(), "create".into(), a.id)]);
     }
 
     #[test]
