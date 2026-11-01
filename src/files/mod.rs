@@ -9,6 +9,8 @@
 // validate are consumed by the upload path and no longer need the allow.
 #[allow(dead_code)]
 pub mod cache;
+// Thumbnail loading is consumed by views; some helpers await later tickets.
+#[allow(dead_code)]
 pub mod images;
 pub mod intake;
 pub mod open;
