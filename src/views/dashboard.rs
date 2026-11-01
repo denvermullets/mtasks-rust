@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header, Sort};
+use crate::dashboard_eval::{AssigneeFilter, Evaluation, Filter, GroupResult, Header, Sort};
 use crate::db::dashboards::{Dashboard, MoveDirection};
 use crate::theme as t;
 use crate::views::board::CardData;
@@ -145,6 +145,7 @@ fn controls<'a>(
             .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
             .push(team_picker(evaluation, header.team.as_deref()))
+            .push(assignee_picker(evaluation, header.assignee))
             .push(status_picker(evaluation, header.status.as_deref()))
             .push(reset_button())
             .push(add_group_button(read_only))
@@ -204,6 +205,39 @@ struct StatusChoice(Option<String>);
 impl std::fmt::Display for StatusChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0.as_deref().unwrap_or("Any status"))
+    }
+}
+
+/// The assignee picker: members of the source teams plus "Unassigned".
+/// Hidden when no member is known.
+fn assignee_picker<'a>(
+    e: &Evaluation<'a>,
+    active: Option<AssigneeFilter>,
+) -> Element<'a, Message> {
+    if e.assignees.is_empty() {
+        return horizontal_space().width(0).into();
+    }
+    let mut options = vec![AssigneeChoice { pick: None, label: "Anyone".into() }];
+    options.extend(e.assignees.iter().map(|a| AssigneeChoice {
+        pick: Some(AssigneeFilter::User(a.remote_id)),
+        label: a.name.clone(),
+    }));
+    options.push(AssigneeChoice { pick: Some(AssigneeFilter::Unassigned), label: "Unassigned".into() });
+    let selected = options.iter().find(|o| o.pick == active).cloned();
+    pick_list(options, selected, |c| Message::SetDashboardAssignee(c.pick))
+        .text_size(13)
+        .into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssigneeChoice {
+    pick: Option<AssigneeFilter>,
+    label: String,
+}
+
+impl std::fmt::Display for AssigneeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
     }
 }
 
@@ -338,7 +372,10 @@ fn group_header<'a>(
     if !g.group.description.is_empty() {
         r = r.push(text(g.group.description.clone()).size(12).color(t::text_secondary()));
     }
-    r = r.push(horizontal_space()).push(move_buttons(&g.group.id, index, count, read_only));
+    r = r
+        .push(horizontal_space())
+        .push(move_buttons(&g.group.id, index, count, read_only))
+        .push(delete_group_button(&g.group.id, read_only));
     mouse_area(
         container(r)
             .padding([6, 4])
@@ -361,6 +398,15 @@ pub fn toggle_group(collapsed: &mut CollapsedGroups, dashboard_id: &str, group_i
         set.insert(group_id.to_string());
         true
     }
+}
+
+/// "Delete" on a group header (asks to confirm): disabled while read-only.
+fn delete_group_button<'a>(group_id: &str, read_only: bool) -> Element<'a, Message> {
+    button(text("Delete").size(12))
+        .on_press_maybe((!read_only).then(|| Message::ConfirmDeleteDashboardGroup(group_id.to_string())))
+        .padding([2, 8])
+        .style(button::text)
+        .into()
 }
 
 /// Move-up / move-down buttons; disabled at the edges and when read-only.

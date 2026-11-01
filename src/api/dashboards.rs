@@ -38,6 +38,12 @@ pub async fn delete(client: &ApiClient, id: i64) -> Result<(), ApiError> {
     client.delete(&format!("api/v1/dashboards/{id}")).await
 }
 
+/// `DELETE /api/v1/dashboards/:dashboard_id/groups/:id`.
+pub async fn delete_group(client: &ApiClient, dashboard_remote_id: i64, id: i64) -> Result<(), ApiError> {
+    client.delete(&format!("api/v1/dashboards/{dashboard_remote_id}/groups/{id}")).await
+}
+
+
 /// `PATCH /api/v1/dashboards/:dashboard_id/groups/reorder`: every group id in
 /// display order. Returns the dashboard's groups in the order the server applied.
 pub async fn reorder_groups(
