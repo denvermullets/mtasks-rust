@@ -41,13 +41,6 @@ impl Anchor {
     }
 }
 
-/// The span's rectangle in window pixels. `bounds` and `cursor` share one
-/// coordinate space (content space inside a scrollable), so their difference
-/// is scroll-independent.
-pub fn window_rect(bounds: Rectangle, cursor: Point, window_cursor: Point) -> Rectangle {
-    Rectangle::new(window_cursor + (bounds.position() - cursor), bounds.size())
-}
-
 /// Card state plus the bookkeeping that body widgets need.
 #[derive(Debug, Default)]
 pub struct BodyHover {
@@ -172,20 +165,6 @@ mod tests {
         ];
         for (link, want) in rows {
             assert_eq!(Anchor::from_link(&link), want);
-        }
-    }
-
-    #[test]
-    fn window_rect_is_independent_of_scroll() {
-        // The same span at three scroll offsets: bounds and cursor both shift
-        // by the offset in content space while the window pointer is fixed.
-        let size = Size::new(40.0, 16.0);
-        let window_cursor = Point::new(300.0, 200.0);
-        for scroll in [0.0, 150.0, 900.0] {
-            let bounds = Rectangle::new(Point::new(100.0, 500.0 + scroll), size);
-            let cursor = Point::new(110.0, 508.0 + scroll);
-            let r = window_rect(bounds, cursor, window_cursor);
-            assert_eq!(r, Rectangle::new(Point::new(290.0, 192.0), size));
         }
     }
 

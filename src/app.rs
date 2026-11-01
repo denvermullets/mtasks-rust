@@ -222,9 +222,6 @@ pub enum Message {
     /// A body paragraph's hovered span changed. The id is the reporting
     /// widget's owner id (see `hover_rich::HoverRich::on_hover`).
     BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
-    /// The pointer moved (window coordinates). Only subscribed while a body
-    /// is on screen; feeds `window_cursor`.
-    WindowCursor(iced::Point),
     /// A hover-card timer elapsed (see `hover_card::Effect`).
     HoverTimer(u64),
     /// Leave an issue detail that was opened from My Issues and return there.
@@ -895,8 +892,6 @@ pub struct App {
     toasts: Vec<Toast>,
     /// Hover card over body references (JRST-299).
     body_hover: crate::body_hover::BodyHover,
-    /// Last pointer position in window coordinates, for placing hover cards.
-    window_cursor: Option<iced::Point>,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
     next_toast_id: u64,
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
@@ -2941,7 +2936,6 @@ impl App {
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
             body_hover: crate::body_hover::BodyHover::new(),
-            window_cursor: None,
             next_toast_id: 0,
             sync_paused_auth: false,
         };
@@ -3009,16 +3003,6 @@ impl App {
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
 
         let mut subs = vec![keys, activity, banner_clicks];
-        // Hover cards are placed from the window pointer position. Tracking it
-        // rebuilds the view on every move, so only views that draw bodies pay.
-        if self.issue_detail.is_some() || matches!(self.view, View::ProjectDetail(_)) {
-            subs.push(event::listen_with(|event, _status, _id| match event {
-                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                    Some(Message::WindowCursor(position))
-                }
-                _ => None,
-            }));
-        }
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(
@@ -4498,16 +4482,12 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
-            Message::WindowCursor(p) => self.window_cursor = Some(p),
             Message::BodyHover(owner, hover) => {
                 let span = hover.map(|h| {
                     let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
-                    // Without a known pointer the card would land at the origin;
+                    // The widget saw no pointer move yet (fresh after a rebuild):
                     // fall back to the content-space rectangle.
-                    let rect = match self.window_cursor {
-                        Some(w) => crate::body_hover::window_rect(h.bounds, h.cursor, w),
-                        None => h.bounds,
-                    };
+                    let rect = h.window_bounds.unwrap_or(h.bounds);
                     (anchor, rect)
                 });
                 let effect = self.body_hover.body_hover(owner, span);
