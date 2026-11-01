@@ -3862,8 +3862,8 @@ impl App {
                     &issue_id,
                     &paths,
                 );
-                if !intake.refused.is_empty() {
-                    self.push_toast(intake.refused.join("\n"), ToastKind::Error, false);
+                if let Some(toast) = intake.refusal_toast() {
+                    self.push_toast(toast, ToastKind::Error, false);
                 }
                 self.load_detail_dependencies(&conn);
                 self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
