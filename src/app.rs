@@ -100,6 +100,7 @@ pub enum Message {
     SetDashboardSort(crate::dashboard_eval::Sort),
     /// Local team id, or None for all teams.
     SetDashboardTeam(Option<String>),
+    SetDashboardLabel(Option<String>),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -3813,6 +3814,12 @@ impl App {
 
             Message::SetDashboardTeam(team) => {
                 self.dashboard_header.team = team;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardLabel(label) => {
+                self.dashboard_header.label = label;
                 self.focused_lane = 0;
                 self.focused_issue = 0;
             }
