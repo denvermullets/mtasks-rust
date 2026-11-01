@@ -3877,13 +3877,13 @@ impl App {
                         ToastKind::Error,
                         false,
                     );
-                } else if let Some(Some(rid)) = found {
-                    if let Err(e) = crate::db::home_page::set_local(&self.db(), "dashboard", rid) {
+                } else if let Some(remote_id) = found {
+                    if let Err(e) =
+                        crate::db::home_page::set_dashboard_local(&self.db(), &dashboard_id, remote_id)
+                    {
                         eprintln!("[home_page] set failed: {e}");
                     }
                     self.home_page = crate::db::home_page::get(&self.db()).unwrap_or_default();
-                } else if found.is_some() {
-                    self.push_toast("This dashboard hasn't synced yet", ToastKind::Error, false);
                 }
             }
 
