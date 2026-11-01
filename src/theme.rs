@@ -512,9 +512,31 @@ pub mod space {
     pub const S16: f32 = 64.0;
 }
 
+/// The web's Tailwind v4 corner radii in logical pixels (rounded-sm = 0.25rem, md = 0.375rem,
+/// lg = 0.5rem, xl = 0.75rem, 2xl = 1rem). `FULL` is `rounded-full`: large enough to make a pill.
+#[allow(dead_code)]
+pub mod radius {
+    pub const XS: f32 = 2.0;
+    pub const SM: f32 = 4.0;
+    pub const MD: f32 = 6.0;
+    pub const LG: f32 = 8.0;
+    pub const XL: f32 = 12.0;
+    pub const XXL: f32 = 16.0;
+    pub const FULL: f32 = 9999.0;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radius_values_match_the_webs_tailwind_radii() {
+        use radius::*;
+        assert_eq!([XS, SM, MD, LG, XL, XXL], [2.0, 4.0, 6.0, 8.0, 12.0, 16.0]);
+        assert!(FULL >= 9999.0);
+        // The web's markdown: inline code 0.25rem, images 0.375rem, code blocks 0.5rem.
+        assert_eq!([SM, MD, LG], [0.25 * 16.0, 0.375 * 16.0, 0.5 * 16.0]);
+    }
 
     #[test]
     fn spacing_scale_matches_the_webs_tailwind_steps() {
