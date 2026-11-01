@@ -679,6 +679,9 @@ pub struct App {
     detail_attachments: Vec<crate::db::attachments::Attachment>,
     /// Pending inline images (placeholder uuid -> outbox file) of the open issue.
     detail_pending_paths: std::collections::HashMap<String, std::path::PathBuf>,
+    /// The top-level comment composer was the last editor touched; a file drop
+    /// then stages onto it (JRST-208). Cleared on view change.
+    composer_focused: bool,
     /// Fetch state per blob key for images shown in the UI (thumbnails now;
     /// inline images and the lightbox reuse it). Bytes live in the file cache.
     images: crate::files::images::ImageStore,
@@ -907,6 +910,7 @@ impl App {
     fn switch_view(&mut self, view: View) {
         let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
         self.view = view;
+        self.composer_focused = false;
         self.retain_open_view();
         if self.view == View::Inbox {
             self.reload_inbox();
@@ -1018,6 +1022,7 @@ impl App {
     /// Recompute the `@`/`#` suggestion list for `target` from its cursor.
     fn refresh_suggestions(&mut self, target: crate::mentions::EditorTarget) {
         use crate::mentions::{self as m, EditorTarget};
+        self.composer_focused = matches!(target, EditorTarget::Comment);
         // On project detail only the comment composers exist; the id excluded
         // from `#` suggestions is the project's, which matches no issue.
         let (content, exclude_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
@@ -1657,6 +1662,7 @@ impl App {
         self.commit_project_detail();
         self.issue_detail = Some(issue_detail::IssueDetailState::from_issue(issue));
         self.view = View::IssueDetail(issue.id.clone());
+        self.composer_focused = false;
         let conn = self.db();
         self.load_detail_dependencies(&conn);
         self.reload_detail_origin(&conn);
@@ -2180,6 +2186,7 @@ impl App {
         self.commit_project_detail();
         self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
         self.view = View::ProjectDetail(project.id.clone());
+        self.composer_focused = false;
         let conn = self.db();
         self.load_detail_dependencies(&conn);
         self.fetch_project_comments_task(&conn, project)
@@ -2353,6 +2360,7 @@ impl App {
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
             detail_pending_paths: Default::default(),
+            composer_focused: false,
             images: Default::default(),
             detail_comment_attachments: Default::default(),
             detail_references: Vec::new(),
@@ -4059,8 +4067,11 @@ impl App {
 
             Message::FileDropped(path) => {
                 use crate::files::drop::{drop_target, DropTarget};
-                match drop_target(&self.view, &self.modal) {
+                match drop_target(&self.view, &self.modal, self.composer_focused) {
                     DropTarget::Issue => return self.update(Message::FilesPicked(vec![path])),
+                    DropTarget::CommentComposer => {
+                        return self.update(Message::CommentFilesPicked(vec![path]))
+                    }
                     DropTarget::Ignore => {}
                 }
             }
