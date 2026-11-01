@@ -3049,7 +3049,11 @@ impl App {
 
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
 
-        let mut subs = vec![keys, activity, scrolls, banner_clicks];
+        let mut subs = vec![keys, activity, banner_clicks];
+        // Only listen for wheel events while a card is pending or showing.
+        if self.body_hover.is_active() {
+            subs.push(scrolls);
+        }
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(

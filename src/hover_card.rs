@@ -64,6 +64,12 @@ impl<A: Clone + PartialEq> HoverCard<A> {
         Self::default()
     }
 
+    /// True from the pointer entering an anchor until the card is gone: a
+    /// pending show, an open card or one in its hide delay.
+    pub fn is_active(&self) -> bool {
+        self.phase != Phase::Idle
+    }
+
     /// The anchor whose card should be drawn now, if any. At most one.
     pub fn current(&self) -> Option<&A> {
         match &self.phase {

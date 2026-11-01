@@ -85,6 +85,12 @@ impl BodyHover {
         }
     }
 
+    /// True while a card is pending, showing or in its hide delay: the span
+    /// where something can still need dismissing (by a scroll, say).
+    pub fn is_active(&self) -> bool {
+        self.card.is_active()
+    }
+
     /// True while a card is showing (including during its hide delay).
     pub fn is_open(&self) -> bool {
         self.card.current().is_some()
