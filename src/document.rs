@@ -311,6 +311,54 @@ pub fn parse_with(body: &str, host: &str, member_names: &[&str]) -> Document {
     b.finish()
 }
 
+impl Document {
+    /// The body as plain text: no markdown syntax, blocks and list items
+    /// separated by single spaces, runs of whitespace collapsed. Images are
+    /// left out; code keeps its text but not its fences or backticks. For
+    /// previews such as the hover card's excerpt.
+    pub fn plain_text(&self) -> String {
+        let mut parts = Vec::new();
+        plain_blocks(&self.blocks, &mut parts);
+        parts.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}
+
+fn plain_blocks(blocks: &[Block], out: &mut Vec<String>) {
+    for block in blocks {
+        match block {
+            Block::Paragraph(inlines) | Block::Heading(_, inlines) => out.push(plain_inlines(inlines)),
+            Block::Image(_) | Block::Rule => {}
+            Block::List(list) => {
+                for item in &list.items {
+                    plain_blocks(item, out);
+                }
+            }
+            Block::Quote(blocks) => plain_blocks(blocks, out),
+            Block::Code(code) => out.push(code.text.clone()),
+            Block::Table(table) => {
+                for cell in table.header.iter().chain(table.rows.iter().flatten()) {
+                    plain_blocks(cell, out);
+                }
+            }
+        }
+    }
+}
+
+fn plain_inlines(inlines: &[Inline]) -> String {
+    let mut s = String::new();
+    for inline in inlines {
+        match inline {
+            Inline::Text(t) | Inline::Code(t) | Inline::Mention(t) => s.push_str(t),
+            Inline::HardBreak => s.push(' '),
+            Inline::IssueRef { text, .. } | Inline::Link { text, .. } => s.push_str(text),
+            Inline::Strong(inner) | Inline::Emphasis(inner) | Inline::Strikethrough(inner) => {
+                s.push_str(&plain_inlines(inner))
+            }
+        }
+    }
+    s
+}
+
 #[derive(Default)]
 struct Builder {
     /// Open containers, innermost last. Empty means the document root.
@@ -683,6 +731,30 @@ fn is_block_end(end: &TagEnd) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_text_drops_syntax() {
+        let rows = [
+            ("", ""),
+            ("   \n\n  ", ""),
+            ("Hello **bold** and `code`", "Hello bold and code"),
+            ("# Title\n\nBody  text\nnext line", "Title Body text next line"),
+            ("- one\n- two\n  - nested", "one two nested"),
+            ("1. a\n2. b", "a b"),
+            ("> quoted\n\nafter", "quoted after"),
+            ("see [the docs](https://x.y/z) now", "see the docs now"),
+            ("before ![alt](https://x.y/i.png) after", "before after"),
+            ("```rust\nlet x = 1;\n```\n\nend", "let x = 1; end"),
+            ("a\n\n---\n\nb", "a b"),
+            ("ping @Ann on PROJ-12", "ping @Ann on PROJ-12"),
+            ("- [x] done\n- [ ] todo", "done todo"),
+            ("*em* and ~~gone~~", "em and gone"),
+            ("| a | b |\n|---|---|\n| c | d |", "a b c d"),
+        ];
+        for (body, want) in rows {
+            assert_eq!(parse(body).plain_text(), want, "{body:?}");
+        }
+    }
+
     use super::*;
 
     fn text(s: &str) -> Inline {

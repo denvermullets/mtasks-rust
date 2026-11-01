@@ -5,7 +5,7 @@
 //! `body_hover::content_for`). Placement is `card_placement::place`, called from
 //! `overlay`; keep `estimated_height` in step with the card's rows.
 
-use iced::widget::{column, container, text};
+use iced::widget::{column, container, row, text};
 use iced::{alignment, Border, Element, Length, Padding, Rectangle, Size, Theme};
 
 use crate::app::Message;
@@ -46,18 +46,34 @@ pub fn overlay<'a>(content: &CardContent, anchor: Rectangle) -> Element<'a, Mess
     .into()
 }
 
-/// Rough card height for the flip decision: padding plus the identifier line
-/// and the title wrapped at about 0.55 em per character. Update when
-/// `issue_card` gains rows (JRST-301 to 305).
+/// Average glyph width as a fraction of the font size, for wrap estimates.
+const GLYPH: f32 = 0.55;
+
+/// Rough card height for the flip decision: padding plus every row of
+/// `issue_card`, with each row that can wrap (title, excerpt, metadata)
+/// counted in lines. Update when `issue_card` gains rows.
 fn estimated_height(content: &CardContent) -> f32 {
     match content {
         CardContent::Issue(issue) => {
-            let per_line = ((WIDTH - 2.0 * t::space::S3) / (t::type_scale::SM * 0.55)).floor();
-            let title_lines = (issue.title.chars().count() as f32 / per_line).ceil().max(1.0);
-            2.0 * t::space::S3
-                + t::type_scale::XS * t::type_scale::LH_XS
-                + t::space::S1
-                + title_lines * t::type_scale::SM * t::type_scale::LH_SM
+            let inner = WIDTH - 2.0 * t::space::S3;
+            let xs_line = t::type_scale::XS * t::type_scale::LH_XS;
+            let lines = |chars: usize, size: f32| {
+                let per_line = (inner / (size * GLYPH)).floor().max(1.0);
+                (chars as f32 / per_line).ceil().max(1.0)
+            };
+            // Identifier and lane share one line.
+            let mut height = xs_line;
+            height += t::space::S1
+                + lines(issue.title.chars().count(), t::type_scale::SM)
+                    * t::type_scale::SM
+                    * t::type_scale::LH_SM;
+            if let Some(excerpt) = &issue.excerpt {
+                let n = lines(excerpt.chars().count(), t::type_scale::XS).min(EXCERPT_LINES);
+                height += t::space::S1 + n * xs_line;
+            }
+            let rows = meta_lines(&meta_widths(issue), inner, t::space::S3);
+            height += t::space::S1 + rows as f32 * xs_line + (rows - 1) as f32 * t::space::S3;
+            2.0 * t::space::S3 + height
         }
         // Name, email and count: three single lines.
         CardContent::Member(_) => {
@@ -66,6 +82,38 @@ fn estimated_height(content: &CardContent) -> f32 {
                 + 2.0 * (t::space::S1 + t::type_scale::XS * t::type_scale::LH_XS)
         }
     }
+}
+
+/// Lines the excerpt is clamped to.
+const EXCERPT_LINES: f32 = 3.0;
+
+/// Estimated widths of the metadata groups, in the order `issue_card` draws
+/// them: a glyph or badge (about 16), a gap, then the label.
+fn meta_widths(issue: &IssueCard) -> Vec<f32> {
+    let label = |s: &str| s.chars().count() as f32 * t::type_scale::XS * GLYPH;
+    let group = |s: &str| 16.0 + t::space::S1 + label(s);
+    let mut widths = vec![group(issue.priority_label)];
+    for text in [&issue.assignee, &issue.project, &issue.due].into_iter().flatten() {
+        widths.push(group(text));
+    }
+    widths
+}
+
+/// How many lines a wrapping row of items with `widths` takes in `available`
+/// width, `spacing` between items. Always at least one.
+fn meta_lines(widths: &[f32], available: f32, spacing: f32) -> usize {
+    let mut lines = 1;
+    let mut used = 0.0;
+    for &w in widths {
+        let need = if used == 0.0 { w } else { used + spacing + w };
+        if used > 0.0 && need > available {
+            lines += 1;
+            used = w;
+        } else {
+            used = need;
+        }
+    }
+    lines
 }
 
 fn member_card<'a>(member: &MemberCard) -> Element<'a, Message> {
@@ -84,11 +132,53 @@ fn member_card<'a>(member: &MemberCard) -> Element<'a, Message> {
 }
 
 fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
+    let mut top = row![text(issue.identifier.clone()).size(t::type_scale::XS).color(t::text_secondary())]
+        .spacing(t::space::S2)
+        .align_y(iced::Alignment::Center);
+    if let Some(lane) = &issue.lane {
+        top = top
+            .push(iced::widget::horizontal_space())
+            .push(crate::views::lane_icon::view(lane.icon))
+            .push(text(lane.name.clone()).size(t::type_scale::XS).color(t::text_muted()));
+    }
+    // Groups of facts that wrap onto further lines when the card is narrow.
+    let mut facts = vec![fact(vec![
+        text("●").size(t::type_scale::XS).color(t::priority_color(issue.priority)).into(),
+        muted(issue.priority_label),
+    ])];
+    if let Some(name) = &issue.assignee {
+        facts.push(fact(vec![initials_badge(name), muted(name.clone())]));
+    }
+    if let Some(name) = &issue.project {
+        facts.push(fact(vec![muted("▣"), muted(name.clone())]));
+    }
+    if let Some(due) = &issue.due {
+        facts.push(fact(vec![muted("◷"), muted(due.clone())]));
+    }
+    let meta = iced::widget::Row::with_children(facts)
+        .spacing(t::space::S3)
+        .align_y(iced::Alignment::Center)
+        .wrap();
     let body = column![
-        text(issue.identifier.clone()).size(t::type_scale::XS).color(t::text_secondary()),
+        top,
         text(issue.title.clone()).size(t::type_scale::SM).color(t::text_primary()),
     ]
     .spacing(t::space::S1);
+    let body = match &issue.excerpt {
+        Some(excerpt) => body.push(
+            // About three lines: iced has no line clamp, so cut the height.
+            container(
+                text(excerpt.clone())
+                    .size(t::type_scale::XS)
+                    .line_height(t::type_scale::LH_XS)
+                    .color(t::text_muted()),
+            )
+                .max_height(t::type_scale::XS * t::type_scale::LH_XS * EXCERPT_LINES)
+                .clip(true),
+        ),
+        None => body,
+    };
+    let body = body.push(meta);
     panel(body.into())
 }
 
@@ -102,4 +192,95 @@ fn panel<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
             ..Default::default()
         })
         .into()
+}
+
+/// One icon-and-label group in the meta row.
+fn fact<'a>(parts: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    iced::widget::Row::with_children(parts)
+        .spacing(t::space::S1)
+        .align_y(iced::Alignment::Center)
+        .into()
+}
+
+fn muted<'a>(label: impl Into<String>) -> Element<'a, Message> {
+    text(label.into()).size(t::type_scale::XS).color(t::text_muted()).into()
+}
+
+/// A small circle with the person's initials.
+fn initials_badge<'a>(name: &str) -> Element<'a, Message> {
+    container(text(crate::views::projects::lead_initials(name)).size(9).color(t::text_primary()))
+        .center_x(Length::Fixed(16.0))
+        .center_y(Length::Fixed(16.0))
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_card())),
+            border: Border { color: t::border(), width: 1.0, radius: t::radius::FULL.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body_hover::LaneInfo;
+    use crate::db::models::Priority;
+    use crate::lane_icon::LaneIcon;
+
+    fn card() -> IssueCard {
+        IssueCard {
+            identifier: "A-1".into(),
+            title: "t".into(),
+            lane: Some(LaneInfo { name: "Done".into(), icon: LaneIcon::Completed }),
+            priority: Priority::Low,
+            priority_label: "Low",
+            assignee: None,
+            project: None,
+            due: None,
+            excerpt: None,
+        }
+    }
+
+    fn height(card: IssueCard) -> f32 {
+        estimated_height(&CardContent::Issue(card))
+    }
+
+    #[test]
+    fn meta_row_wraps_greedily() {
+        let rows = [
+            (vec![], 1),
+            (vec![100.0], 1),
+            (vec![100.0, 100.0], 1),
+            (vec![100.0, 100.0, 100.0], 2), // 100+12+100+12+100 > 296
+            (vec![200.0, 200.0, 200.0], 3),
+        ];
+        for (widths, want) in rows {
+            assert_eq!(meta_lines(&widths, 296.0, 12.0), want, "{widths:?}");
+        }
+    }
+
+    #[test]
+    fn every_row_adds_height_and_wrapping_rows_add_per_line() {
+        let base = height(card());
+        let mut with_excerpt = card();
+        with_excerpt.excerpt = Some("short".into());
+        let one = height(with_excerpt);
+        assert!(one > base, "excerpt row counts");
+        let mut long = card();
+        long.excerpt = Some("word ".repeat(34));
+        let three = height(long);
+        assert!(three > one, "more excerpt lines count");
+        let mut huge = card();
+        huge.excerpt = Some("z".repeat(170));
+        assert!((height(huge) - three).abs() < 20.0, "excerpt clamps at three lines");
+
+        let mut wide = card();
+        wide.assignee = Some("A very long assignee name indeed".into());
+        wide.project = Some("An equally long project name here".into());
+        wide.due = Some("Dec 25".into());
+        assert!(height(wide) > base, "wrapped metadata adds lines");
+
+        let mut titled = card();
+        titled.title = "w".repeat(120);
+        assert!(height(titled) > base, "long titles wrap");
+    }
 }
