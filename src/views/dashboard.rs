@@ -146,6 +146,7 @@ fn controls<'a>(
             .push(sort_picker(header.sort))
             .push(team_picker(evaluation, header.team.as_deref()))
             .push(assignee_picker(evaluation, header.assignee))
+            .push(label_picker(evaluation, header.label.as_deref()))
             .push(reset_button())
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
@@ -217,6 +218,26 @@ struct AssigneeChoice {
 impl std::fmt::Display for AssigneeChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)
+    }
+}
+
+/// The label picker, by name across the source teams. Hidden when no labels exist.
+fn label_picker<'a>(e: &Evaluation<'a>, active: Option<&str>) -> Element<'a, Message> {
+    if e.label_names.is_empty() {
+        return horizontal_space().width(0).into();
+    }
+    let mut options = vec![LabelChoice(None)];
+    options.extend(e.label_names.iter().map(|n| LabelChoice(Some(n.clone()))));
+    let selected = options.iter().find(|o| o.0.as_deref() == active).cloned();
+    pick_list(options, selected, |c| Message::SetDashboardLabel(c.0)).text_size(13).into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LabelChoice(Option<String>);
+
+impl std::fmt::Display for LabelChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_deref().unwrap_or("All labels"))
     }
 }
 

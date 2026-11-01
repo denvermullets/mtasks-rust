@@ -99,6 +99,9 @@ pub struct Header {
     pub team: Option<String>,
     /// Mine: only issues assigned to the current user (any of their member rows).
     pub mine: bool,
+    /// Label name the picker narrows to, matched across the source teams. A
+    /// name not in `Evaluation::label_names` is ignored.
+    pub label: Option<String>,
     /// The assignee picker: one person (by Rails user id, across teams) or
     /// the unowned work.
     pub assignee: Option<AssigneeFilter>,
@@ -154,6 +157,8 @@ pub struct Evaluation<'a> {
     /// Members of the source teams, deduplicated by Rails user id and sorted
     /// by name. The assignee picker adds "Unassigned" itself.
     pub assignees: Vec<AssigneeOption>,
+    /// Distinct, sorted label names on the source teams. The label picker reads this.
+    pub label_names: Vec<String>,
 }
 
 pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
@@ -181,12 +186,20 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         .as_deref()
         .filter(|id| source_teams.iter().any(|t| t.id == *id))
         .map(str::to_string);
+    let label_names = label_names(m, &source_teams);
+    let valid_label = input
+        .header
+        .label
+        .as_deref()
+        .filter(|n| label_names.iter().any(|x| x == n))
+        .map(str::to_string);
+    let source_ids: HashSet<&str> = source_teams.iter().map(|t| t.id.as_str()).collect();
     let input = &Input {
         groups: input.groups,
         mirror: input.mirror,
         current_user_remote_id: input.current_user_remote_id,
         today: input.today,
-        header: Header { team: valid_team, ..input.header.clone() },
+        header: Header { team: valid_team, label: valid_label, ..input.header.clone() },
     };
     // Ids across all groups' refined base sets, deduplicated for the counts.
     let mut counted: HashSet<&str> = HashSet::new();
@@ -198,7 +211,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
             let pool = pool(cfg, m, &accessible, &my_members);
             let pool = apply_label_sources(cfg, m, &accessible, pool);
             // The refined base set: counts read this, rows narrow it further.
-            let base = base_set(input, &pool, &my_members);
+            let base = base_set(input, &pool, &my_members, &source_ids);
             counted.extend(base.iter().map(|i| i.id.as_str()));
             let mut issues: Vec<&Issue> = base
                 .into_iter()
@@ -215,7 +228,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         })
         .collect();
     let (due_today, overdue) = due_counts(&counted, m, input.today);
-    Evaluation { groups, due_today, overdue, source_teams, assignees }
+    Evaluation { groups, due_today, overdue, source_teams, assignees, label_names }
 }
 
 /// A group's pool narrowed to the starting set rows and counts both read.
@@ -226,6 +239,7 @@ fn base_set<'a>(
     input: &Input<'a>,
     pool: &HashSet<&'a str>,
     my_members: &HashSet<&str>,
+    source_ids: &HashSet<&str>,
 ) -> Vec<&'a Issue> {
     let m = &input.mirror;
     m.issues
@@ -234,6 +248,7 @@ fn base_set<'a>(
         .filter(|i| passes_mine(i, input.header.mine, my_members))
         .filter(|i| passes_team(i, input.header.team.as_deref()))
         .filter(|i| passes_assignee(i, input.header.assignee, m.members))
+        .filter(|i| passes_label(i, input.header.label.as_deref(), m, source_ids))
         .collect()
 }
 
@@ -273,6 +288,29 @@ fn assignee_options(teams: &[&Team], members: &[Member]) -> Vec<AssigneeOption> 
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.remote_id.cmp(&b.remote_id)));
     out
+}
+
+/// Distinct label names on the source teams, sorted.
+fn label_names(m: &Mirror<'_>, source_teams: &[&Team]) -> Vec<String> {
+    let mut names: Vec<String> = m
+        .labels
+        .iter()
+        .filter(|l| source_teams.iter().any(|t| t.id == l.team_id))
+        .map(|l| l.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The label picker: keeps issues carrying a label of that name on a source
+/// team. No name means no narrowing. A bool, so an issue is never repeated.
+fn passes_label(i: &Issue, name: Option<&str>, m: &Mirror<'_>, source_ids: &HashSet<&str>) -> bool {
+    name.is_none_or(|n| {
+        m.issue_labels.get(&i.id).is_some_and(|ls| {
+            ls.iter().any(|l| l.name == n && source_ids.contains(l.team_id.as_str()))
+        })
+    })
 }
 
 /// Accessible teams behind the sources of every group, in mirror order.
@@ -1472,5 +1510,74 @@ mod tests {
         let groups = vec![cfg("g", vec![team_src(1, true)])];
         let h = Header { filter: Filter::Open, mine: true, ..Header::default() };
         assert!(fx.eval_with(&groups, None, h).groups[0].issues.is_empty());
+    }
+    fn named_label(id: &str, team: &str, name: &str) -> Label {
+        Label { name: name.into(), ..label(id, team, 0) }
+    }
+
+    fn label_pick_fx() -> Fx {
+        let mut fx = Fx::new();
+        let (a_bug, b_bug) = (named_label("la_bug", "a", "bug"), named_label("lb_bug", "b", "bug"));
+        let a_ui = named_label("la_ui", "a", "ui");
+        let arch_bug = named_label("larch_bug", "arch", "archived-only");
+        let mut one = issue("one", "a", "la");
+        one.due_date = Some("2026-10-30".into());
+        let two = issue("two", "b", "lb");
+        let three = issue("three", "a", "la");
+        let four = issue("four", "a", "la");
+        fx.issue_labels.insert("one".into(), vec![a_bug.clone()]);
+        fx.issue_labels.insert("two".into(), vec![b_bug.clone()]);
+        fx.issue_labels.insert("three".into(), vec![a_ui.clone()]);
+        fx.issue_labels.insert("four".into(), vec![a_bug.clone(), a_ui.clone()]);
+        fx.labels = vec![a_bug, b_bug, a_ui, arch_bug];
+        fx.issues = vec![one, two, three, four];
+        fx
+    }
+
+    #[test]
+    fn label_names_are_distinct_sorted_and_from_source_teams() {
+        let fx = label_pick_fx();
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        assert_eq!(fx.eval(&groups, Some(99)).label_names, ["bug", "ui"]);
+        // Only team b is behind the dashboard: just its labels.
+        let groups = vec![cfg("g", vec![team_src(2, true)])];
+        assert_eq!(fx.eval(&groups, Some(99)).label_names, ["bug"]);
+    }
+
+    #[test]
+    fn label_picker_matches_by_name_across_teams_rows_and_counts() {
+        let fx = label_pick_fx();
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        let h = Header { filter: Filter::Open, label: Some("bug".into()), ..Header::default() };
+        let ev = fx.eval_with(&groups, Some(99), h);
+        let mut got: Vec<&str> = ev.groups[0].issues.iter().map(|i| i.id.as_str()).collect();
+        got.sort();
+        assert_eq!(got, ["four", "one", "two"]);
+        assert_eq!(ev.overdue, 1);
+    }
+
+    #[test]
+    fn label_picker_lists_an_issue_once_with_several_matching_labels() {
+        let mut fx = label_pick_fx();
+        let extra = named_label("la_bug2", "a", "bug");
+        fx.issue_labels.get_mut("four").unwrap().push(extra.clone());
+        fx.labels.push(extra);
+        let groups = vec![cfg("g", vec![team_src(1, true)])];
+        let h = Header { filter: Filter::Open, label: Some("bug".into()), ..Header::default() };
+        let ev = fx.eval_with(&groups, Some(99), h);
+        let fours = ev.groups[0].issues.iter().filter(|i| i.id == "four").count();
+        assert_eq!(fours, 1);
+    }
+
+    #[test]
+    fn label_picker_ignores_a_name_not_on_the_source_teams() {
+        let fx = label_pick_fx();
+        let groups = vec![cfg("g", vec![team_src(1, true)])];
+        let h = Header {
+            filter: Filter::Open,
+            label: Some("archived-only".into()),
+            ..Header::default()
+        };
+        assert_eq!(fx.eval_with(&groups, Some(99), h).groups[0].issues.len(), 3);
     }
 }
