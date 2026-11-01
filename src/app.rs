@@ -272,6 +272,8 @@ pub enum Message {
     // Header bar
     /// Header search box changed; filters the current view's items.
     HeaderSearchChanged(String),
+    /// Dashboard header: flip the Mine toggle.
+    ToggleDashboardMine,
     /// Focus the header search box (Cmd+F).
     FocusSearch,
     /// "Display" button: open the display-options popover.
@@ -3668,6 +3670,12 @@ impl App {
 
             Message::SetDashboardSort(sort) => {
                 self.dashboard_header.sort = sort;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::ToggleDashboardMine => {
+                self.dashboard_header.mine = !self.dashboard_header.mine;
                 self.focused_lane = 0;
                 self.focused_issue = 0;
             }
