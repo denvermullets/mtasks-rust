@@ -84,6 +84,11 @@ impl BodyHover {
         }
     }
 
+    /// True while a card is showing (including during its hide delay).
+    pub fn is_open(&self) -> bool {
+        self.card.current().is_some()
+    }
+
     /// Any other state-machine event (timer, click, scroll, escape...).
     pub fn event(&mut self, event: Event<Anchor>) -> Option<Effect> {
         let effect = self.card.update(event);
@@ -224,6 +229,44 @@ mod tests {
         open(&mut h, 1, "a");
         h.body_hover(1, on("a"));
         assert_eq!(shown(&h), issue_anchor("a"));
+    }
+
+    #[test]
+    fn card_enter_and_leave_keep_and_then_hide() {
+        let mut h = BodyHover::new();
+        open(&mut h, 1, "a");
+        h.body_hover(1, None);
+        h.event(Event::EnteredCard);
+        assert_eq!(shown(&h), issue_anchor("a"));
+        let e = h.event(Event::LeftCard).unwrap();
+        assert_eq!(shown(&h), issue_anchor("a"), "visible during hide delay");
+        // Back on the anchor before the timer: stays open, old timer is stale.
+        h.body_hover(1, on("a"));
+        h.event(Event::TimerFired(e.generation));
+        assert_eq!(shown(&h), issue_anchor("a"));
+        h.body_hover(1, None);
+        h.event(Event::EnteredCard);
+        let e = h.event(Event::LeftCard).unwrap();
+        h.event(Event::TimerFired(e.generation));
+        assert_eq!(shown(&h), None);
+        assert_eq!(h.current(), None);
+    }
+
+    #[test]
+    fn click_scroll_escape_and_view_change_close_open_and_pending() {
+        for ev in [Event::Clicked, Event::Scrolled, Event::Escape, Event::ViewChanged] {
+            let mut h = BodyHover::new();
+            open(&mut h, 1, "a");
+            h.event(ev.clone());
+            assert_eq!(shown(&h), None, "{ev:?} closes an open card");
+            assert!(!h.is_open());
+
+            let mut h = BodyHover::new();
+            let pending = h.body_hover(1, on("a")).unwrap();
+            h.event(ev.clone());
+            h.event(Event::TimerFired(pending.generation));
+            assert_eq!(shown(&h), None, "{ev:?} cancels a pending card");
+        }
     }
 
     fn issue(id: &str, team: &str, n: Option<i32>, title: &str) -> Issue {

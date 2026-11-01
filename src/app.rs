@@ -226,6 +226,9 @@ pub enum Message {
     BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
     /// A hover-card timer elapsed (see `hover_card::Effect`).
     HoverTimer(u64),
+    /// The pointer entered or left the hover card itself.
+    HoverCardEntered,
+    HoverCardLeft,
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -4519,6 +4522,14 @@ impl App {
             }
             Message::HoverTimer(generation) => {
                 let effect = self.body_hover.event(crate::hover_card::Event::TimerFired(generation));
+                return Self::hover_timer(effect);
+            }
+            Message::HoverCardEntered => {
+                let effect = self.body_hover.event(crate::hover_card::Event::EnteredCard);
+                return Self::hover_timer(effect);
+            }
+            Message::HoverCardLeft => {
+                let effect = self.body_hover.event(crate::hover_card::Event::LeftCard);
                 return Self::hover_timer(effect);
             }
             Message::OpenBodyLink(target) => match target {
