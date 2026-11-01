@@ -144,6 +144,7 @@ fn controls<'a>(
             .push(mine_toggle(header.mine))
             .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
+            .push(reset_button())
             .push(add_group_button(read_only))
             .push(edit_button(dashboard, read_only))
             .push(set_home_button(dashboard, read_only, is_home))
@@ -167,6 +168,15 @@ fn due_counts<'a>(e: &Evaluation<'a>) -> Element<'a, Message> {
 /// The sort order picker.
 fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
     pick_list(Sort::ALL, Some(active), Message::SetDashboardSort).text_size(13).into()
+}
+
+/// "Reset": back to the default filter, sort, search and pickers.
+fn reset_button<'a>() -> Element<'a, Message> {
+    button(text("Reset").size(13))
+        .on_press(Message::ResetDashboard)
+        .padding([4, 10])
+        .style(button::secondary)
+        .into()
 }
 
 /// "Add group": disabled while the token is read-only.
