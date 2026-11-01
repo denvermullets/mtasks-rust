@@ -302,6 +302,41 @@ pub fn accent_fill(status: button::Status) -> Color {
     }
 }
 
+fn luminance(c: Color) -> f32 {
+    let lin = |v: f32| {
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG contrast ratio between two opaque colors (1.0 to 21.0).
+pub fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Label color on an accent fill: whichever of the page background and
+/// `text_strong` contrasts more with the fill. That is the dark page
+/// background on Default's light accent, and the dark `gray[0]` on Warm
+/// Paper's orange, where the light page background falls short of 4.5:1.
+pub fn on_accent_for(t: &Tokens, hovered: bool) -> Color {
+    let fill = if hovered { t.accent_hover } else { t.accent };
+    if contrast_ratio(t.background, fill) >= contrast_ratio(t.gray[0], fill) {
+        t.background
+    } else {
+        t.gray[0]
+    }
+}
+
+/// Label color for an accent-filled button in `status`.
+pub fn on_accent(status: button::Status) -> Color {
+    on_accent_for(tok(), matches!(status, button::Status::Hovered))
+}
+
 /// A catalog entry for pick lists: displays as the theme name, carries the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemeChoice {
@@ -369,7 +404,6 @@ token_fn! {
     accent => |t: &Tokens| t.accent;
     accent_hover => |t: &Tokens| t.accent_hover;
     /// Web `text-gray-100`: titles and emphasised text.
-    #[allow(dead_code)]
     text_strong => |t: &Tokens| t.gray[0];
     text_primary => |t: &Tokens| t.gray[1];
     /// Web `text-gray-300`: markdown and running body text.
@@ -543,6 +577,44 @@ pub mod radius {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tokens_for(key: &str) -> &'static Tokens {
+        THEMES.iter().find(|t| t.key == key).unwrap()
+    }
+
+    #[test]
+    fn label_on_accent_fill_meets_4_5_to_1() {
+        // At rest on every theme. Hovered on Default and Warm Paper only: the
+        // `accent_hover` tokens of Cool Linen (4.36), Ash (3.71) and Chalk
+        // (4.29) fall short with either label color.
+        for t in THEMES.iter() {
+            let ratio = contrast_ratio(on_accent_for(t, false), t.accent);
+            assert!(ratio >= 4.5, "{}: {ratio:.2}:1", t.name);
+        }
+        for key in ["default", "warm-paper"] {
+            let t = tokens_for(key);
+            let ratio = contrast_ratio(on_accent_for(t, true), t.accent_hover);
+            assert!(ratio >= 4.5, "{} hovered: {ratio:.2}:1", t.name);
+        }
+    }
+
+    #[test]
+    fn warm_paper_accent_label_is_dark_not_the_page_background() {
+        let t = tokens_for("warm-paper");
+        assert_eq!(on_accent_for(t, false), t.gray[0]);
+        assert!(contrast_ratio(t.background, t.accent) < 4.5);
+    }
+
+    #[test]
+    fn default_accent_label_stays_the_dark_page_background() {
+        let t = tokens_for("default");
+        assert_eq!(on_accent_for(t, false), t.background);
+    }
+
+    #[test]
+    fn contrast_ratio_of_black_on_white_is_21() {
+        assert!((contrast_ratio(hx(0x000000), hx(0xffffff)) - 21.0).abs() < 0.01);
+    }
 
     #[test]
     fn radius_values_match_the_webs_tailwind_radii() {
