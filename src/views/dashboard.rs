@@ -3,11 +3,13 @@
 //!
 //! Focus uses the same `(group index, issue index in group)` pair as the list.
 
-use iced::widget::{column, container, horizontal_rule, row, scrollable, text, Column};
+use iced::widget::{
+    button, column, container, horizontal_rule, pick_list, row, scrollable, text, Column,
+};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::dashboard_eval::{Evaluation, GroupResult};
+use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header, Sort};
 use crate::db::dashboards::Dashboard;
 use crate::theme as t;
 use crate::views::board::CardData;
@@ -19,6 +21,7 @@ pub fn view<'a>(
     data: CardData<'a>,
     focused_group: usize,
     focused_issue: usize,
+    header: Header,
 ) -> Element<'a, Message> {
     let Some(dashboard) = dashboard else {
         return centered("Dashboard not found");
@@ -40,7 +43,7 @@ pub fn view<'a>(
 
     container(
         column![]
-            .push(controls(dashboard))
+            .push(controls(dashboard, header))
             .push(horizontal_rule(1))
             .push(issue_list::header_row(data.display))
             .push(scrollable(list).height(Length::Fill)),
@@ -56,17 +59,44 @@ pub fn view<'a>(
 
 /// The dashboard's header controls. Later tickets push into this row: filter
 /// tabs, Mine, sort, counts and the pickers. Only the "Open" lens exists now.
-fn controls<'a>(dashboard: &'a Dashboard) -> Element<'a, Message> {
+fn controls<'a>(dashboard: &'a Dashboard, header: Header) -> Element<'a, Message> {
     container(
         row![]
             .spacing(12)
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
-            .push(text("Open").size(13).color(t::text_muted())),
+            .push(filter_tabs(header.filter))
+            .push(sort_picker(header.sort)),
     )
     .padding([8, 16])
     .width(Length::Fill)
     .into()
+}
+
+/// The sort order picker.
+fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
+    pick_list(Sort::ALL, Some(active), Message::SetDashboardSort).text_size(13).into()
+}
+
+/// The Today / Week / Hot / Open tabs; the active one is highlighted.
+fn filter_tabs<'a>(active: Filter) -> Element<'a, Message> {
+    let mut r = row![].spacing(4).align_y(Alignment::Center);
+    for f in Filter::ALL {
+        let color = if f == active { t::text_primary() } else { t::text_muted() };
+        r = r.push(
+            button(text(f.label()).size(13).color(color))
+                .padding([2, 8])
+                .style(move |_theme: &Theme, _status| button::Style {
+                    background: (f == active)
+                        .then(|| iced::Background::Color(t::bg_card_focused())),
+                    text_color: color,
+                    border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                    ..Default::default()
+                })
+                .on_press(Message::SetDashboardFilter(f)),
+        );
+    }
+    r.into()
 }
 
 /// A group's section header: color swatch, name, description and issue count.

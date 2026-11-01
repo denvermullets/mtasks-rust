@@ -216,17 +216,20 @@ pub enum LaunchTarget {
     Team(String),
     /// A Saved view, opened on its team (local ids).
     View { view_id: String, team_id: String },
+    /// A dashboard (local id).
+    Dashboard(String),
     /// No usable Home page: the first non-archived team's board.
     Default,
 }
 
-/// Resolve the stored Home page against the local mirror. Dashboards, unknown
+/// Resolve the stored Home page against the local mirror. Unknown
 /// kinds and targets that are not mirrored (deleted, not synced yet, or a
 /// view whose team is missing) resolve to `Default`.
 pub fn launch_target(
     home: Option<&HomePage>,
     teams: &[Team],
     views: &std::collections::HashMap<String, Vec<SavedView>>,
+    dashboards: &[Dashboard],
 ) -> LaunchTarget {
     let Some(h) = home else { return LaunchTarget::Default };
     match &h.target {
@@ -243,7 +246,10 @@ pub fn launch_target(
                 view_id: v.id.clone(),
                 team_id: v.team_id.clone(),
             }),
-        HomeTarget::Dashboard(_) => LaunchTarget::Default,
+        HomeTarget::Dashboard(_) => dashboards
+            .iter()
+            .find(|d| h.matches_dashboard(d))
+            .map_or(LaunchTarget::Default, |d| LaunchTarget::Dashboard(d.id.clone())),
     }
 }
 
@@ -438,14 +444,14 @@ mod tests {
     #[test]
     fn team_home_launches_that_team() {
         let (t, v) = fixture();
-        assert_eq!(launch_target(home("team", 2).as_ref(), &t, &v), LaunchTarget::Team("b".into()));
+        assert_eq!(launch_target(home("team", 2).as_ref(), &t, &v, &[]), LaunchTarget::Team("b".into()));
     }
 
     #[test]
     fn view_home_launches_that_view() {
         let (t, v) = fixture();
         assert_eq!(
-            launch_target(home("view", 50).as_ref(), &t, &v),
+            launch_target(home("view", 50).as_ref(), &t, &v, &[]),
             LaunchTarget::View { view_id: "v1".into(), team_id: "b".into() }
         );
     }
@@ -454,7 +460,7 @@ mod tests {
     fn no_home_dashboard_and_missing_targets_fall_back() {
         let (t, v) = fixture();
         for h in [None, home("dashboard", 9), home("team", 99), home("view", 99), home("bogus", 1)] {
-            assert_eq!(launch_target(h.as_ref(), &t, &v), LaunchTarget::Default);
+            assert_eq!(launch_target(h.as_ref(), &t, &v, &[]), LaunchTarget::Default);
         }
     }
 
@@ -462,6 +468,24 @@ mod tests {
     fn a_view_whose_team_is_not_mirrored_falls_back() {
         let (t, _) = fixture();
         let views = std::collections::HashMap::from([("gone".to_string(), vec![sv("v2", "gone", Some(60))])]);
-        assert_eq!(launch_target(home("view", 60).as_ref(), &t, &views), LaunchTarget::Default);
+        assert_eq!(launch_target(home("view", 60).as_ref(), &t, &views, &[]), LaunchTarget::Default);
+    }
+
+    #[test]
+    fn a_mirrored_dashboard_home_launches_it() {
+        let (t, v) = fixture();
+        let d = crate::db::dashboards::Dashboard {
+            id: "d1".into(),
+            remote_id: Some(9),
+            name: "D".into(),
+            description: String::new(),
+            position: 0,
+            updated_at: String::new(),
+        };
+        assert_eq!(
+            launch_target(home("dashboard", 9).as_ref(), &t, &v, &[d.clone()]),
+            LaunchTarget::Dashboard("d1".into())
+        );
+        assert_eq!(launch_target(home("dashboard", 10).as_ref(), &t, &v, &[d]), LaunchTarget::Default);
     }
 }

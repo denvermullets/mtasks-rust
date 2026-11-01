@@ -376,6 +376,22 @@ pub fn create_local(
     Ok(get(conn, &id)?.expect("dashboard just inserted"))
 }
 
+/// After a successful `POST`: the local row takes the server's id, position
+/// and `updated_at`. The name and description stay as typed (a later local
+/// edit may be queued). A pull that ran first may have mirrored the pushed
+/// row as a second local row; that duplicate goes, so the id stays unique.
+pub fn adopt_created(conn: &Connection, id: &str, dto: &DashboardIn) -> Result<()> {
+    conn.execute(
+        "DELETE FROM dashboards WHERE remote_id = ?2 AND id <> ?1",
+        params![id, dto.id],
+    )?;
+    conn.execute(
+        "UPDATE dashboards SET remote_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, dto.id, dto.position, dto.updated_at],
+    )?;
+    Ok(())
+}
+
 pub fn find_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Dashboard>> {
     conn.query_row(
         "SELECT id, remote_id, name, description, position, updated_at FROM dashboards WHERE remote_id = ?1",
@@ -691,5 +707,42 @@ mod tests {
         let d = create_local(&conn, "Local", "").unwrap();
         apply_snapshot(&conn, &[]).unwrap();
         assert!(get(&conn, &d.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn adopt_created_takes_id_position_and_updated_at() {
+        let conn = setup();
+        let d = create_local(&conn, "Mine", "desc").unwrap();
+        adopt_created(&conn, &d.id, &dash(77, "Mine", 5, vec![])).unwrap();
+        let got = find_by_remote_id(&conn, 77).unwrap().unwrap();
+        assert_eq!((got.id.as_str(), got.position), (d.id.as_str(), 5));
+        assert_eq!(got.updated_at, "2026-01-01T00:00:00.000Z");
+        assert_eq!((got.name.as_str(), got.description.as_str()), ("Mine", "desc"));
+    }
+
+    #[test]
+    fn a_pull_after_adoption_updates_the_row_without_duplicating() {
+        let conn = setup();
+        let d = create_local(&conn, "Mine", "").unwrap();
+        adopt_created(&conn, &d.id, &dash(77, "Mine", 0, vec![])).unwrap();
+        let entry = sync_queue::pending_entries(&conn).unwrap()[0].id;
+        sync_queue::mark_synced(&conn, entry.unwrap()).unwrap();
+        apply_snapshot(&conn, &[dash(77, "Renamed", 0, vec![])]).unwrap();
+        let all = list(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].id.as_str(), all[0].name.as_str()), (d.id.as_str(), "Renamed"));
+    }
+
+    #[test]
+    fn adopting_after_a_pull_already_mirrored_the_row_drops_the_duplicate() {
+        let conn = setup();
+        let d = create_local(&conn, "Mine", "").unwrap();
+        apply_snapshot(&conn, &[dash(77, "Mine", 0, vec![group(5, "G", 0)])]).unwrap();
+        assert_eq!(list(&conn).unwrap().len(), 2);
+        adopt_created(&conn, &d.id, &dash(77, "Mine", 0, vec![])).unwrap();
+        let all = list(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, d.id);
+        assert_eq!(all[0].remote_id, Some(77));
     }
 }
