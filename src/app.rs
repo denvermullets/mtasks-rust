@@ -1707,6 +1707,53 @@ impl App {
         )
     }
 
+    /// Fetch one inline image (a signed blob-redirect URL, no auth) into the
+    /// file cache under its `files::inline::blob_key`; reports
+    /// `Message::ImageFetched`. No-op for keys already known to `images`.
+    pub(crate) fn request_inline_image(&mut self, src: &str) -> Task<Message> {
+        let Some(key) = crate::files::inline::blob_key(src) else {
+            return Task::none();
+        };
+        if !self.images.begin(&key) {
+            return Task::none();
+        }
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.images.set_ready(&key, path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let url = crate::files::inline::fetch_url(src, &base_url);
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.images.set_failed(&key);
+            return Task::none();
+        };
+        Task::perform(
+            async move { client.get_bytes_public(&url).await.map_err(|e| e.to_string()) },
+            move |r| Message::ImageFetched(key.clone(), r),
+        )
+    }
+
+    /// `request_inline_image` for every blob image in the open issue's description.
+    fn request_description_images(&mut self) -> Task<Message> {
+        let Some(detail) = self.issue_detail.as_ref() else {
+            return Task::none();
+        };
+        if !matches!(&self.view, View::IssueDetail(id) if *id == detail.issue_id) {
+            return Task::none();
+        }
+        let srcs: Vec<String> = crate::views::body::image_list(
+            &detail.description_text(),
+            &self.config.api_base_url,
+        )
+        .into_iter()
+        .filter(|i| i.key.is_some())
+        .map(|i| i.src)
+        .collect();
+        Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
+    }
+
     /// `request_image` for every Attachment currently rendered in the open detail view.
     fn request_visible_images(&mut self) -> Task<Message> {
         let atts: Vec<crate::db::attachments::Attachment> = self
@@ -1716,7 +1763,8 @@ impl App {
             .filter(|a| crate::files::images::is_thumbnailable(&a.content_type))
             .cloned()
             .collect();
-        Task::batch(atts.iter().map(|a| self.request_image(a)))
+        let inline = self.request_description_images();
+        Task::batch(atts.iter().map(|a| self.request_image(a)).chain([inline]))
     }
 
     /// Copy a cached blob to its real filename and hand it to the OS.
@@ -4976,6 +5024,7 @@ impl App {
                             sub_issues,
                             self.detail_origin.as_deref(),
                             &my_member_ids,
+                            &self.config.api_base_url,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.

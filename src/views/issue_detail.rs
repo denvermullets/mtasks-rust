@@ -12,6 +12,7 @@ use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
 use crate::theme as t;
+use crate::views::body::BodyCtx;
 use crate::views::issue_form::LaneOption;
 use crate::views::lane_icon;
 use crate::views::projects::MemberOption;
@@ -115,6 +116,7 @@ pub fn view<'a>(
     sub_issues: Vec<&'a Issue>,
     recurring_origin: Option<&'a str>,
     my_member_ids: &[String],
+    host: &'a str,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -168,10 +170,16 @@ pub fn view<'a>(
         .push_maybe(suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
         .push_maybe(description_preview(
             &detail.description_text(),
-            team,
-            teams,
-            issues,
-            members,
+            &BodyCtx {
+                team,
+                teams,
+                issues,
+                members,
+                images,
+                host,
+                pending_paths: None,
+                on_image: None,
+            },
         ))
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push_maybe(
@@ -719,7 +727,7 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
 /// Body text with `@mentions` and `IDENT-n` references highlighted. Own-team
 /// references that resolve to a local issue are clickable. Spans own their
 /// text so this also works for live editor content.
-fn rich_body<'a>(
+pub(crate) fn rich_body<'a>(
     body: &str,
     size: f32,
     plain: iced::Color,
@@ -755,18 +763,13 @@ fn rich_body<'a>(
 
 /// Rendered (highlighted, clickable) view of the description, shown only when
 /// it contains at least one token; the editor itself is plain text.
-fn description_preview<'a>(
-    body: &str,
-    team: Option<&Team>,
-    teams: &[Team],
-    issues: &[Issue],
-    members: &[Member],
-) -> Option<Element<'a, Message>> {
-    let ident = team.map(|t| t.identifier.as_str()).unwrap_or("");
-    let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
+    let ident = ctx.team.map(|t| t.identifier.as_str()).unwrap_or("");
+    let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
     let has_token = mentions::segments(body, ident, &names)
         .iter()
-        .any(|s| !matches!(s, Segment::Text(_)));
+        .any(|s| !matches!(s, Segment::Text(_)))
+        || crate::views::body::has_images(body, ctx.host);
     if !has_token {
         return None;
     }
@@ -775,15 +778,7 @@ fn description_preview<'a>(
             column![]
                 .spacing(4)
                 .push(text("Preview").size(10).color(t::text_muted()))
-                .push(rich_body(
-                    body,
-                    12.0,
-                    t::text_secondary(),
-                    team,
-                    teams,
-                    issues,
-                    members,
-                )),
+                .push(crate::views::body::view(body, 12.0, t::text_secondary(), ctx)),
         )
         .padding([6, 10])
         .into(),

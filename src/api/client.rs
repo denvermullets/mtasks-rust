@@ -192,6 +192,17 @@ impl ApiClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// GET raw bytes from an absolute URL with no credentials, following
+    /// redirects. For signed blob-redirect URLs (inline images), which need no
+    /// auth and must not leak the bearer token to a storage host.
+    pub async fn get_bytes_public(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+        let resp = self.http.get(url).header(header::ACCEPT, "*/*").send().await?;
+        if !resp.status().is_success() {
+            return Err(map_error(resp).await);
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     pub async fn post<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,
