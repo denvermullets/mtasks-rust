@@ -7,11 +7,23 @@ pub struct CommentParams {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<i64>,
+    /// Signed ids of uploaded files to attach (create only). Sent top-level
+    /// beside `comment`, which is where Rails reads `files`.
+    #[serde(skip)]
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct CommentWrap<'a> {
     comment: &'a CommentParams,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    files: &'a [String],
+}
+
+impl<'a> CommentWrap<'a> {
+    fn new(comment: &'a CommentParams) -> Self {
+        Self { comment, files: &comment.files }
+    }
 }
 
 /// Top-level comments on an issue. The server nests `replies` under each.
@@ -89,7 +101,7 @@ pub async fn create(
     client
         .post_with_header(
             &path,
-            &CommentWrap { comment: params },
+            &CommentWrap::new(params),
             "Idempotency-Key",
             idempotency_key,
         )
@@ -159,8 +171,9 @@ mod tests {
         let params = CommentParams {
             body: "hello".into(),
             parent_id: None,
+            files: vec![],
         };
-        let body = serde_json::to_value(CommentWrap { comment: &params }).unwrap();
+        let body = serde_json::to_value(CommentWrap::new(&params)).unwrap();
         assert_eq!(body, serde_json::json!({ "comment": { "body": "hello" } }));
     }
 
@@ -169,11 +182,26 @@ mod tests {
         let params = CommentParams {
             body: "reply".into(),
             parent_id: Some(7),
+            files: vec![],
         };
-        let body = serde_json::to_value(CommentWrap { comment: &params }).unwrap();
+        let body = serde_json::to_value(CommentWrap::new(&params)).unwrap();
         assert_eq!(
             body,
             serde_json::json!({ "comment": { "body": "reply", "parent_id": 7 } })
+        );
+    }
+
+    #[test]
+    fn comment_params_send_files_as_top_level_signed_ids_only_when_present() {
+        let params = CommentParams {
+            body: "x".into(),
+            files: vec!["sig".into()],
+            ..Default::default()
+        };
+        let body = serde_json::to_value(CommentWrap::new(&params)).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "comment": { "body": "x" }, "files": ["sig"] })
         );
     }
 }
