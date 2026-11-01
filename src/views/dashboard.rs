@@ -3,11 +3,13 @@
 //!
 //! Focus uses the same `(group index, issue index in group)` pair as the list.
 
-use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, Column};
+use iced::widget::{
+    button, column, container, horizontal_rule, pick_list, row, scrollable, text, Column,
+};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header};
+use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header, Sort};
 use crate::db::dashboards::Dashboard;
 use crate::theme as t;
 use crate::views::board::CardData;
@@ -68,7 +70,8 @@ fn controls<'a>(
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
             .push(filter_tabs(header.filter))
-            .push(due_counts(evaluation)),
+            .push(due_counts(evaluation))
+            .push(sort_picker(header.sort)),
     )
     .padding([8, 16])
     .width(Length::Fill)
@@ -83,6 +86,11 @@ fn due_counts<'a>(e: &Evaluation<'a>) -> Element<'a, Message> {
         .push(text(format!("{} due today", e.due_today)).size(12).color(t::text_secondary()))
         .push(text(format!("{} overdue", e.overdue)).size(12).color(overdue))
         .into()
+}
+
+/// The sort order picker.
+fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
+    pick_list(Sort::ALL, Some(active), Message::SetDashboardSort).text_size(13).into()
 }
 
 /// The Today / Week / Hot / Open tabs; the active one is highlighted.

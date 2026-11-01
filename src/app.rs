@@ -93,6 +93,7 @@ pub enum Message {
     OpenDashboard(String),
     /// Pick a dashboard filter tab (Today / Week / Hot / Open).
     SetDashboardFilter(crate::dashboard_eval::Filter),
+    SetDashboardSort(crate::dashboard_eval::Sort),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -849,6 +850,14 @@ impl App {
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
             saved_views: self.palette_saved_views(),
+            dashboards: self
+                .dashboards
+                .iter()
+                .map(|d| crate::palette_results::SearchableDashboard {
+                    id: d.id.clone(),
+                    name: d.name.clone(),
+                })
+                .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
         }
     }
@@ -3453,6 +3462,12 @@ impl App {
                 self.switch_view(View::Dashboard(id));
             }
 
+            Message::SetDashboardSort(sort) => {
+                self.dashboard_header.sort = sort;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
             Message::SetDashboardFilter(filter) => {
                 self.dashboard_header.filter = filter;
                 self.focused_lane = 0;
@@ -4334,6 +4349,7 @@ impl App {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
+                    PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
