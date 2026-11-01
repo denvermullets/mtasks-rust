@@ -372,7 +372,6 @@ token_fn! {
     text_strong => |t: &Tokens| t.gray[0];
     text_primary => |t: &Tokens| t.gray[1];
     /// Web `text-gray-300`: markdown and running body text.
-    #[allow(dead_code)]
     text_body => |t: &Tokens| t.gray[2];
     text_secondary => |t: &Tokens| t.gray[3];
     text_muted => |t: &Tokens| t.gray[4];
