@@ -490,6 +490,66 @@ pub fn remove_local(conn: &Connection, id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Inline-image uploads of an owner that are ready for their body to be sent:
+/// placeholder uuid -> (signed id, blob filename). FAILED rows are left out on
+/// purpose, so a body waiting on one stays blocked until Retry/Remove.
+pub fn inline_resolutions(
+    conn: &Connection,
+    kind: OwnerKind,
+    owner_id: &str,
+) -> Result<HashMap<String, (String, String)>> {
+    Ok(list_for_owner(conn, kind, owner_id)?
+        .into_iter()
+        .filter(|a| a.upload_kind == UploadKind::InlineImage && a.upload_state == UploadState::Pending)
+        .filter_map(|a| Some((a.placeholder_uuid?, (a.signed_id?, a.blob_filename?))))
+        .collect())
+}
+
+/// After a body carrying `resolved` placeholders was pushed: rewrite the
+/// owner's LOCAL body to the web form too (so it keeps no stale placeholder),
+/// then drop those inline rows and their outbox files. A bare blob has no
+/// attach step, so the row's job is done. Rows for placeholders not in
+/// `resolved` (e.g. pasted after the push was prepared) are left alone.
+pub fn settle_inline_images(
+    conn: &Connection,
+    kind: OwnerKind,
+    owner_id: &str,
+    resolved: &HashMap<String, (String, String)>,
+) -> Result<()> {
+    if resolved.is_empty() {
+        return Ok(());
+    }
+    let (table, column) = match kind {
+        OwnerKind::Issue => ("issues", "description"),
+        OwnerKind::Project => ("projects", "description"),
+        OwnerKind::Comment => ("comments", "body"),
+    };
+    let current: Option<String> = conn
+        .query_row(&format!("SELECT {column} FROM {table} WHERE id = ?1"), params![owner_id], |r| r.get(0))
+        .ok()
+        .flatten();
+    if let Some(text) = current {
+        let rewritten = crate::mentions::rewrite_placeholders(&text, resolved).body;
+        if rewritten != text {
+            conn.execute(
+                &format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"),
+                params![rewritten, owner_id],
+            )?;
+        }
+    }
+    for row in list_for_owner(conn, kind, owner_id)? {
+        let used = row.upload_kind == UploadKind::InlineImage
+            && row.placeholder_uuid.as_ref().is_some_and(|u| resolved.contains_key(u));
+        if used {
+            conn.execute("DELETE FROM attachments WHERE id = ?1", params![row.id])?;
+            if let Some(path) = row.outbox_path.as_deref() {
+                let _ = crate::files::outbox::remove(std::path::Path::new(path));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Put back a row captured in a delete payload's `restore` (after a 403).
 /// A no-op when the row (by remote id) is already there again.
 pub fn restore_from_snapshot(conn: &Connection, snap: &serde_json::Value, remote_id: i64) -> Result<()> {
@@ -618,6 +678,42 @@ mod tests {
 
     fn names(c: &Connection) -> Vec<String> {
         list_for_owner(c, OwnerKind::Issue, "i1").unwrap().into_iter().map(|a| a.filename).collect()
+    }
+
+    fn inline_row(c: &Connection, id: &str, uuid: &str, state: &str, signed: Option<&str>) {
+        c.execute(
+            "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state, upload_kind, placeholder_uuid, signed_id, blob_filename)
+             VALUES (?1, 'issue', 'i1', 'p.png', '2026-02-01T00:00:00.000Z', ?2, 'inline_image', ?3, ?4, ?5)",
+            params![id, state, uuid, signed, signed.map(|_| "p.png")],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn inline_resolutions_skip_unuploaded_and_failed() {
+        let c = conn();
+        inline_row(&c, "a", "u-ok", "pending", Some("sig"));
+        inline_row(&c, "b", "u-wait", "pending", None);
+        inline_row(&c, "c", "u-bad", "failed", Some("sig2"));
+        let m = inline_resolutions(&c, OwnerKind::Issue, "i1").unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["u-ok"], ("sig".to_string(), "p.png".to_string()));
+    }
+
+    #[test]
+    fn settle_rewrites_local_body_and_drops_used_rows() {
+        let c = conn();
+        c.execute("PRAGMA foreign_keys=OFF", []).ok();
+        inline_row(&c, "a", "11111111-1111-4111-8111-111111111111", "pending", Some("sig"));
+        inline_row(&c, "b", "22222222-2222-4222-8222-222222222222", "pending", None);
+        let body = "x ![image](jait-pending://11111111-1111-4111-8111-111111111111) ![image](jait-pending://22222222-2222-4222-8222-222222222222)";
+        c.execute("INSERT INTO issues (id, title, description, lane_id, team_id, created_at, updated_at) VALUES ('i1','t',?1,'l','t','x','x')", params![body]).unwrap();
+        let resolved = inline_resolutions(&c, OwnerKind::Issue, "i1").unwrap();
+        settle_inline_images(&c, OwnerKind::Issue, "i1", &resolved).unwrap();
+        let d: String = c.query_row("SELECT description FROM issues WHERE id='i1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(d, "x ![image](/rails/active_storage/blobs/redirect/sig/p.png) ![image](jait-pending://22222222-2222-4222-8222-222222222222)");
+        let left: Vec<_> = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap().into_iter().map(|a| a.id).collect();
+        assert_eq!(left, ["b"]);
     }
 
     #[test]
