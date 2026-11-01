@@ -91,6 +91,7 @@ pub fn view<'a>(
     comment_attachments: &'a CommentAttachments,
     images: &'a crate::files::images::ImageStore,
     host: &'a str,
+    pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -154,6 +155,10 @@ pub fn view<'a>(
             text_editor(&detail.description)
                 .placeholder("Add description…")
                 .on_action(Message::ProjectDetailDescriptionChanged)
+                .key_binding(crate::views::issue_detail::paste_image_binding(
+                    text_editor::Binding::from_key_press,
+                    Message::PasteImageIntoProjectDescription,
+                ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(160.0)),
@@ -167,7 +172,7 @@ pub fn view<'a>(
                 members,
                 images,
                 host,
-                pending_paths: None,
+                pending_paths: Some(pending_paths),
                 on_image: Some(Message::OpenInlineImage),
             },
         ))

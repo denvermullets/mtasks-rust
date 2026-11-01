@@ -1475,12 +1475,15 @@ struct ProjectCreatePrep {
     team_remote_id: i64,
     params: ProjectParams,
     local_id: String,
+    inline: InlineImages,
 }
 
 struct ProjectUpdatePrep {
     team_remote_id: i64,
     remote_id: i64,
     params: ProjectParams,
+    local_id: String,
+    inline: InlineImages,
 }
 
 fn prep_project_create(entity_id: &str) -> Prep<ProjectCreatePrep> {
@@ -1505,14 +1508,22 @@ fn prep_project_create(entity_id: &str) -> Prep<ProjectCreatePrep> {
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
-    let params = match build_project_params(&conn, &project) {
+    let mut params = match build_project_params(&conn, &project) {
         Ok(p) => p,
+        Err(o) => return Prep::Done(o),
+    };
+    let inline = match prepare_body(&conn, attachments::OwnerKind::Project, &project.id, params.description.take()) {
+        Ok((d, i)) => {
+            params.description = d;
+            i
+        }
         Err(o) => return Prep::Done(o),
     };
     Prep::Ready(ProjectCreatePrep {
         team_remote_id,
         params,
         local_id: project.id,
+        inline,
     })
 }
 
@@ -1543,14 +1554,23 @@ fn prep_project_update(entity_id: &str) -> Prep<ProjectUpdatePrep> {
         Ok(None) => return Prep::Done(Outcome::LeavePending("team not synced yet".into())),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
-    let params = match build_project_params(&conn, &project) {
+    let mut params = match build_project_params(&conn, &project) {
         Ok(p) => p,
+        Err(o) => return Prep::Done(o),
+    };
+    let inline = match prepare_body(&conn, attachments::OwnerKind::Project, &project.id, params.description.take()) {
+        Ok((d, i)) => {
+            params.description = d;
+            i
+        }
         Err(o) => return Prep::Done(o),
     };
     Prep::Ready(ProjectUpdatePrep {
         team_remote_id,
         remote_id,
         params,
+        local_id: project.id,
+        inline,
     })
 }
 
@@ -1575,7 +1595,11 @@ async fn project_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
         }
     }
     match projects::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => commit_create(entry_id, "projects", &prep.local_id, dto.id),
+        Ok(dto) => {
+            let out = commit_create(entry_id, "projects", &prep.local_id, dto.id);
+            settle_inline(attachments::OwnerKind::Project, &prep.local_id, &prep.inline);
+            out
+        }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
@@ -1586,7 +1610,10 @@ async fn project_update(client: &ApiClient, entity_id: &str) -> Outcome {
         Prep::Done(o) => return o,
     };
     match projects::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
-        Ok(_) => Outcome::Success,
+        Ok(_) => {
+            settle_inline(attachments::OwnerKind::Project, &prep.local_id, &prep.inline);
+            Outcome::Success
+        }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
@@ -4586,6 +4613,29 @@ mod tests {
             "a ![image](/rails/active_storage/blobs/redirect/sig/my%20pic.png) b"
         );
         assert_eq!(rewrite_body_or_wait("plain", &none).ok().unwrap(), "plain");
+    }
+
+    #[test]
+    fn prepare_body_rewrites_project_inline_upload() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state, upload_kind, placeholder_uuid, signed_id, blob_filename)
+             VALUES ('a','project','p1','p.png','2026-02-01T00:00:00.000Z','pending','inline_image',?1,'sig','p.png')",
+            [PH],
+        )
+        .unwrap();
+        let body = Some(format!("x ![image](jait-pending://{PH})"));
+        let (sent, map) = prepare_body(&conn, attachments::OwnerKind::Project, "p1", body.clone())
+            .ok()
+            .unwrap();
+        assert_eq!(
+            sent.unwrap(),
+            "x ![image](/rails/active_storage/blobs/redirect/sig/p.png)"
+        );
+        assert_eq!(map.len(), 1);
+        // Another owner's body still waits: the row belongs to the project.
+        assert!(prepare_body(&conn, attachments::OwnerKind::Issue, "p1", body).is_err());
     }
 
     #[test]
