@@ -2162,15 +2162,35 @@ fn prep_comment_create_in(
         Ok(p) => p,
         Err(o) => return Prep::Done(o),
     };
+    let files = match comment_create_files(conn, &comment.id) {
+        Ok(f) => f,
+        Err(o) => return Prep::Done(o),
+    };
     Prep::Ready(CommentCreatePrep {
         team_remote_id,
         target,
         params: CommentParams {
             body: comment.body,
             parent_id: parent_remote_id,
+            files,
         },
         local_id: comment.id,
     })
+}
+
+/// Signed ids of the comment's staged files, in staging order. The create waits
+/// (`LeavePending`) while any file's upload has no signed id yet.
+fn comment_create_files(conn: &Connection, comment_id: &str) -> Result<Vec<String>, Outcome> {
+    let files = attachments::list_for_owner(conn, attachments::OwnerKind::Comment, comment_id)
+        .map_err(|e| Outcome::LeavePending(format!("db: {e}")))?;
+    let mut ids = Vec::new();
+    for f in files.iter().filter(|f| f.upload_state != UploadState::Synced) {
+        match &f.signed_id {
+            Some(s) => ids.push(s.clone()),
+            None => return Err(Outcome::LeavePending("comment files still uploading".into())),
+        }
+    }
+    Ok(ids)
 }
 
 /// Remote id of a reply's parent. A parent that hasn't synced yet leaves the
@@ -2664,7 +2684,20 @@ async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
     )
     .await
     {
-        Ok(dto) => commit_create(entry_id, "comments", &prep.local_id, dto.id),
+        Ok(dto) => {
+            if !prep.params.files.is_empty() {
+                if let Ok(conn) = open() {
+                    if let Ok(paths) =
+                        attachments::finish_comment_files(&conn, &prep.local_id, dto.files.as_deref())
+                    {
+                        for p in paths {
+                            let _ = crate::files::outbox::remove(std::path::Path::new(&p));
+                        }
+                    }
+                }
+            }
+            commit_create(entry_id, "comments", &prep.local_id, dto.id)
+        }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
@@ -2721,8 +2754,12 @@ fn prep_upload_create_in(conn: &Connection, entity_id: &str) -> Prep<UploadPrep>
     if a.signed_id.is_some() || a.upload_state != UploadState::Pending {
         return Prep::Done(Outcome::Success);
     }
-    if let Err(o) = owner_remote_id(conn, &a) {
-        return Prep::Done(o);
+    // A comment's files upload while it is still being written (and while it
+    // has no remote id): its create waits for them, not the other way round.
+    if a.owner_kind != "comment" {
+        if let Err(o) = owner_remote_id(conn, &a) {
+            return Prep::Done(o);
+        }
     }
     let Some(outbox_path) = a.outbox_path.clone() else {
         return Prep::Done(Outcome::LeavePending("no outbox copy".into()));
@@ -4748,6 +4785,7 @@ mod tests {
         let params = CommentParams {
             body: "r".into(),
             parent_id: Some(77),
+            files: vec![],
         };
         let json = serde_json::to_value(&params).unwrap();
         assert_eq!(json["parent_id"], 77);
@@ -7566,6 +7604,60 @@ mod tests {
         attachments::mark_failed(&conn, &a.id, "nope").unwrap();
         assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
         assert!(matches!(prep_attachment_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
+    }
+
+    // ── Comment files (JRST-206) ──
+
+    fn staged_comment_file(conn: &Connection, comment: &str) -> Attachment {
+        attachments::add_pending(
+            conn,
+            &attachments::NewPending {
+                owner_kind: crate::db::attachments::OwnerKind::Comment,
+                owner_id: comment.into(),
+                filename: "log.txt".into(),
+                content_type: "text/plain".into(),
+                byte_size: 3,
+                checksum: "abc==".into(),
+                outbox_path: "/tmp/outbox/c".into(),
+                kind: crate::files::validate::UploadKind::Attachment,
+                placeholder_uuid: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn comment_files_upload_before_the_comment_has_a_remote_id() {
+        let conn = project_comment_fixture(Some(80));
+        let a = staged_comment_file(&conn, "pc"); // comment "pc" is unsynced
+        assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Ready(_)));
+        // Even before the comment row exists locally (staged in the composer).
+        let b = staged_comment_file(&conn, "not-yet-sent");
+        assert!(matches!(prep_upload_create_in(&conn, &b.id), Prep::Ready(_)));
+    }
+
+    #[test]
+    fn comment_create_waits_for_its_files_then_sends_their_signed_ids() {
+        let conn = project_comment_fixture(Some(80));
+        let a = staged_comment_file(&conn, "pc");
+        assert!(matches!(
+            prep_comment_create_in(&conn, "pc", i64::MAX),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        attachments::set_uploaded(&conn, &a.id, "signed-1", "log.txt").unwrap();
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Ready(p) => assert_eq!(p.params.files, vec!["signed-1".to_string()]),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_without_files_sends_none() {
+        let conn = project_comment_fixture(Some(80));
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Ready(p) => assert!(p.params.files.is_empty()),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
     }
 
     #[test]

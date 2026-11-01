@@ -41,6 +41,22 @@ pub struct IssueDetailState {
     pub reply_composer: text_editor::Content,
     /// Open `@`/`#` autocomplete list (under the editor named by `target`).
     pub suggest: Option<SuggestState>,
+    /// Files staged on the new-comment composer.
+    pub composer_files: ComposerFiles,
+}
+
+/// Files staged on a comment composer (issue or project detail). They are
+/// queued as Pending uploads owned by `comment_id`, the id the comment will be
+/// inserted with when sent, so the composer shows them before the comment exists.
+pub struct ComposerFiles {
+    pub comment_id: String,
+    pub files: Vec<Attachment>,
+}
+
+impl Default for ComposerFiles {
+    fn default() -> Self {
+        Self { comment_id: uuid::Uuid::new_v4().to_string(), files: Vec::new() }
+    }
 }
 
 impl IssueDetailState {
@@ -66,6 +82,7 @@ impl IssueDetailState {
             reply_to: None,
             reply_composer: text_editor::Content::new(),
             suggest: None,
+            composer_files: ComposerFiles::default(),
         }
     }
 
@@ -866,6 +883,7 @@ fn comments_section<'a>(
     col.push(new_comment_composer(
         &detail.comment_composer,
         detail.suggest.as_ref(),
+        &detail.composer_files.files,
     ))
     .into()
 }
@@ -916,6 +934,7 @@ pub fn push_thread<'a>(
 pub fn new_comment_composer<'a>(
     content: &'a text_editor::Content,
     suggest: Option<&'a SuggestState>,
+    staged: &'a [Attachment],
 ) -> Element<'a, Message> {
     column![]
         .spacing(8)
@@ -932,13 +951,45 @@ pub fn new_comment_composer<'a>(
                 .height(Length::Fixed(80.0)),
         )
         .push_maybe(suggestion_list(suggest, EditorTarget::Comment))
+        .push_maybe((!staged.is_empty()).then(|| staged_chips(staged)))
         .push(
-            button(text("Comment").size(13))
-                .on_press(Message::SubmitComment)
-                .padding([6, 14])
-                .style(button::primary),
+            row![]
+                .spacing(8)
+                .push(
+                    button(text("Comment").size(13))
+                        .on_press(Message::SubmitComment)
+                        .padding([6, 14])
+                        .style(button::primary),
+                )
+                .push(
+                    button(text("+ Attach file").size(13))
+                        .on_press(Message::PickCommentFiles)
+                        .padding([6, 14])
+                        .style(button::secondary),
+                ),
         )
         .into()
+}
+
+/// One removable chip per file staged on the composer.
+fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
+    let mut chips = row![].spacing(6).align_y(Alignment::Center);
+    for a in staged {
+        chips = chips.push(
+            button(
+                text(format!(
+                    "{} ({})  ✕",
+                    a.filename,
+                    crate::views::attachments::format_size(a.byte_size)
+                ))
+                .size(12),
+            )
+            .on_press(Message::RemoveStagedFile(a.id.clone()))
+            .padding([3, 8])
+            .style(button::secondary),
+        );
+    }
+    chips.wrap().into()
 }
 
 /// One change-history line: "actor description  ·  3d ago".

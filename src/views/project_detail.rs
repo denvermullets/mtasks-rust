@@ -32,6 +32,8 @@ pub struct ProjectDetailState {
     pub reply_to: Option<String>,
     pub reply_composer: text_editor::Content,
     pub suggest: Option<crate::mentions::SuggestState>,
+    /// Files staged on the new-comment composer.
+    pub composer_files: crate::views::issue_detail::ComposerFiles,
 }
 
 impl ProjectDetailState {
@@ -48,6 +50,7 @@ impl ProjectDetailState {
             reply_to: None,
             reply_composer: text_editor::Content::new(),
             suggest: None,
+            composer_files: Default::default(),
         }
     }
 
@@ -306,6 +309,7 @@ fn discussion_section<'a>(
         .push(new_comment_composer(
             &detail.comment_composer,
             detail.suggest.as_ref(),
+            &detail.composer_files.files,
         ))
         .into()
 }

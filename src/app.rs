@@ -356,6 +356,13 @@ pub enum Message {
     FilesPicked(Vec<std::path::PathBuf>),
     /// A file dropped on the window; routed by `files::drop::drop_target`.
     FileDropped(std::path::PathBuf),
+    /// "+ Attach file" on a comment composer (issue or project detail).
+    PickCommentFiles,
+    /// Files chosen for the open detail view's comment composer (picker now;
+    /// drag-and-drop sends this too). Staged as chips, sent with the comment.
+    CommentFilesPicked(Vec<std::path::PathBuf>),
+    /// Remove a staged composer file (local attachment id) before sending.
+    RemoveStagedFile(String),
 
     // CSV import / export (sidebar footer)
     /// Export the selected team's issues via a native save dialog.
@@ -416,6 +423,7 @@ struct CommentDrafts<'a> {
     reply_to: &'a mut Option<String>,
     reply: &'a mut iced::widget::text_editor::Content,
     suggest: &'a mut Option<crate::mentions::SuggestState>,
+    files: &'a mut crate::views::issue_detail::ComposerFiles,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1092,6 +1100,7 @@ impl App {
                 reply_to: &mut d.reply_to,
                 reply: &mut d.reply_composer,
                 suggest: &mut d.suggest,
+                files: &mut d.composer_files,
             });
         }
         self.issue_detail.as_mut().map(|d| CommentDrafts {
@@ -1099,6 +1108,7 @@ impl App {
             reply_to: &mut d.reply_to,
             reply: &mut d.reply_composer,
             suggest: &mut d.suggest,
+            files: &mut d.composer_files,
         })
     }
 
@@ -1888,8 +1898,13 @@ impl App {
                 .map(|m| m.id)
         });
         let now = crate::db::now_iso();
+        // A top-level comment takes the id its staged files are owned by.
+        let staged_id = match (&parent_id, self.comment_drafts_mut()) {
+            (None, Some(d)) if !d.files.files.is_empty() => Some(d.files.comment_id.clone()),
+            _ => None,
+        };
         let comment = Comment {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: staged_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             remote_id: None,
             issue_id,
             project_id,
@@ -1904,6 +1919,11 @@ impl App {
         }
         drop(conn);
         self.enqueue_sync("comment", &comment.id, "create", None);
+        if staged_id.is_some() {
+            if let Some(d) = self.comment_drafts_mut() {
+                *d.files = Default::default();
+            }
+        }
         self.reload_data();
         true
     }
@@ -3962,6 +3982,55 @@ impl App {
                     self.push_toast(toast, ToastKind::Error, false);
                 }
                 self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::PickCommentFiles => {
+                if self.comment_drafts_mut().is_none() {
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .pick_files()
+                            .await
+                            .map(|hs| hs.iter().map(|h| h.path().to_path_buf()).collect())
+                            .unwrap_or_default()
+                    },
+                    Message::CommentFilesPicked,
+                );
+            }
+
+            Message::CommentFilesPicked(paths) => {
+                if paths.is_empty() {
+                    return Task::none();
+                }
+                let conn = self.db();
+                let Some(d) = self.comment_drafts_mut() else {
+                    return Task::none();
+                };
+                let intake = crate::files::intake::queue_files(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Comment,
+                    &d.files.comment_id,
+                    &paths,
+                );
+                d.files.files.extend(intake.queued);
+                if !intake.refused.is_empty() {
+                    self.push_toast(intake.refused.join("\n"), ToastKind::Error, false);
+                }
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::RemoveStagedFile(id) => {
+                let conn = self.db();
+                if let Some(Some(path)) = crate::db::attachments::remove_staged(&conn, &id).ok() {
+                    let _ = crate::files::outbox::remove(std::path::Path::new(&path));
+                }
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.files.files.retain(|a| a.id != id);
+                }
                 self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
             }
 
