@@ -31,16 +31,21 @@ pub enum Block {
     /// An image on its own line in reading order. An image inside a paragraph
     /// splits it into paragraph, image, paragraph.
     Image(ImageBlock),
-    /// A bulleted list. Ordered lists are not a block yet (JRST-275); until
-    /// then their items surface as flat paragraphs.
+    /// A bulleted or numbered list.
     List(List),
 }
 
-/// A bulleted list: each item is its own block sequence, so an item can hold
-/// several paragraphs, images and (later) nested lists.
+/// A list: each item is its own block sequence, so an item can hold
+/// several paragraphs, images and nested lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct List {
+    /// `Some(n)` for a numbered list whose first item is numbered `n` (the
+    /// number the author wrote, so `3.` starts at 3); `None` for bullets.
+    pub start: Option<u64>,
     pub items: Vec<Vec<Block>>,
+    /// One entry per item: `Some(done)` for a task item (`- [ ]` / `- [x]`),
+    /// `None` for a plain item. Same length as `items`.
+    pub checked: Vec<Option<bool>>,
 }
 
 /// `![alt](src)` with its allowlist verdict.
@@ -79,6 +84,10 @@ pub enum Inline {
     /// A link with an openable target. Text is flat (no tokens inside).
     /// Links with any other scheme are not produced: their text stays plain.
     Link { text: String, url: String },
+    /// `**strong**` text. Holds the inlines inside, so mentions and
+    /// references in bold text stay tokens. Wrapper inlines for other styles
+    /// (emphasis, strikethrough) nest the same way.
+    Strong(Vec<Inline>),
 }
 
 /// Whether a link target may be opened: only `http`, `https` and `mailto`
@@ -97,7 +106,7 @@ pub fn is_openable_link(url: &str) -> bool {
 /// Parser options: the web feature set. Hard breaks are never produced from
 /// plain newlines, so nothing to switch off.
 fn parse_options() -> Options {
-    Options::empty()
+    Options::ENABLE_TASKLISTS
 }
 
 /// Parse `body` into a [`Document`]. Never panics; input that isn't valid
@@ -143,16 +152,19 @@ struct Builder {
     literal_depth: usize,
     /// The link being read: (url, text so far).
     link: Option<(String, String)>,
+    /// Open wrappers (strong), innermost last: the buffer each one wraps into
+    /// and its constructor. The wrapper's own content is in `current`.
+    wrappers: Vec<(Vec<Inline>, fn(Vec<Inline>) -> Inline)>,
 }
 
 /// An open container and what it has collected so far.
 enum Frame {
-    /// A bulleted list; collects finished items.
-    List(Vec<Vec<Block>>),
-    /// An item of a bulleted list.
-    Item(Vec<Block>),
-    /// A container with no block of its own (ordered lists and their items for
-    /// now): children are spliced into the parent when it closes.
+    /// A list (start number if ordered); collects finished items.
+    List(Option<u64>, Vec<Vec<Block>>, Vec<Option<bool>>),
+    /// An item of a list.
+    Item(Vec<Block>, Option<bool>),
+    /// A container with no block of its own (an item outside any list):
+    /// children are spliced into the parent when it closes.
     Flat(Vec<Block>),
 }
 
@@ -167,9 +179,14 @@ impl Builder {
     fn close(&mut self) {
         self.flush();
         match self.stack.pop() {
-            Some(Frame::List(items)) => self.push_block(Block::List(List { items })),
-            Some(Frame::Item(blocks)) => match self.stack.last_mut() {
-                Some(Frame::List(items)) => items.push(blocks),
+            Some(Frame::List(start, items, checked)) => {
+                self.push_block(Block::List(List { start, items, checked }))
+            }
+            Some(Frame::Item(blocks, done)) => match self.stack.last_mut() {
+                Some(Frame::List(_, items, checked)) => {
+                    items.push(blocks);
+                    checked.push(done);
+                }
                 _ => blocks.into_iter().for_each(|b| self.push_block(b)),
             },
             Some(Frame::Flat(blocks)) => blocks.into_iter().for_each(|b| self.push_block(b)),
@@ -180,9 +197,12 @@ impl Builder {
     /// Add a finished block to the innermost open container, or the root.
     fn push_block(&mut self, block: Block) {
         match self.stack.last_mut() {
-            Some(Frame::Item(blocks) | Frame::Flat(blocks)) => blocks.push(block),
+            Some(Frame::Item(blocks, _) | Frame::Flat(blocks)) => blocks.push(block),
             // A block directly in a list (never from the parser) is kept, not lost.
-            Some(Frame::List(items)) => items.push(vec![block]),
+            Some(Frame::List(_, items, checked)) => {
+                items.push(vec![block]);
+                checked.push(None);
+            }
             None => self.blocks.push(block),
         }
     }
@@ -235,17 +255,26 @@ impl Builder {
                 self.literal_depth += 1;
                 self.link = Some((dest_url.to_string(), String::new()));
             }
+            Event::Start(Tag::Strong) if self.html_depth == 0 => {
+                self.flush_pending();
+                self.wrappers.push((std::mem::take(&mut self.current), Inline::Strong));
+            }
+            Event::End(TagEnd::Strong) => self.close_wrapper(),
             Event::Html(_) | Event::InlineHtml(_) => {}
-            Event::Start(Tag::List(None)) => self.open(Frame::List(Vec::new())),
-            Event::Start(Tag::List(Some(_))) => self.open(Frame::Flat(Vec::new())),
+            Event::Start(Tag::List(start)) => self.open(Frame::List(start, Vec::new(), Vec::new())),
             Event::Start(Tag::Item) => {
                 let frame = match self.stack.last() {
-                    Some(Frame::List(_)) => Frame::Item(Vec::new()),
+                    Some(Frame::List(..)) => Frame::Item(Vec::new(), None),
                     _ => Frame::Flat(Vec::new()),
                 };
                 self.open(frame);
             }
             Event::End(TagEnd::List(_) | TagEnd::Item) => self.close(),
+            Event::TaskListMarker(done) => {
+                if let Some(Frame::Item(_, mark)) = self.stack.last_mut() {
+                    *mark = Some(done);
+                }
+            }
             Event::Text(s) => self.push_text(&s),
             Event::Code(s) => self.push_literal(&s),
             Event::SoftBreak => self.push_text(" "),
@@ -332,8 +361,24 @@ impl Builder {
         }
     }
 
+    /// End the innermost open wrapper: its content becomes one inline in the
+    /// buffer it was opened from. An end with nothing open (its start was cut
+    /// short by an image) does nothing.
+    fn close_wrapper(&mut self) {
+        self.flush_pending();
+        let Some((outer, wrap)) = self.wrappers.pop() else { return };
+        let inner = std::mem::replace(&mut self.current, outer);
+        if !inner.is_empty() {
+            self.current.push(wrap(inner));
+        }
+    }
+
     fn flush(&mut self) {
         self.flush_pending();
+        // A block boundary inside a wrapper (an image) ends the wrapper.
+        while !self.wrappers.is_empty() {
+            self.close_wrapper();
+        }
         if !self.current.is_empty() {
             let runs = std::mem::take(&mut self.current);
             self.push_block(Block::Paragraph(runs));
@@ -425,8 +470,80 @@ mod tests {
         }
     }
 
+    fn strong(runs: Vec<Inline>) -> Inline {
+        Inline::Strong(runs)
+    }
+
+    #[test]
+    fn parses_strong_runs() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("asterisks", "a **b** c", vec![para(vec![text("a "), strong(vec![text("b")]), text(" c")])]),
+            ("underscores", "a __b__ c", vec![para(vec![text("a "), strong(vec![text("b")]), text(" c")])]),
+            ("whole paragraph", "**all**", vec![para(vec![strong(vec![text("all")])])]),
+            (
+                "two runs",
+                "**a** and **b**",
+                vec![para(vec![strong(vec![text("a")]), text(" and "), strong(vec![text("b")])])],
+            ),
+            ("unclosed stays literal", "**oops", vec![para(vec![text("**oops")])]),
+            ("empty marks stay literal", "a **** b", vec![para(vec![text("a **** b")])]),
+            ("single star is not strong", "a *b* c", vec![para(vec![text("a b c")])]),
+            (
+                "tokens inside strong",
+                "**ping @Ann on PROJ-7**",
+                vec![para(vec![strong(vec![
+                    text("ping "),
+                    Inline::Mention("@Ann".into()),
+                    text(" on "),
+                    Inline::IssueRef { text: "PROJ-7".into(), prefix: "PROJ".into(), number: 7 },
+                ])])],
+            ),
+            (
+                "code inside strong stays one literal run",
+                "**run `x` now**",
+                vec![para(vec![strong(vec![text("run x now")])])],
+            ),
+            (
+                "link inside strong",
+                "**see [here](https://a.b)**",
+                vec![para(vec![strong(vec![
+                    text("see "),
+                    Inline::Link { text: "here".into(), url: "https://a.b".into() },
+                ])])],
+            ),
+            (
+                "strong spans a soft break",
+                "**one\ntwo**",
+                vec![para(vec![strong(vec![text("one two")])])],
+            ),
+            (
+                "strong in code is literal",
+                "`**x**`",
+                vec![para(vec![text("**x**")])],
+            ),
+            (
+                "strong in a second paragraph",
+                "one\n\n**two**",
+                vec![para(vec![text("one")]), para(vec![strong(vec![text("two")])])],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["Ann"]).blocks, want, "{name}");
+        }
+    }
+
     fn list(items: Vec<Vec<Block>>) -> Block {
-        Block::List(List { items })
+        let checked = vec![None; items.len()];
+        Block::List(List { start: None, items, checked })
+    }
+
+    fn ordered(start: u64, items: Vec<Vec<Block>>) -> Block {
+        let checked = vec![None; items.len()];
+        Block::List(List { start: Some(start), items, checked })
+    }
+
+    fn tasks(marks: &[Option<bool>], items: Vec<Vec<Block>>) -> Block {
+        Block::List(List { start: None, items, checked: marks.to_vec() })
     }
 
     #[test]
@@ -486,9 +603,102 @@ mod tests {
                 vec![list(vec![vec![para(vec![text("a")]), list(vec![vec![para(vec![text("b")])]])]])],
             ),
             (
-                "ordered lists stay flat paragraphs until they get their own block",
+                "ordered list starts at 1",
                 "1. a\n2. b",
-                vec![para(vec![text("a")]), para(vec![text("b")])],
+                vec![ordered(1, vec![vec![para(vec![text("a")])], vec![para(vec![text("b")])]])],
+            ),
+            (
+                "ordered list keeps the written start number",
+                "3. a\n4. b",
+                vec![ordered(3, vec![vec![para(vec![text("a")])], vec![para(vec![text("b")])]])],
+            ),
+            (
+                "paren delimiter is ordered too",
+                "1) a",
+                vec![ordered(1, vec![vec![para(vec![text("a")])]])],
+            ),
+            (
+                "ordered start of zero",
+                "0. a",
+                vec![ordered(0, vec![vec![para(vec![text("a")])]])],
+            ),
+            (
+                "ordered list after a paragraph",
+                "intro\n\n1. a",
+                vec![para(vec![text("intro")]), ordered(1, vec![vec![para(vec![text("a")])]])],
+            ),
+            (
+                "bullets and numbers are separate lists",
+                "- a\n\n1. b",
+                vec![list(vec![vec![para(vec![text("a")])]]), ordered(1, vec![vec![para(vec![text("b")])]])],
+            ),
+            (
+                "task items carry their state",
+                "- [ ] todo\n- [x] done\n- plain",
+                vec![tasks(&[Some(false), Some(true), None], vec![
+                    vec![para(vec![text("todo")])],
+                    vec![para(vec![text("done")])],
+                    vec![para(vec![text("plain")])],
+                ])],
+            ),
+            (
+                "uppercase X is checked",
+                "- [X] done",
+                vec![tasks(&[Some(true)], vec![vec![para(vec![text("done")])]])],
+            ),
+            (
+                "task marker needs a space after the bracket",
+                "- [x]nope\n- [] nope",
+                vec![list(vec![vec![para(vec![text("[x]nope")])], vec![para(vec![text("[] nope")])]])],
+            ),
+            (
+                "task item nested in a plain item",
+                "- a\n  - [x] b",
+                vec![list(vec![vec![
+                    para(vec![text("a")]),
+                    tasks(&[Some(true)], vec![vec![para(vec![text("b")])]]),
+                ]])],
+            ),
+            (
+                "task marker in a numbered list",
+                "1. [x] a",
+                vec![Block::List(List {
+                    start: Some(1),
+                    items: vec![vec![para(vec![text("a")])]],
+                    checked: vec![Some(true)],
+                })],
+            ),
+            (
+                "nested bullets three deep",
+                "- a\n  - b\n    - c",
+                vec![list(vec![vec![
+                    para(vec![text("a")]),
+                    list(vec![vec![para(vec![text("b")]), list(vec![vec![para(vec![text("c")])]])]]),
+                ]])],
+            ),
+            (
+                "numbered list nested in bullets",
+                "- a\n  1. x\n  2. y",
+                vec![list(vec![vec![
+                    para(vec![text("a")]),
+                    ordered(1, vec![vec![para(vec![text("x")])], vec![para(vec![text("y")])]]),
+                ]])],
+            ),
+            (
+                "bullets nested in a numbered list, siblings after",
+                "1. a\n   - b\n2. c",
+                vec![ordered(1, vec![
+                    vec![para(vec![text("a")]), list(vec![vec![para(vec![text("b")])]])],
+                    vec![para(vec![text("c")])],
+                ])],
+            ),
+            (
+                "dedent returns to the outer list",
+                "- a\n  - b\n- c",
+                vec![list(vec![
+                    vec![para(vec![text("a")]), list(vec![vec![para(vec![text("b")])]])],
+                    vec![para(vec![text("c")])],
+                ])],
             ),
             (
                 "quote inside an item stays flat",
@@ -499,6 +709,21 @@ mod tests {
         for (name, body, want) in cases {
             assert_eq!(parse_with(body, "", &names).blocks, want, "{name}");
         }
+    }
+
+    #[test]
+    fn strong_inside_a_list_item() {
+        let want = vec![list(vec![vec![para(vec![text("a "), strong(vec![text("b")])])]])];
+        assert_eq!(parse("- a **b**").blocks, want);
+    }
+
+    #[test]
+    fn an_image_inside_strong_ends_the_run_without_losing_text() {
+        let body = format!("**a ![x]({BLOB}) b**");
+        let blocks = parse(&body).blocks;
+        assert_eq!(blocks[0], para(vec![strong(vec![text("a ")])]));
+        assert!(matches!(blocks[1], Block::Image(_)));
+        assert_eq!(blocks[2], para(vec![text(" b")]));
     }
 
     #[test]
@@ -634,7 +859,7 @@ mod tests {
             (
                 "inside emphasis",
                 "**PROJ-1** and *@ann*",
-                vec![issue("PROJ-1", "PROJ", 1), text(" and "), mention("@ann")],
+                vec![Inline::Strong(vec![issue("PROJ-1", "PROJ", 1)]), text(" and "), mention("@ann")],
             ),
             ("inline code not tokenized", "`PROJ-1 @ann` x", vec![text("PROJ-1 @ann x")]),
             (

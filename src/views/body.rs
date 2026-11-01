@@ -20,6 +20,7 @@ use crate::document::{self, Block};
 use crate::db::models::{Issue, Member, Team};
 use crate::files::images::{ImageState, ImageStore};
 use crate::files::inline;
+use crate::fonts;
 use crate::document::Inline;
 use crate::mentions::{self, body_segments, LinkTarget, BodySegment, ImageBlock, ImageKind};
 use crate::theme as t;
@@ -163,21 +164,42 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
     match b {
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
         Block::Image(img) => image_block(img, ctx),
-        Block::List(list) => bullet_list(list, size, plain, ctx),
+        Block::List(list) => list_block(list, size, plain, ctx),
     }
 }
 
-/// Gutter holding the bullet; item content sits in its own column beside it,
-/// so wrapped lines hang under the first line rather than under the bullet.
-fn bullet_list<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+/// Marker for item `index` (0-based): a bullet, or the number counted from
+/// the list's start.
+fn list_marker(start: Option<u64>, index: usize) -> String {
+    match start {
+        Some(n) => format!("{}.", n + index as u64),
+        None => "•".to_string(),
+    }
+}
+
+/// Marker for a task item, replacing its bullet or number; `None` for a
+/// plain item. Read-only: toggling a box is not wired.
+fn task_marker(done: Option<bool>) -> Option<&'static str> {
+    done.map(|d| if d { "☑" } else { "☐" })
+}
+
+/// Gutter holding the marker; item content sits in its own column beside it,
+/// so wrapped lines hang under the first line rather than under the marker.
+/// A numbered gutter is as wide as its widest label so items stay aligned.
+fn list_block<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     let mut col = column![].spacing(t::space::S1);
-    for item in &list.items {
+    let labels: Vec<String> = (0..list.items.len()).map(|i| list_marker(list.start, i)).collect();
+    let gutter = match list.start {
+        Some(_) => labels.iter().map(|l| l.chars().count()).max().unwrap_or(1) as f32 * size * 0.65 + size * 0.5,
+        None => size * 1.25,
+    };
+    for ((item, label), done) in list.items.iter().zip(labels).zip(&list.checked) {
         let mut content = column![].spacing(t::space::S1).width(iced::Length::Fill);
         for b in item {
             content = content.push(block(b, size, plain, ctx));
         }
         col = col.push(
-            row![container(text("•").size(size).color(plain)).width(size * 1.25), content]
+            row![container(text(task_marker(*done).map(str::to_string).unwrap_or(label)).size(size).color(plain)).width(gutter), content]
                 .spacing(t::space::S1),
         );
     }
@@ -207,23 +229,36 @@ enum Run {
     Reference { text: String, target: Option<LinkTarget> },
     /// An external link.
     Link { text: String, url: String },
+    /// A run drawn bold. Wraps the run it styles, so it composes with
+    /// other styles (a bold link, a bold mention).
+    Bold(Box<Run>),
 }
 
 /// Map inlines to runs. `resolve` turns an `IDENT-n` token into a link target.
 fn runs(inlines: &[Inline], resolve: impl Fn(&str) -> Option<LinkTarget>) -> Vec<Run> {
-    inlines
-        .iter()
-        .map(|i| match i {
-            Inline::Text(s) => Run::Plain(s.clone()),
-            Inline::HardBreak => Run::Plain("\n".to_string()),
-            Inline::Mention(s) => Run::Mention(s.clone()),
-            Inline::IssueRef { text, prefix, number } => Run::Reference {
+    let mut out = Vec::new();
+    push_runs(inlines, &resolve, &mut out);
+    out
+}
+
+fn push_runs(inlines: &[Inline], resolve: &impl Fn(&str) -> Option<LinkTarget>, out: &mut Vec<Run>) {
+    for i in inlines {
+        match i {
+            Inline::Text(s) => out.push(Run::Plain(s.clone())),
+            Inline::HardBreak => out.push(Run::Plain("\n".to_string())),
+            Inline::Mention(s) => out.push(Run::Mention(s.clone())),
+            Inline::IssueRef { text, prefix, number } => out.push(Run::Reference {
                 text: text.clone(),
                 target: resolve(&format!("{prefix}-{number}")),
-            },
-            Inline::Link { text, url } => Run::Link { text: text.clone(), url: url.clone() },
-        })
-        .collect()
+            }),
+            Inline::Link { text, url } => out.push(Run::Link { text: text.clone(), url: url.clone() }),
+            Inline::Strong(inner) => {
+                let mut runs = Vec::new();
+                push_runs(inner, resolve, &mut runs);
+                out.extend(runs.into_iter().map(|r| Run::Bold(Box::new(r))));
+            }
+        }
+    }
 }
 
 fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> {
@@ -236,6 +271,11 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
         }
         Run::Reference { text, target: None } => span(text).color(t::accent()),
         Run::Link { text, url } => span(text).color(t::accent()).link(LinkTarget::External(url)),
+        Run::Bold(inner) => {
+            let mut s = span_for(*inner, plain);
+            s.font = Some(fonts::bold(s.font.unwrap_or_else(fonts::active)));
+            s
+        }
     }
 }
 
@@ -357,6 +397,27 @@ mod tests {
 
     const HOST: &str = "http://localhost:3005";
 
+    #[test]
+    fn task_markers_show_state() {
+        assert_eq!(task_marker(None), None);
+        assert_eq!(task_marker(Some(false)), Some("☐"));
+        assert_eq!(task_marker(Some(true)), Some("☑"));
+    }
+
+    #[test]
+    fn list_markers_count_from_the_start() {
+        let cases = [
+            (None, 2, "•"),
+            (Some(1), 0, "1."),
+            (Some(1), 9, "10."),
+            (Some(3), 1, "4."),
+            (Some(0), 0, "0."),
+        ];
+        for (start, index, want) in cases {
+            assert_eq!(list_marker(start, index), want, "{start:?} {index}");
+        }
+    }
+
     fn resolve(token: &str) -> Option<LinkTarget> {
         (token == "PROJ-7").then(|| LinkTarget::Issue("id-7".into()))
     }
@@ -377,6 +438,33 @@ mod tests {
                 Run::Plain(" next".into()),
             ]
         );
+    }
+
+    #[test]
+    fn strong_inlines_map_to_bold_runs_keeping_their_tokens() {
+        let doc = document::parse_with("a **b @Ann [l](https://a.b)** c", "", &["Ann"]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        let bold = |r| Run::Bold(Box::new(r));
+        assert_eq!(
+            runs(inl, resolve),
+            [
+                Run::Plain("a ".into()),
+                bold(Run::Plain("b ".into())),
+                bold(Run::Mention("@Ann".into())),
+                bold(Run::Plain(" ".into())),
+                bold(Run::Link { text: "l".into(), url: "https://a.b".into() }),
+                Run::Plain(" c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bold_spans_use_the_bold_weight_and_keep_their_color() {
+        let s = span_for(Run::Bold(Box::new(Run::Plain("x".into()))), Color::WHITE);
+        assert_eq!(s.font.map(|f| f.weight), Some(iced::font::Weight::Bold));
+        assert_eq!(s.color, Some(Color::WHITE));
+        let plain = span_for(Run::Plain("x".into()), Color::WHITE);
+        assert_eq!(plain.font, None);
     }
 
     #[test]
