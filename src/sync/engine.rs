@@ -3897,6 +3897,12 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
                 || dto.related_issues.is_some()
                 || dto.duplicates.is_some();
             let dto = relax_issue_fks(conn, dto);
+            // A detail payload with no `files` key means no files.
+            let pulled_files = if is_detail {
+                Some(dto.files.clone().unwrap_or_default())
+            } else {
+                None
+            };
             let existing_uuid = existing.map(|i| i.id);
             let recurring_remote_id = dto.recurring_issue_id;
             // Capture the remote label ids before `into_model` consumes dto.
@@ -3915,6 +3921,15 @@ fn apply_pulled_issues(conn: &Connection, local_team_id: &str, dtos: Vec<IssueDt
             let local_label_ids = resolve_local_label_ids(conn, &label_remote_ids)?;
             queries::set_issue_labels(conn, &issue.id, &local_label_ids)
                 .map_err(|e| format!("db (set issue labels): {e}"))?;
+            if let Some(files) = pulled_files {
+                crate::db::attachments::replace_synced(
+                    conn,
+                    crate::db::attachments::OwnerKind::Issue,
+                    &issue.id,
+                    &files,
+                )
+                .map_err(|e| format!("db (attachments): {e}"))?;
+            }
             pending_links.push((issue.id.clone(), is_detail.then_some(links)));
             Ok(true)
         })();
@@ -6092,6 +6107,54 @@ mod tests {
             "canceled_at": null
         }))
         .unwrap()
+    }
+
+    fn detail_with_files(id: i64, files: serde_json::Value) -> IssueDto {
+        let mut dto = detail_dto(id, "two", "2026-05-01T00:00:00.000Z");
+        dto.files = Some(serde_json::from_value(files).unwrap());
+        dto
+    }
+
+    fn file_json(id: i64, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "blob_id": id + 100, "filename": name, "content_type": "image/png",
+            "byte_size": 5, "checksum": "x==", "created_at": "2026-01-01T00:00:00.000Z",
+            "download_url": format!("/api/v1/attachments/{id}/download")
+        })
+    }
+
+    #[test]
+    fn pulled_detail_replaces_issue_attachments_and_keeps_pending() {
+        use crate::db::attachments::{list_for_owner, OwnerKind};
+        let conn = setup_dependency_db();
+        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
+        let names = |conn: &Connection| -> Vec<String> {
+            let issue = queries::find_issue_by_remote_id(conn, 2).unwrap().unwrap();
+            list_for_owner(conn, OwnerKind::Issue, &issue.id)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.filename)
+                .collect()
+        };
+        let first = detail_with_files(2, serde_json::json!([file_json(2, "b"), file_json(1, "a")]));
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![first]), 0);
+        assert_eq!(names(&conn), ["a", "b"]);
+
+        let issue = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
+        conn.execute(
+            "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state)
+             VALUES ('p1', 'issue', ?1, 'pend', '2026-02-01T00:00:00.000Z', 'pending')",
+            rusqlite::params![issue.id],
+        )
+        .unwrap();
+        let second = detail_with_files(2, serde_json::json!([file_json(1, "a"), file_json(3, "c")]));
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![second]), 0);
+        assert_eq!(names(&conn), ["a", "c", "pend"]);
+
+        // `files` missing from a detail payload means no files.
+        let third = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
+        assert_eq!(apply_pulled_issues(&conn, "t1", vec![third]), 0);
+        assert_eq!(names(&conn), ["pend"]);
     }
 
     fn feed_comment(id: i64, parent: Option<i64>, issue: Option<i64>, body: &str) -> CommentDto {

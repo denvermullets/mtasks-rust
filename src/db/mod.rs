@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod attachments;
 pub mod connection;
 pub mod home_page;
 pub mod migrations;
