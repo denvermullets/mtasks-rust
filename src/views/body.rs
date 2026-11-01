@@ -165,7 +165,58 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
         Block::Image(img) => image_block(img, ctx),
         Block::List(list) => list_block(list, size, plain, ctx),
+        Block::Code(code) => code_block(code, size),
     }
+}
+
+/// A piece of code text and its color. The seam for syntax highlighting:
+/// [`code_spans`] is the only place that decides colors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeSpan {
+    text: String,
+    color: CodeColor,
+}
+
+/// A color role inside a code block, resolved to a real color at draw time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeColor {
+    Plain,
+}
+
+impl CodeColor {
+    fn color(self) -> Color {
+        match self {
+            CodeColor::Plain => t::CODE_BLOCK_TEXT,
+        }
+    }
+}
+
+/// Split a code block into colored spans. Concatenating the span texts gives
+/// back `text` exactly. Today everything is `Plain`; a highlighter keyed on
+/// `lang` replaces the body (add `CodeColor` roles as it needs them).
+fn code_spans(_lang: Option<&str>, text: &str) -> Vec<CodeSpan> {
+    vec![CodeSpan { text: text.to_string(), color: CodeColor::Plain }]
+}
+
+/// A code block: monospace text in a fixed dark frame. Lines never wrap.
+fn code_block<'a>(code: &document::CodeBlock, size: f32) -> Element<'a, Message> {
+    let spans: Vec<text::Span<'a, Message, iced::Font>> = code_spans(code.lang.as_deref(), &code.text)
+        .into_iter()
+        .map(|s| span(s.text).color(s.color.color()))
+        .collect();
+    let body = iced::widget::rich_text(spans)
+        .font(fonts::code())
+        .size(size)
+        .wrapping(text::Wrapping::None);
+    container(body)
+        .width(iced::Length::Fill)
+        .padding(t::space::S3)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::CODE_BLOCK_BG)),
+            border: Border { radius: t::radius::MD.into(), ..Border::default() },
+            ..Default::default()
+        })
+        .into()
 }
 
 /// Marker for item `index` (0-based): a bullet, or the number counted from
@@ -495,6 +546,22 @@ mod tests {
         let s = span_for(Run::Code("x".into()), Color::WHITE);
         assert_eq!(s.font, Some(fonts::code()));
         assert_eq!(s.highlight.map(|h| h.background), Some(iced::Background::Color(t::bg_card())));
+    }
+
+    #[test]
+    fn code_spans_keep_the_text_exactly() {
+        for text in ["", "a", "if a {\n    b();\n\n\tc();\n}", "ABC-12 @Ann ![x](y)"] {
+            let joined: String = code_spans(Some("rust"), text).into_iter().map(|s| s.text).collect();
+            assert_eq!(joined, text);
+        }
+    }
+
+    #[test]
+    fn code_frame_is_dark_with_legible_text_on_every_theme() {
+        // Relative luminance, sRGB approximated by the channel mean.
+        let lum = |c: Color| (c.r + c.g + c.b) / 3.0;
+        assert!(lum(t::CODE_BLOCK_BG) < 0.2);
+        assert!(lum(CodeColor::Plain.color()) > 0.7);
     }
 
     #[test]
