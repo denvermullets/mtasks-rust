@@ -17,11 +17,7 @@ pub struct OutboxEntry {
 
 /// Default root: `<data_local_dir>/mtasks-rusty/files/outbox`.
 pub fn default_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("mtasks-rusty")
-        .join("files")
-        .join("outbox")
+    super::outbox_dir(&super::default_root())
 }
 
 /// Active Storage checksum: base64 of the raw MD5 digest.

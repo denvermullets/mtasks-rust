@@ -621,6 +621,22 @@ const MIGRATIONS: &[Migration] = &[
                 ON issues (recurring_issue_id);
         ",
     },
+    Migration {
+        version: 31,
+        name: "file_cache",
+        up: "
+            -- Index of downloaded blobs in the local file cache (see
+            -- src/files/cache.rs). Local only, never synced.
+            CREATE TABLE IF NOT EXISTS file_cache (
+                blob_key TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                last_accessed TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_file_cache_last_accessed
+                ON file_cache (last_accessed);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -803,7 +819,7 @@ mod tests {
         }
         run(&conn).unwrap();
         conn.prepare("SELECT recurring_issue_id FROM issues").unwrap();
-        assert_eq!(applied_versions(&conn).last(), Some(&29));
+        assert!(applied_versions(&conn).contains(&29));
     }
 
     #[test]
