@@ -443,6 +443,81 @@ pub fn move_group(conn: &Connection, group_id: &str, direction: MoveDirection) -
     Ok(true)
 }
 
+/// What a group-order push needs, read fresh from the database.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OrderPlan {
+    /// The dashboard's remote id, every group's remote id in display order, and
+    /// the queue payload they were resolved from (for `finish_order_push`).
+    Ready { dashboard_remote_id: i64, group_remote_ids: Vec<i64>, payload: String },
+    /// The dashboard or one of its groups has not been created on the server yet.
+    Waiting(&'static str),
+    /// Nothing left to push (dashboard gone, or no group of the order remains).
+    Gone,
+}
+
+/// Resolve queue entry `entry_id`'s local group ids to remote ids. Re-reads the
+/// payload, since later moves rewrite it in place while the entry is pending.
+pub fn plan_order_push(conn: &Connection, entry_id: i64, dashboard_id: &str) -> Result<OrderPlan> {
+    let Some(dashboard) = get(conn, dashboard_id)? else { return Ok(OrderPlan::Gone) };
+    let payload: Option<String> = conn
+        .query_row("SELECT payload FROM sync_queue WHERE id = ?1", params![entry_id], |r| r.get(0))
+        .optional()?
+        .flatten();
+    let Some(payload) = payload else { return Ok(OrderPlan::Gone) };
+    let local_ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|v| v.get("group_ids").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let Some(dashboard_remote_id) = dashboard.remote_id else {
+        return Ok(OrderPlan::Waiting("dashboard create not yet drained"));
+    };
+    let groups = groups_for(conn, dashboard_id)?;
+    let mut group_remote_ids = Vec::new();
+    for id in &local_ids {
+        // A group deleted since the move is just left out.
+        let Some(group) = groups.iter().find(|g| &g.id == id) else { continue };
+        match group.remote_id {
+            Some(r) => group_remote_ids.push(r),
+            None => return Ok(OrderPlan::Waiting("group create not yet drained")),
+        }
+    }
+    if group_remote_ids.is_empty() {
+        return Ok(OrderPlan::Gone);
+    }
+    Ok(OrderPlan::Ready { dashboard_remote_id, group_remote_ids, payload })
+}
+
+/// Adopt the server's returned order as local positions and retire the entry,
+/// in one transaction. If another move rewrote the payload while the request
+/// was in flight, the response is stale: change nothing and keep the entry
+/// pending so the newer order is pushed next. Returns true when retired.
+pub fn finish_order_push(
+    conn: &Connection,
+    entry_id: i64,
+    dashboard_id: &str,
+    sent_payload: &str,
+    returned: &[GroupIn],
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let current: Option<String> = tx
+        .query_row("SELECT payload FROM sync_queue WHERE id = ?1", params![entry_id], |r| r.get(0))
+        .optional()?
+        .flatten();
+    if current.as_deref() != Some(sent_payload) {
+        return Ok(false);
+    }
+    for (pos, g) in returned.iter().enumerate() {
+        tx.execute(
+            "UPDATE dashboard_groups SET position = ?3 WHERE remote_id = ?1 AND dashboard_id = ?2",
+            params![g.id, dashboard_id, pos as i64],
+        )?;
+    }
+    sync_queue::mark_synced(&tx, entry_id)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// Remove a dashboard and its groups and sources locally, and retire every
 /// unpushed queue entry for the dashboard, its groups and its group order (a
 /// never-pushed create is simply dropped). Returns the `dashboard` delete
@@ -1291,5 +1366,142 @@ mod tests {
     fn delete_local_of_a_missing_dashboard_is_a_no_op() {
         let conn = setup();
         assert_eq!(delete_local(&conn, "nope").unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod order_push_tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn
+    }
+
+    fn gin(id: i64, pos: i64) -> GroupIn {
+        GroupIn {
+            id,
+            name: format!("g{id}"),
+            description: None,
+            color: None,
+            position: pos,
+            team_ids: vec![],
+            project_ids: vec![],
+            label_ids: vec![],
+            all_team_ids: vec![],
+            all_project_ids: vec![],
+        }
+    }
+
+    fn snapshot() -> DashboardIn {
+        DashboardIn {
+            id: 1,
+            name: "A".into(),
+            description: None,
+            position: 0,
+            updated_at: String::new(),
+            groups: vec![gin(10, 0), gin(11, 1), gin(12, 2)],
+        }
+    }
+
+    /// A mirrored dashboard (remote 1) with groups remote 10, 11, 12.
+    fn seeded() -> (Connection, String, Vec<String>) {
+        let conn = conn();
+        apply_snapshot(&conn, &[snapshot()]).unwrap();
+        let d = find_by_remote_id(&conn, 1).unwrap().unwrap();
+        let ids = groups_for(&conn, &d.id).unwrap().into_iter().map(|g| g.id).collect();
+        (conn, d.id, ids)
+    }
+
+    fn order_entry(conn: &Connection, d: &str) -> i64 {
+        sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.entity_type == GROUP_ORDER_ENTITY_TYPE && e.entity_id == d)
+            .unwrap()
+            .id
+            .unwrap()
+    }
+
+    fn remote_order(conn: &Connection, d: &str) -> Vec<i64> {
+        groups_for(conn, d).unwrap().into_iter().map(|g| g.remote_id.unwrap()).collect()
+    }
+
+    #[test]
+    fn a_burst_of_moves_resolves_to_one_final_remote_order() {
+        let (conn, d, ids) = seeded();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        move_group(&conn, &ids[1], MoveDirection::Down).unwrap();
+        let entry = order_entry(&conn, &d);
+        let OrderPlan::Ready { dashboard_remote_id, group_remote_ids, .. } =
+            plan_order_push(&conn, entry, &d).unwrap()
+        else {
+            panic!("ready")
+        };
+        assert_eq!(dashboard_remote_id, 1);
+        assert_eq!(group_remote_ids, remote_order(&conn, &d));
+        assert_eq!(group_remote_ids, [12, 10, 11]);
+    }
+
+    #[test]
+    fn waits_while_the_dashboard_or_a_group_is_unpushed() {
+        let (conn, d, ids) = seeded();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        let entry = order_entry(&conn, &d);
+        conn.execute("UPDATE dashboard_groups SET remote_id = NULL WHERE id = ?1", params![ids[1]]).unwrap();
+        assert!(matches!(plan_order_push(&conn, entry, &d).unwrap(), OrderPlan::Waiting(_)));
+        conn.execute("UPDATE dashboard_groups SET remote_id = 11 WHERE id = ?1", params![ids[1]]).unwrap();
+        conn.execute("UPDATE dashboards SET remote_id = NULL WHERE id = ?1", params![d]).unwrap();
+        assert!(matches!(plan_order_push(&conn, entry, &d).unwrap(), OrderPlan::Waiting(_)));
+    }
+
+    #[test]
+    fn a_deleted_dashboard_has_nothing_to_push() {
+        let (conn, d, ids) = seeded();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        let entry = order_entry(&conn, &d);
+        conn.execute("DELETE FROM dashboards WHERE id = ?1", params![d]).unwrap();
+        assert_eq!(plan_order_push(&conn, entry, &d).unwrap(), OrderPlan::Gone);
+    }
+
+    #[test]
+    fn the_returned_order_sets_positions_and_retires_the_entry() {
+        let (conn, d, ids) = seeded();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        let entry = order_entry(&conn, &d);
+        let OrderPlan::Ready { payload, .. } = plan_order_push(&conn, entry, &d).unwrap() else {
+            panic!("ready")
+        };
+        // The server answers with its own order, which wins.
+        let returned = [gin(11, 0), gin(12, 1), gin(10, 2)];
+        assert!(finish_order_push(&conn, entry, &d, &payload, &returned).unwrap());
+        assert_eq!(remote_order(&conn, &d), [11, 12, 10]);
+        assert!(!sync_queue::has_pending_entry(&conn, GROUP_ORDER_ENTITY_TYPE, &d).unwrap());
+    }
+
+    #[test]
+    fn a_move_made_while_the_push_was_in_flight_stays_queued() {
+        let (conn, d, ids) = seeded();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        let entry = order_entry(&conn, &d);
+        let OrderPlan::Ready { payload, .. } = plan_order_push(&conn, entry, &d).unwrap() else {
+            panic!("ready")
+        };
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        let before = groups_for(&conn, &d).unwrap();
+        let stale = [gin(10, 0), gin(12, 1), gin(11, 2)];
+        assert!(!finish_order_push(&conn, entry, &d, &payload, &stale).unwrap());
+        assert_eq!(groups_for(&conn, &d).unwrap(), before);
+        assert!(sync_queue::has_pending_entry(&conn, GROUP_ORDER_ENTITY_TYPE, &d).unwrap());
+    }
+
+    #[test]
+    fn a_pull_leaves_positions_alone_while_the_order_is_pending() {
+        let (conn, d, ids) = seeded();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        apply_snapshot(&conn, &[snapshot()]).unwrap();
+        assert_eq!(remote_order(&conn, &d), [10, 12, 11]);
     }
 }

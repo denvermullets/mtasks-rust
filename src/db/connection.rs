@@ -4,6 +4,12 @@ use std::path::PathBuf;
 use super::migrations;
 
 pub fn db_path() -> PathBuf {
+    // Test builds only: live checks point the engine's `open()` at a scratch dir.
+    #[cfg(test)]
+    if let Ok(dir) = std::env::var("MTASKS_TEST_DATA_DIR") {
+        std::fs::create_dir_all(&dir).expect("Failed to create test data directory");
+        return PathBuf::from(dir).join("jait.db");
+    }
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("mtasks-rusty");
