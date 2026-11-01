@@ -439,9 +439,9 @@ fn issue_identifier(issue: &Issue, team: Option<&Team>) -> String {
 fn origin_line<'a>(title: &'a str, team_id: &str) -> Element<'a, Message> {
     button(
         row![]
-            .spacing(4)
-            .push(text("From recurring issue:").size(12).color(t::text_muted()))
-            .push(text(title).size(12).color(t::text_secondary())),
+            .spacing(space::S1)
+            .push(text("From recurring issue:").size(type_scale::XS).color(t::text_muted()))
+            .push(text(title).size(type_scale::XS).color(t::text_secondary())),
     )
     .on_press(Message::SelectTeamView(
         team_id.to_string(),
@@ -456,13 +456,13 @@ fn origin_line<'a>(title: &'a str, team_id: &str) -> Element<'a, Message> {
 fn parent_link<'a>(parent: &'a Issue, team: Option<&'a Team>) -> Element<'a, Message> {
     button(
         row![]
-            .spacing(6)
+            .spacing(space::S1_5)
             .push(
                 text(issue_identifier(parent, team))
-                    .size(12)
+                    .size(type_scale::XS)
                     .color(t::text_muted()),
             )
-            .push(text(&parent.title).size(12).color(t::text_secondary())),
+            .push(text(&parent.title).size(type_scale::XS).color(t::text_secondary())),
     )
     .on_press(Message::OpenIssueDetail(parent.id.clone()))
     .padding(0)
@@ -507,12 +507,12 @@ fn sub_issue_row<'a>(
             .unwrap_or(t::text_muted());
         container(
             row![]
-                .spacing(4)
+                .spacing(space::S1)
                 .align_y(Alignment::Center)
                 .push(lane_icon::view(crate::lane_icon::icon_for(l.category.as_deref())))
                 .push(text(&l.name).size(11).color(color)),
         )
-            .padding([2, 8])
+            .padding([space::S0_5, space::S2])
             .style(move |_theme: &Theme| container::Style {
                 border: Border {
                     color,
@@ -525,11 +525,11 @@ fn sub_issue_row<'a>(
 
     button(
         row![]
-            .spacing(8)
+            .spacing(space::S2)
             .align_y(Alignment::Center)
             .push(
                 text(issue_identifier(child, team))
-                    .size(12)
+                    .size(type_scale::XS)
                     .color(t::text_muted()),
             )
             .push(
@@ -541,7 +541,7 @@ fn sub_issue_row<'a>(
             .push_maybe(badge),
     )
     .on_press(Message::OpenIssueDetail(child.id.clone()))
-    .padding([6, 8])
+    .padding([space::S1_5, space::S2])
     .width(Length::Fill)
     .style(button::text)
     .into()
@@ -616,7 +616,7 @@ fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element
     }
     if let Some((add_label, direction)) = kind.add() {
         col = col.push(
-            button(text(add_label).size(12).color(t::accent()))
+            button(text(add_label).size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenDependencyPicker(direction))
                 .padding(0)
                 .style(button::text),
@@ -630,14 +630,14 @@ fn dependency_section<'a>(links: &'a [DependencyLink], kind: DepKind) -> Element
 /// tinted with the section's dependency color.
 fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Element<'a, Message> {
     let line = row![]
-        .spacing(6)
+        .spacing(space::S1_5)
         .align_y(Alignment::Center)
         .push(
             button(
                 row![]
-                    .spacing(6)
-                    .push(text(&link.identifier).size(12).color(relation_color))
-                    .push(text(&link.title).size(12).color(t::text_secondary())),
+                    .spacing(space::S1_5)
+                    .push(text(&link.identifier).size(type_scale::XS).color(relation_color))
+                    .push(text(&link.title).size(type_scale::XS).color(t::text_secondary())),
             )
             .on_press(Message::OpenIssueDetail(link.issue_id.clone()))
             .padding(0)
@@ -645,7 +645,7 @@ fn dependency_row<'a>(link: &'a DependencyLink, relation_color: Color) -> Elemen
             .style(button::text),
         )
         .push(
-            button(text("×").size(14).color(t::text_muted()))
+            button(text("×").size(type_scale::SM).color(t::text_muted()))
                 .on_press(Message::RemoveDependency(link.dep_id.clone()))
                 .padding(0)
                 .style(button::text),
@@ -762,7 +762,7 @@ fn suggestion_list<'a>(
 /// replaces the partial `@query`/`#query` with the full token. Rendered inline
 /// under the editor (not a floating popover).
 pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, Message> {
-    let mut col = column![].spacing(2).push(
+    let mut col = column![].spacing(space::S0_5).push(
         text("↑↓ to move · Enter/Tab or click to insert · Esc to dismiss")
             .size(type_scale::XS)
             .color(t::text_muted()),
@@ -772,7 +772,7 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         col = col.push(
             button(
                 row![]
-                    .spacing(8)
+                    .spacing(space::S2)
                     .push(text(&item.label).size(type_scale::SM).color(t::accent()))
                     .push(text(&item.detail).size(type_scale::SM).color(t::text_secondary())),
             )
@@ -789,7 +789,7 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         );
     }
     container(col)
-        .padding(6)
+        .padding(space::S1_5)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::bg_secondary())),
@@ -1030,11 +1030,11 @@ fn referenced_in_section<'a>(
         };
         let row_button = button(
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .align_y(Alignment::Center)
                 .push(
                     text(issue_identifier(src, team))
-                        .size(12)
+                        .size(type_scale::XS)
                         .color(t::text_muted()),
                 )
                 .push(
@@ -1046,7 +1046,7 @@ fn referenced_in_section<'a>(
                 .push(text(via).size(11).color(t::text_muted())),
         )
         .on_press(Message::OpenIssueDetail(src.id.clone()))
-        .padding([6, 8])
+        .padding([space::S1_5, space::S2])
         .width(Length::Fill)
         .style(button::text);
         col = col.push(issue_row_anchor(row_button, &src.id));
@@ -1153,7 +1153,7 @@ pub fn new_comment_composer<'a>(
     staged: &'a [Attachment],
 ) -> Element<'a, Message> {
     column![]
-        .spacing(8)
+        .spacing(space::S2)
         .push(
             text_editor(content)
                 .placeholder("Leave a comment…  (Cmd+Enter to send)")
@@ -1173,7 +1173,7 @@ pub fn new_comment_composer<'a>(
         .push_maybe((!staged.is_empty()).then(|| staged_chips(staged)))
         .push(
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .push(
                     button(text("Comment").size(type_scale::XS))
                         .on_press(Message::SubmitComment)
@@ -1192,7 +1192,7 @@ pub fn new_comment_composer<'a>(
 
 /// One removable chip per file staged on the composer.
 fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
-    let mut chips = row![].spacing(6).align_y(Alignment::Center);
+    let mut chips = row![].spacing(space::S1_5).align_y(Alignment::Center);
     for a in staged {
         chips = chips.push(
             button(
@@ -1260,7 +1260,7 @@ fn reply_composer<'a>(
     suggest: Option<&'a SuggestState>,
 ) -> Element<'a, Message> {
     let body = column![]
-        .spacing(6)
+        .spacing(space::S1_5)
         .push(
             text_editor(content)
                 .placeholder("Write a reply…  (Cmd+Enter to send)")
@@ -1278,7 +1278,7 @@ fn reply_composer<'a>(
         )
         .push(
             row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .push(
                     button(text("Reply").size(type_scale::XS))
                         .on_press(Message::SubmitReply)
@@ -1320,9 +1320,9 @@ fn comment_row<'a>(
         .map(|m| m.name.as_str())
         .unwrap_or("Unknown");
 
-    let mut col = column![].spacing(4).push(
+    let mut col = column![].spacing(space::S1).push(
         row![]
-            .spacing(8)
+            .spacing(space::S2)
             .align_y(Alignment::Center)
             .push(text(author).size(type_scale::SM).color(t::text_body()))
             .push(
@@ -1358,7 +1358,7 @@ fn comment_row<'a>(
             .get(&comment.id)
             .and_then(|files| crate::views::attachments::section_with(files, ctx.images, can_delete)),
     );
-    let mut actions = row![].spacing(10);
+    let mut actions = row![].spacing(space::S2_5);
     let can_reply = can_reply && Comment::can_reply_at(depth);
     if can_reply {
         actions = actions.push(

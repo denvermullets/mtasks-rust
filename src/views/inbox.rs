@@ -50,7 +50,7 @@ pub fn view<'a>(state: &'a InboxState) -> Element<'a, Message> {
         filter_tab("All", Filter::All, state.filter),
         text("[f] switch").size(type_scale::XS).color(t::text_muted()),
     ]
-    .spacing(6)
+    .spacing(space::S1_5)
     .align_y(Alignment::Center)
     .padding([space::S2, space::S4]);
     column![tabs, list(state)].into()
