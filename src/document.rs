@@ -124,6 +124,52 @@ pub fn resolve_link(url: &str, host: &str) -> Option<String> {
     is_openable_link(url).then(|| url.to_string())
 }
 
+/// Byte ranges of bare `http://` and `https://` addresses in `text`, as the
+/// web autolinks them. The scheme is case-insensitive and must start a word.
+/// An address ends at whitespace or `<`/`>`; trailing sentence punctuation
+/// and unbalanced closing brackets are left out of it.
+fn find_bare_urls(text: &str) -> Vec<(usize, usize)> {
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(off) = lower[from..].find("http") {
+        let start = from + off;
+        from = start + 4;
+        if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+            continue;
+        }
+        let after = &lower[start + 4..];
+        let scheme = if after.starts_with("://") {
+            7
+        } else if after.starts_with("s://") {
+            8
+        } else {
+            continue;
+        };
+        let stop = text[start..].find(|c: char| c.is_whitespace() || c == '<' || c == '>');
+        let mut end = stop.map_or(text.len(), |i| start + i);
+        loop {
+            let cand = &text[start..end];
+            let Some(last) = cand.chars().next_back() else { break };
+            let drop = match last {
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '*' => true,
+                ')' => cand.matches(')').count() > cand.matches('(').count(),
+                ']' => cand.matches(']').count() > cand.matches('[').count(),
+                _ => false,
+            };
+            if !drop {
+                break;
+            }
+            end -= last.len_utf8();
+        }
+        if end > start + scheme {
+            out.push((start, end));
+            from = end;
+        }
+    }
+    out
+}
+
 /// Parser options: the web feature set. Hard breaks are never produced from
 /// plain newlines, so nothing to switch off.
 fn parse_options() -> Options {
@@ -357,6 +403,12 @@ impl Builder {
         }
         for m in find_mentions(&text, &names) {
             spans.push((m.start, m.end, Inline::Mention(text[m.start..m.end].to_string())));
+        }
+        for (start, end) in find_bare_urls(&text) {
+            let url = text[start..end].to_string();
+            if let Some(url) = resolve_link(&url, "") {
+                spans.push((start, end, Inline::Link { text: url.clone(), url }));
+            }
         }
         spans.sort_by_key(|s| s.0);
         let mut pos = 0;
@@ -1038,6 +1090,38 @@ mod tests {
         ];
         for (name, url, host, want) in cases {
             assert_eq!(resolve_link(url, host).as_deref(), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn bare_urls_become_links() {
+        let link = |u: &str| Inline::Link { text: u.into(), url: u.into() };
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("pasted url", "https://a.b/x?y=1#z", vec![para(vec![link("https://a.b/x?y=1#z")])]),
+            ("in a sentence", "see http://a.b now", vec![para(vec![text("see "), link("http://a.b"), text(" now")])]),
+            ("mixed case scheme", "HTTPS://A.B/x", vec![para(vec![link("HTTPS://A.B/x")])]),
+            ("trailing period", "go to https://a.b/x.", vec![para(vec![text("go to "), link("https://a.b/x"), text(".")])]),
+            ("trailing punctuation run", "(https://a.b/x)?!", vec![para(vec![text("("), link("https://a.b/x"), text(")?!")])]),
+            ("comma", "https://a.b, https://c.d", vec![para(vec![link("https://a.b"), text(", "), link("https://c.d")])]),
+            ("balanced parens kept", "https://a.b/w_(x)", vec![para(vec![link("https://a.b/w_(x)")])]),
+            ("quote and colon", "\"https://a.b\":", vec![para(vec![text("\""), link("https://a.b"), text("\":")])]),
+            ("scheme only is text", "http:// and https://", vec![para(vec![text("http:// and https://")])]),
+            ("not at a word start", "xhttps://a.b", vec![para(vec![text("xhttps://a.b")])]),
+            ("other schemes stay text", "ftp://a.b file:///x javascript:x", vec![para(vec![text("ftp://a.b file:///x javascript:x")])]),
+            ("www alone stays text", "www.a.b", vec![para(vec![text("www.a.b")])]),
+            ("inline code stays code", "`https://a.b`", vec![para(vec![text("https://a.b")])]),
+            ("code block stays text", "```\nhttps://a.b\n```", vec![para(vec![text("https://a.b\n")])]),
+            (
+                "existing link is untouched",
+                "[https://x.y](https://a.b)",
+                vec![para(vec![Inline::Link { text: "https://x.y".into(), url: "https://a.b".into() }])],
+            ),
+            ("angle autolink is one link", "<https://a.b>", vec![para(vec![link("https://a.b")])]),
+            ("inside bold", "**https://a.b**", vec![para(vec![Inline::Strong(vec![link("https://a.b")])])]),
+            ("issue ref in the path is not split out", "https://a.b/PROJ-1", vec![para(vec![link("https://a.b/PROJ-1")])]),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse(body).blocks, want, "{name}");
         }
     }
 
