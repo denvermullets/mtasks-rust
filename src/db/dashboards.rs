@@ -30,7 +30,6 @@ pub struct Dashboard {
     pub updated_at: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardGroup {
     /// Local uuid.
@@ -44,7 +43,6 @@ pub struct DashboardGroup {
     pub position: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SourceType {
     Team,
@@ -72,7 +70,6 @@ impl SourceType {
 }
 
 /// One source of a group. `include_all` is meaningful for Team and Project only.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GroupSource {
     pub source_type: SourceType,
@@ -445,7 +442,6 @@ pub fn groups_for(conn: &Connection, dashboard_id: &str) -> Result<Vec<Dashboard
 }
 
 /// A group's sources, ordered by type then remote id.
-#[allow(dead_code)]
 pub fn sources_for(conn: &Connection, group_id: &str) -> Result<Vec<GroupSource>> {
     let mut stmt = conn.prepare(
         "SELECT source_type, source_remote_id, include_all FROM dashboard_group_sources
