@@ -410,6 +410,12 @@ semantic!(
     Color::from_rgb(0.23, 0.73, 0.53),
     hx(0x15803d)
 );
+/// Code block frame: the same dark color on every theme, like the web's
+/// fixed dark code blocks (gray-900 background).
+pub const CODE_BLOCK_BG: Color = hx(0x111827);
+/// Plain text inside a code block frame (gray-200); legible on `CODE_BLOCK_BG`.
+pub const CODE_BLOCK_TEXT: Color = hx(0xe5e7eb);
+
 semantic!(danger, Color::from_rgb(0.94, 0.27, 0.27), hx(0xdc2626));
 semantic!(warning, Color::from_rgb(0.90, 0.62, 0.22), hx(0xb45309));
 // Progress chart series (mirrors Rails progress_chart_controller.js).
