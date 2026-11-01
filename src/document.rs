@@ -37,6 +37,8 @@ pub enum Block {
     Quote(Vec<Block>),
     /// A heading, level 1 to 6.
     Heading(u8, Vec<Inline>),
+    /// A horizontal rule (`---`).
+    Rule,
 }
 
 /// A list: each item is its own block sequence, so an item can hold
@@ -308,6 +310,10 @@ impl Builder {
                 self.flush();
                 self.heading = None;
             }
+            Event::Rule => {
+                self.flush();
+                self.push_block(Block::Rule);
+            }
             Event::Start(Tag::BlockQuote(_)) => self.open(Frame::Quote(Vec::new())),
             Event::End(TagEnd::BlockQuote(_)) => self.close(),
             Event::End(TagEnd::Link | TagEnd::Image) => {
@@ -495,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_headings() {
+    fn parses_headings_and_rules() {
         let cases: Vec<(&str, &str, Vec<Block>)> = vec![
             ("h1", "# Title", vec![heading(1, vec![text("Title")])]),
             ("h6", "###### Small", vec![heading(6, vec![text("Small")])]),
@@ -511,6 +517,9 @@ mod tests {
             ),
             ("not a heading without a space", "#nope", vec![para(vec![text("#nope")])]),
             ("heading in a quote", "> # Q", vec![Block::Quote(vec![heading(1, vec![text("Q")])])]),
+            ("rule", "a\n\n---\n\nb", vec![para(vec![text("a")]), Block::Rule, para(vec![text("b")])]),
+            ("star rule", "***", vec![Block::Rule]),
+            ("rule in a quote", "> a\n>\n> ---", vec![Block::Quote(vec![para(vec![text("a")]), Block::Rule])]),
             (
                 "text after a heading is a paragraph",
                 "# H\ntext",

@@ -91,7 +91,7 @@ fn collect_images(blocks: &[Block], out: &mut Vec<InlineImage>) {
             Block::Image(img) => out.extend(InlineImage::from_document(img)),
             Block::List(list) => list.items.iter().for_each(|item| collect_images(item, out)),
             Block::Quote(inner) => collect_images(inner, out),
-            Block::Paragraph(_) | Block::Heading(..) => {}
+            Block::Paragraph(_) | Block::Heading(..) | Block::Rule => {}
         }
     }
 }
@@ -166,6 +166,7 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
         Block::List(list) => list_block(list, size, plain, ctx),
         Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx),
         Block::Heading(level, inlines) => heading_block(*level, inlines, plain, ctx, false),
+        Block::Rule => rule_block(size),
     }
 }
 
@@ -203,6 +204,22 @@ fn heading_block<'a>(
     let bold = [Inline::Strong(inlines.to_vec())];
     container(paragraph(&bold, size, plain, ctx))
         .padding(iced::Padding { top, bottom, ..Default::default() })
+        .into()
+}
+
+/// Space above and below the web's `hr` (`margin: 1.5em 0`) beyond the column gap.
+fn rule_margin(size: f32) -> f32 {
+    (1.5 * size - t::space::S2).max(0.0)
+}
+
+/// A horizontal rule: one pixel in the border color across the column.
+fn rule_block<'a>(size: f32) -> Element<'a, Message> {
+    let line = container(iced::widget::Space::new(0, 0))
+        .width(iced::Length::Fill)
+        .height(1)
+        .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() });
+    container(line)
+        .padding(iced::Padding { top: rule_margin(size), bottom: rule_margin(size), ..Default::default() })
         .into()
 }
 
@@ -465,6 +482,13 @@ mod tests {
             assert_eq!(heading_padding(size, false), (top, bottom), "padding h{level}");
         }
         assert_eq!(heading_padding(24.0, true), (0.0, 4.0), "first block has no top margin");
+    }
+
+    #[test]
+    fn rule_margin_follows_the_web_stylesheet() {
+        assert_eq!(rule_margin(16.0), 16.0);
+        assert_eq!(rule_margin(14.0), 13.0);
+        assert_eq!(rule_margin(4.0), 0.0);
     }
 
     #[test]
