@@ -95,9 +95,34 @@ pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
     }
 }
 
+/// Keys bound only while an issue detail is showing. Checked before the
+/// global handler; `None` falls through to it.
+pub fn handle_issue_detail_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    match key {
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "a" => {
+            Some(Message::PickAttachmentFiles)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_attaches_a_file_in_issue_detail_only() {
+        let a = Key::Character("a".into());
+        assert!(matches!(
+            handle_issue_detail_key(&a, Modifiers::empty()),
+            Some(Message::PickAttachmentFiles)
+        ));
+        assert!(handle_issue_detail_key(&a, Modifiers::COMMAND).is_none());
+        assert!(handle_issue_detail_key(&Key::Character("b".into()), Modifiers::empty()).is_none());
+        // The global handler never binds it, so it's inert off the detail view.
+        assert!(press("a", false, true).is_none());
+        assert!(press("a", false, false).is_none());
+    }
 
     #[test]
     fn inbox_jk_move_selection() {

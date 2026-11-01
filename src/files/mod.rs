@@ -13,7 +13,9 @@ pub mod cache;
 #[allow(dead_code)]
 pub mod images;
 pub mod drop;
+pub mod inline;
 pub mod intake;
+pub mod lightbox;
 pub mod open;
 pub mod outbox;
 pub mod validate;
