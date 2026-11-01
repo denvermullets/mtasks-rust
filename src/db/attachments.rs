@@ -4,9 +4,6 @@
 //! `owner_id` is the owner's LOCAL id. Synced rows are replaced from each
 //! pull of the owner's `files` ([`replace_synced`]); pending and failed rows
 //! are local-only (upload tickets own them) and are never touched by it.
-// The read side (list_for_owner, Attachment, UploadState) is consumed by the
-// display and upload tickets; only replace_synced is wired so far.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -67,14 +64,6 @@ pub enum UploadState {
 }
 
 impl UploadState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            UploadState::Synced => "synced",
-            UploadState::Pending => "pending",
-            UploadState::Failed => "failed",
-        }
-    }
-
     fn from_db(s: &str) -> Self {
         match s {
             "pending" => UploadState::Pending,

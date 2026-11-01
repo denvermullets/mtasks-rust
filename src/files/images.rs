@@ -59,6 +59,7 @@ impl ImageStore {
     }
 
     /// Drop what we know (e.g. after cache eviction) so `begin` can retry.
+    #[cfg(test)]
     pub fn forget(&mut self, key: &str) {
         self.states.remove(key);
     }

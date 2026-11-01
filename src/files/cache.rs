@@ -1,7 +1,7 @@
 //! File cache with LRU eviction, indexed by the `file_cache` table.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -39,19 +39,17 @@ impl FileCache {
         Self::new(super::default_root())
     }
 
+    #[cfg(test)]
     pub fn with_cap(mut self, cap: u64) -> Self {
         self.cap = cap;
         self
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join("cache")
     }
 
+    #[cfg(test)]
     pub fn outbox_dir(&self) -> PathBuf {
         super::outbox_dir(&self.root)
     }
