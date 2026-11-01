@@ -26,14 +26,11 @@ pub struct GroupConfig {
 pub struct Mirror<'a> {
     pub teams: &'a [Team],
     pub projects: &'a [Project],
-    // Read by the label-source and label-picker tickets.
-    #[allow(dead_code)]
     pub labels: &'a [Label],
     pub lanes: &'a [Lane],
     pub members: &'a [Member],
     pub issues: &'a [Issue],
     /// Labels per issue local id.
-    #[allow(dead_code)]
     pub issue_labels: &'a HashMap<String, Vec<Label>>,
 }
 
@@ -107,6 +104,7 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         .iter()
         .map(|cfg| {
             let pool = pool(cfg, m, &accessible, &my_members);
+            let pool = apply_label_sources(cfg, m, &accessible, pool);
             let mut issues: Vec<&Issue> = m
                 .issues
                 .iter()
@@ -136,8 +134,55 @@ fn dropped(s: &GroupSource, m: &Mirror<'_>, accessible: &HashSet<&str>) -> bool 
         SourceType::Team => {
             !team_of_source(s, m).is_some_and(|t| accessible.contains(t.id.as_str()))
         }
-        SourceType::Project | SourceType::Label => false,
+        SourceType::Label => label_of_source(s, m, accessible).is_none(),
+        SourceType::Project => false,
     }
+}
+
+/// The mirrored label behind a label source, if its team is accessible.
+fn label_of_source<'a>(
+    s: &GroupSource,
+    m: &Mirror<'a>,
+    accessible: &HashSet<&str>,
+) -> Option<&'a Label> {
+    m.labels
+        .iter()
+        .find(|l| l.remote_id == Some(s.remote_id))
+        .filter(|l| accessible.contains(l.team_id.as_str()))
+}
+
+/// Applies a group's label sources to its team/project pool. With team or
+/// project sources, labels narrow the pool to issues carrying any listed label.
+/// With only label sources, the pool is every issue on the labels' teams that
+/// carries any of them. Label sources on inaccessible teams are dropped.
+fn apply_label_sources<'a>(
+    cfg: &GroupConfig,
+    m: &Mirror<'a>,
+    accessible: &HashSet<&str>,
+    base: HashSet<&'a str>,
+) -> HashSet<&'a str> {
+    let label_sources: Vec<&GroupSource> =
+        cfg.sources.iter().filter(|s| s.source_type == SourceType::Label).collect();
+    if label_sources.is_empty() {
+        return base;
+    }
+    let labels: Vec<&Label> =
+        label_sources.iter().filter_map(|s| label_of_source(s, m, accessible)).collect();
+    let carries_any = |issue_id: &str| {
+        m.issue_labels
+            .get(issue_id)
+            .is_some_and(|ls| ls.iter().any(|l| labels.iter().any(|w| w.id == l.id)))
+    };
+    let narrowing = cfg.sources.iter().any(|s| s.source_type != SourceType::Label);
+    if narrowing {
+        return base.into_iter().filter(|id| carries_any(id)).collect();
+    }
+    let teams: HashSet<&str> = labels.iter().map(|l| l.team_id.as_str()).collect();
+    m.issues
+        .iter()
+        .filter(|i| teams.contains(i.team_id.as_str()) && carries_any(&i.id))
+        .map(|i| i.id.as_str())
+        .collect()
 }
 
 /// Ids of the issues a group's sources pull in, before the active-set rule.
@@ -516,5 +561,90 @@ mod tests {
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 2, 2));
         i.due_date = Some("2026-01-01".into());
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 1, 1));
+    }
+
+    fn label(id: &str, team: &str, remote: i64) -> Label {
+        Label {
+            id: id.into(),
+            remote_id: Some(remote),
+            team_id: team.into(),
+            name: id.into(),
+            color: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn label_src(remote: i64) -> GroupSource {
+        GroupSource { source_type: SourceType::Label, remote_id: remote, include_all: false }
+    }
+
+    fn label_fx() -> Fx {
+        let mut fx = Fx::new();
+        fx.labels = vec![
+            label("bug_a", "a", 10),
+            label("ui_a", "a", 11),
+            label("bug_b", "b", 12),
+            label("bug_arch", "arch", 13),
+        ];
+        let mut mine = issue("mine", "a", "la");
+        mine.assignee_id = Some("ma".into());
+        fx.issues = vec![
+            mine,
+            issue("theirs", "a", "la"),
+            issue("plain", "a", "la"),
+            issue("both", "a", "la"),
+            issue("on_b", "b", "lb"),
+            issue("on_arch", "arch", "larch"),
+        ];
+        fx.issue_labels.insert("mine".into(), vec![fx.labels[0].clone()]);
+        fx.issue_labels.insert("theirs".into(), vec![fx.labels[1].clone()]);
+        fx.issue_labels.insert("both".into(), vec![fx.labels[0].clone(), fx.labels[1].clone()]);
+        fx.issue_labels.insert("on_b".into(), vec![fx.labels[2].clone()]);
+        fx.issue_labels.insert("on_arch".into(), vec![fx.labels[3].clone()]);
+        fx
+    }
+
+    #[test]
+    fn labels_only_group_pulls_every_labeled_issue_on_label_teams() {
+        let fx = label_fx();
+        let got = fx.run(vec![cfg("g", vec![label_src(10), label_src(11)])], Some(99));
+        assert_eq!(got, vec![ids(&["both", "mine", "theirs"])]);
+    }
+
+    #[test]
+    fn labels_narrow_team_sources_to_issues_carrying_any_label() {
+        let fx = label_fx();
+        let got = fx.run(vec![cfg("g", vec![team_src(1, true), label_src(10)])], Some(99));
+        assert_eq!(got, vec![ids(&["both", "mine"])]);
+        // Assigned-to-me team source: only my labeled issues.
+        let srcs = vec![team_src(1, false), label_src(10), label_src(11)];
+        assert_eq!(fx.run(vec![cfg("g", srcs)], Some(99)), vec![ids(&["mine"])]);
+    }
+
+    #[test]
+    fn issue_with_several_listed_labels_appears_once() {
+        let fx = label_fx();
+        let got = fx.run(vec![cfg("g", vec![label_src(10), label_src(11)])], Some(99));
+        assert_eq!(got[0].iter().filter(|i| *i == "both").count(), 1);
+        let srcs = vec![team_src(1, true), label_src(10), label_src(11)];
+        let got = fx.run(vec![cfg("g", srcs)], Some(99));
+        assert_eq!(got[0].iter().filter(|i| *i == "both").count(), 1);
+    }
+
+    #[test]
+    fn label_on_inaccessible_team_or_unmirrored_is_dropped() {
+        let fx = label_fx();
+        let groups = vec![
+            cfg("only_arch", vec![label_src(13)]),
+            cfg("unknown", vec![label_src(999)]),
+            cfg("mixed", vec![label_src(13), label_src(12)]),
+        ];
+        let ev = fx.eval(&groups, Some(99));
+        assert!(ev.groups[0].inaccessible && ev.groups[0].issues.is_empty());
+        assert!(ev.groups[1].inaccessible && ev.groups[1].issues.is_empty());
+        assert!(!ev.groups[2].inaccessible);
+        let got: Vec<&str> = ev.groups[2].issues.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(got, vec!["on_b"]);
     }
 }
