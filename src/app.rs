@@ -81,6 +81,8 @@ pub enum Message {
     SetSavedViewAsHome(String),
     /// Switch the right pane to a non-team-scoped view (e.g. My Issues).
     NavigateToView(View),
+    /// Open a dashboard (its local id) from the sidebar.
+    OpenDashboard(String),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -584,6 +586,16 @@ pub enum View {
     /// Notification Inbox. Not team-scoped, but unlike `MyIssues` it loads no
     /// cross-team issue data (the per-team data stays as is).
     Inbox,
+    /// A dashboard (local id). Cross-team like `MyIssues`: the mirror data of
+    /// every active team is loaded, and the selected team is left alone.
+    Dashboard(String),
+}
+
+impl View {
+    /// Views whose data is every active team's (see `App::load_cross_team`).
+    fn is_cross_team(&self) -> bool {
+        matches!(self, View::MyIssues | View::Dashboard(_))
+    }
 }
 
 /// Sort key for the Projects table (mirrors the Rails index sort options).
@@ -643,8 +655,10 @@ pub struct App {
     teams: Vec<Team>,
     /// Mirrored dashboards for the sidebar (reloaded with the rest after a sync).
     dashboards: Vec<crate::db::dashboards::Dashboard>,
-    /// Local id of the open dashboard; set once dashboards can be opened.
-    open_dashboard_id: Option<String>,
+    /// The open dashboard's groups with their sources (reloaded with the mirror).
+    dashboard_groups: Vec<crate::dashboard_eval::GroupConfig>,
+    /// Header state of the open dashboard. Per-dashboard memory is a later ticket.
+    dashboard_header: crate::dashboard_eval::Header,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -823,7 +837,7 @@ impl App {
     /// another team (or we are on My Issues, whose data is mixed), select its
     /// team like a sidebar click, so the sidebar follows and its data is loaded.
     fn select_team_for_palette(&mut self, team_id: &str) -> Task<Message> {
-        if self.selected_team_id.as_deref() == Some(team_id) && self.view != View::MyIssues {
+        if self.selected_team_id.as_deref() == Some(team_id) && !self.view.is_cross_team() {
             return Task::none();
         }
         self.expanded_teams.insert(team_id.to_string());
@@ -863,7 +877,7 @@ impl App {
             self.selected_team_id = default_team_id(&self.teams);
         }
 
-        if self.view == View::MyIssues {
+        if self.view.is_cross_team() {
             self.load_cross_team(&conn);
         } else if let Some(ref team_id) = self.selected_team_id {
             self.lanes = queries::lanes_for_team(&conn, team_id).unwrap_or_default();
@@ -879,6 +893,7 @@ impl App {
             self.issue_labels.clear();
         }
 
+        self.reload_dashboard_config(&conn);
         self.reload_recurring(&conn);
         self.reload_detail_origin(&conn);
         self.refresh_open_view();
@@ -924,10 +939,46 @@ impl App {
         }
     }
 
+    /// Re-read the open dashboard's groups and sources from the mirror.
+    fn reload_dashboard_config(&mut self, conn: &rusqlite::Connection) {
+        use crate::db::dashboards;
+        self.dashboard_groups = match &self.view {
+            View::Dashboard(id) => dashboards::groups_for(conn, id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|group| crate::dashboard_eval::GroupConfig {
+                    sources: dashboards::sources_for(conn, &group.id).unwrap_or_default(),
+                    group,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+    }
+
+    /// The open dashboard evaluated over the loaded cross-team data.
+    fn dashboard_evaluation(&self) -> crate::dashboard_eval::Evaluation<'_> {
+        crate::dashboard_eval::evaluate(&crate::dashboard_eval::Input {
+            groups: &self.dashboard_groups,
+            mirror: crate::dashboard_eval::Mirror {
+                teams: &self.teams,
+                projects: &self.projects,
+                labels: &self.labels,
+                lanes: &self.lanes,
+                members: &self.members,
+                issues: &self.issues,
+                issue_labels: &self.issue_labels,
+            },
+            current_user_remote_id: self.config.current_user_remote_id,
+            today: chrono::Local::now().date_naive(),
+            header: self.dashboard_header,
+        })
+    }
+
     /// Switch to `view`, reloading data when crossing in or out of the
-    /// cross-team My Issues view (its data replaces the per-team data).
+    /// cross-team views (their data replaces the per-team data).
     fn switch_view(&mut self, view: View) {
-        let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
+        let crossing = self.view.is_cross_team() != view.is_cross_team()
+            || matches!(view, View::Dashboard(_));
         self.view = view;
         self.composer_focused = false;
         self.retain_open_view();
@@ -956,7 +1007,7 @@ impl App {
 
     fn reload_recurring(&mut self, conn: &rusqlite::Connection) {
         self.recurring_rows = match &self.selected_team_id {
-            Some(team_id) if self.view != View::MyIssues => {
+            Some(team_id) if !self.view.is_cross_team() => {
                 crate::db::recurring_issues::list_rows(conn, team_id).unwrap_or_default()
             }
             _ => Vec::new(),
@@ -1401,6 +1452,11 @@ impl App {
             &self.issues,
             &self.projects,
         );
+        if let View::Dashboard(id) = &self.view {
+            if let Some(d) = self.dashboards.iter().find(|d| d.id == *id) {
+                crumbs.push(d.name.clone());
+            }
+        }
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "My Issues".into());
         }
@@ -1461,6 +1517,19 @@ impl App {
     /// Board columns for the current display options, filters and search.
     /// Focus indices (`focused_lane`/`focused_issue`) index into these.
     fn board_columns(&self) -> Vec<display::Column<'_>> {
+        if matches!(self.view, View::Dashboard(_)) {
+            return self
+                .dashboard_evaluation()
+                .groups
+                .into_iter()
+                .map(|g| display::Column {
+                    title: g.group.name.clone(),
+                    lane_icon: None,
+                    issues: g.issues,
+                    sections: Vec::new(),
+                })
+                .collect();
+        }
         let my = self.view == View::MyIssues;
         let data = display::Data {
             team: if my { None } else { self.selected_team() },
@@ -1713,6 +1782,10 @@ impl App {
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
+        // Opening an issue from a dashboard (and Back) is its own ticket.
+        if matches!(self.view, View::Dashboard(_)) {
+            return Task::none();
+        }
         if self.view == View::MyIssues {
             self.selected_team_id = Some(issue.team_id.clone());
             self.view = View::Board;
@@ -2550,7 +2623,8 @@ impl App {
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views,
             dashboards: crate::db::dashboards::list(&conn).unwrap_or_default(),
-            open_dashboard_id: None,
+            dashboard_groups: Vec::new(),
+            dashboard_header: Default::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -2750,7 +2824,7 @@ impl App {
         // My Issues spans several teams: create and lane moves need a single
         // team's lanes, so they're no-ops here. Priority and delete act on the
         // issue's own row/team, so they work cross-team.
-        if self.view == View::MyIssues
+        if self.view.is_cross_team()
             && matches!(
                 message,
                 Message::CreateIssue | Message::MoveIssueNextLane | Message::MoveIssuePrevLane
@@ -3210,6 +3284,14 @@ impl App {
                 self.inbox.set_filter(filter);
                 self.reload_inbox();
                 return self.scroll_inbox_to_selection();
+            }
+
+            Message::OpenDashboard(id) => {
+                self.commit_issue_detail();
+                self.commit_project_detail();
+                self.detail_from_my_issues = false;
+                self.detail_from_inbox = false;
+                self.switch_view(View::Dashboard(id));
             }
 
             Message::NavigateToView(view) => {
@@ -5440,7 +5522,10 @@ impl App {
             open_view_id: self.open_view.as_ref().map(|v| v.view_id.as_str()),
             home: self.home_page.as_ref(),
             dashboards: &self.dashboards,
-            open_dashboard_id: self.open_dashboard_id.as_deref(),
+            open_dashboard_id: match &self.view {
+                View::Dashboard(id) => Some(id.as_str()),
+                _ => None,
+            },
         });
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
@@ -5624,6 +5709,23 @@ impl App {
             View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
             View::RecurringIssues => crate::views::recurring_issues::view(&self.recurring_rows),
             View::Inbox => crate::views::inbox::view(&self.inbox),
+            View::Dashboard(ref id) => {
+                let evaluation = self.dashboard_evaluation();
+                crate::views::dashboard::view(
+                    self.dashboards.iter().find(|d| d.id == *id),
+                    &evaluation,
+                    board::CardData {
+                        teams: &self.teams,
+                        lanes: &self.lanes,
+                        members: &self.members,
+                        projects: &self.projects,
+                        issue_labels: &self.issue_labels,
+                        display: self.board_display(),
+                    },
+                    self.focused_lane,
+                    self.focused_issue,
+                )
+            }
         };
 
         let token_configured = self
@@ -5920,6 +6022,9 @@ fn breadcrumb(
     if *view == View::Inbox {
         return vec!["Inbox".into()];
     }
+    if matches!(view, View::Dashboard(_)) {
+        return vec!["Dashboards".into()];
+    }
     let mut crumbs = vec![team
         .map(|t| t.identifier.clone())
         .unwrap_or_else(|| "JAIT".into())];
@@ -5945,7 +6050,7 @@ fn breadcrumb(
                 crumbs.push("Issues".into());
             }
         }
-        View::MyIssues | View::Inbox => {}
+        View::MyIssues | View::Inbox | View::Dashboard(_) => {}
     }
     crumbs
 }

@@ -25,7 +25,7 @@ pub struct SidebarState<'a> {
     pub home: Option<&'a HomePage>,
     /// Mirrored dashboards (any order; the view sorts them).
     pub dashboards: &'a [Dashboard],
-    /// Local id of the open dashboard (set once dashboards can be opened).
+    /// Local id of the open dashboard (`View::Dashboard`), highlighted in its row.
     pub open_dashboard_id: Option<&'a str>,
 }
 
@@ -62,17 +62,12 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         col = col.push(section_header("DASHBOARDS"));
         for d in ordered_dashboards(dashboards) {
             let active = open_dashboard_id == Some(d.id.as_str());
-            // Rows don't open anything yet (the open ticket wires this up).
-            col = col.push(
-                container(text(&d.name).size(13).color(if active {
-                    t::text_primary()
-                } else {
-                    t::text_secondary()
-                }))
-                .padding([6, 14])
-                .width(Length::Fill)
-                .style(move |_theme: &Theme| selected_row_container_style(active)),
-            );
+            col = col.push(nav_row(
+                &d.name,
+                active,
+                Message::OpenDashboard(d.id.clone()),
+                14,
+            ));
         }
     }
 
@@ -437,15 +432,6 @@ fn selected_row_style(active: bool) -> button::Style {
             width: if active { 2.0 } else { 0.0 },
             radius: 0.0.into(),
         },
-        ..Default::default()
-    }
-}
-
-fn selected_row_container_style(active: bool) -> container::Style {
-    let b = selected_row_style(active);
-    container::Style {
-        background: b.background,
-        border: b.border,
         ..Default::default()
     }
 }
