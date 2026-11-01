@@ -17,7 +17,7 @@
 
 use iced::{Point, Rectangle};
 
-use crate::db::models::{Issue, Lane, Member, Project, Team};
+use crate::db::models::{Issue, Lane, Member, Priority, Project, Team};
 use crate::hover_card::{Effect, Event, HoverCard};
 use crate::lane_icon::{icon_for, LaneIcon};
 use crate::mentions::LinkTarget;
@@ -114,6 +114,11 @@ pub struct IssueCard {
     pub title: String,
     /// The issue's lane; `None` when the lane isn't in the records.
     pub lane: Option<LaneInfo>,
+    pub priority: Priority,
+    /// `Urgent`..`Low`, or `No priority`; always present, like the web's.
+    pub priority_label: &'static str,
+    /// The assignee's name; `None` when unassigned or not in the records.
+    pub assignee: Option<String>,
 }
 
 /// A lane as the card shows it: icon beside the name.
@@ -136,7 +141,7 @@ pub struct Records<'a> {
 
 /// Card content for an anchor from local data; `None` draws no card.
 pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
-    let Records { issues, teams, lanes, .. } = *records;
+    let Records { issues, teams, lanes, members, .. } = *records;
     match anchor {
         Anchor::Issue(id) => {
             let issue = issues.iter().find(|i| i.id == *id)?;
@@ -149,7 +154,20 @@ pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
                 Some(team) => format!("{}-{}", team.identifier, number),
                 None => format!("#{number}"),
             };
-            Some(CardContent::Issue(IssueCard { identifier, title: issue.title.clone(), lane }))
+            let priority = issue.priority_enum();
+            let assignee = issue
+                .assignee_id
+                .as_ref()
+                .and_then(|id| members.iter().find(|m| m.id == *id))
+                .map(|m| m.name.clone());
+            Some(CardContent::Issue(IssueCard {
+                identifier,
+                title: issue.title.clone(),
+                lane,
+                priority,
+                priority_label: crate::display::PRIORITY_TITLES[priority.to_i32() as usize],
+                assignee,
+            }))
         }
         Anchor::Mention(_) => None,
     }
@@ -331,7 +349,10 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        let issues = [issue("a", "t", Some(7), "Fix it"), issue("b", "gone", Some(3), "Orphan")];
+        let mut issues = [issue("a", "t", Some(7), "Fix it"), issue("b", "gone", Some(3), "Orphan")];
+        for i in &mut issues {
+            i.priority = 0;
+        }
         let teams = [team];
         let records = Records { issues: &issues, teams: &teams, ..Default::default() };
         let rows = [
@@ -343,7 +364,14 @@ mod tests {
         for (anchor, want) in rows {
             let got = content_for(&anchor, &records);
             let want = want.map(|(i, t)| {
-                CardContent::Issue(IssueCard { identifier: i.into(), title: t.into(), lane: None })
+                CardContent::Issue(IssueCard {
+                    identifier: i.into(),
+                    title: t.into(),
+                    lane: None,
+                    priority: Priority::Urgent,
+                    priority_label: "Urgent",
+                    assignee: None,
+                })
             });
             assert_eq!(got, want, "{anchor:?}");
         }
@@ -379,6 +407,41 @@ mod tests {
             };
             let want = want.map(|(name, icon)| LaneInfo { name: name.into(), icon });
             assert_eq!(card.lane, want);
+        }
+    }
+
+    fn member(id: &str, name: &str) -> Member {
+        Member {
+            id: id.into(),
+            remote_id: None,
+            team_id: "t".into(),
+            name: name.into(),
+            email: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn card_carries_priority_and_assignee() {
+        let members = [member("m", "Ann Lee")];
+        let rows = [
+            (0, Some("m"), "Urgent", Some("Ann Lee")),
+            (3, None, "Low", None),
+            (4, Some("gone"), "No priority", None),
+            (99, Some("m"), "No priority", Some("Ann Lee")),
+        ];
+        for (priority, assignee, label, name) in rows {
+            let mut i = issue("a", "t", Some(1), "x");
+            i.priority = priority;
+            i.assignee_id = assignee.map(String::from);
+            let issues = [i];
+            let records = Records { issues: &issues, members: &members, ..Default::default() };
+            let Some(CardContent::Issue(card)) = content_for(&Anchor::Issue("a".into()), &records) else {
+                panic!("card expected");
+            };
+            assert_eq!(card.priority_label, label);
+            assert_eq!(card.assignee.as_deref(), name);
         }
     }
 }

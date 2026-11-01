@@ -45,9 +45,22 @@ fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
             .push(crate::views::lane_icon::view(lane.icon))
             .push(text(lane.name.clone()).size(t::type_scale::XS).color(t::text_muted()));
     }
+    // Groups of facts that wrap onto further lines when the card is narrow.
+    let mut facts = vec![fact(vec![
+        text("●").size(t::type_scale::XS).color(t::priority_color(issue.priority)).into(),
+        muted(issue.priority_label),
+    ])];
+    if let Some(name) = &issue.assignee {
+        facts.push(fact(vec![initials_badge(name), muted(name.clone())]));
+    }
+    let meta = iced::widget::Row::with_children(facts)
+        .spacing(t::space::S3)
+        .align_y(iced::Alignment::Center)
+        .wrap();
     let body = column![
         top,
         text(issue.title.clone()).size(t::type_scale::SM).color(t::text_primary()),
+        meta,
     ]
     .spacing(t::space::S1);
     container(body)
@@ -56,6 +69,31 @@ fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::bg_modal())),
             border: Border { color: t::border(), width: 1.0, radius: t::radius::LG.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// One icon-and-label group in the meta row.
+fn fact<'a>(parts: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    iced::widget::Row::with_children(parts)
+        .spacing(t::space::S1)
+        .align_y(iced::Alignment::Center)
+        .into()
+}
+
+fn muted<'a>(label: impl Into<String>) -> Element<'a, Message> {
+    text(label.into()).size(t::type_scale::XS).color(t::text_muted()).into()
+}
+
+/// A small circle with the person's initials.
+fn initials_badge<'a>(name: &str) -> Element<'a, Message> {
+    container(text(crate::views::projects::lead_initials(name)).size(9).color(t::text_primary()))
+        .center_x(Length::Fixed(16.0))
+        .center_y(Length::Fixed(16.0))
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_card())),
+            border: Border { color: t::border(), width: 1.0, radius: t::radius::FULL.into() },
             ..Default::default()
         })
         .into()
