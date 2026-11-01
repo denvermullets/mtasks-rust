@@ -92,6 +92,8 @@ pub enum Inline {
     Strong(Vec<Inline>),
     /// `*emphasis*` text; nests like [`Inline::Strong`].
     Emphasis(Vec<Inline>),
+    /// `~~struck~~` text; nests like [`Inline::Strong`].
+    Strikethrough(Vec<Inline>),
 }
 
 /// Whether a link target may be opened: only `http`, `https` and `mailto`
@@ -110,7 +112,7 @@ pub fn is_openable_link(url: &str) -> bool {
 /// Parser options: the web feature set. Hard breaks are never produced from
 /// plain newlines, so nothing to switch off.
 fn parse_options() -> Options {
-    Options::ENABLE_TASKLISTS
+    Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH
 }
 
 /// Parse `body` into a [`Document`]. Never panics; input that isn't valid
@@ -272,6 +274,11 @@ impl Builder {
                 self.wrappers.push((std::mem::take(&mut self.current), Inline::Emphasis));
             }
             Event::End(TagEnd::Emphasis) => self.close_wrapper(),
+            Event::Start(Tag::Strikethrough) if self.html_depth == 0 => {
+                self.flush_pending();
+                self.wrappers.push((std::mem::take(&mut self.current), Inline::Strikethrough));
+            }
+            Event::End(TagEnd::Strikethrough) => self.close_wrapper(),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::Start(Tag::List(start)) => self.open(Frame::List(start, Vec::new(), Vec::new())),
             Event::Start(Tag::Item) => {
@@ -537,6 +544,41 @@ mod tests {
 
     fn em(runs: Vec<Inline>) -> Inline {
         Inline::Emphasis(runs)
+    }
+
+    fn strike(runs: Vec<Inline>) -> Inline {
+        Inline::Strikethrough(runs)
+    }
+
+    #[test]
+    fn parses_strikethrough_runs() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("strike", "a ~~b~~ c", vec![para(vec![text("a "), strike(vec![text("b")]), text(" c")])]),
+            ("unclosed stays literal", "~~oops", vec![para(vec![text("~~oops")])]),
+            ("in code stays literal", "`~~x~~`", vec![para(vec![text("~~x~~")])]),
+            (
+                "around bold",
+                "~~x **y**~~",
+                vec![para(vec![strike(vec![text("x "), strong(vec![text("y")])])])],
+            ),
+            (
+                "around italic",
+                "~~*x*~~",
+                vec![para(vec![strike(vec![em(vec![text("x")])])])],
+            ),
+            (
+                "tokens inside",
+                "~~PROJ-7 @Ann~~",
+                vec![para(vec![strike(vec![
+                    Inline::IssueRef { text: "PROJ-7".into(), prefix: "PROJ".into(), number: 7 },
+                    text(" "),
+                    Inline::Mention("@Ann".into()),
+                ])])],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["Ann"]).blocks, want, "{name}");
+        }
     }
 
     #[test]

@@ -246,6 +246,8 @@ enum Run {
     Bold(Box<Run>),
     /// A run drawn italic; wraps like `Bold`.
     Italic(Box<Run>),
+    /// A run drawn with a line through it; wraps like `Bold`.
+    Struck(Box<Run>),
 }
 
 /// Map inlines to runs. `resolve` turns an `IDENT-n` token into a link target.
@@ -276,6 +278,11 @@ fn push_runs(inlines: &[Inline], resolve: &impl Fn(&str) -> Option<LinkTarget>, 
                 push_runs(inner, resolve, &mut runs);
                 out.extend(runs.into_iter().map(|r| Run::Italic(Box::new(r))));
             }
+            Inline::Strikethrough(inner) => {
+                let mut runs = Vec::new();
+                push_runs(inner, resolve, &mut runs);
+                out.extend(runs.into_iter().map(|r| Run::Struck(Box::new(r))));
+            }
         }
     }
 }
@@ -299,6 +306,7 @@ fn span_for<'a>(r: Run, plain: Color) -> text::Span<'a, LinkTarget, iced::Font> 
             s.font = Some(fonts::italic(s.font.unwrap_or_else(fonts::active)));
             s
         }
+        Run::Struck(inner) => span_for(*inner, plain).strikethrough(true),
     }
 }
 
@@ -519,6 +527,35 @@ mod tests {
         let f = both.font.unwrap();
         // No bold italic face yet: italic wins (JRST-270).
         assert_eq!((f.style, f.weight), (iced::font::Style::Italic, iced::font::Weight::Normal));
+    }
+
+    #[test]
+    fn strikethrough_maps_to_struck_runs_keeping_their_tokens() {
+        let doc = document::parse_with("~~a @Ann~~ ~~*b*~~", "", &["Ann"]);
+        let Block::Paragraph(inl) = &doc.blocks[0] else { panic!("paragraph") };
+        let st = |r| Run::Struck(Box::new(r));
+        assert_eq!(
+            runs(inl, resolve),
+            [
+                st(Run::Plain("a ".into())),
+                st(Run::Mention("@Ann".into())),
+                Run::Plain(" ".into()),
+                st(Run::Italic(Box::new(Run::Plain("b".into())))),
+            ]
+        );
+    }
+
+    #[test]
+    fn struck_spans_set_strikethrough_and_keep_other_styling() {
+        let s = span_for(Run::Struck(Box::new(Run::Plain("x".into()))), Color::WHITE);
+        assert!(s.strikethrough);
+        assert_eq!(s.color, Some(Color::WHITE));
+        let link = span_for(
+            Run::Struck(Box::new(Run::Link { text: "l".into(), url: "https://a.b".into() })),
+            Color::WHITE,
+        );
+        assert!(link.strikethrough && link.link.is_some());
+        assert!(!span_for(Run::Plain("x".into()), Color::WHITE).strikethrough);
     }
 
     #[test]
