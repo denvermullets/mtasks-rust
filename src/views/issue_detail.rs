@@ -27,6 +27,8 @@ pub struct IssueDetailState {
     pub issue_id: String,
     pub title: String,
     pub description: text_editor::Content,
+    /// True while the description editor is open; otherwise it is drawn rendered.
+    pub editing_description: bool,
     /// "YYYY-MM-DD" or "".
     pub due_date: String,
     /// Numeric text (e.g. "3", "2.5") or "".
@@ -72,6 +74,7 @@ impl IssueDetailState {
             issue_id: issue.id.clone(),
             title: issue.title.clone(),
             description: text_editor::Content::with_text(&body),
+            editing_description: false,
             due_date: issue.due_date.clone().unwrap_or_default(),
             estimate: issue
                 .estimate
@@ -179,24 +182,8 @@ pub fn view<'a>(
                 .as_deref()
                 .map(|e| text(e).size(12).color(t::danger())),
         )
-        .push(
-            text_editor(&detail.description)
-                .placeholder("Add description…  (@ to mention, # to link an issue)")
-                .on_action(Message::IssueDetailDescriptionChanged)
-                .key_binding(paste_image_binding(
-                    editor_binding(
-                        None,
-                        suggesting(detail.suggest.as_ref(), EditorTarget::Description),
-                    ),
-                    Message::PasteImageIntoDescription,
-                ))
-                .padding(10)
-                .size(14)
-                .height(Length::Fixed(220.0)),
-        )
-        .push_maybe(suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
-        .push_maybe(description_preview(
-            &detail.description_text(),
+        .push(description_section(
+            detail,
             &BodyCtx {
                 team,
                 teams,
@@ -800,6 +787,136 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
         .into()
 }
 
+/// How an editable markdown description is drawn. JRST-293 can reuse this and
+/// the focus operation below for the project description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DescriptionDisplay {
+    Editor,
+    Rendered,
+    /// Empty and not being edited: an "Add description…" prompt.
+    Empty,
+}
+
+/// Editing wins; otherwise a blank buffer shows the prompt and anything else
+/// is rendered. Decided from the buffered text so unsaved edits show.
+pub(crate) fn description_display(buffered: &str, editing: bool) -> DescriptionDisplay {
+    if editing {
+        DescriptionDisplay::Editor
+    } else if buffered.trim().is_empty() {
+        DescriptionDisplay::Empty
+    } else {
+        DescriptionDisplay::Rendered
+    }
+}
+
+/// Container id used to find the description editor for focusing.
+pub(crate) fn description_editor_id() -> iced::widget::container::Id {
+    iced::widget::container::Id::new("issue-description-editor")
+}
+
+/// Focuses the first focusable widget inside the container `target`
+/// (text_editor has no id of its own in iced 0.13) and unfocuses the rest.
+pub(crate) struct FocusFirstIn {
+    target: iced::advanced::widget::Id,
+    done: bool,
+}
+
+impl FocusFirstIn {
+    pub(crate) fn new(target: iced::widget::container::Id) -> Self {
+        Self { target: target.into(), done: false }
+    }
+}
+
+struct FocusFirst<'a>(&'a mut bool);
+
+impl iced::advanced::widget::Operation<()> for FocusFirst<'_> {
+    fn container(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
+    ) {
+        operate_on_children(self);
+    }
+
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        _id: Option<&iced::advanced::widget::Id>,
+    ) {
+        if !*self.0 {
+            state.focus();
+            *self.0 = true;
+        }
+    }
+}
+
+impl iced::advanced::widget::Operation<()> for FocusFirstIn {
+    fn container(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
+    ) {
+        if id == Some(&self.target) {
+            operate_on_children(&mut FocusFirst(&mut self.done));
+        } else {
+            operate_on_children(self);
+        }
+    }
+
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        _id: Option<&iced::advanced::widget::Id>,
+    ) {
+        // Anything focused outside the target loses focus.
+        state.unfocus();
+    }
+}
+
+/// The description: rendered markdown (click to edit), an empty prompt, or the editor.
+fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let text_now = detail.description_text();
+    match description_display(&text_now, detail.editing_description) {
+        DescriptionDisplay::Editor => {
+            let editor = text_editor(&detail.description)
+                .placeholder("Add description…  (@ to mention, # to link an issue)")
+                .on_action(Message::IssueDetailDescriptionChanged)
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        None,
+                        suggesting(detail.suggest.as_ref(), EditorTarget::Description),
+                    ),
+                    Message::PasteImageIntoDescription,
+                ))
+                .padding(10)
+                .size(14)
+                .height(Length::Fixed(220.0));
+            column![]
+                .push(container(editor).id(description_editor_id()))
+                .push_maybe(suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
+                .into()
+        }
+        DescriptionDisplay::Empty => iced::widget::mouse_area(
+            container(text("Add description…").size(14).color(t::text_muted()))
+                .padding(10)
+                .width(Length::Fill),
+        )
+        .on_press(Message::EditIssueDescription)
+        .interaction(iced::mouse::Interaction::Text)
+        .into(),
+        DescriptionDisplay::Rendered => iced::widget::mouse_area(
+            container(crate::views::body::view(&text_now, 14.0, t::text_secondary(), ctx))
+                .padding(10)
+                .width(Length::Fill),
+        )
+        .on_press(Message::EditIssueDescription)
+        .interaction(iced::mouse::Interaction::Text)
+        .into(),
+    }
+}
+
 /// Rendered (highlighted, clickable) view of the description, shown only when
 /// it contains at least one token; the editor itself is plain text.
 pub(crate) fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
@@ -1205,5 +1322,24 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
         placeholder: t::text_muted(),
         value: t::text_primary(),
         selection: t::accent(),
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    #[test]
+    fn description_display_table() {
+        let cases = [
+            ("", false, DescriptionDisplay::Empty),
+            ("  \n ", false, DescriptionDisplay::Empty),
+            ("hello **x**", false, DescriptionDisplay::Rendered),
+            ("hello", true, DescriptionDisplay::Editor),
+            ("", true, DescriptionDisplay::Editor),
+        ];
+        for (text, editing, want) in cases {
+            assert_eq!(description_display(text, editing), want, "{text:?} {editing}");
+        }
     }
 }
