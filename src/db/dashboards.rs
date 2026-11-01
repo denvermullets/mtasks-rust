@@ -551,6 +551,55 @@ pub fn delete_local(conn: &Connection, dashboard_id: &str) -> Result<Option<Stri
         .map(|id| serde_json::json!({ "remote_id": id }).to_string()))
 }
 
+/// Remove one group and its sources locally and retire its unpushed queue
+/// entries (a never-pushed create is simply dropped). The dashboard's other
+/// groups keep their relative order, and a pending group-order payload loses
+/// the group's id. Returns the `dashboard_group` delete payload
+/// (`{"dashboard_remote_id": n, "remote_id": n}`) when the group exists on the
+/// server, so a delete must be queued; `None` otherwise (or if already gone).
+pub fn delete_group_local(conn: &Connection, group_id: &str) -> Result<Option<String>> {
+    let Some(group) = get_group(conn, group_id)? else {
+        return Ok(None);
+    };
+    let dashboard = get(conn, &group.dashboard_id)?;
+    let now = crate::db::now_iso();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE sync_queue SET synced_at = ?3
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
+        params![GROUP_ENTITY_TYPE, group_id, now],
+    )?;
+    // The group's sources go with the row (ON DELETE CASCADE).
+    tx.execute("DELETE FROM dashboard_groups WHERE id = ?1", params![group_id])?;
+    let pending_order: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT id, payload FROM sync_queue
+             WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL AND payload IS NOT NULL",
+            params![GROUP_ORDER_ENTITY_TYPE, group.dashboard_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((entry_id, payload)) = pending_order {
+        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&payload) {
+            if let Some(ids) = v.get_mut("group_ids").and_then(|i| i.as_array_mut()) {
+                ids.retain(|i| i.as_str() != Some(group_id));
+                tx.execute(
+                    "UPDATE sync_queue SET payload = ?2 WHERE id = ?1",
+                    params![entry_id, v.to_string()],
+                )?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(match (group.remote_id, dashboard.and_then(|d| d.remote_id)) {
+        (Some(remote_id), Some(dashboard_remote_id)) => Some(
+            serde_json::json!({ "dashboard_remote_id": dashboard_remote_id, "remote_id": remote_id })
+                .to_string(),
+        ),
+        _ => None,
+    })
+}
+
 /// After a successful `POST`: the local row takes the server's id, position
 /// and `updated_at`. The name and description stay as typed (a later local
 /// edit may be queued). A pull that ran first may have mirrored the pushed
@@ -1362,6 +1411,51 @@ mod tests {
         // The other dashboard is untouched.
         assert_eq!(queue_for(&conn, GROUP_ENTITY_TYPE), [(gb.id.clone(), "update".to_string())]);
         assert!(get(&conn, &b.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_group_local_of_a_never_pushed_group_discards_it_and_its_queue() {
+        let conn = setup();
+        let d = create_local(&conn, "D", "").unwrap();
+        let mut draft = draft_named("G");
+        draft.toggle_source(SourceType::Team, 7);
+        let g = create_group_local(&conn, &d.id, &draft).unwrap();
+        assert_eq!(delete_group_local(&conn, &g.id).unwrap(), None);
+        assert!(get_group(&conn, &g.id).unwrap().is_none());
+        assert!(sources_for(&conn, &g.id).unwrap().is_empty());
+        assert!(queue_for(&conn, GROUP_ENTITY_TYPE).is_empty());
+        assert!(get(&conn, &d.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_group_local_of_a_pushed_group_returns_payload_and_keeps_order() {
+        let conn = setup();
+        let mut g1 = group(10, "A", 0);
+        g1.team_ids = vec![1];
+        apply_snapshot(&conn, &[dash(5, "D", 0, vec![g1, group(11, "B", 1), group(12, "C", 2)])]).unwrap();
+        let d = find_by_remote_id(&conn, 5).unwrap().unwrap();
+        let gs = groups_for(&conn, &d.id).unwrap();
+        sync_queue::enqueue(&conn, GROUP_ENTITY_TYPE, &gs[0].id, "update", None).unwrap();
+        let order = serde_json::json!({ "group_ids": [gs[2].id, gs[0].id, gs[1].id] }).to_string();
+        sync_queue::enqueue(&conn, GROUP_ORDER_ENTITY_TYPE, &d.id, "update", Some(&order)).unwrap();
+
+        let payload = delete_group_local(&conn, &gs[0].id).unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!((v["remote_id"].as_i64(), v["dashboard_remote_id"].as_i64()), (Some(10), Some(5)));
+        assert!(sources_for(&conn, &gs[0].id).unwrap().is_empty());
+        assert!(queue_for(&conn, GROUP_ENTITY_TYPE).is_empty());
+        let left: Vec<String> = groups_for(&conn, &d.id).unwrap().into_iter().map(|g| g.id).collect();
+        assert_eq!(left, [gs[1].id.clone(), gs[2].id.clone()]);
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        let o = q.iter().find(|e| e.entity_type == GROUP_ORDER_ENTITY_TYPE).unwrap();
+        let ids: serde_json::Value = serde_json::from_str(o.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(ids["group_ids"], serde_json::json!([gs[2].id, gs[1].id]));
+    }
+
+    #[test]
+    fn delete_group_local_of_a_missing_group_is_a_no_op() {
+        let conn = setup();
+        assert_eq!(delete_group_local(&conn, "nope").unwrap(), None);
     }
 
     #[test]

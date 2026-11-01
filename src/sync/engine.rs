@@ -427,6 +427,9 @@ async fn process(
         (dashboards::GROUP_ENTITY_TYPE, "create") => {
             dashboard_group_create(client, &entry.entity_id, entry_id).await
         }
+        (dashboards::GROUP_ENTITY_TYPE, "delete") => {
+            dashboard_group_delete(client, entry.payload.as_deref()).await
+        }
         (dashboards::ENTITY_TYPE, "update") => dashboard_update(client, &entry.entity_id).await,
         (dashboards::ENTITY_TYPE, "delete") => {
             dashboard_delete(client, entry.payload.as_deref()).await
@@ -3032,6 +3035,21 @@ async fn dashboard_delete(client: &ApiClient, payload: Option<&str>) -> Outcome 
         return Outcome::DropAndLog("dashboard delete: bad payload".into());
     };
     dashboard_delete_outcome(crate::api::dashboards::delete(client, remote_id).await)
+}
+
+/// `DELETE /dashboards/:dashboard_id/groups/:id`. A 404 means it is already gone: done.
+async fn dashboard_group_delete(client: &ApiClient, payload: Option<&str>) -> Outcome {
+    let Some((dashboard_remote_id, remote_id)) = group_delete_ids(payload) else {
+        return Outcome::DropAndLog("dashboard group delete: bad payload".into());
+    };
+    dashboard_delete_outcome(
+        crate::api::dashboards::delete_group(client, dashboard_remote_id, remote_id).await,
+    )
+}
+
+fn group_delete_ids(payload: Option<&str>) -> Option<(i64, i64)> {
+    let v: serde_json::Value = serde_json::from_str(payload?).ok()?;
+    Some((v.get("dashboard_remote_id")?.as_i64()?, v.get("remote_id")?.as_i64()?))
 }
 
 fn dashboard_delete_outcome(result: Result<(), ApiError>) -> Outcome {
@@ -6164,6 +6182,16 @@ mod tests {
         for bad in [None, Some("nope"), Some("{}")] {
             assert_eq!(saved_view_delete_id(bad), None);
         }
+    }
+
+    #[test]
+    fn group_delete_payload_needs_both_remote_ids() {
+        assert_eq!(
+            group_delete_ids(Some(r#"{"dashboard_remote_id":5,"remote_id":10}"#)),
+            Some((5, 10))
+        );
+        assert_eq!(group_delete_ids(Some(r#"{"remote_id":10}"#)), None);
+        assert_eq!(group_delete_ids(None), None);
     }
 
     #[test]
