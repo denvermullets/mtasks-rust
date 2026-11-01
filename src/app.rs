@@ -156,6 +156,8 @@ pub enum Message {
     OpenAttachment(crate::db::attachments::Attachment),
     /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
     AttachmentDownloaded(crate::db::attachments::Attachment, Result<Vec<u8>, String>),
+    /// Bytes for an image fetched into the cache for display (JRST-187), keyed by blob key.
+    ImageFetched(String, Result<Vec<u8>, String>),
     ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
@@ -644,6 +646,9 @@ pub struct App {
     /// Files attached to the open issue (synced, then pending/failed). Repopulated
     /// each reload only while `view` is `IssueDetail`.
     detail_attachments: Vec<crate::db::attachments::Attachment>,
+    /// Fetch state per blob key for images shown in the UI (thumbnails now;
+    /// inline images and the lightbox reuse it). Bytes live in the file cache.
+    images: crate::files::images::ImageStore,
     /// Files attached to each comment of the open issue/project, keyed by the
     /// comment's local id (comments without files have no entry). Repopulated
     /// each reload while `view` is `IssueDetail` or `ProjectDetail`.
@@ -1666,6 +1671,54 @@ impl App {
         )
     }
 
+    /// Make sure `att`'s image is on its way into the cache for display.
+    /// No-op for non-images, unuploaded files, and keys already known to
+    /// `images`. A cache hit becomes `Ready` at once; a miss downloads and
+    /// reports `Message::ImageFetched`.
+    pub(crate) fn request_image(&mut self, att: &crate::db::attachments::Attachment) -> Task<Message> {
+        if !crate::files::images::is_thumbnailable(&att.content_type) {
+            return Task::none();
+        }
+        let (Some(key), Some(remote_id)) = (crate::files::open::blob_key(att), att.remote_id)
+        else {
+            return Task::none();
+        };
+        if !self.images.begin(&key) {
+            return Task::none();
+        }
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.images.set_ready(&key, path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.images.set_failed(&key);
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                crate::api::attachments::download(&client, remote_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |r| Message::ImageFetched(key.clone(), r),
+        )
+    }
+
+    /// `request_image` for every Attachment currently rendered in the open detail view.
+    fn request_visible_images(&mut self) -> Task<Message> {
+        let atts: Vec<crate::db::attachments::Attachment> = self
+            .detail_attachments
+            .iter()
+            .chain(self.detail_comment_attachments.values().flatten())
+            .filter(|a| crate::files::images::is_thumbnailable(&a.content_type))
+            .cloned()
+            .collect();
+        Task::batch(atts.iter().map(|a| self.request_image(a)))
+    }
+
     /// Copy a cached blob to its real filename and hand it to the OS.
     fn open_cached_attachment(
         &mut self,
@@ -2169,6 +2222,7 @@ impl App {
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
+            images: Default::default(),
             detail_comment_attachments: Default::default(),
             detail_references: Vec::new(),
             detail_origin: None,
@@ -2370,6 +2424,7 @@ impl App {
         sync_queue::take_local_write();
         let task = self.update_inner(message);
         self.retain_open_view();
+        let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
@@ -3183,6 +3238,15 @@ impl App {
                     false,
                 ),
             },
+            Message::ImageFetched(key, result) => {
+                let cache = crate::files::cache::FileCache::at_default_root();
+                match result.map_err(|e| e.to_string()).and_then(|bytes| {
+                    cache.put(&self.db(), &key, &bytes).map_err(|e| e.to_string())
+                }) {
+                    Ok(path) => self.images.set_ready(&key, path),
+                    Err(_) => self.images.set_failed(&key),
+                }
+            }
             Message::ActivityFetched(issue_id, stored) => {
                 // Only refresh when entries landed and that issue is still open.
                 if stored > 0
@@ -4860,6 +4924,7 @@ impl App {
                             &self.detail_comments,
                             &self.detail_attachments,
                             &self.detail_comment_attachments,
+                            &self.images,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -4905,6 +4970,7 @@ impl App {
                             &self.detail_references,
                             &self.detail_attachments,
                             &self.detail_comment_attachments,
+                            &self.images,
                             &self.issues,
                             parent,
                             sub_issues,
