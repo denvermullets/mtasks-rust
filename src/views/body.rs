@@ -176,6 +176,12 @@ fn list_marker(start: Option<u64>, index: usize) -> String {
     }
 }
 
+/// Marker for a task item, replacing its bullet or number; `None` for a
+/// plain item. Read-only: toggling a box is not wired.
+fn task_marker(done: Option<bool>) -> Option<&'static str> {
+    done.map(|d| if d { "☑" } else { "☐" })
+}
+
 /// Gutter holding the marker; item content sits in its own column beside it,
 /// so wrapped lines hang under the first line rather than under the marker.
 /// A numbered gutter is as wide as its widest label so items stay aligned.
@@ -186,13 +192,13 @@ fn list_block<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<
         Some(_) => labels.iter().map(|l| l.chars().count()).max().unwrap_or(1) as f32 * size * 0.65 + size * 0.5,
         None => size * 1.25,
     };
-    for (item, label) in list.items.iter().zip(labels) {
+    for ((item, label), done) in list.items.iter().zip(labels).zip(&list.checked) {
         let mut content = column![].spacing(t::space::S1).width(iced::Length::Fill);
         for b in item {
             content = content.push(block(b, size, plain, ctx));
         }
         col = col.push(
-            row![container(text(label).size(size).color(plain)).width(gutter), content]
+            row![container(text(task_marker(*done).map(str::to_string).unwrap_or(label)).size(size).color(plain)).width(gutter), content]
                 .spacing(t::space::S1),
         );
     }
@@ -370,6 +376,13 @@ mod tests {
     use super::*;
 
     const HOST: &str = "http://localhost:3005";
+
+    #[test]
+    fn task_markers_show_state() {
+        assert_eq!(task_marker(None), None);
+        assert_eq!(task_marker(Some(false)), Some("☐"));
+        assert_eq!(task_marker(Some(true)), Some("☑"));
+    }
 
     #[test]
     fn list_markers_count_from_the_start() {
