@@ -3164,14 +3164,25 @@ impl App {
         self.push_toast(msg, ToastKind::Error, false);
     }
 
+    /// Whether either detail view has its description editor open.
+    fn editing_description(&self) -> bool {
+        self.issue_detail.as_ref().is_some_and(|d| d.editing_description)
+            || self.project_detail.as_ref().is_some_and(|d| d.editing_description)
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
         let view_before = self.view.clone();
+        let editing_before = self.editing_description();
         let mut task = self.update_inner(message);
-        // The one place that closes hover cards on a view change or modal
-        // open, whatever message caused it (keyboard included).
-        if self.view != view_before || self.modal != Modal::None {
+        // The one place that closes hover cards on a view change, modal open
+        // or description editor toggle, whatever message caused it (keyboard
+        // included).
+        if self.view != view_before
+            || self.modal != Modal::None
+            || self.editing_description() != editing_before
+        {
             let effect = self.body_hover.event(crate::hover_card::Event::ViewChanged);
             task = Task::batch([task, Self::hover_timer(effect)]);
         }
