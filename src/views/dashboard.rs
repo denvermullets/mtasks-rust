@@ -3,11 +3,14 @@
 //!
 //! Focus uses the same `(group index, issue index in group)` pair as the list.
 
-use iced::widget::{button, column, container, horizontal_rule, horizontal_space, row, scrollable, text, Column};
+use iced::widget::{
+    button, column, container, horizontal_rule, horizontal_space, pick_list, row, scrollable, text,
+    Column,
+};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header};
+use crate::dashboard_eval::{Evaluation, Filter, GroupResult, Header, Sort};
 use crate::db::dashboards::{Dashboard, MoveDirection};
 use crate::theme as t;
 use crate::views::board::CardData;
@@ -64,11 +67,17 @@ fn controls<'a>(dashboard: &'a Dashboard, header: Header) -> Element<'a, Message
             .spacing(12)
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
-            .push(filter_tabs(header.filter)),
+            .push(filter_tabs(header.filter))
+            .push(sort_picker(header.sort)),
     )
     .padding([8, 16])
     .width(Length::Fill)
     .into()
+}
+
+/// The sort order picker.
+fn sort_picker<'a>(active: Sort) -> Element<'a, Message> {
+    pick_list(Sort::ALL, Some(active), Message::SetDashboardSort).text_size(13).into()
 }
 
 /// The Today / Week / Hot / Open tabs; the active one is highlighted.
