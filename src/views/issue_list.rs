@@ -19,13 +19,18 @@ use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::Issue;
+use crate::fonts;
 use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
 use crate::scroll;
-use crate::theme as t;
+use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::board::CardData;
 use crate::views::labels as labels_view;
 use crate::views::lane_icon;
 use crate::views::util;
+
+/// Horizontal padding of the list column and of each row inside it.
+const LIST_PAD_X: f32 = 12.0;
+const ROW_PAD_X: f32 = space::S4;
 
 /// Fixed cell widths (px) so each property lines up across rows.
 const W_PRIORITY: f32 = 16.0;
@@ -74,8 +79,19 @@ fn cell<'a>(content: impl Into<Element<'a, Message>>, width: f32) -> Element<'a,
 fn cell_text<'a>(s: impl text::IntoFragment<'a>, width: f32) -> Element<'a, Message> {
     cell(
         text(s)
-            .size(12)
+            .size(type_scale::XS)
             .color(t::text_muted())
+            .wrapping(text::Wrapping::None),
+        width,
+    )
+}
+
+/// A body cell: `XS`, secondary text (web `text-xs text-gray-400`).
+fn body_text<'a>(s: impl text::IntoFragment<'a>, width: f32) -> Element<'a, Message> {
+    cell(
+        text(s)
+            .size(type_scale::XS)
+            .color(t::text_secondary())
             .wrapping(text::Wrapping::None),
         width,
     )
@@ -83,7 +99,7 @@ fn cell_text<'a>(s: impl text::IntoFragment<'a>, width: f32) -> Element<'a, Mess
 
 /// Column captions, in the same order/widths as `issue_row`.
 pub fn header_row<'a>(d: &DisplayOptions) -> Element<'a, Message> {
-    let mut r: Row<'a, Message> = row![].spacing(12).align_y(Alignment::Center);
+    let mut r: Row<'a, Message> = row![].spacing(space::S3).align_y(Alignment::Center);
     if d.shows(CardProperty::Priority) {
         r = r.push(cell_text("", W_PRIORITY));
     }
@@ -93,7 +109,7 @@ pub fn header_row<'a>(d: &DisplayOptions) -> Element<'a, Message> {
     if d.shows(CardProperty::Status) {
         r = r.push(cell_text("Status", W_STATUS));
     }
-    r = r.push(container(text("Title").size(12).color(t::text_muted())).width(Length::Fill));
+    r = r.push(container(text("Title").size(type_scale::XS).color(t::text_muted())).width(Length::Fill));
     if d.shows(CardProperty::Labels) {
         r = r.push(cell_text("Labels", W_LABELS));
     }
@@ -115,8 +131,11 @@ pub fn header_row<'a>(d: &DisplayOptions) -> Element<'a, Message> {
     if d.shows(CardProperty::Updated) {
         r = r.push(cell_text("Updated", W_DATE));
     }
-    // Horizontal inset = list padding (12) + row padding (12) + border (1).
-    container(r).padding([6, 25]).width(Length::Fill).into()
+    // Horizontal inset = list padding + row padding + border (1).
+    container(r)
+        .padding([6.0, LIST_PAD_X + ROW_PAD_X + 1.0])
+        .width(Length::Fill)
+        .into()
 }
 
 pub fn view<'a>(
@@ -132,7 +151,7 @@ pub fn view<'a>(
         } else {
             "No sections to show"
         };
-        return container(text(msg).size(14).color(t::text_muted()))
+        return container(text(msg).size(type_scale::SM).color(t::text_muted()))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into();
@@ -141,7 +160,7 @@ pub fn view<'a>(
     let mut list: Column<'a, Message> = column![]
         .spacing(scroll::LIST_SPACING)
         .width(Length::Fill)
-        .padding([scroll::LIST_PAD_TOP, 12.0]);
+        .padding([scroll::LIST_PAD_TOP, LIST_PAD_X]);
 
     for (col_idx, col) in columns.iter().enumerate() {
         let is_collapsed = collapsed.contains(&col.title);
@@ -225,12 +244,12 @@ pub fn issue_row<'a>(
     issue_idx: usize,
 ) -> Element<'a, Message> {
     let d = data.display;
-    let mut r: Row<'a, Message> = row![].spacing(12).align_y(Alignment::Center);
+    let mut r: Row<'a, Message> = row![].spacing(space::S3).align_y(Alignment::Center);
 
     if d.shows(CardProperty::Priority) {
         r = r.push(cell(
             text("△")
-                .size(12)
+                .size(type_scale::XS)
                 .color(t::priority_color(issue.priority_enum())),
             W_PRIORITY,
         ));
@@ -246,7 +265,14 @@ pub fn issue_row<'a>(
             .team_number
             .map(|n| format!("{ident}-{n}"))
             .unwrap_or_default();
-        r = r.push(cell_text(tag, W_ID));
+        r = r.push(cell(
+            text(tag)
+                .size(type_scale::XS)
+                .font(fonts::code())
+                .color(t::text_secondary())
+                .wrapping(text::Wrapping::None),
+            W_ID,
+        ));
     }
     if d.shows(CardProperty::Status) {
         let name = data
@@ -257,7 +283,7 @@ pub fn issue_row<'a>(
             .unwrap_or_default();
         r = r.push(cell(
             text(name)
-                .size(12)
+                .size(type_scale::XS)
                 .color(t::text_secondary())
                 .wrapping(text::Wrapping::None),
             W_STATUS,
@@ -266,7 +292,7 @@ pub fn issue_row<'a>(
     r = r.push(
         container(
             text(&issue.title)
-                .size(14)
+                .size(type_scale::SM)
                 .color(t::text_primary())
                 .wrapping(text::Wrapping::None),
         )
@@ -290,7 +316,7 @@ pub fn issue_row<'a>(
             .and_then(|id| data.projects.iter().find(|p| p.id == *id))
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        r = r.push(cell_text(name, W_PROJECT));
+        r = r.push(body_text(name, W_PROJECT));
     }
     if d.shows(CardProperty::Assignee) {
         let name = issue
@@ -299,10 +325,10 @@ pub fn issue_row<'a>(
             .and_then(|id| data.members.iter().find(|m| m.id == *id))
             .map(|m| m.name.clone())
             .unwrap_or_else(|| "Unassigned".to_string());
-        r = r.push(cell_text(name, W_ASSIGNEE));
+        r = r.push(body_text(name, W_ASSIGNEE));
     }
     if d.shows(CardProperty::Estimate) {
-        r = r.push(cell_text(
+        r = r.push(body_text(
             issue
                 .estimate
                 .map(util::format_estimate)
@@ -311,7 +337,7 @@ pub fn issue_row<'a>(
         ));
     }
     if d.shows(CardProperty::DueDate) {
-        r = r.push(cell_text(
+        r = r.push(body_text(
             issue
                 .due_date
                 .as_deref()
@@ -321,10 +347,10 @@ pub fn issue_row<'a>(
         ));
     }
     if d.shows(CardProperty::Created) {
-        r = r.push(cell_text(util::short_date(&issue.created_at), W_DATE));
+        r = r.push(body_text(util::short_date(&issue.created_at), W_DATE));
     }
     if d.shows(CardProperty::Updated) {
-        r = r.push(cell_text(util::short_date(&issue.updated_at), W_DATE));
+        r = r.push(body_text(util::short_date(&issue.updated_at), W_DATE));
     }
 
     let bg = if focused {
@@ -332,11 +358,13 @@ pub fn issue_row<'a>(
     } else {
         t::bg_primary()
     };
-    let border_color = if focused { t::accent() } else { t::border() };
+    // Unfocused rows keep a transparent 1px border so the row width and the
+    // header inset don't change with focus.
+    let border_color = if focused { t::accent() } else { iced::Color::TRANSPARENT };
 
     mouse_area(
         container(r)
-            .padding([0, 12])
+            .padding([0.0, ROW_PAD_X])
             .center_y(Length::Fixed(scroll::LIST_ROW_H))
             .width(Length::Fill)
             .style(move |_theme: &Theme| container::Style {
@@ -344,7 +372,7 @@ pub fn issue_row<'a>(
                 border: Border {
                     color: border_color,
                     width: 1.0,
-                    radius: 6.0.into(),
+                    radius: radius::MD.into(),
                 },
                 ..Default::default()
             }),
