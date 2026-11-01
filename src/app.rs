@@ -34,6 +34,14 @@ use crate::views::{
     team_list, team_members, team_picker, toast,
 };
 
+/// Where an issue detail opened from a dashboard returns to.
+#[derive(Debug, Clone, PartialEq)]
+struct DashboardOrigin {
+    dashboard_id: String,
+    /// The team selected before the detail switched to the issue's own team.
+    prev_team_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     // Navigation
@@ -83,6 +91,9 @@ pub enum Message {
     NavigateToView(View),
     /// Open a dashboard (its local id) from the sidebar.
     OpenDashboard(String),
+    /// Pick a dashboard filter tab (Today / Week / Hot / Open).
+    SetDashboardFilter(crate::dashboard_eval::Filter),
+    SetDashboardSort(crate::dashboard_eval::Sort),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -190,6 +201,7 @@ pub enum Message {
     OpenIssueDetail(String),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
+    BackToDashboard,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
     /// Step the open picker's link kind (Tab forward, Shift+Tab back).
@@ -277,6 +289,14 @@ pub enum Message {
     NewDashboardNameChanged(String),
     NewDashboardDescriptionChanged(String),
     NewDashboardSubmit,
+    /// Dashboard "Add group" modal (state in `App::group_form`).
+    OpenNewGroup,
+    GroupNameChanged(String),
+    GroupDescriptionChanged(String),
+    GroupColorPicked(String),
+    GroupToggleSource(crate::db::dashboards::SourceType, i64),
+    GroupSetIncludeAll(crate::db::dashboards::SourceType, i64, bool),
+    GroupSubmit,
     /// Inert click target (swallows clicks inside a popover).
     Noop,
     SetViewMode(ViewMode),
@@ -477,6 +497,8 @@ pub enum Modal {
     SaveView,
     /// "New dashboard" form; state in `App::dashboard_form`.
     NewDashboard,
+    /// "Add group" form on the open dashboard; state in `App::group_form`.
+    NewGroup,
     /// Name prompt for renaming a Saved view (local id).
     RenameSavedView(String),
     /// Searchable picker for adding an issue dependency (see `issue_picker`).
@@ -605,6 +627,15 @@ impl View {
     fn is_cross_team(&self) -> bool {
         matches!(self, View::MyIssues | View::Dashboard(_))
     }
+
+    /// An open dashboard that a pull (or a local delete) removed falls back to
+    /// the default board; every other view is unchanged.
+    fn without_missing_dashboard(self, dashboards: &[crate::db::dashboards::Dashboard]) -> View {
+        match self {
+            View::Dashboard(id) if !dashboards.iter().any(|d| d.id == id) => View::Board,
+            other => other,
+        }
+    }
 }
 
 /// Sort key for the Projects table (mirrors the Rails index sort options).
@@ -669,12 +700,21 @@ pub struct DashboardForm {
     pub error: Option<&'static str>,
 }
 
+/// Dashboard "Add group" modal state: the draft plus an inline name error.
+#[derive(Debug, Default, Clone)]
+pub struct GroupForm {
+    pub draft: crate::db::dashboards::GroupDraft,
+    pub error: Option<&'static str>,
+}
+
 pub struct App {
     teams: Vec<Team>,
     /// Mirrored dashboards for the sidebar (reloaded with the rest after a sync).
     dashboards: Vec<crate::db::dashboards::Dashboard>,
     /// State of the dashboard name/description modal (create now, rename later).
     dashboard_form: DashboardForm,
+    /// State of the dashboard "Add group" modal.
+    group_form: GroupForm,
     /// The open dashboard's groups with their sources (reloaded with the mirror).
     dashboard_groups: Vec<crate::dashboard_eval::GroupConfig>,
     /// Header state of the open dashboard. Per-dashboard memory is a later ticket.
@@ -720,6 +760,8 @@ pub struct App {
     detail_from_my_issues: bool,
     /// The open issue detail was reached from the Inbox (Back returns there).
     detail_from_inbox: bool,
+    /// The open issue detail was reached from a dashboard (Back returns there).
+    detail_from_dashboard: Option<DashboardOrigin>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -831,6 +873,14 @@ impl App {
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
             saved_views: self.palette_saved_views(),
+            dashboards: self
+                .dashboards
+                .iter()
+                .map(|d| crate::palette_results::SearchableDashboard {
+                    id: d.id.clone(),
+                    name: d.name.clone(),
+                })
+                .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
         }
     }
@@ -895,6 +945,13 @@ impl App {
         self.dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
 
+        let kept = self.view.clone().without_missing_dashboard(&self.dashboards);
+        if kept != self.view {
+            self.view = kept;
+            self.focused_lane = 0;
+            self.focused_issue = 0;
+        }
+
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
         }
@@ -922,7 +979,11 @@ impl App {
 
         // Filters are global but hold per-team ids; drop the ones this data
         // doesn't contain (My Issues loads every team, so its ids all stay).
+        // Skipped while a dashboard-opened detail is up: the selected team is
+        // temporarily the issue's, and pruning would drop the board filters of
+        // the team that was selected before.
         if self.selected_team_id.is_some()
+            && self.detail_from_dashboard.is_none()
             && self.prune_board_filters()
         {
             if let Err(e) = config::save(&self.config) {
@@ -1411,6 +1472,7 @@ impl App {
                     self.commit_issue_detail();
                     self.detail_from_my_issues = false;
                     self.detail_from_inbox = false;
+                    self.detail_from_dashboard = None;
                 }
                 self.view = View::Board;
                 self.focused_lane = 0;
@@ -1481,6 +1543,11 @@ impl App {
         }
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "My Issues".into());
+        }
+        if let (Some(o), View::IssueDetail(_)) = (&self.detail_from_dashboard, &self.view) {
+            if let Some(d) = self.dashboards.iter().find(|d| d.id == o.dashboard_id) {
+                crumbs.insert(0, d.name.clone());
+            }
         }
         if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "Inbox".into());
@@ -1819,9 +1886,8 @@ impl App {
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
-        // Opening an issue from a dashboard (and Back) is its own ticket.
-        if matches!(self.view, View::Dashboard(_)) {
-            return Task::none();
+        if let View::Dashboard(dashboard_id) = self.view.clone() {
+            return self.open_issue_from_dashboard(dashboard_id, issue);
         }
         if self.view == View::MyIssues {
             self.selected_team_id = Some(issue.team_id.clone());
@@ -1830,6 +1896,34 @@ impl App {
             self.detail_from_my_issues = true;
         }
         self.open_issue_detail(&issue)
+    }
+
+    /// Open `issue` from a dashboard: select its own team (like My Issues) so
+    /// the detail is that team's, remembering the dashboard and the team that
+    /// was selected before, so Back restores both.
+    fn open_issue_from_dashboard(&mut self, dashboard_id: String, issue: Issue) -> Task<Message> {
+        self.detail_from_dashboard = Some(DashboardOrigin {
+            dashboard_id,
+            prev_team_id: self.selected_team_id.clone(),
+        });
+        self.selected_team_id = Some(issue.team_id.clone());
+        self.view = View::Board;
+        self.reload_data();
+        self.open_issue_detail(&issue)
+    }
+
+    /// Leave an issue detail opened from a dashboard: put the previously
+    /// selected team back and return to the dashboard. False when the detail
+    /// didn't come from one.
+    fn back_to_dashboard(&mut self) -> bool {
+        let Some(origin) = self.detail_from_dashboard.take() else {
+            return false;
+        };
+        self.commit_issue_detail();
+        self.issue_detail = None;
+        self.selected_team_id = origin.prev_team_id;
+        self.switch_view(View::Dashboard(origin.dashboard_id));
+        true
     }
 
     /// Open `issue` from the Inbox: select its own team (like My Issues) so the
@@ -2356,6 +2450,10 @@ impl App {
                     .to_string();
                 self.push_toast(summary.toast(&name), ToastKind::Info, false);
                 if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
+                    if self.back_to_dashboard() {
+                        self.reload_data();
+                        return;
+                    }
                     let back = if self.detail_from_my_issues {
                         View::MyIssues
                     } else if self.detail_from_inbox {
@@ -2365,6 +2463,7 @@ impl App {
                     };
                     self.detail_from_my_issues = false;
                     self.detail_from_inbox = false;
+                    self.detail_from_dashboard = None;
                     self.issue_detail = None;
                     self.switch_view(back);
                 }
@@ -2574,15 +2673,21 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        let dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         // Open the stored Home page; anything unresolvable falls back to the
         // first team's board.
-        let launch = crate::db::home_page::launch_target(home_page.as_ref(), &teams, &saved_views);
-        let (selected_team_id, launch_view) = match launch {
-            crate::db::home_page::LaunchTarget::Team(id) => (Some(id), None),
-            crate::db::home_page::LaunchTarget::View { view_id, team_id } => {
-                (Some(team_id), Some(view_id))
-            }
-            crate::db::home_page::LaunchTarget::Default => (default_team_id(&teams), None),
+        let launch = crate::db::home_page::launch_target(
+            home_page.as_ref(),
+            &teams,
+            &saved_views,
+            &dashboards,
+        );
+        use crate::db::home_page::LaunchTarget;
+        let (selected_team_id, launch_view, launch_dashboard) = match launch {
+            LaunchTarget::Team(id) => (Some(id), None, None),
+            LaunchTarget::View { view_id, team_id } => (Some(team_id), Some(view_id), None),
+            LaunchTarget::Dashboard(id) => (default_team_id(&teams), None, Some(id)),
+            LaunchTarget::Default => (default_team_id(&teams), None, None),
         };
 
         let (lanes, issues, projects, members, labels, issue_labels) =
@@ -2621,6 +2726,7 @@ impl App {
             detail_deps: Default::default(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
+            detail_from_dashboard: None,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
@@ -2659,8 +2765,9 @@ impl App {
             sync_in_progress: false,
             notif_unread_count: crate::db::notifications::unread_count(&conn).unwrap_or(0),
             saved_views,
-            dashboards: crate::db::dashboards::list(&conn).unwrap_or_default(),
+            dashboards,
             dashboard_form: DashboardForm::default(),
+            group_form: GroupForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
             collapsed_dashboard_groups: Default::default(),
@@ -2680,9 +2787,10 @@ impl App {
             sync_paused_auth: false,
         };
 
-        let task = match launch_view {
-            Some(view_id) => app.update_inner(Message::OpenSavedView(view_id)),
-            None => Task::none(),
+        let task = match (launch_view, launch_dashboard) {
+            (Some(view_id), _) => app.update_inner(Message::OpenSavedView(view_id)),
+            (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
+            _ => Task::none(),
         };
         (app, task)
     }
@@ -3052,6 +3160,78 @@ impl App {
                 }
             }
 
+            Message::OpenNewGroup => {
+                if !matches!(self.view, View::Dashboard(_)) {
+                    return Task::none();
+                }
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't add a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.group_form = GroupForm::default();
+                    self.modal = Modal::NewGroup;
+                    return text_input::focus(crate::views::group_form::name_input_id());
+                }
+            }
+
+            Message::GroupNameChanged(name) => {
+                self.group_form.draft.name = name;
+                self.group_form.error = None;
+            }
+
+            Message::GroupDescriptionChanged(desc) => {
+                self.group_form.draft.description = desc;
+            }
+
+            Message::GroupColorPicked(hex) => {
+                self.group_form.draft.color = hex;
+            }
+
+            Message::GroupToggleSource(kind, remote_id) => {
+                self.group_form.draft.toggle_source(kind, remote_id);
+            }
+
+            Message::GroupSetIncludeAll(kind, remote_id, on) => {
+                self.group_form.draft.set_include_all(kind, remote_id, on);
+            }
+
+            Message::GroupSubmit => {
+                use crate::db::dashboards::{create_group_local, GroupError};
+                if self.modal != Modal::NewGroup {
+                    return Task::none();
+                }
+                let View::Dashboard(dashboard_id) = self.view.clone() else {
+                    return Task::none();
+                };
+                if self.sync_read_only {
+                    self.modal = Modal::None;
+                    self.push_toast(
+                        "Read-only token: can't add a group",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match create_group_local(&self.db(), &dashboard_id, &self.group_form.draft) {
+                    Ok(_) => {
+                        self.modal = Modal::None;
+                        self.group_form = GroupForm::default();
+                        self.reload_data();
+                    }
+                    Err(GroupError::Name(e)) => self.group_form.error = Some(e.message()),
+                    Err(GroupError::NoDashboard) => {
+                        self.group_form.error = Some("This dashboard no longer exists");
+                    }
+                    Err(GroupError::Db(e)) => {
+                        eprintln!("[dashboards] group create failed: {e}");
+                        self.group_form.error = Some("Couldn't add the group");
+                    }
+                }
+            }
+
             Message::OpenRenameSavedView(view_id) => {
                 if self.sync_read_only {
                     self.push_toast(
@@ -3252,6 +3432,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 let from_my = self.view == View::MyIssues;
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
                     self.selected_team_id = Some(team_id);
@@ -3322,6 +3503,7 @@ impl App {
             Message::BackToInbox => {
                 self.commit_issue_detail();
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.issue_detail = None;
                 self.switch_view(View::Inbox);
             }
@@ -3336,6 +3518,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(View::Inbox);
                 let crate::db::notifications::BannerTarget::Notification(remote_id) = target else {
                     return Task::batch([focus, self.scroll_inbox_to_selection()]);
@@ -3394,7 +3577,20 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(View::Dashboard(id));
+            }
+
+            Message::SetDashboardSort(sort) => {
+                self.dashboard_header.sort = sort;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
+            }
+
+            Message::SetDashboardFilter(filter) => {
+                self.dashboard_header.filter = filter;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
             }
 
             Message::NavigateToView(view) => {
@@ -3402,6 +3598,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(view);
             }
 
@@ -3892,6 +4089,9 @@ impl App {
                 self.issue_detail = None;
                 self.switch_view(View::MyIssues);
             }
+            Message::BackToDashboard => {
+                self.back_to_dashboard();
+            }
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
@@ -4287,6 +4487,7 @@ impl App {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
+                    PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
@@ -5671,6 +5872,11 @@ impl App {
                 .or_else(|| {
                     (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
                         .then_some(Message::BackToInbox)
+                })
+                .or_else(|| {
+                    (self.detail_from_dashboard.is_some()
+                        && matches!(self.view, View::IssueDetail(_)))
+                    .then_some(Message::BackToDashboard)
                 }),
             self.update_view_action(),
         );
@@ -5847,6 +6053,8 @@ impl App {
                     self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
                     self.focused_lane,
                     self.focused_issue,
+                    self.dashboard_header,
+                    self.sync_read_only,
                 )
             }
         };
@@ -5995,6 +6203,15 @@ impl App {
             Modal::NewDashboard => iced::widget::stack![
                 base,
                 dashboard_form_modal("New dashboard", "Create", &self.dashboard_form)
+            ]
+            .into(),
+            Modal::NewGroup => iced::widget::stack![
+                base,
+                crate::views::group_form::modal(
+                    &self.group_form.draft,
+                    &self.teams,
+                    self.group_form.error
+                )
             ]
             .into(),
             Modal::SaveView => iced::widget::stack![
@@ -6547,6 +6764,26 @@ mod tests {
     }
 
     use super::*;
+
+    fn dash(id: &str) -> crate::db::dashboards::Dashboard {
+        crate::db::dashboards::Dashboard {
+            id: id.into(),
+            remote_id: None,
+            name: id.into(),
+            description: String::new(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn open_dashboard_removed_by_a_pull_falls_back_to_the_board() {
+        let list = [dash("a")];
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&list), View::Dashboard("a".into()));
+        assert_eq!(View::Dashboard("gone".into()).without_missing_dashboard(&list), View::Board);
+        assert_eq!(View::Dashboard("a".into()).without_missing_dashboard(&[]), View::Board);
+        assert_eq!(View::MyIssues.without_missing_dashboard(&[]), View::MyIssues);
+    }
 
     fn team(id: &str, archived: bool) -> Team {
         Team {
