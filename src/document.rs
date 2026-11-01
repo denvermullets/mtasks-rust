@@ -198,25 +198,87 @@ fn find_bare_urls(text: &str) -> Vec<(usize, usize)> {
             continue;
         };
         let stop = text[start..].find(|c: char| c.is_whitespace() || c == '<' || c == '>');
-        let mut end = stop.map_or(text.len(), |i| start + i);
-        loop {
-            let cand = &text[start..end];
-            let Some(last) = cand.chars().next_back() else { break };
-            let drop = match last {
-                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '*' => true,
-                ')' => cand.matches(')').count() > cand.matches('(').count(),
-                ']' => cand.matches(']').count() > cand.matches('[').count(),
-                _ => false,
-            };
-            if !drop {
-                break;
-            }
-            end -= last.len_utf8();
-        }
+        let end = trim_link_end(text, start, stop.map_or(text.len(), |i| start + i));
         if end > start + scheme {
             out.push((start, end));
             from = end;
         }
+    }
+    out
+}
+
+/// Pull `end` back over trailing sentence punctuation and unbalanced closing
+/// brackets, as the GFM autolink rules do.
+fn trim_link_end(text: &str, start: usize, mut end: usize) -> usize {
+    loop {
+        let cand = &text[start..end];
+        let Some(last) = cand.chars().next_back() else { return end };
+        let drop = match last {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '*' => true,
+            ')' => cand.matches(')').count() > cand.matches('(').count(),
+            ']' => cand.matches(']').count() > cand.matches('[').count(),
+            _ => false,
+        };
+        if !drop {
+            return end;
+        }
+        end -= last.len_utf8();
+    }
+}
+
+/// Byte ranges of bare `www.` addresses (GFM extended autolinks). `www.` is
+/// case-insensitive and must start a word (line start, whitespace, or one of
+/// `* _ ~ (` before it). The domain needs a first label and no underscore in
+/// its last two segments; the rest ends like [`find_bare_urls`].
+fn find_www_links(text: &str) -> Vec<(usize, usize)> {
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(off) = lower[from..].find("www.") {
+        let start = from + off;
+        from = start + 4;
+        let boundary = text[..start].chars().next_back().map_or(true, |c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '('));
+        if !boundary {
+            continue;
+        }
+        let rest = &text[start + 4..];
+        let dom_len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))).unwrap_or(rest.len());
+        let domain = rest[..dom_len].trim_end_matches('.');
+        let segs: Vec<&str> = std::iter::once("www").chain(domain.split('.')).collect();
+        if domain.is_empty() || segs.iter().any(|g| g.is_empty()) || segs.iter().rev().take(2).any(|g| g.contains('_')) {
+            continue;
+        }
+        let stop = text[start..].find(|c: char| c.is_whitespace() || c == '<');
+        let end = trim_link_end(text, start, stop.map_or(text.len(), |i| start + i));
+        if end > start + 4 {
+            out.push((start, end));
+            from = end;
+        }
+    }
+    out
+}
+
+/// Byte ranges of bare email addresses (GFM extended autolinks): a local part
+/// of letters, digits and `. - _ +`, an `@`, and a domain of letters, digits,
+/// `-` and `_` with at least one period. A trailing period is left out, and a
+/// domain ending in `-` or `_` is not an address.
+fn find_emails(text: &str) -> Vec<(usize, usize)> {
+    let local_ok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+');
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (at, _) in text.match_indices('@') {
+        let local = text[..at].chars().rev().take_while(|&c| local_ok(c)).count();
+        let start = at - local;
+        let start = start + (text[start..at].len() - text[start..at].trim_start_matches('.').len());
+        if start == at || out.last().is_some_and(|&(_, e)| start < e) {
+            continue;
+        }
+        let rest = &text[at + 1..];
+        let dom_len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))).unwrap_or(rest.len());
+        let domain = rest[..dom_len].trim_end_matches('.');
+        if !domain.contains('.') || domain.split('.').any(str::is_empty) || domain.ends_with(['-', '_']) {
+            continue;
+        }
+        out.push((start, at + 1 + domain.len()));
     }
     out
 }
@@ -247,6 +309,54 @@ pub fn parse_with(body: &str, host: &str, member_names: &[&str]) -> Document {
         b.event(ev);
     }
     b.finish()
+}
+
+impl Document {
+    /// The body as plain text: no markdown syntax, blocks and list items
+    /// separated by single spaces, runs of whitespace collapsed. Images are
+    /// left out; code keeps its text but not its fences or backticks. For
+    /// previews such as the hover card's excerpt.
+    pub fn plain_text(&self) -> String {
+        let mut parts = Vec::new();
+        plain_blocks(&self.blocks, &mut parts);
+        parts.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}
+
+fn plain_blocks(blocks: &[Block], out: &mut Vec<String>) {
+    for block in blocks {
+        match block {
+            Block::Paragraph(inlines) | Block::Heading(_, inlines) => out.push(plain_inlines(inlines)),
+            Block::Image(_) | Block::Rule => {}
+            Block::List(list) => {
+                for item in &list.items {
+                    plain_blocks(item, out);
+                }
+            }
+            Block::Quote(blocks) => plain_blocks(blocks, out),
+            Block::Code(code) => out.push(code.text.clone()),
+            Block::Table(table) => {
+                for cell in table.header.iter().chain(table.rows.iter().flatten()) {
+                    plain_blocks(cell, out);
+                }
+            }
+        }
+    }
+}
+
+fn plain_inlines(inlines: &[Inline]) -> String {
+    let mut s = String::new();
+    for inline in inlines {
+        match inline {
+            Inline::Text(t) | Inline::Code(t) | Inline::Mention(t) => s.push_str(t),
+            Inline::HardBreak => s.push(' '),
+            Inline::IssueRef { text, .. } | Inline::Link { text, .. } => s.push_str(text),
+            Inline::Strong(inner) | Inline::Emphasis(inner) | Inline::Strikethrough(inner) => {
+                s.push_str(&plain_inlines(inner))
+            }
+        }
+    }
+    s
 }
 
 #[derive(Default)]
@@ -542,6 +652,15 @@ impl Builder {
                 spans.push((start, end, Inline::Link { text: url.clone(), url }));
             }
         }
+        // `www.` addresses open over http; bare emails open as mailto.
+        for (found, prefix) in [(find_www_links(&text), "http://"), (find_emails(&text), "mailto:")] {
+            for (start, end) in found {
+                let shown = text[start..end].to_string();
+                if let Some(url) = resolve_link(&format!("{prefix}{shown}"), "") {
+                    spans.push((start, end, Inline::Link { text: shown, url }));
+                }
+            }
+        }
         spans.sort_by_key(|s| s.0);
         let mut pos = 0;
         for (start, end, token) in spans {
@@ -612,6 +731,30 @@ fn is_block_end(end: &TagEnd) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_text_drops_syntax() {
+        let rows = [
+            ("", ""),
+            ("   \n\n  ", ""),
+            ("Hello **bold** and `code`", "Hello bold and code"),
+            ("# Title\n\nBody  text\nnext line", "Title Body text next line"),
+            ("- one\n- two\n  - nested", "one two nested"),
+            ("1. a\n2. b", "a b"),
+            ("> quoted\n\nafter", "quoted after"),
+            ("see [the docs](https://x.y/z) now", "see the docs now"),
+            ("before ![alt](https://x.y/i.png) after", "before after"),
+            ("```rust\nlet x = 1;\n```\n\nend", "let x = 1; end"),
+            ("a\n\n---\n\nb", "a b"),
+            ("ping @Ann on PROJ-12", "ping @Ann on PROJ-12"),
+            ("- [x] done\n- [ ] todo", "done todo"),
+            ("*em* and ~~gone~~", "em and gone"),
+            ("| a | b |\n|---|---|\n| c | d |", "a b c d"),
+        ];
+        for (body, want) in rows {
+            assert_eq!(parse(body).plain_text(), want, "{body:?}");
+        }
+    }
+
     use super::*;
 
     fn text(s: &str) -> Inline {
@@ -1530,7 +1673,26 @@ mod tests {
             ("scheme only is text", "http:// and https://", vec![para(vec![text("http:// and https://")])]),
             ("not at a word start", "xhttps://a.b", vec![para(vec![text("xhttps://a.b")])]),
             ("other schemes stay text", "ftp://a.b file:///x javascript:x", vec![para(vec![text("ftp://a.b file:///x javascript:x")])]),
-            ("www alone stays text", "www.a.b", vec![para(vec![text("www.a.b")])]),
+            ("www becomes an http link", "www.a.b/x", vec![para(vec![Inline::Link { text: "www.a.b/x".into(), url: "http://www.a.b/x".into() }])]),
+            ("www in a sentence", "see (WWW.a.b).", vec![para(vec![text("see ("), Inline::Link { text: "WWW.a.b".into(), url: "http://WWW.a.b".into() }, text(").")])]),
+            ("www needs a word start", "awww.a.b", vec![para(vec![text("awww.a.b")])]),
+            ("www with no domain", "www. www..b", vec![para(vec![text("www. www..b")])]),
+            ("www underscore in last segments", "www.a_b.com", vec![para(vec![text("www.a_b.com")])]),
+            ("email becomes mailto", "ann@example.com", vec![para(vec![Inline::Link { text: "ann@example.com".into(), url: "mailto:ann@example.com".into() }])]),
+            (
+                "email in a sentence",
+                "mail a.b+c@ex-1.co.uk.",
+                vec![para(vec![text("mail "), Inline::Link { text: "a.b+c@ex-1.co.uk".into(), url: "mailto:a.b+c@ex-1.co.uk".into() }, text(".")])],
+            ),
+            ("email needs a dotted domain", "ann@example", vec![para(vec![text("ann@example")])]),
+            ("email domain cannot end in dash", "ann@example.com-", vec![para(vec![text("ann@example.com-")])]),
+            ("email with no local part", "@example.com", vec![para(vec![text("@example.com")])]),
+            ("email inside a url stays in the url", "https://a.b/x@y.com", vec![para(vec![link("https://a.b/x@y.com")])]),
+            (
+                "code and link text stay untouched",
+                "`ann@example.com` [www.a.b](https://c.d)",
+                vec![para(vec![code("ann@example.com"), text(" "), Inline::Link { text: "www.a.b".into(), url: "https://c.d".into() }])],
+            ),
             ("inline code stays code", "`https://a.b`", vec![para(vec![Inline::Code("https://a.b".into())])]),
             (
                 "code block stays text",
@@ -1548,6 +1710,19 @@ mod tests {
         ];
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn mentions_and_emails_do_not_interfere() {
+        let mail = |a: &str| Inline::Link { text: a.into(), url: format!("mailto:{a}") };
+        let cases: Vec<(&str, &str, Vec<Inline>)> = vec![
+            ("mention beside email", "@ann ann@example.com", vec![Inline::Mention("@ann".into()), text(" "), mail("ann@example.com")]),
+            ("email whose host is a member", "ann@example.com", vec![mail("ann@example.com")]),
+            ("mention before an email host", "hi @example x@example.com", vec![text("hi "), Inline::Mention("@example".into()), text(" "), mail("x@example.com")]),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["ann", "example"]).blocks, vec![para(want)], "{name}");
         }
     }
 

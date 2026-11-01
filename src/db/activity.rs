@@ -303,6 +303,9 @@ pub struct ActivityItem {
     /// Plain text, no HTML.
     pub text: String,
     pub origin: ItemOrigin,
+    /// Local id of the issue this line is about, for an incoming reference
+    /// whose source issue is cached here. Anchors the line's hover card.
+    pub source_issue_id: Option<String>,
 }
 
 /// Display-ready Activity for an issue, oldest first. Each version change,
@@ -318,6 +321,10 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
             "dependency" => dependency_line(&entry).into_iter().collect(),
             _ => Vec::new(),
         };
+        let source_issue_id = match entry.entry_type.as_str() {
+            "reference" => reference_source_issue(conn, &entry)?,
+            _ => None,
+        };
         for (i, text) in texts.into_iter().enumerate() {
             items.push(ActivityItem {
                 key: format!("{}#{i}", entry.cursor),
@@ -325,6 +332,7 @@ pub fn activity_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Activ
                 actor: actor.clone(),
                 text,
                 origin: ItemOrigin::Server,
+                source_issue_id: source_issue_id.clone(),
             });
         }
     }
@@ -405,6 +413,7 @@ fn merge_pending(conn: &Connection, issue_id: &str, items: &mut Vec<ActivityItem
             at,
             actor: ActorSlot { remote_id: None, name: Some("You".to_string()) },
             origin: ItemOrigin::Pending,
+            source_issue_id: None,
         };
         let pos = items.iter().rposition(|i| i.at <= item.at).map_or(0, |p| p + 1);
         items.insert(pos, item);
@@ -421,6 +430,14 @@ fn reference_line(entry: &StoredEntry) -> String {
             None => format!("mentioned in {ident}"),
         },
         None => "mentioned in another issue".to_string(),
+    }
+}
+
+/// Local id of a reference entry's source issue, when that issue is cached.
+fn reference_source_issue(conn: &Connection, entry: &StoredEntry) -> Result<Option<String>> {
+    match entry.payload["source_issue"]["id"].as_i64() {
+        Some(remote) => Ok(crate::db::queries::find_issue_by_remote_id(conn, remote)?.map(|i| i.id)),
+        None => Ok(None),
     }
 }
 
@@ -457,6 +474,7 @@ fn created_item(conn: &Connection, issue_id: &str) -> Result<Option<ActivityItem
             actor: resolve_actor(conn, remote_id, name.as_deref())?,
             text: "created the issue".to_string(),
             origin: ItemOrigin::Server,
+            source_issue_id: None,
         })),
     }
 }
@@ -979,6 +997,22 @@ mod jrst139_tests {
         assert_eq!(items[0].text, "mentioned in MTK-2: Add reset");
         assert_eq!(items[0].key, "reference:1#0");
         assert_eq!(items[0].actor, ActorSlot { remote_id: Some(2), name: Some("ryan".into()) });
+    }
+
+    #[test]
+    fn reference_lines_carry_the_local_source_issue_only_when_cached() {
+        let conn = conn_with(r#"[{"type":"reference","id":1,"cursor":"reference:1","created_at":"2026-07-08T13:35:39Z",
+          "source_issue":{"id":2,"identifier":"MTK-2","title":"Add reset"},"source_type":"comment","user":null},
+          {"type":"reference","id":2,"cursor":"reference:2","created_at":"2026-07-08T13:36:00Z",
+          "source_issue":{"id":99,"identifier":"MTK-99","title":"Not cached"},"source_type":"comment","user":null},
+          {"type":"reference","id":3,"cursor":"reference:3","created_at":"2026-07-08T13:37:00Z",
+          "source_issue":null,"source_type":"issue","user":null}]"#);
+        let before = activity_for_issue(&conn, "i1").unwrap();
+        assert!(before.iter().all(|i| i.source_issue_id.is_none()), "nothing cached yet");
+        conn.execute("UPDATE issues SET remote_id = 2 WHERE id = 'i1'", []).unwrap();
+        let got: Vec<_> = activity_for_issue(&conn, "i1").unwrap().into_iter().map(|i| i.source_issue_id).collect();
+        // The created line, then the three references.
+        assert_eq!(got, [None, Some("i1".to_string()), None, None]);
     }
 
     #[test]
@@ -1532,6 +1566,7 @@ mod jrst151_tests {
             actor: ActorSlot { remote_id: None, name: None },
             text: k.into(),
             origin: ItemOrigin::Server,
+            source_issue_id: None,
         }
     }
 

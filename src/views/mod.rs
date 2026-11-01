@@ -9,6 +9,7 @@ pub mod display_panel;
 pub mod header;
 pub mod hover_card_view;
 pub mod hover_rich;
+pub mod row_hover;
 pub mod inbox;
 pub mod issue_detail;
 pub mod issue_form;

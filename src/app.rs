@@ -224,6 +224,10 @@ pub enum Message {
     /// A body paragraph's hovered span changed. The id is the reporting
     /// widget's owner id (see `hover_rich::HoverRich::on_hover`).
     BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// The pointer entered (`Some`) or left (`None`) a row that anchors a hover
+    /// card, with the row's window rectangle (`views::row_hover`). The id is
+    /// the row widget's owner id.
+    RowHover(u64, Option<(crate::body_hover::Anchor, iced::Rectangle)>),
     /// A hover-card timer elapsed (see `hover_card::Effect`).
     HoverTimer(u64),
     /// The pointer entered or left the hover card itself.
@@ -899,6 +903,9 @@ pub struct App {
     toasts: Vec<Toast>,
     /// Hover card over body references (JRST-299).
     body_hover: crate::body_hover::BodyHover,
+    /// The open hover card's content, read from the local database when the
+    /// card opened (never on the view path). `None` content = no card.
+    hover_content: Option<(crate::body_hover::Anchor, Option<crate::body_hover::CardContent>)>,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
     next_toast_id: u64,
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
@@ -2943,6 +2950,7 @@ impl App {
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
             body_hover: crate::body_hover::BodyHover::new(),
+            hover_content: None,
             next_toast_id: 0,
             sync_paused_auth: false,
         };
@@ -4538,7 +4546,13 @@ impl App {
                 return Self::hover_timer(effect);
             }
             // No cards behind a modal.
-            Message::BodyHover(..) if self.modal != Modal::None => {}
+            Message::BodyHover(..) | Message::RowHover(..) if self.modal != Modal::None => {}
+            Message::RowHover(owner, hover) => {
+                let effect = self
+                    .body_hover
+                    .body_hover(owner, hover.map(|(anchor, rect)| (Some(anchor), rect)));
+                return Self::hover_timer(effect);
+            }
             Message::BodyHover(owner, hover) => {
                 let span = hover.map(|h| {
                     let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
@@ -4551,7 +4565,13 @@ impl App {
                 return Self::hover_timer(effect);
             }
             Message::HoverTimer(generation) => {
+                // A card opening afresh re-reads, so edits made while it was
+                // closed show.
+                if !self.body_hover.is_open() {
+                    self.hover_content = None;
+                }
                 let effect = self.body_hover.event(crate::hover_card::Event::TimerFired(generation));
+                self.refresh_hover_content();
                 return Self::hover_timer(effect);
             }
             Message::HoverCardEntered => {
@@ -4582,6 +4602,8 @@ impl App {
                 }
             }
             Message::OpenIssueDetail(issue_id) => {
+                // A click on a row ends its hover (the view may not change).
+                self.body_hover.event(crate::hover_card::Event::Clicked);
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
                 }
@@ -4611,6 +4633,8 @@ impl App {
                 self.modal = Modal::None;
             }
             Message::RemoveDependency(dep_id) => {
+                // The row (and its hover anchor) is about to vanish.
+                self.body_hover.event(crate::hover_card::Event::Clicked);
                 self.remove_dependency(&dep_id);
             }
             Message::OpenMoveTeamPicker(issue_id) => {
@@ -6323,14 +6347,51 @@ impl App {
         Task::none()
     }
 
+    /// Keep `hover_content` in step with the card on screen: read the local
+    /// database once when a card opens on a new anchor, drop it when the card
+    /// closes. Called where a card can open (the show timer), not per frame.
+    fn refresh_hover_content(&mut self) {
+        let Some((anchor, _)) = self.body_hover.current() else {
+            self.hover_content = None;
+            return;
+        };
+        if self.hover_content.as_ref().is_some_and(|(a, _)| a == anchor) {
+            return;
+        }
+        let anchor = anchor.clone();
+        let content = match &anchor {
+            crate::body_hover::Anchor::Issue(id) => {
+                let conn = self.db();
+                crate::db::queries::card_records(&conn, id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }
+            // Mentions count open issues from the loaded issues, which the
+            // card needs in full, so they use the in-memory lists.
+            crate::body_hover::Anchor::Mention(_) => crate::body_hover::content_for(
+                &anchor,
+                &crate::body_hover::Records {
+                    issues: &self.issues,
+                    members: &self.members,
+                    ..Default::default()
+                },
+            ),
+        };
+        self.hover_content = Some((anchor, content));
+    }
+
     /// The hover card for the current anchor, positioned under its span.
     fn hover_card_overlay(&self) -> Option<Element<'_, Message>> {
         if self.modal != Modal::None {
             return None;
         }
         let (anchor, rect) = self.body_hover.current()?;
-        let content = crate::body_hover::content_for(anchor, &self.issues, &self.teams)?;
-        Some(crate::views::hover_card_view::overlay(&content, rect))
+        let (cached, content) = self.hover_content.as_ref()?;
+        if cached != anchor {
+            return None;
+        }
+        let content = content.as_ref()?;
+        Some(crate::views::hover_card_view::overlay(content, rect))
     }
 
     pub fn view(&self) -> Element<'_, Message> {
