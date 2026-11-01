@@ -93,6 +93,7 @@ pub enum Message {
     OpenDashboard(String),
     /// Pick a dashboard filter tab (Today / Week / Hot / Open).
     SetDashboardFilter(crate::dashboard_eval::Filter),
+    SetDashboardSort(crate::dashboard_eval::Sort),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -3451,6 +3452,12 @@ impl App {
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
                 self.switch_view(View::Dashboard(id));
+            }
+
+            Message::SetDashboardSort(sort) => {
+                self.dashboard_header.sort = sort;
+                self.focused_lane = 0;
+                self.focused_issue = 0;
             }
 
             Message::SetDashboardFilter(filter) => {
