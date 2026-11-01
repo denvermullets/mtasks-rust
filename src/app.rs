@@ -143,6 +143,8 @@ pub enum Message {
     /// Click on the rendered description: open the editor with focus.
     EditIssueDescription,
     StopEditingIssueDescription,
+    EditProjectDescription,
+    StopEditingProjectDescription,
     IssueDetailDueDateChanged(String),
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
@@ -3161,6 +3163,13 @@ impl App {
                         return self.update(msg);
                     }
                 }
+                if matches!(self.view, View::ProjectDetail(_)) && !modal_open {
+                    let editing_description =
+                        self.project_detail.as_ref().is_some_and(|d| d.editing_description);
+                    if let Some(msg) = keys::handle_project_detail_key(&key, modifiers, editing_description) {
+                        return self.update(msg);
+                    }
+                }
                 if matches!(self.view, View::Dashboard(_)) && !modal_open {
                     if let Some(msg) = keys::handle_dashboard_key(&key, modifiers) {
                         return self.update(msg);
@@ -4225,6 +4234,21 @@ impl App {
                     d.editing_description = true;
                     return iced::advanced::widget::operate(issue_detail::FocusFirstIn::new(
                         issue_detail::description_editor_id(),
+                    ))
+                    .discard();
+                }
+            }
+
+            Message::StopEditingProjectDescription => {
+                if let Some(d) = &mut self.project_detail {
+                    d.editing_description = false;
+                }
+            }
+            Message::EditProjectDescription => {
+                if let Some(d) = &mut self.project_detail {
+                    d.editing_description = true;
+                    return iced::advanced::widget::operate(issue_detail::FocusFirstIn::new(
+                        project_detail::description_editor_id(),
                     ))
                     .discard();
                 }
