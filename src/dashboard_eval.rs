@@ -44,11 +44,29 @@ pub enum Filter {
     Open,
 }
 
-/// Row order within a group. Only Due exists so far.
+/// Row order within a group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Sort {
     #[default]
     Due,
+    Priority,
+    Updated,
+    Created,
+}
+
+impl Sort {
+    pub const ALL: [Sort; 4] = [Sort::Due, Sort::Priority, Sort::Updated, Sort::Created];
+}
+
+impl std::fmt::Display for Sort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Sort::Due => "Due date",
+            Sort::Priority => "Priority",
+            Sort::Updated => "Updated",
+            Sort::Created => "Created",
+        })
+    }
 }
 
 /// The header state. Held in memory per dashboard; not persisted.
@@ -202,6 +220,16 @@ fn sort(issues: &mut [&Issue], sort: Sort, projects: &[Project]) {
             let due = effective_due(i, projects);
             (due.is_none(), due, i.priority, i.id.clone())
         }),
+        // Urgent first, then effective due (undated last), then id.
+        Sort::Priority => issues.sort_by_cached_key(|i| {
+            let due = effective_due(i, projects);
+            (i.priority, due.is_none(), due, i.id.clone())
+        }),
+        // Newest first, then id.
+        Sort::Updated => issues
+            .sort_by_cached_key(|i| (std::cmp::Reverse(i.updated_at.clone()), i.id.clone())),
+        Sort::Created => issues
+            .sort_by_cached_key(|i| (std::cmp::Reverse(i.created_at.clone()), i.id.clone())),
     }
 }
 
@@ -506,6 +534,99 @@ mod tests {
                 "project_undated",
             ])]
         );
+    }
+
+    fn run_sorted(fx: &Fx, sort: Sort) -> Vec<String> {
+        let groups = vec![cfg("g", vec![team_src(1, true)])];
+        let ev = evaluate(&Input {
+            groups: &groups,
+            mirror: Mirror {
+                teams: &fx.teams,
+                projects: &fx.projects,
+                labels: &fx.labels,
+                lanes: &fx.lanes,
+                members: &fx.members,
+                issues: &fx.issues,
+                issue_labels: &fx.issue_labels,
+            },
+            current_user_remote_id: None,
+            today: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            header: Header { sort, ..Header::default() },
+        });
+        ev.groups[0].issues.iter().map(|i| i.id.clone()).collect()
+    }
+
+    fn sort_fx() -> Fx {
+        let mut fx = Fx::new();
+        fx.projects = vec![project("p", "a", Some("2026-11-03"))];
+        let mk = |id: &str, due: Option<&str>, pri: i32, proj: Option<&str>, c: &str, u: &str| {
+            let mut i = issue(id, "a", "la");
+            i.due_date = due.map(String::from);
+            i.priority = pri;
+            i.project_id = proj.map(String::from);
+            i.created_at = c.into();
+            i.updated_at = u.into();
+            i
+        };
+        fx.issues = vec![
+            mk("late_urgent", Some("2026-11-09"), 0, None, "2026-01-03", "2026-02-01"),
+            mk("soon_low", Some("2026-11-02"), 3, None, "2026-01-01", "2026-02-04"),
+            mk("soon_high", Some("2026-11-02"), 1, None, "2026-01-02", "2026-02-02"),
+            mk("via_proj", None, 2, Some("p"), "2026-01-05", "2026-02-03"),
+            mk("undated_urgent", None, 0, None, "2026-01-04", "2026-02-05"),
+            mk("undated_low", None, 3, None, "2026-01-06", "2026-02-06"),
+        ];
+        fx
+    }
+
+    #[test]
+    fn sort_due_is_dated_first_then_priority() {
+        assert_eq!(
+            run_sorted(&sort_fx(), Sort::Due),
+            ids(&["soon_high", "soon_low", "via_proj", "late_urgent", "undated_urgent", "undated_low"])
+        );
+    }
+
+    #[test]
+    fn sort_priority_then_due_then_id() {
+        let mut fx = sort_fx();
+        let mut tie = issue("a_tie", "a", "la");
+        tie.priority = 0;
+        tie.due_date = Some("2026-11-09".into());
+        fx.issues.push(tie);
+        assert_eq!(
+            run_sorted(&fx, Sort::Priority),
+            ids(&[
+                "a_tie",
+                "late_urgent",
+                "undated_urgent",
+                "soon_high",
+                "via_proj",
+                "soon_low",
+                "undated_low"
+            ])
+        );
+    }
+
+    #[test]
+    fn sort_updated_and_created_newest_first_then_id() {
+        let mut fx = sort_fx();
+        assert_eq!(
+            run_sorted(&fx, Sort::Updated),
+            ids(&["undated_low", "undated_urgent", "soon_low", "via_proj", "soon_high", "late_urgent"])
+        );
+        assert_eq!(
+            run_sorted(&fx, Sort::Created),
+            ids(&["undated_low", "via_proj", "undated_urgent", "late_urgent", "soon_high", "soon_low"])
+        );
+        for i in &mut fx.issues {
+            i.updated_at = "same".into();
+            i.created_at = "same".into();
+        }
+        let by_id =
+            ids(&["late_urgent", "soon_high", "soon_low", "undated_low", "undated_urgent", "via_proj"]);
+        assert_eq!(run_sorted(&fx, Sort::Updated), by_id);
+        assert_eq!(run_sorted(&fx, Sort::Created), by_id);
     }
 
     #[test]
