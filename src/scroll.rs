@@ -8,7 +8,9 @@
 
 /// Fixed heights of list-mode elements; the view renders with these exact
 /// heights so the offsets computed here match what is drawn.
-pub const LIST_ROW_H: f32 = 34.0;
+/// A row is one `SM` line plus the web row's `py-2.5`.
+pub const LIST_ROW_H: f32 =
+    crate::theme::type_scale::SM * crate::theme::type_scale::LH_SM + 2.0 * crate::theme::space::S2_5;
 pub const LIST_HEADER_H: f32 = 40.0;
 pub const LIST_SUBHEAD_H: f32 = 26.0;
 pub const LIST_SPACING: f32 = 2.0;
@@ -170,6 +172,14 @@ mod tests {
             top2,
             LIST_PAD_TOP + 2.0 * LIST_HEADER_H + LIST_SUBHEAD_H + 3.0 * LIST_SPACING
         );
+    }
+
+    #[test]
+    fn list_row_matches_the_drawn_row() {
+        // One SM line (20) plus the row's vertical padding of 2 * S2_5.
+        assert_eq!(LIST_ROW_H, 40.0);
+        let secs = vec![ListSection { len: 2, subhead_starts: vec![], collapsed: false }];
+        assert_eq!(list_row_span(&secs, 0, 1).0, 4.0 + 40.0 + 2.0 + 40.0 + 2.0);
     }
 
     #[test]
