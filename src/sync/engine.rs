@@ -3479,9 +3479,10 @@ async fn pull_projects_step(
             .map_err(|e| format!("db (pull cursor): {e}"))?
             .and_then(|c| cursor::since_with_overlap(&c))
     };
-    let page = projects::list_page(client, team_remote_id, since.as_deref())
+    let mut page = projects::list_page(client, team_remote_id, since.as_deref())
         .await
         .map_err(|e| format!("projects: {e}"))?;
+    attach_project_details(client, team_remote_id, &mut page.rows).await?;
     sync_log(
         &phase_scope("pull_projects", Some(team_remote_id)),
         "ok",
@@ -3490,6 +3491,24 @@ async fn pull_projects_step(
 
     let conn = open()?;
     apply_pulled_projects(&conn, local_team_id, page.rows, page.server_time.as_deref())
+}
+
+/// The project index omits `files`; only the detail payload carries them. An
+/// error fails the step before the cursor moves, so the rows are retried.
+async fn attach_project_details(
+    client: &ApiClient,
+    team_remote_id: i64,
+    rows: &mut [ProjectDto],
+) -> Result<(), String> {
+    for dto in rows.iter_mut() {
+        match projects::get(client, team_remote_id, dto.id).await {
+            Ok(detail) => dto.files = Some(detail.files.unwrap_or_default()),
+            // Deleted since the listing: nothing to store.
+            Err(ApiError::NotFound(_)) => {}
+            Err(e) => return Err(format!("project {} detail: {e}", dto.id)),
+        }
+    }
+    Ok(())
 }
 
 /// Write pulled project rows (idempotent, so overlap re-delivery is safe),
@@ -3516,11 +3535,22 @@ fn apply_pulled_projects(
         }
 
         let existing_uuid = existing.as_ref().map(|p| p.id.clone());
+        // `None` (index row, no detail) leaves stored attachments alone.
+        let pulled_files = dto.files.clone();
         let project: Project = dto
             .into_model(conn, local_team_id.to_string(), existing_uuid)
             .map_err(|e| format!("convert project: {e}"))?;
         queries::upsert_project(conn, &project)
             .map_err(|e| format!("db (upsert project): {e}"))?;
+        if let Some(files) = pulled_files {
+            crate::db::attachments::replace_synced(
+                conn,
+                crate::db::attachments::OwnerKind::Project,
+                &project.id,
+                &files,
+            )
+            .map_err(|e| format!("db (project attachments): {e}"))?;
+        }
     }
     // project_labels join not populated in this ticket; documented as TODO.
     if let Some(t) = server_time {
@@ -6166,6 +6196,49 @@ mod tests {
         // `files` missing from a detail payload means no files.
         let third = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
         assert_eq!(apply_pulled_issues(&conn, "t1", vec![third]), 0);
+        assert_eq!(names(&conn), ["pend"]);
+    }
+
+    #[test]
+    fn pulled_project_replaces_attachments_and_keeps_pending() {
+        use crate::db::attachments::{list_for_owner, OwnerKind};
+        let conn = setup_dependency_db();
+        let names = |conn: &Connection| -> Vec<String> {
+            let p = queries::find_project_by_remote_id(conn, 9).unwrap().unwrap();
+            list_for_owner(conn, OwnerKind::Project, &p.id)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.filename)
+                .collect()
+        };
+        let with = |files: serde_json::Value, ts: &str| {
+            let mut d = project_dto(9, "P", ts);
+            d.files = Some(serde_json::from_value(files).unwrap());
+            d
+        };
+        let first = with(serde_json::json!([file_json(2, "b"), file_json(1, "a")]), "2026-01-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![first], None).unwrap();
+        assert_eq!(names(&conn), ["a", "b"]);
+
+        let p = queries::find_project_by_remote_id(&conn, 9).unwrap().unwrap();
+        conn.execute(
+            "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state)
+             VALUES ('pp1', 'project', ?1, 'pend', '2026-02-01T00:00:00.000Z', 'pending')",
+            rusqlite::params![p.id],
+        )
+        .unwrap();
+        let second = with(serde_json::json!([file_json(1, "a"), file_json(3, "c")]), "2026-02-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![second], None).unwrap();
+        assert_eq!(names(&conn), ["a", "c", "pend"]);
+
+        // An index row (no `files`) leaves attachments alone.
+        let index_row = project_dto(9, "P", "2026-03-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![index_row], None).unwrap();
+        assert_eq!(names(&conn), ["a", "c", "pend"]);
+
+        // A detail payload with an empty list clears synced rows only.
+        let empty = with(serde_json::json!([]), "2026-04-01T00:00:00.000Z");
+        apply_pulled_projects(&conn, "t1", vec![empty], None).unwrap();
         assert_eq!(names(&conn), ["pend"]);
     }
 
