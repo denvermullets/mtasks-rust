@@ -2517,7 +2517,7 @@ async fn home_page_set(client: &ApiClient, payload: Option<&str>) -> Outcome {
     let (kind, id) = match resolved {
         crate::db::home_page::Resolved::Ready(k, i) => (k, i),
         crate::db::home_page::Resolved::Waiting => {
-            return Outcome::LeavePending("home view not synced yet".into())
+            return Outcome::LeavePending("Home view or dashboard not synced yet".into())
         }
         crate::db::home_page::Resolved::Bad => {
             return Outcome::DropAndLog("home_page set: bad payload".into())
@@ -2772,7 +2772,21 @@ async fn dashboard_group_create(client: &ApiClient, entity_id: &str, entry_id: i
                 Err(e) => Outcome::LeavePending(e),
             }
         }
+        Err(ApiError::NotFound(m)) => orphaned_group_create(entity_id, &m),
         Err(e) => classify(&e),
+    }
+}
+
+/// A 404 on `POST /dashboards/:id/groups` means the dashboard was deleted on
+/// the web, so the group can never be pushed. Discard it (and its queue
+/// entries); otherwise the unpushed group keeps `apply_snapshot` from ever
+/// removing the dashboard. The next pull then drops the dashboard.
+fn orphaned_group_create(group_id: &str, message: &str) -> Outcome {
+    match open().and_then(|c| {
+        dashboards::delete_group_local(&c, group_id).map_err(|e| format!("db: {e}"))
+    }) {
+        Ok(_) => Outcome::DropAndLog(format!("dashboard gone on the server, group discarded: {message}")),
+        Err(e) => Outcome::LeavePending(e),
     }
 }
 

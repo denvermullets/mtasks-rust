@@ -1108,6 +1108,23 @@ mod tests {
     }
 
     #[test]
+    fn discarding_an_orphaned_group_lets_the_next_pull_remove_the_dashboard() {
+        let conn = setup();
+        apply_snapshot(&conn, &[dash(1, "A", 0, vec![])]).unwrap();
+        let d = find_by_remote_id(&conn, 1).unwrap().unwrap();
+        let draft = GroupDraft { name: "G".into(), ..GroupDraft::default() };
+        let g = create_group_local(&conn, &d.id, &draft).unwrap();
+        // Deleted on the web while the group is unpushed: the dashboard is kept...
+        apply_snapshot(&conn, &[]).unwrap();
+        assert!(get(&conn, &d.id).unwrap().is_some());
+        // ...until the failed create discards the group and retires its entry.
+        assert_eq!(delete_group_local(&conn, &g.id).unwrap(), None);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+        apply_snapshot(&conn, &[]).unwrap();
+        assert!(get(&conn, &d.id).unwrap().is_none());
+    }
+
+    #[test]
     fn leaves_rows_with_pending_writes_alone() {
         let conn = setup();
         apply_snapshot(&conn, &[dash(1, "A", 0, vec![group(10, "G", 0)])]).unwrap();
