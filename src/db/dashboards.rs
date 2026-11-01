@@ -376,6 +376,49 @@ pub fn create_local(
     Ok(get(conn, &id)?.expect("dashboard just inserted"))
 }
 
+/// Which way to move a group in its dashboard's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up,
+    Down,
+}
+
+/// Move a group one place up or down, renumber the dashboard's groups 0..n
+/// locally, and queue the new order. All moves on one dashboard coalesce into
+/// a single pending `GROUP_ORDER_ENTITY_TYPE` entry (entity_id = dashboard
+/// local id, action "update") whose payload `{"group_ids": [..]}` holds the
+/// final order as local group ids. Returns false at an edge (nothing written).
+pub fn move_group(conn: &Connection, group_id: &str, direction: MoveDirection) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let dashboard_id: String = tx.query_row(
+        "SELECT dashboard_id FROM dashboard_groups WHERE id = ?1",
+        params![group_id],
+        |r| r.get(0),
+    )?;
+    let mut ids: Vec<String> = groups_for(&tx, &dashboard_id)?.into_iter().map(|g| g.id).collect();
+    let Some(at) = ids.iter().position(|i| i == group_id) else { return Ok(false) };
+    let to = match direction {
+        MoveDirection::Up if at > 0 => at - 1,
+        MoveDirection::Down if at + 1 < ids.len() => at + 1,
+        _ => return Ok(false),
+    };
+    ids.swap(at, to);
+    for (pos, id) in ids.iter().enumerate() {
+        tx.execute("UPDATE dashboard_groups SET position = ?2 WHERE id = ?1", params![id, pos as i64])?;
+    }
+    let payload = serde_json::json!({ "group_ids": ids }).to_string();
+    let updated = tx.execute(
+        "UPDATE sync_queue SET payload = ?3
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL AND attempted_at IS NULL",
+        params![GROUP_ORDER_ENTITY_TYPE, dashboard_id, payload],
+    )?;
+    if updated == 0 {
+        sync_queue::enqueue(&tx, GROUP_ORDER_ENTITY_TYPE, &dashboard_id, "update", Some(&payload))?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
 /// After a successful `POST`: the local row takes the server's id, position
 /// and `updated_at`. The name and description stay as typed (a later local
 /// edit may be queued). A pull that ran first may have mirrored the pushed
@@ -828,6 +871,89 @@ mod tests {
         let d = create_local(&conn, "Local", "").unwrap();
         apply_snapshot(&conn, &[]).unwrap();
         assert!(get(&conn, &d.id).unwrap().is_some());
+    }
+
+    fn seeded_three() -> (Connection, String, Vec<String>) {
+        let conn = setup();
+        apply_snapshot(
+            &conn,
+            &[dash(1, "A", 0, vec![group(10, "G", 0), group(11, "H", 1), group(12, "I", 2)])],
+        )
+        .unwrap();
+        let d = find_by_remote_id(&conn, 1).unwrap().unwrap();
+        let ids = groups_for(&conn, &d.id).unwrap().into_iter().map(|g| g.id).collect();
+        (conn, d.id, ids)
+    }
+
+    fn names(conn: &Connection, d: &str) -> Vec<String> {
+        groups_for(conn, d).unwrap().into_iter().map(|g| g.name).collect()
+    }
+
+    #[test]
+    fn move_group_renumbers_the_groups_contiguously() {
+        let (conn, d, ids) = seeded_three();
+        // Server positions with gaps are normalised to 0..n.
+        conn.execute("UPDATE dashboard_groups SET position = position * 10 + 5", []).unwrap();
+        assert!(move_group(&conn, &ids[2], MoveDirection::Up).unwrap());
+        assert_eq!(names(&conn, &d), ["G", "I", "H"]);
+        let pos: Vec<_> = groups_for(&conn, &d).unwrap().into_iter().map(|g| g.position).collect();
+        assert_eq!(pos, [0, 1, 2]);
+        assert!(move_group(&conn, &ids[0], MoveDirection::Down).unwrap());
+        assert_eq!(names(&conn, &d), ["I", "G", "H"]);
+    }
+
+    #[test]
+    fn move_group_at_an_edge_changes_and_queues_nothing() {
+        let (conn, d, ids) = seeded_three();
+        assert!(!move_group(&conn, &ids[0], MoveDirection::Up).unwrap());
+        assert!(!move_group(&conn, &ids[2], MoveDirection::Down).unwrap());
+        assert_eq!(names(&conn, &d), ["G", "H", "I"]);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn several_moves_coalesce_into_one_entry_with_the_final_order() {
+        let (conn, d, ids) = seeded_three();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].entity_type.as_str(), q[0].action.as_str(), q[0].entity_id.as_str()),
+                   (GROUP_ORDER_ENTITY_TYPE, "update", d.as_str()));
+        let payload: serde_json::Value = serde_json::from_str(q[0].payload.as_deref().unwrap()).unwrap();
+        let order: Vec<_> = groups_for(&conn, &d).unwrap().into_iter().map(|g| g.id).collect();
+        assert_eq!(payload["group_ids"], serde_json::json!(order));
+        assert_eq!(names(&conn, &d), ["I", "H", "G"]);
+    }
+
+    #[test]
+    fn a_move_after_the_order_was_pushed_queues_a_fresh_entry() {
+        let (conn, d, ids) = seeded_three();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        conn.execute("UPDATE sync_queue SET synced_at = 'x'", []).unwrap();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].entity_id, d);
+        assert_eq!(names(&conn, &d), ["H", "I", "G"]);
+    }
+
+    #[test]
+    fn moves_on_different_dashboards_queue_separate_entries() {
+        let (conn, _d, ids) = seeded_three();
+        apply_snapshot(
+            &conn,
+            &[
+                dash(1, "A", 0, vec![group(10, "G", 0), group(11, "H", 1), group(12, "I", 2)]),
+                dash(2, "B", 1, vec![group(20, "X", 0), group(21, "Y", 1)]),
+            ],
+        )
+        .unwrap();
+        let x = find_group_by_remote_id(&conn, 20).unwrap().unwrap();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        move_group(&conn, &x.id, MoveDirection::Down).unwrap();
+        assert_eq!(sync_queue::pending_entries(&conn).unwrap().len(), 2);
     }
 
     #[test]

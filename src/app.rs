@@ -91,6 +91,8 @@ pub enum Message {
     NavigateToView(View),
     /// Open a dashboard (its local id) from the sidebar.
     OpenDashboard(String),
+    /// Move a dashboard group (local id) up or down.
+    MoveDashboardGroup(String, crate::db::dashboards::MoveDirection),
     /// Pick a dashboard filter tab (Today / Week / Hot / Open).
     SetDashboardFilter(crate::dashboard_eval::Filter),
     SetDashboardSort(crate::dashboard_eval::Sort),
@@ -3543,6 +3545,22 @@ impl App {
                 self.inbox.set_filter(filter);
                 self.reload_inbox();
                 return self.scroll_inbox_to_selection();
+            }
+
+            Message::MoveDashboardGroup(group_id, direction) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't reorder groups",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::move_group(&self.db(), &group_id, direction) {
+                    Ok(true) => self.reload_data(),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[dashboards] move group failed: {e}"),
+                }
             }
 
             Message::OpenDashboard(id) => {
