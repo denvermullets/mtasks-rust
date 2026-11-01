@@ -341,6 +341,11 @@ pub fn replace_synced(
             }
         }
         for f in files {
+            // A delete the server has not seen yet: the row is already gone
+            // locally, so a pull must not resurrect it.
+            if has_pending_delete(conn, kind, f.id)? {
+                continue;
+            }
             let content_type = f.content_type.clone().unwrap_or_default();
             match existing.get(&f.id) {
                 Some(local_id) => {
@@ -387,6 +392,19 @@ pub fn replace_synced(
             Err(e)
         }
     }
+}
+
+/// True while an `attachment/delete` for `remote_id` (of this owner kind) is
+/// queued and unpushed.
+fn has_pending_delete(conn: &Connection, kind: OwnerKind, remote_id: i64) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_queue
+         WHERE entity_type = 'attachment' AND action = 'delete' AND synced_at IS NULL
+           AND json_extract(payload, '$.owner_kind') = ?1
+           AND json_extract(payload, '$.remote_id') = ?2)",
+        params![kind.as_str(), remote_id],
+        |r| r.get(0),
+    )
 }
 
 /// One attachment by local id.
@@ -708,6 +726,27 @@ mod tests {
 
     fn names(c: &Connection) -> Vec<String> {
         list_for_owner(c, OwnerKind::Issue, "i1").unwrap().into_iter().map(|a| a.filename).collect()
+    }
+
+    #[test]
+    fn pull_does_not_resurrect_attachment_with_queued_delete() {
+        let c = conn();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(5, "a.png"), dto(6, "b.png")]).unwrap();
+        let a = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap().remove(0);
+        assert_eq!(a.remote_id, Some(5));
+        c.execute("DELETE FROM attachments WHERE id = ?1", params![a.id]).unwrap();
+        c.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, action, payload, created_at)
+             VALUES ('attachment', ?1, 'delete', '{\"owner_kind\":\"issue\",\"remote_id\":5}', 'now')",
+            params![a.id],
+        )
+        .unwrap();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(5, "a.png"), dto(6, "b.png")]).unwrap();
+        assert_eq!(names(&c), vec!["b.png"]);
+        // Once the delete is pushed, the server list decides again.
+        c.execute("UPDATE sync_queue SET synced_at = 'x' WHERE entity_type = 'attachment'", []).unwrap();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(5, "a.png"), dto(6, "b.png")]).unwrap();
+        assert_eq!(names(&c).len(), 2);
     }
 
     #[test]
