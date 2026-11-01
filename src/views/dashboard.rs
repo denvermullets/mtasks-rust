@@ -3,12 +3,12 @@
 //!
 //! Focus uses the same `(group index, issue index in group)` pair as the list.
 
-use iced::widget::{column, container, horizontal_rule, row, scrollable, text, Column};
+use iced::widget::{button, column, container, horizontal_rule, horizontal_space, row, scrollable, text, Column};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::dashboard_eval::{Evaluation, GroupResult};
-use crate::db::dashboards::Dashboard;
+use crate::db::dashboards::{Dashboard, MoveDirection};
 use crate::theme as t;
 use crate::views::board::CardData;
 use crate::views::issue_list;
@@ -19,6 +19,7 @@ pub fn view<'a>(
     data: CardData<'a>,
     focused_group: usize,
     focused_issue: usize,
+    read_only: bool,
 ) -> Element<'a, Message> {
     let Some(dashboard) = dashboard else {
         return centered("Dashboard not found");
@@ -26,7 +27,7 @@ pub fn view<'a>(
 
     let mut list: Column<'a, Message> = column![].spacing(8).width(Length::Fill).padding([8, 12]);
     for (group_idx, g) in evaluation.groups.iter().enumerate() {
-        list = list.push(group_header(g));
+        list = list.push(group_header(g, group_idx, evaluation.groups.len(), read_only));
         if g.issues.is_empty() {
             list = list.push(
                 container(text("No issues").size(13).color(t::text_muted())).padding([4, 16]),
@@ -70,7 +71,12 @@ fn controls<'a>(dashboard: &'a Dashboard) -> Element<'a, Message> {
 }
 
 /// A group's section header: color swatch, name, description and issue count.
-fn group_header<'a>(g: &GroupResult<'a>) -> Element<'a, Message> {
+fn group_header<'a>(
+    g: &GroupResult<'a>,
+    index: usize,
+    count: usize,
+    read_only: bool,
+) -> Element<'a, Message> {
     let color = t::hex_to_color(&g.group.color).unwrap_or_else(t::accent);
     let swatch = container(text(""))
         .width(Length::Fixed(4.0))
@@ -88,7 +94,25 @@ fn group_header<'a>(g: &GroupResult<'a>) -> Element<'a, Message> {
     if !g.group.description.is_empty() {
         r = r.push(text(g.group.description.clone()).size(12).color(t::text_secondary()));
     }
+    r = r.push(horizontal_space()).push(move_buttons(&g.group.id, index, count, read_only));
     container(r).padding([6, 4]).width(Length::Fill).into()
+}
+
+/// Move-up / move-down buttons; disabled at the edges and when read-only.
+fn move_buttons<'a>(group_id: &str, index: usize, count: usize, read_only: bool) -> Element<'a, Message> {
+    let button_for = |label: &'static str, dir: MoveDirection, allowed: bool| {
+        let b = button(text(label).size(12)).padding([2, 8]).style(button::text);
+        if allowed && !read_only {
+            b.on_press(Message::MoveDashboardGroup(group_id.to_string(), dir))
+        } else {
+            b
+        }
+    };
+    row![]
+        .spacing(4)
+        .push(button_for("Up", MoveDirection::Up, index > 0))
+        .push(button_for("Down", MoveDirection::Down, index + 1 < count))
+        .into()
 }
 
 fn centered<'a>(msg: &'static str) -> Element<'a, Message> {

@@ -91,6 +91,8 @@ pub enum Message {
     NavigateToView(View),
     /// Open a dashboard (its local id) from the sidebar.
     OpenDashboard(String),
+    /// Move a dashboard group (local id) up or down.
+    MoveDashboardGroup(String, crate::db::dashboards::MoveDirection),
 
     // Team menu (sidebar kebab)
     /// Open/close the per-team menu on an expanded team header.
@@ -3419,6 +3421,22 @@ impl App {
                 return self.scroll_inbox_to_selection();
             }
 
+            Message::MoveDashboardGroup(group_id, direction) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't reorder groups",
+                        ToastKind::Error,
+                        false,
+                    );
+                    return Task::none();
+                }
+                match crate::db::dashboards::move_group(&self.db(), &group_id, direction) {
+                    Ok(true) => self.reload_data(),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[dashboards] move group failed: {e}"),
+                }
+            }
+
             Message::OpenDashboard(id) => {
                 self.commit_issue_detail();
                 self.commit_project_detail();
@@ -5867,6 +5885,7 @@ impl App {
                     },
                     self.focused_lane,
                     self.focused_issue,
+                    self.sync_read_only,
                 )
             }
         };
