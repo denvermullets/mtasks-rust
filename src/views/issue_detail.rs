@@ -1064,16 +1064,19 @@ fn comment_row<'a>(
         issues,
         members,
     ));
-    col = col.push_maybe(
-        ctx.comment_attachments
-            .get(&comment.id)
-            .and_then(|files| crate::views::attachments::section(files, ctx.images)),
-    );
-    // Delete is offered on the user's own comments, synced or not.
+    // Delete is offered on the user's own comments, synced or not. The desktop
+    // does not know member roles, so team admins are not offered it on others'
+    // comments (the server would 403 anyone else; the row is then restored).
     let can_delete = comment
         .author_id
         .as_ref()
         .is_some_and(|aid| my_member_ids.contains(aid));
+    // Attachment delete follows the same author rule.
+    col = col.push_maybe(
+        ctx.comment_attachments
+            .get(&comment.id)
+            .and_then(|files| crate::views::attachments::section_with(files, ctx.images, can_delete)),
+    );
     let mut actions = row![].spacing(10);
     let can_reply = can_reply && Comment::can_reply_at(depth);
     if can_reply {
