@@ -140,7 +140,7 @@ pub fn view<'a>(
     recurring_origin: Option<&'a str>,
     my_member_ids: &[String],
     host: &'a str,
-    pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
+    pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -722,16 +722,20 @@ pub fn paste_image_binding(
 }
 
 /// Pending inline images by placeholder uuid -> outbox file, for `BodyCtx`.
-pub fn pending_inline_paths(
-    attachments: &[Attachment],
-) -> std::collections::HashMap<String, std::path::PathBuf> {
+pub fn pending_inline_paths(attachments: &[Attachment]) -> crate::views::body::PendingInlineMap {
+    use crate::db::attachments::UploadState;
     attachments
         .iter()
         .filter(|a| a.upload_kind == crate::db::attachments::UploadKind::InlineImage)
         .filter_map(|a| {
             Some((
                 a.placeholder_uuid.clone()?,
-                std::path::PathBuf::from(a.outbox_path.as_ref()?),
+                crate::views::body::PendingInline {
+                    id: a.id.clone(),
+                    path: std::path::PathBuf::from(a.outbox_path.as_ref()?),
+                    failure: (a.upload_state == UploadState::Failed)
+                        .then(|| a.failure_reason.clone().unwrap_or_else(|| "unknown error".into())),
+                },
             ))
         })
         .collect()
@@ -958,7 +962,7 @@ pub struct ThreadCtx<'a, 'b> {
     /// Configured JAIT base URL (resolves inline image URLs).
     pub host: &'a str,
     /// Unsent pasted images (placeholder uuid -> outbox file), comments included.
-    pub pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
+    pub pending_paths: &'a crate::views::body::PendingInlineMap,
 }
 
 /// Comment local id -> its files (absent when it has none).

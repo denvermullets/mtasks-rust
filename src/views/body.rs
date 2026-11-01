@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, image, text};
+use iced::widget::{button, column, container, image, row, text};
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;
@@ -26,6 +26,20 @@ use crate::theme as t;
 const MAX_IMAGE_WIDTH: f32 = 560.0;
 /// Placeholder size while an image loads.
 const PLACEHOLDER: (f32, f32) = (240.0, 140.0);
+
+/// A not-yet-uploaded inline image (pending or failed), found by placeholder uuid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInline {
+    /// Local attachment id (target of Retry / Remove).
+    pub id: String,
+    /// Outbox copy of the pasted image.
+    pub path: PathBuf,
+    /// `Some(reason)` when the upload failed for good.
+    pub failure: Option<String>,
+}
+
+/// Pending inline images by placeholder uuid.
+pub type PendingInlineMap = HashMap<String, PendingInline>;
 
 /// One image block in reading order. `key` is the file-cache/`ImageStore` key
 /// (`None` for pending placeholders, which have no blob yet).
@@ -98,7 +112,7 @@ pub struct BodyCtx<'a> {
     /// Outbox file per pending placeholder uuid. Pending uploads (JRST-197)
     /// fill this; a uuid with no entry renders as a card.
     /// `None` = no pending uploads known.
-    pub pending_paths: Option<&'a HashMap<String, PathBuf>>,
+    pub pending_paths: Option<&'a PendingInlineMap>,
     /// Click on an image (lightbox, JRST-192). `None` = not clickable.
     pub on_image: Option<fn(InlineImage) -> Message>,
 }
@@ -134,6 +148,7 @@ fn image_path(block: &ImageBlock<'_>, ctx: &BodyCtx<'_>) -> Option<PathBuf> {
     match block.kind {
         ImageKind::Pending(uuid) => ctx.pending_paths
             .and_then(|m| m.get(uuid))
+            .map(|p| &p.path)
             .filter(|p| p.exists())
             .cloned(),
         ImageKind::Blob => inline::blob_key(block.src)
@@ -153,14 +168,45 @@ fn image_block<'a>(block: &ImageBlock<'_>, ctx: &BodyCtx<'a>) -> Element<'a, Mes
         None if loading => placeholder(),
         None => alt_card(block.alt),
     };
-    match ctx.on_image {
+    let el: Element<'a, Message> = match ctx.on_image {
         Some(on_image) => button(el)
             .padding(0)
             .style(|_theme: &Theme, _status| button::Style::default())
             .on_press(on_image(InlineImage::from_block(block)))
             .into(),
         None => el,
+    };
+    match failed_inline(block, ctx) {
+        Some((id, reason)) => column![el, failed_row(id, reason)].spacing(4).into(),
+        None => el,
     }
+}
+
+/// The failed upload behind a pending-placeholder block: (attachment id, reason).
+fn failed_inline<'a>(block: &ImageBlock<'_>, ctx: &BodyCtx<'a>) -> Option<(String, String)> {
+    let ImageKind::Pending(uuid) = block.kind else { return None };
+    let p = ctx.pending_paths?.get(uuid)?;
+    Some((p.id.clone(), p.failure.clone()?))
+}
+
+/// "Upload failed: reason" with the two ways out.
+fn failed_row<'a>(id: String, reason: String) -> Element<'a, Message> {
+    row![]
+        .spacing(8)
+        .push(text(format!("Upload failed: {reason}")).size(11).color(t::danger()))
+        .push(
+            button(text("Retry").size(11).color(t::accent()))
+                .on_press(Message::RetryUpload(id.clone()))
+                .padding(0)
+                .style(button::text),
+        )
+        .push(
+            button(text("Remove").size(11).color(t::text_muted()))
+                .on_press(Message::RemoveFailedUpload(id))
+                .padding(0)
+                .style(button::text),
+        )
+        .into()
 }
 
 fn placeholder<'a>() -> Element<'a, Message> {

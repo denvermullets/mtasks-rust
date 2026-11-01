@@ -689,7 +689,7 @@ pub struct App {
     /// each reload only while `view` is `IssueDetail`.
     detail_attachments: Vec<crate::db::attachments::Attachment>,
     /// Pending inline images (placeholder uuid -> outbox file) of the open issue.
-    detail_pending_paths: std::collections::HashMap<String, std::path::PathBuf>,
+    detail_pending_paths: crate::views::body::PendingInlineMap,
     /// The top-level comment composer was the last editor touched; a file drop
     /// then stages onto it (JRST-208). Cleared on view change.
     composer_focused: bool,
