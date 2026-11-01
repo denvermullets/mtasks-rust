@@ -141,6 +141,10 @@ pub enum Message {
     /// "Delete" pressed on a synced attachment card (local attachment id).
     ConfirmDeleteAttachment(String),
     DeleteAttachmentConfirmed,
+    /// "Retry" on a failed upload card (local attachment id).
+    RetryUpload(String),
+    /// "Remove" on a failed upload card (local attachment id).
+    RemoveFailedUpload(String),
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -4483,6 +4487,27 @@ impl App {
                 }
                 self.modal = Modal::None;
                 self.reload_data();
+            }
+
+            Message::RetryUpload(id) => {
+                let conn = self.db();
+                let _ = crate::db::attachments::retry_failed(&conn, &id);
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::RemoveFailedUpload(id) => {
+                let conn = self.db();
+                if let Ok(Some(removed)) = crate::db::attachments::remove_failed(&conn, &id) {
+                    if let Some(p) = &removed.outbox_path {
+                        let _ = crate::files::outbox::remove(std::path::Path::new(p));
+                    }
+                    // JRST-214 hook: for an inline image (`removed.placeholder_uuid`),
+                    // strip its `jait-pending://` placeholder from the body here
+                    // via `mentions::strip_placeholder`.
+                }
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
             }
 
             Message::DeleteProjectConfirmed => {

@@ -2660,8 +2660,8 @@ async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
 // `upload/create` and `attachment/create` entries (entity_id = the attachment's
 // local id), queued together by `db::attachments::add_pending`. Both wait while
 // the owner has no remote id; the attach also waits for the upload's
-// `signed_id`. Any upload error retries for now (see [`upload_outcome`]); the
-// failed state is a later ticket.
+// `signed_id`. Errors are split by [`classify_upload_error`]: permanent ones mark
+// the row `failed` (Retry/Remove on the card), temporary ones keep retrying.
 
 /// What an `upload/create` entry needs to run.
 struct UploadPrep {
@@ -2731,7 +2731,7 @@ fn prep_attachment_create_in(conn: &Connection, entity_id: &str) -> Prep<AttachP
         Ok(None) => return Prep::Done(Outcome::Success),
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
-    if a.upload_state == UploadState::Synced {
+    if a.upload_state != UploadState::Pending {
         return Prep::Done(Outcome::Success);
     }
     let Some(signed_id) = a.signed_id.clone() else {
@@ -2764,15 +2764,50 @@ fn prep_attachment_create_in(conn: &Connection, entity_id: &str) -> Prep<AttachP
     })
 }
 
-/// Every upload error is temporary for now: a permanent classification would
-/// drop the entry and silently lose the user's file. The failed state
-/// (JRST-200) replaces this with a permanent/temporary split. An expired PUT
-/// target (403) is retried by starting the direct upload again, which is what
-/// every retry does (the target is never stored).
-fn upload_outcome(err: &ApiError) -> Outcome {
-    match classify(err) {
-        Outcome::DropAndLog(reason) => Outcome::LeavePending(reason),
-        other => other,
+/// How an upload/attach error is treated.
+#[derive(Debug, PartialEq, Eq)]
+enum UploadFailure {
+    /// Will not succeed unchanged: the row becomes `failed` with this reason.
+    Permanent(String),
+    /// Offline, timeout, 5xx, auth: keep the entry pending and retry.
+    Temporary(String),
+}
+
+/// Pure split of upload errors. Permanent: 422 (`Validation`), a 403 from the
+/// API (`Forbidden`) and a 404 (the owner is gone), plus other 4xx from the
+/// storage target. Temporary: network (offline/timeout), 5xx, 401/missing token,
+/// and a 403 from the PUT (`Server { 403 }`, an expired target: JRST-201
+/// restarts the direct upload, which every retry does).
+fn classify_upload_error(err: &ApiError) -> UploadFailure {
+    use UploadFailure::{Permanent, Temporary};
+    match err {
+        ApiError::Validation { errors } => Permanent(format!("rejected: {}", errors.join("; "))),
+        ApiError::Forbidden(m) => Permanent(format!("not allowed: {m}")),
+        ApiError::NotFound(m) => Permanent(format!("not found: {m}")),
+        ApiError::Server { status, message } if matches!(status, 403 | 408 | 429) => {
+            Temporary(format!("server {status}: {message}"))
+        }
+        ApiError::Server { status, message } if (400..500).contains(status) => {
+            Permanent(format!("server {status}: {message}"))
+        }
+        ApiError::Server { status, message } => Temporary(format!("server {status}: {message}")),
+        other => Temporary(other.to_string()),
+    }
+}
+
+/// Outcome for an upload/attach error. A permanent one marks the row `failed`
+/// and consumes the entry (Retry requeues it); the user's file is kept.
+fn upload_outcome(entity_id: &str, err: &ApiError) -> Outcome {
+    match classify_upload_error(err) {
+        UploadFailure::Temporary(reason) => Outcome::LeavePending(reason),
+        UploadFailure::Permanent(reason) => {
+            match open().and_then(|c| {
+                attachments::mark_failed(&c, entity_id, &reason).map_err(|e| format!("db: {e}"))
+            }) {
+                Ok(()) => Outcome::DropAndLog(reason),
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
     }
 }
 
@@ -2790,10 +2825,10 @@ async fn upload_create(client: &ApiClient, entity_id: &str) -> Outcome {
     };
     let direct = match attachments_api::create_direct_upload(client, &prep.blob).await {
         Ok(d) => d,
-        Err(e) => return upload_outcome(&e),
+        Err(e) => return upload_outcome(entity_id, &e),
     };
     if let Err(e) = attachments_api::put_bytes(client, &direct.direct_upload, bytes).await {
-        return upload_outcome(&e);
+        return upload_outcome(entity_id, &e);
     }
     let blob_filename = direct.filename.unwrap_or(prep.blob.filename);
     let saved = open().and_then(|c| {
@@ -2840,11 +2875,11 @@ async fn attachment_create(client: &ApiClient, entity_id: &str) -> Outcome {
                 Err(e) => Outcome::LeavePending(e),
             }
         }
-        // Owner gone or refused for good: kept pending until the failed state
-        // exists (JRST-200), never dropped.
+        // Team access lost keeps the entry; anything else goes through the
+        // permanent/temporary split.
         Err(e) => match classify_in_team(&e, prep.team_remote_id) {
-            Outcome::DropAndLog(reason) => Outcome::LeavePending(reason),
-            other => other,
+            o @ Outcome::TeamAccessLost(..) => o,
+            _ => upload_outcome(entity_id, &e),
         },
     }
 }
@@ -7404,13 +7439,57 @@ mod tests {
         assert!(matches!(prep_attachment_create_in(&conn, "gone"), Prep::Done(Outcome::Success)));
     }
 
+    fn is_permanent(e: ApiError) -> bool {
+        matches!(classify_upload_error(&e), UploadFailure::Permanent(_))
+    }
+
     #[test]
-    fn upload_errors_never_drop_the_entry() {
-        let e = ApiError::Validation { errors: vec!["too big".into()] };
-        assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
-        let e = ApiError::Server { status: 403, message: "expired".into() };
-        assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
-        let e = ApiError::NotFound("x".into());
-        assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
+    fn upload_422_403_and_404_are_permanent() {
+        assert!(is_permanent(ApiError::Validation { errors: vec!["too big".into()] }));
+        assert!(is_permanent(ApiError::Forbidden("no".into())));
+        assert!(is_permanent(ApiError::NotFound("gone".into())));
+        assert!(is_permanent(ApiError::Server { status: 400, message: "bad".into() }));
+    }
+
+    #[test]
+    fn upload_5xx_auth_and_expired_put_target_are_temporary() {
+        assert!(!is_permanent(ApiError::Server { status: 500, message: "x".into() }));
+        assert!(!is_permanent(ApiError::Server { status: 503, message: "x".into() }));
+        assert!(!is_permanent(ApiError::Server { status: 403, message: "expired".into() }));
+        assert!(!is_permanent(ApiError::Server { status: 429, message: "slow".into() }));
+        assert!(!is_permanent(ApiError::Unauthorized("x".into())));
+        assert!(!is_permanent(ApiError::MissingToken));
+    }
+
+    #[tokio::test]
+    async fn upload_offline_and_timeout_are_temporary() {
+        // Offline: nothing listens on the port.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = closed.local_addr().unwrap();
+        drop(closed);
+        let offline = reqwest::get(format!("http://{addr}/")).await.unwrap_err();
+        assert!(offline.is_connect());
+        assert!(!is_permanent(ApiError::Network(offline)));
+        // Timeout: the socket accepts but nobody answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", silent.local_addr().unwrap());
+        let timeout = reqwest::Client::new()
+            .get(url)
+            .timeout(std::time::Duration::from_millis(50))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(timeout.is_timeout());
+        assert!(!is_permanent(ApiError::Network(timeout)));
+    }
+
+    #[test]
+    fn a_failed_row_is_a_finished_entry_for_both_steps() {
+        let conn = setup_dependency_db();
+        let a = pending_upload(&conn, "i1");
+        attachments::set_uploaded(&conn, &a.id, "signed", "spec.pdf").unwrap();
+        attachments::mark_failed(&conn, &a.id, "nope").unwrap();
+        assert!(matches!(prep_upload_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
+        assert!(matches!(prep_attachment_create_in(&conn, &a.id), Prep::Done(Outcome::Success)));
     }
 }
