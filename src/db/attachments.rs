@@ -359,6 +359,27 @@ pub fn remove_synced_issue_attachment(conn: &Connection, id: &str) -> Result<Opt
     ))
 }
 
+/// Cancel / remove a not-yet-uploaded (pending or failed) row: delete it, drop
+/// its unsent `upload`/`attachment` queue entries and the outbox copy. Returns
+/// whether a row was removed; synced rows are refused (use the delete path).
+pub fn remove_local(conn: &Connection, id: &str) -> Result<bool> {
+    let Some(a) = get(conn, id)? else { return Ok(false) };
+    if a.upload_state == UploadState::Synced {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM sync_queue WHERE entity_id = ?1 AND entity_type IN (?2, ?3) AND synced_at IS NULL",
+        params![id, UPLOAD_ENTITY, ATTACHMENT_ENTITY],
+    )?;
+    tx.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
+    tx.commit()?;
+    if let Some(path) = a.outbox_path.as_deref() {
+        let _ = crate::files::outbox::remove(std::path::Path::new(path));
+    }
+    Ok(true)
+}
+
 /// Put back a row captured in a delete payload's `restore` (after a 403).
 /// A no-op when the row (by remote id) is already there again.
 pub fn restore_from_snapshot(conn: &Connection, snap: &serde_json::Value, remote_id: i64) -> Result<()> {
@@ -623,5 +644,33 @@ mod tests {
         assert_eq!(map["c1"].len(), 1);
         assert_eq!(map["c2"].iter().map(|a| a.filename.as_str()).collect::<Vec<_>>(), ["b", "c"]);
         assert!(!map.contains_key("c3"), "issue files are not comment files");
+    }
+
+    #[test]
+    fn remove_local_cancels_a_pending_upload_row_queue_and_outbox_file() {
+        let c = conn();
+        let dir = std::env::temp_dir().join(format!("rm-local-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("blob");
+        std::fs::write(&file, b"x").unwrap();
+        let mut n = new_pending("spec.pdf");
+        n.outbox_path = file.to_string_lossy().into_owned();
+        let a = add_pending(&c, &n).unwrap();
+        let keep = add_pending(&c, &new_pending("keep.pdf")).unwrap();
+        assert!(remove_local(&c, &a.id).unwrap());
+        assert_eq!(names(&c), vec!["keep.pdf"]);
+        assert!(!file.exists());
+        assert!(queue(&c).iter().all(|(_, _, id)| *id == keep.id));
+        assert!(!remove_local(&c, &a.id).unwrap(), "already gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_local_refuses_synced_rows() {
+        let c = conn();
+        replace_synced(&c, OwnerKind::Issue, "i1", &[dto(9, "a.png")]).unwrap();
+        let id = list_for_owner(&c, OwnerKind::Issue, "i1").unwrap()[0].id.clone();
+        assert!(!remove_local(&c, &id).unwrap());
+        assert_eq!(names(&c), vec!["a.png"]);
     }
 }

@@ -140,6 +140,8 @@ pub enum Message {
     DeleteCommentConfirmed,
     /// "Delete" pressed on a synced attachment card (local attachment id).
     ConfirmDeleteAttachment(String),
+    /// Cancel a pending upload (local row id): drops the row, queue entries and outbox file.
+    CancelAttachmentUpload(String),
     DeleteAttachmentConfirmed,
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
@@ -4470,6 +4472,12 @@ impl App {
                 } else {
                     self.modal = Modal::DeleteAttachmentConfirm(id);
                 }
+            }
+
+            Message::CancelAttachmentUpload(id) => {
+                let _ = crate::db::attachments::remove_local(&self.db(), &id);
+                self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
+                self.reload_data();
             }
 
             Message::DeleteAttachmentConfirmed => {

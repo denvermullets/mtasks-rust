@@ -58,13 +58,20 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore) -> Element<'a, Messag
             .padding(0)
             .style(button::text)
     });
+    let cancel = (a.upload_state == UploadState::Pending).then(|| {
+        button(text("Cancel").size(11).color(t::text_muted()))
+            .on_press(Message::CancelAttachmentUpload(a.id.clone()))
+            .padding(0)
+            .style(button::text)
+    });
     let body = container(
         row![]
             .spacing(8)
             .align_y(Alignment::Center)
             .push_maybe(thumbnail(a, images))
             .push(info)
-            .push_maybe(delete),
+            .push_maybe(delete)
+            .push_maybe(cancel),
     )
     .padding(10)
     .width(Length::Fill)
