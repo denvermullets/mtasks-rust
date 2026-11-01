@@ -31,6 +31,30 @@ impl OwnerKind {
             OwnerKind::Comment => "comment",
         }
     }
+
+    /// `None` for anything but the three stored names.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "issue" => Some(OwnerKind::Issue),
+            "project" => Some(OwnerKind::Project),
+            "comment" => Some(OwnerKind::Comment),
+            _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for OwnerKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        Self::parse(s).ok_or_else(|| format!("unknown attachment owner kind {s:?}"))
+    }
+}
+
+impl std::fmt::Display for OwnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Where an attachment is in its life: on the server, waiting to upload, or
@@ -66,7 +90,7 @@ pub struct Attachment {
     /// Local uuid.
     pub id: String,
     pub remote_id: Option<i64>,
-    pub owner_kind: String,
+    pub owner_kind: OwnerKind,
     /// Owner's local id.
     pub owner_id: String,
     pub blob_id: Option<i64>,
@@ -99,7 +123,12 @@ fn from_row(r: &Row) -> Result<Attachment> {
     Ok(Attachment {
         id: r.get(0)?,
         remote_id: r.get(1)?,
-        owner_kind: r.get(2)?,
+        owner_kind: {
+            let raw: String = r.get(2)?;
+            raw.parse().map_err(|e: String| {
+                rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
+            })?
+        },
         owner_id: r.get(3)?,
         blob_id: r.get(4)?,
         filename: r.get(5)?,
@@ -407,6 +436,62 @@ fn has_pending_delete(conn: &Connection, kind: OwnerKind, remote_id: i64) -> Res
     )
 }
 
+/// Where an attachment's owner lives: its team and remote id, and for a
+/// comment the issue/project it is under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerRef {
+    /// The owner's team, local id.
+    pub team_id: String,
+    /// The owner's own remote id; `None` until the server has seen it.
+    pub remote_id: Option<i64>,
+    /// Comment owners only.
+    pub parent: Option<ParentRef>,
+}
+
+/// The issue or project a comment belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRef {
+    pub kind: OwnerKind,
+    pub remote_id: Option<i64>,
+}
+
+/// The one owner lookup: `None` when the owner (or a comment's parent) is
+/// missing locally.
+pub fn owner_ref(conn: &Connection, a: &Attachment) -> Result<Option<OwnerRef>> {
+    use crate::db::models::CommentOwner;
+    use crate::db::queries;
+    Ok(match a.owner_kind {
+        OwnerKind::Issue => queries::get_issue(conn, &a.owner_id)?.map(|i| OwnerRef {
+            team_id: i.team_id,
+            remote_id: i.remote_id,
+            parent: None,
+        }),
+        OwnerKind::Project => queries::get_project(conn, &a.owner_id)?.map(|p| OwnerRef {
+            team_id: p.team_id,
+            remote_id: p.remote_id,
+            parent: None,
+        }),
+        OwnerKind::Comment => {
+            let Some(c) = queries::get_comment(conn, &a.owner_id)? else { return Ok(None) };
+            let (kind, team_id, parent_remote) = match c.owner() {
+                CommentOwner::Issue(iid) => {
+                    let Some(i) = queries::get_issue(conn, &iid)? else { return Ok(None) };
+                    (OwnerKind::Issue, i.team_id, i.remote_id)
+                }
+                CommentOwner::Project(pid) => {
+                    let Some(p) = queries::get_project(conn, &pid)? else { return Ok(None) };
+                    (OwnerKind::Project, p.team_id, p.remote_id)
+                }
+            };
+            Some(OwnerRef {
+                team_id,
+                remote_id: c.remote_id,
+                parent: Some(ParentRef { kind, remote_id: parent_remote }),
+            })
+        }
+    })
+}
+
 /// One attachment by local id.
 pub fn get(conn: &Connection, id: &str) -> Result<Option<Attachment>> {
     use rusqlite::OptionalExtension;
@@ -432,51 +517,28 @@ pub fn remove_synced_attachment(conn: &Connection, id: &str) -> Result<Option<St
     let (Some(remote_id), UploadState::Synced) = (a.remote_id, a.upload_state) else {
         return Ok(None);
     };
-    // (team local id, owner remote id, extra payload fields)
-    let (team_local, owner_remote_id, extra) = match a.owner_kind.as_str() {
-        "issue" => {
-            let Some(issue) = queries::get_issue(conn, &a.owner_id)? else { return Ok(None) };
-            let Some(r) = issue.remote_id else { return Ok(None) };
-            (issue.team_id, r, serde_json::json!({}))
+    let Some(owner) = owner_ref(conn, &a)? else { return Ok(None) };
+    let Some(owner_remote_id) = owner.remote_id else { return Ok(None) };
+    // Comment owners also carry the parent the server addresses them under.
+    let extra = match &owner.parent {
+        Some(parent) => {
+            let Some(parent_remote) = parent.remote_id else { return Ok(None) };
+            serde_json::json!({ "parent_kind": parent.kind.as_str(), "parent_remote_id": parent_remote })
         }
-        "project" => {
-            let Some(project) = queries::get_project(conn, &a.owner_id)? else { return Ok(None) };
-            let Some(r) = project.remote_id else { return Ok(None) };
-            (project.team_id, r, serde_json::json!({}))
-        }
-        "comment" => {
-            let Some(comment) = queries::get_comment(conn, &a.owner_id)? else { return Ok(None) };
-            let Some(comment_remote) = comment.remote_id else { return Ok(None) };
-            let (kind, team, parent_remote) = match comment.owner() {
-                crate::db::models::CommentOwner::Issue(iid) => {
-                    let Some(i) = queries::get_issue(conn, &iid)? else { return Ok(None) };
-                    ("issue", i.team_id, i.remote_id)
-                }
-                crate::db::models::CommentOwner::Project(pid) => {
-                    let Some(p) = queries::get_project(conn, &pid)? else { return Ok(None) };
-                    ("project", p.team_id, p.remote_id)
-                }
-            };
-            let Some(parent_remote) = parent_remote else { return Ok(None) };
-            (
-                team,
-                comment_remote,
-                serde_json::json!({ "parent_kind": kind, "parent_remote_id": parent_remote }),
-            )
-        }
-        _ => return Ok(None),
+        None => serde_json::json!({}),
     };
+    let team_local = owner.team_id;
     let Some(team_remote_id) = queries::remote_id_for(conn, "teams", &team_local)? else {
         return Ok(None);
     };
     conn.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
     let mut payload = serde_json::json!({
-        "owner_kind": a.owner_kind,
+        "owner_kind": a.owner_kind.as_str(),
         "team_remote_id": team_remote_id,
         "owner_remote_id": owner_remote_id,
         "remote_id": remote_id,
         "restore": {
-            "id": a.id, "owner_kind": a.owner_kind, "owner_id": a.owner_id,
+            "id": a.id, "owner_kind": a.owner_kind.as_str(), "owner_id": a.owner_id,
             "blob_id": a.blob_id, "filename": a.filename, "content_type": a.content_type,
             "byte_size": a.byte_size, "checksum": a.checksum, "created_at": a.created_at,
         },
@@ -771,6 +833,14 @@ mod tests {
 
     fn names(c: &Connection) -> Vec<String> {
         list_for_owner(c, OwnerKind::Issue, "i1").unwrap().into_iter().map(|a| a.filename).collect()
+    }
+
+    #[test]
+    fn owner_kind_parses_and_rejects_unknown_names() {
+        for k in [OwnerKind::Issue, OwnerKind::Project, OwnerKind::Comment] {
+            assert_eq!(k.as_str().parse::<OwnerKind>(), Ok(k));
+        }
+        assert!("team".parse::<OwnerKind>().is_err());
     }
 
     #[test]

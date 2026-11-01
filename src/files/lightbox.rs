@@ -138,7 +138,7 @@ mod tests {
         Attachment {
             id: id.into(),
             remote_id: Some(7),
-            owner_kind: "issue".into(),
+            owner_kind: crate::db::attachments::OwnerKind::Issue,
             owner_id: "i1".into(),
             blob_id: Some(70),
             filename: format!("{id}.bin"),

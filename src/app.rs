@@ -1017,12 +1017,7 @@ impl App {
     fn strip_removed_inline(&mut self, conn: &rusqlite::Connection, row: &crate::db::attachments::Attachment) {
         use crate::db::attachments::OwnerKind;
         let Some(uuid) = row.placeholder_uuid.as_deref() else { return };
-        let kind = match row.owner_kind.as_str() {
-            "issue" => OwnerKind::Issue,
-            "project" => OwnerKind::Project,
-            "comment" => OwnerKind::Comment,
-            _ => return,
-        };
+        let kind = row.owner_kind;
         let Ok(Some(body)) = crate::db::attachments::strip_inline_placeholder(conn, kind, &row.owner_id, uuid) else {
             return;
         };
