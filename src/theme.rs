@@ -493,9 +493,51 @@ pub mod type_scale {
     pub const LH_XXXXL: f32 = 40.0 / 36.0;
 }
 
+/// The web's Tailwind v4 spacing scale: `N` steps of 0.25rem (4px), named by the Tailwind step.
+/// Use for padding, gaps and margins.
+#[allow(dead_code)]
+pub mod space {
+    pub const S0_5: f32 = 2.0;
+    pub const S1: f32 = 4.0;
+    pub const S1_5: f32 = 6.0;
+    pub const S2: f32 = 8.0;
+    pub const S2_5: f32 = 10.0;
+    pub const S3: f32 = 12.0;
+    pub const S4: f32 = 16.0;
+    pub const S5: f32 = 20.0;
+    pub const S6: f32 = 24.0;
+    pub const S8: f32 = 32.0;
+    pub const S10: f32 = 40.0;
+    pub const S12: f32 = 48.0;
+    pub const S16: f32 = 64.0;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spacing_scale_matches_the_webs_tailwind_steps() {
+        use space::*;
+        let steps = [
+            (0.5, S0_5),
+            (1.0, S1),
+            (1.5, S1_5),
+            (2.0, S2),
+            (2.5, S2_5),
+            (3.0, S3),
+            (4.0, S4),
+            (5.0, S5),
+            (6.0, S6),
+            (8.0, S8),
+            (10.0, S10),
+            (12.0, S12),
+            (16.0, S16),
+        ];
+        for (step, px) in steps {
+            assert_eq!(px, step * 4.0, "spacing step {step}");
+        }
+    }
 
     const RAILS_KEYS: [&str; 15] = [
         "default",
