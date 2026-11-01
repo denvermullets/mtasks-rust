@@ -1006,6 +1006,43 @@ impl App {
         }
     }
 
+    /// JRST-214: a failed inline image was removed; drop its placeholder from the
+    /// owner's body and the open editor. Waiting body writers read the body from
+    /// the DB, so they proceed on their own; an update is only enqueued when
+    /// nothing is queued for the owner.
+    fn strip_removed_inline(&mut self, conn: &rusqlite::Connection, row: &crate::db::attachments::Attachment) {
+        use crate::db::attachments::OwnerKind;
+        let Some(uuid) = row.placeholder_uuid.as_deref() else { return };
+        let kind = match row.owner_kind.as_str() {
+            "issue" => OwnerKind::Issue,
+            "project" => OwnerKind::Project,
+            "comment" => OwnerKind::Comment,
+            _ => return,
+        };
+        let Ok(Some(body)) = crate::db::attachments::strip_inline_placeholder(conn, kind, &row.owner_id, uuid) else {
+            return;
+        };
+        let entity = match kind {
+            OwnerKind::Issue => {
+                if let Some(d) = self.issue_detail.as_mut().filter(|d| d.issue_id == row.owner_id) {
+                    d.description = iced::widget::text_editor::Content::with_text(&body);
+                }
+                "issue"
+            }
+            OwnerKind::Project => {
+                if let Some(d) = self.project_detail.as_mut().filter(|d| d.project_id == row.owner_id) {
+                    d.description = iced::widget::text_editor::Content::with_text(&body);
+                }
+                "project"
+            }
+            OwnerKind::Comment => return,
+        };
+        if !sync_queue::has_pending_entry(conn, entity, &row.owner_id).unwrap_or(true) {
+            let _ = sync_queue::enqueue(conn, entity, &row.owner_id, "update", None);
+        }
+        self.reload_data();
+    }
+
     /// Refill `detail_comment_attachments` for the comments in `detail_comments`.
     fn load_comment_attachments(&mut self, conn: &rusqlite::Connection) {
         let ids: Vec<&str> = self.detail_comments.iter().map(|c| c.id.as_str()).collect();
@@ -4893,10 +4930,7 @@ impl App {
                     .filter(|a| a.upload_state == crate::db::attachments::UploadState::Failed);
                 if let Some(row) = row {
                     if let Ok(true) = crate::db::attachments::remove_local(&conn, &id) {
-                        // JRST-214 hook: for an inline image (`row.placeholder_uuid`),
-                        // strip its `jait-pending://` placeholder from the body here
-                        // via `mentions::strip_placeholder`.
-                        let _ = row;
+                        self.strip_removed_inline(&conn, &row);
                     }
                 }
                 self.load_detail_dependencies(&conn);

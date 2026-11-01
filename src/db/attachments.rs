@@ -550,6 +550,36 @@ pub fn settle_inline_images(
     Ok(())
 }
 
+/// Remove the `jait-pending://<uuid>` placeholder from the owner's LOCAL body
+/// (JRST-214: Remove on a failed inline image). Returns the new body when it
+/// changed, `None` when the owner or placeholder was not there.
+pub fn strip_inline_placeholder(
+    conn: &Connection,
+    kind: OwnerKind,
+    owner_id: &str,
+    uuid: &str,
+) -> Result<Option<String>> {
+    let (table, column) = match kind {
+        OwnerKind::Issue => ("issues", "description"),
+        OwnerKind::Project => ("projects", "description"),
+        OwnerKind::Comment => ("comments", "body"),
+    };
+    let current: Option<String> = conn
+        .query_row(&format!("SELECT {column} FROM {table} WHERE id = ?1"), params![owner_id], |r| r.get(0))
+        .ok()
+        .flatten();
+    let Some(text) = current else { return Ok(None) };
+    let stripped = crate::mentions::strip_placeholder(&text, uuid);
+    if stripped == text {
+        return Ok(None);
+    }
+    conn.execute(
+        &format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"),
+        params![stripped, owner_id],
+    )?;
+    Ok(Some(stripped))
+}
+
 /// Put back a row captured in a delete payload's `restore` (after a 403).
 /// A no-op when the row (by remote id) is already there again.
 pub fn restore_from_snapshot(conn: &Connection, snap: &serde_json::Value, remote_id: i64) -> Result<()> {
@@ -678,6 +708,25 @@ mod tests {
 
     fn names(c: &Connection) -> Vec<String> {
         list_for_owner(c, OwnerKind::Issue, "i1").unwrap().into_iter().map(|a| a.filename).collect()
+    }
+
+    #[test]
+    fn strip_inline_placeholder_cleans_owner_body() {
+        let c = conn();
+        let uuid = "123e4567-e89b-12d3-a456-426614174000";
+        c.execute("PRAGMA foreign_keys=OFF", []).ok();
+        c.execute(
+            "INSERT INTO issues (id, title, description, lane_id, team_id, created_at, updated_at) VALUES ('i1','t',?1,'l','t','x','x')",
+            params![format!("a ![image](jait-pending://{uuid}) b")],
+        )
+        .unwrap();
+        let new = strip_inline_placeholder(&c, OwnerKind::Issue, "i1", uuid).unwrap();
+        assert_eq!(new.as_deref(), Some("a  b"));
+        let stored: String =
+            c.query_row("SELECT description FROM issues WHERE id='i1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(stored, "a  b");
+        assert_eq!(strip_inline_placeholder(&c, OwnerKind::Issue, "i1", uuid).unwrap(), None);
+        assert_eq!(strip_inline_placeholder(&c, OwnerKind::Issue, "nope", uuid).unwrap(), None);
     }
 
     fn inline_row(c: &Connection, id: &str, uuid: &str, state: &str, signed: Option<&str>) {
