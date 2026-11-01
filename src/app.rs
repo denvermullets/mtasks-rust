@@ -1783,6 +1783,21 @@ impl App {
         Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
     }
 
+    /// `request_inline_image` for every blob image in the open project's description.
+    fn request_project_description_images(&mut self) -> Task<Message> {
+        let Some(detail) = self.project_detail.as_ref() else {
+            return Task::none();
+        };
+        if !matches!(&self.view, View::ProjectDetail(id) if *id == detail.project_id) {
+            return Task::none();
+        }
+        let srcs = crate::views::body::fetchable_srcs(
+            &detail.description_text(),
+            &self.config.api_base_url,
+        );
+        Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
+    }
+
     /// `request_image` for every Attachment currently rendered in the open detail view.
     fn request_visible_images(&mut self) -> Task<Message> {
         let atts: Vec<crate::db::attachments::Attachment> = self
@@ -1793,7 +1808,12 @@ impl App {
             .cloned()
             .collect();
         let inline = self.request_description_images();
-        Task::batch(atts.iter().map(|a| self.request_image(a)).chain([inline]))
+        let project_inline = self.request_project_description_images();
+        Task::batch(
+            atts.iter()
+                .map(|a| self.request_image(a))
+                .chain([inline, project_inline]),
+        )
     }
 
     /// Copy a cached blob to its real filename and hand it to the OS.
@@ -5167,6 +5187,7 @@ impl App {
                             &self.detail_attachments,
                             &self.detail_comment_attachments,
                             &self.images,
+                            &self.config.api_base_url,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.

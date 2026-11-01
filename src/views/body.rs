@@ -60,6 +60,15 @@ pub fn image_list(body: &str, host: &str) -> Vec<InlineImage> {
         .collect()
 }
 
+/// `src` of every image in `body` that can be fetched (blob images; pending skipped).
+pub fn fetchable_srcs(body: &str, host: &str) -> Vec<String> {
+    image_list(body, host)
+        .into_iter()
+        .filter(|i| i.key.is_some())
+        .map(|i| i.src)
+        .collect()
+}
+
 /// True when `body` has at least one image block.
 pub fn has_images(body: &str, host: &str) -> bool {
     body_segments(body, host)
@@ -193,6 +202,16 @@ mod tests {
         );
         assert_eq!(list[0].key.as_deref(), Some("inline-AA--1"));
         assert_eq!(list[1].key.as_deref(), Some("inline-BB--2"));
+    }
+
+    #[test]
+    fn fetchable_srcs_lists_only_blob_images() {
+        let body = "![a](/rails/active_storage/blobs/redirect/AA--1/a.png) \
+                    ![p](jait-pending://123e4567-e89b-12d3-a456-426614174000)";
+        assert_eq!(
+            fetchable_srcs(body, HOST),
+            ["/rails/active_storage/blobs/redirect/AA--1/a.png"]
+        );
     }
 
     #[test]
