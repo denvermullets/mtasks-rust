@@ -124,19 +124,32 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
     Evaluation { groups }
 }
 
+/// The local project behind a project source, if mirrored and on an accessible team.
+fn project_of_source<'a>(
+    s: &GroupSource,
+    m: &Mirror<'a>,
+    accessible: &HashSet<&str>,
+) -> Option<&'a Project> {
+    m.projects
+        .iter()
+        .find(|p| p.remote_id == Some(s.remote_id))
+        .filter(|p| accessible.contains(p.team_id.as_str()))
+}
+
 /// The local team behind a team source, if mirrored.
 fn team_of_source<'a>(s: &GroupSource, m: &Mirror<'a>) -> Option<&'a Team> {
     m.teams.iter().find(|t| t.remote_id == Some(s.remote_id))
 }
 
-/// A source pointing at something outside the accessible teams. Only team
-/// sources are judged so far; project and label sources arrive with their tickets.
+/// A source pointing at something outside the accessible teams. Label sources
+/// are not judged yet; they arrive with their ticket.
 fn dropped(s: &GroupSource, m: &Mirror<'_>, accessible: &HashSet<&str>) -> bool {
     match s.source_type {
         SourceType::Team => {
             !team_of_source(s, m).is_some_and(|t| accessible.contains(t.id.as_str()))
         }
-        SourceType::Project | SourceType::Label => false,
+        SourceType::Project => project_of_source(s, m, accessible).is_none(),
+        SourceType::Label => false,
     }
 }
 
@@ -160,7 +173,30 @@ fn pool<'a>(
             }
         }
     }
+    add_project_sources(cfg, m, accessible, my_members, &mut out);
     out
+}
+
+/// Project sources: every issue in the project when include-all, else only
+/// those assigned to the current user. Unions into `out`.
+fn add_project_sources<'a>(
+    cfg: &GroupConfig,
+    m: &Mirror<'a>,
+    accessible: &HashSet<&str>,
+    my_members: &HashSet<&str>,
+    out: &mut HashSet<&'a str>,
+) {
+    for s in cfg.sources.iter().filter(|s| s.source_type == SourceType::Project) {
+        let Some(project) = project_of_source(s, m, accessible) else {
+            continue;
+        };
+        for i in m.issues.iter().filter(|i| i.project_id.as_deref() == Some(project.id.as_str())) {
+            let mine = i.assignee_id.as_deref().is_some_and(|a| my_members.contains(a));
+            if s.include_all || mine {
+                out.insert(i.id.as_str());
+            }
+        }
+    }
 }
 
 /// Not archived, completed or canceled, and not in a completed/canceled lane.
@@ -516,5 +552,74 @@ mod tests {
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 2, 2));
         i.due_date = Some("2026-01-01".into());
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 1, 1));
+    }
+
+    fn proj_src(remote: i64, all: bool) -> GroupSource {
+        GroupSource { source_type: SourceType::Project, remote_id: remote, include_all: all }
+    }
+
+    /// Fixture with projects p1 (team a, remote 10) and p2 (team arch, remote 11).
+    fn project_fx() -> Fx {
+        let mut fx = Fx::new();
+        let mut p1 = project("p1", "a", None);
+        p1.remote_id = Some(10);
+        let mut p2 = project("p2", "arch", None);
+        p2.remote_id = Some(11);
+        fx.projects = vec![p1, p2];
+        let mut mine = issue("mine", "a", "la");
+        mine.project_id = Some("p1".into());
+        mine.assignee_id = Some("ma".into());
+        let mut theirs = issue("theirs", "a", "la");
+        theirs.project_id = Some("p1".into());
+        theirs.assignee_id = Some("other".into());
+        let mut outside = issue("outside", "a", "la");
+        outside.assignee_id = Some("ma".into());
+        let mut archived_proj = issue("ap", "arch", "larch");
+        archived_proj.project_id = Some("p2".into());
+        fx.issues = vec![mine, theirs, outside, archived_proj];
+        fx
+    }
+
+    #[test]
+    fn include_all_project_source_pulls_every_project_issue() {
+        let fx = project_fx();
+        let got = fx.run(vec![cfg("g", vec![proj_src(10, true)])], Some(99));
+        let mut g = got[0].clone();
+        g.sort();
+        assert_eq!(g, ids(&["mine", "theirs"]));
+    }
+
+    #[test]
+    fn assigned_project_source_pulls_only_my_project_issues() {
+        let fx = project_fx();
+        let got = fx.run(vec![cfg("g", vec![proj_src(10, false)])], Some(99));
+        assert_eq!(got, vec![ids(&["mine"])]);
+    }
+
+    #[test]
+    fn project_on_inaccessible_team_is_dropped_and_group_flagged() {
+        let fx = project_fx();
+        let groups = vec![cfg("g", vec![proj_src(11, true)]), cfg("h", vec![proj_src(999, true)])];
+        let ev = fx.eval(&groups, Some(99));
+        assert!(ev.groups.iter().all(|g| g.issues.is_empty() && g.inaccessible));
+    }
+
+    #[test]
+    fn project_and_team_sources_union() {
+        let fx = project_fx();
+        // Team a assigned-to-me gives mine + outside; project all adds theirs.
+        let got = fx.run(vec![cfg("g", vec![team_src(1, false), proj_src(10, true)])], Some(99));
+        let mut g = got[0].clone();
+        g.sort();
+        assert_eq!(g, ids(&["mine", "outside", "theirs"]));
+    }
+
+    #[test]
+    fn dropped_project_alongside_live_team_source_is_not_inaccessible() {
+        let fx = project_fx();
+        let groups = vec![cfg("g", vec![team_src(1, true), proj_src(11, true)])];
+        let ev = fx.eval(&groups, Some(99));
+        assert!(!ev.groups[0].inaccessible);
+        assert_eq!(ev.groups[0].issues.len(), 3);
     }
 }
