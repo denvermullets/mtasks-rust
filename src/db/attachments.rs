@@ -110,6 +110,22 @@ pub fn list_for_owner(conn: &Connection, kind: OwnerKind, owner_id: &str) -> Res
     rows.collect()
 }
 
+/// Files for each of the given comments, keyed by the comment's LOCAL id.
+/// Comments without files get no entry.
+pub fn list_for_comments(
+    conn: &Connection,
+    comment_ids: &[&str],
+) -> Result<HashMap<String, Vec<Attachment>>> {
+    let mut map = HashMap::new();
+    for id in comment_ids {
+        let files = list_for_owner(conn, OwnerKind::Comment, id)?;
+        if !files.is_empty() {
+            map.insert((*id).to_string(), files);
+        }
+    }
+    Ok(map)
+}
+
 /// Make the owner's `synced` rows match the server's list. Unchanged files
 /// keep their local id and are refreshed in place, new ones are inserted,
 /// missing ones are deleted. Pending and failed rows are left alone.
@@ -272,5 +288,18 @@ mod tests {
         assert!(names(&c).is_empty());
         assert_eq!(list_for_owner(&c, OwnerKind::Issue, "i2").unwrap().len(), 1);
         assert_eq!(list_for_owner(&c, OwnerKind::Project, "i1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_for_comments_keys_by_comment_and_skips_empty() {
+        let c = conn();
+        replace_synced(&c, OwnerKind::Comment, "c1", &[dto(1, "a")]).unwrap();
+        replace_synced(&c, OwnerKind::Comment, "c2", &[dto(2, "b"), dto(3, "c")]).unwrap();
+        replace_synced(&c, OwnerKind::Issue, "c3", &[dto(4, "issue-file")]).unwrap();
+        let map = list_for_comments(&c, &["c1", "c2", "c3"]).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["c1"].len(), 1);
+        assert_eq!(map["c2"].iter().map(|a| a.filename.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+        assert!(!map.contains_key("c3"), "issue files are not comment files");
     }
 }
