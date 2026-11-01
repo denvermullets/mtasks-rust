@@ -139,7 +139,7 @@ pub fn view<'a>(
                 .on_input(Message::ProjectDetailNameChanged)
                 .on_submit(Message::CommitProjectDetail)
                 .size(type_scale::XXL)
-                .font(crate::fonts::bold(crate::fonts::active()))
+                .font(crate::fonts::bold_active())
                 .padding(space::S1)
                 .style(title_input_style),
         );
@@ -221,7 +221,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
-            .style(util::sidebar_pick_list_style),
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
         .push(util::sidebar_field(
             "Priority",
@@ -233,7 +234,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
-            .style(util::sidebar_pick_list_style),
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
         .push(util::sidebar_field(
             "Lead",
@@ -243,7 +245,8 @@ pub fn view<'a>(
             .width(Length::Fill)
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
-            .style(util::sidebar_pick_list_style),
+            .style(util::sidebar_pick_list_style)
+            .menu_style(util::sidebar_menu_style),
         ))
         // Project labels aren't wired into the data layer yet (see JAIT-181
         // notes); render read-only until the follow-up ticket lands.
@@ -345,7 +348,7 @@ fn discussion_section<'a>(
         ))
         .padding(iced::Padding::ZERO.top(space::S4)),
     );
-    with_heading("Discussion", col)
+    util::with_heading("Discussion", col)
 }
 
 /// Burndown / progress chart: scope, started, completed over time against the
@@ -394,7 +397,7 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
     .width(Length::Fill)
     .padding(space::S4)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_card())),
+        background: Some(iced::Background::Color(t::bg_secondary())),
         border: Border {
             color: t::border(),
             width: 1.0,
@@ -434,7 +437,7 @@ fn issues_section<'a>(
         }
     }
 
-    with_heading_owned(heading, col)
+    util::with_heading(heading, col)
 }
 
 fn issue_row<'a>(
@@ -513,7 +516,7 @@ fn issue_row<'a>(
         .padding([space::S2, space::S3])
         .width(Length::Fill)
         .style(|_theme: &Theme, _status| button::Style {
-            background: Some(iced::Background::Color(t::bg_card())),
+            background: Some(iced::Background::Color(t::bg_secondary())),
             text_color: t::text_primary(),
             border: Border {
                 color: t::border(),
@@ -581,28 +584,3 @@ pub(crate) fn description_editor_id() -> container::Id {
 
 /// Alpha of the status tile fill (web `bg-accent/20`).
 const STATUS_TILE_ALPHA: f32 = 0.2;
-
-/// Section heading (web `text-sm font-semibold text-gray-400`) over its
-/// content, `space::S4` apart.
-fn with_heading<'a>(
-    label: &'a str,
-    content: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    with_heading_owned(label.to_string(), content)
-}
-
-fn with_heading_owned<'a>(
-    label: String,
-    content: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    column![]
-        .spacing(space::S4)
-        .push(
-            text(label)
-                .size(type_scale::SM)
-                .font(crate::fonts::bold(crate::fonts::active()))
-                .color(t::text_secondary()),
-        )
-        .push(content)
-        .into()
-}

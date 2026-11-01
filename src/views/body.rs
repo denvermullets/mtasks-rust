@@ -28,6 +28,9 @@ use crate::mentions::{self, LinkTarget};
 use crate::theme as t;
 use crate::views::hover_rich::hover_rich;
 
+/// Alpha of the code block's horizontal scrollbar thumb over the code text color.
+const CODE_SCROLLER_ALPHA: f32 = 0.35;
+
 /// Widest an inline image is drawn.
 const MAX_IMAGE_WIDTH: f32 = 560.0;
 /// Placeholder size while an image loads.
@@ -311,7 +314,7 @@ fn code_block<'a>(parsed: &Parsed, code: &document::CodeBlock, size: f32) -> Ele
         })
         .style(|theme: &Theme, status| {
             let mut s = scrollable::default(theme, status);
-            s.horizontal_rail.scroller.color = Color { a: 0.35, ..t::CODE_BLOCK_TEXT };
+            s.horizontal_rail.scroller.color = Color { a: CODE_SCROLLER_ALPHA, ..t::CODE_BLOCK_TEXT };
             s
         });
     container(scroll)

@@ -58,12 +58,30 @@ pub fn sidebar_heading_text(label: &str) -> String {
     label.to_uppercase()
 }
 
+/// Section heading (web `text-sm font-semibold text-gray-400`) over its
+/// content, `space::S4` apart. Shared by the issue and project detail views.
+pub fn with_heading<'a, M: 'a>(
+    label: impl Into<String>,
+    content: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
+    column![]
+        .spacing(space::S4)
+        .push(
+            text(label.into())
+                .size(type_scale::SM)
+                .font(crate::fonts::bold_active())
+                .color(t::text_secondary()),
+        )
+        .push(content)
+        .into()
+}
+
 /// Sidebar group heading: small, bold, uppercase, muted (web
 /// `text-xs font-semibold text-gray-500 uppercase`).
 pub fn sidebar_heading<'a, M: 'a>(label: &str) -> Element<'a, M> {
     text(sidebar_heading_text(label))
         .size(type_scale::XS)
-        .font(crate::fonts::bold(crate::fonts::active()))
+        .font(crate::fonts::bold_active())
         .color(t::text_muted())
         .into()
 }
@@ -114,6 +132,19 @@ pub fn sidebar_pick_list_style(_theme: &Theme, status: pick_list::Status) -> pic
         handle_color: t::text_muted(),
         background: iced::Background::Color(t::bg_secondary()),
         border: control_border(!matches!(status, pick_list::Status::Active)),
+    }
+}
+
+/// Dropdown menu style to pair with `sidebar_pick_list_style`: same fill, stroke
+/// border and `radius::MD` as the closed control, accent for the highlighted
+/// option. Use as `.menu_style(util::sidebar_menu_style)`.
+pub fn sidebar_menu_style(_theme: &Theme) -> iced::overlay::menu::Style {
+    iced::overlay::menu::Style {
+        background: iced::Background::Color(t::bg_secondary()),
+        border: control_border(false),
+        text_color: t::text_body(),
+        selected_text_color: t::on_accent(iced::widget::button::Status::Active),
+        selected_background: iced::Background::Color(t::accent()),
     }
 }
 

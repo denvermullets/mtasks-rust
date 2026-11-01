@@ -278,7 +278,7 @@ fn issue_card<'a>(
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
     if d.shows(CardProperty::Labels) && !labels.is_empty() {
-        let mut chips: Row<'a, Message> = row![].spacing(4);
+        let mut chips: Row<'a, Message> = row![].spacing(space::S1);
         for label in labels {
             chips = chips.push(labels_view::static_chip(label));
         }
@@ -300,7 +300,7 @@ fn issue_card<'a>(
         // Priority indicator: triangle + number like the Rails app
         meta = meta.push(
             row![]
-                .spacing(4)
+                .spacing(space::S1)
                 .align_y(iced::Alignment::Center)
                 .push(
                     text("△")

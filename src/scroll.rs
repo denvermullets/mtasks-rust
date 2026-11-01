@@ -99,8 +99,10 @@ pub fn board_card_height(show_id: bool, has_chips: bool, has_meta: bool) -> f32 
     h
 }
 
-/// Fixed height of the chip row on a board card.
-pub const CARD_CHIP_ROW_H: f32 = 20.0;
+/// Fixed height of the chip row on a board card: one label pill, which is an XS
+/// line plus `S0_5` padding above and below (see `views::labels::pill`).
+pub const CARD_CHIP_ROW_H: f32 =
+    crate::theme::type_scale::XS * crate::theme::type_scale::LH_XS + 2.0 * crate::theme::space::S0_5;
 
 /// `(top, height)` of card `issue` in a board lane. `card_heights` is the
 /// card height per issue; `subhead_starts` are flat indices preceded by a
@@ -192,6 +194,11 @@ mod tests {
         );
         assert_eq!(h, 70.0);
         assert!(board_card_height(true, true, true) > board_card_height(false, false, false));
+    }
+
+    #[test]
+    fn chip_row_is_one_label_pill_tall() {
+        assert_eq!(CARD_CHIP_ROW_H, 20.0);
     }
 
     #[test]

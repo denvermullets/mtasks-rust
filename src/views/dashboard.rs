@@ -24,9 +24,9 @@ use crate::views::issue_list;
 
 /// Layout constants the scroll-to-focus math relies on: group headers and
 /// empty-state rows have fixed heights, and the list column a fixed gap/padding.
-const LIST_SPACING: f32 = 8.0;
-const LIST_PAD_TOP: f32 = 8.0;
-const HEADER_H: f32 = 32.0;
+const LIST_SPACING: f32 = space::S2;
+const LIST_PAD_TOP: f32 = space::S2;
+const HEADER_H: f32 = space::S8;
 /// An `SM` line plus the web empty message's `py-3`.
 const EMPTY_H: f32 = type_scale::SM * type_scale::LH_SM + 2.0 * space::S3;
 
@@ -89,7 +89,7 @@ pub fn view<'a>(
     let mut list: Column<'a, Message> = column![]
         .spacing(LIST_SPACING)
         .width(Length::Fill)
-        .padding([LIST_PAD_TOP, 12.0]);
+        .padding([LIST_PAD_TOP, space::S3]);
     for (group_idx, g) in evaluation.groups.iter().enumerate() {
         let is_collapsed = collapsed.contains(&g.group.id);
         list = list.push(group_header(g, group_idx, evaluation.groups.len(), read_only, is_collapsed));
@@ -98,7 +98,7 @@ pub fn view<'a>(
         }
         if g.issues.is_empty() {
             let mut line = row![]
-                .spacing(8)
+                .spacing(space::S2)
                 .align_y(Alignment::Center)
                 .push(text(empty_message(g)).size(type_scale::SM).color(t::text_muted()));
             if g.no_sources {
@@ -154,7 +154,7 @@ fn controls<'a>(
     let ViewState { read_only, is_home, .. } = *state;
     container(
         row![]
-            .spacing(12)
+            .spacing(space::S3)
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(type_scale::SM).color(t::text_primary()))
             .push(filter_tabs(header.filter))
@@ -171,7 +171,7 @@ fn controls<'a>(
             .push(set_home_button(dashboard, read_only, is_home))
             .push(delete_dashboard_button(&dashboard.id, read_only)),
     )
-    .padding([8, 16])
+    .padding([space::S2, space::S4])
     .width(Length::Fill)
     .into()
 }
@@ -180,7 +180,7 @@ fn controls<'a>(
 fn due_counts<'a>(e: &Evaluation<'a>) -> Element<'a, Message> {
     let overdue = if e.overdue > 0 { t::danger() } else { t::text_muted() };
     row![]
-        .spacing(10)
+        .spacing(space::S2_5)
         .push(text(format!("{} due today", e.due_today)).size(type_scale::XS).color(t::text_secondary()))
         .push(text(format!("{} overdue", e.overdue)).size(type_scale::XS).color(overdue))
         .into()
@@ -324,7 +324,7 @@ fn delete_dashboard_button<'a>(id: &str, read_only: bool) -> Element<'a, Message
 
 /// The Today / Week / Hot / Open tabs; the active one is highlighted.
 fn filter_tabs<'a>(active: Filter) -> Element<'a, Message> {
-    let mut r = row![].spacing(4).align_y(Alignment::Center);
+    let mut r = row![].spacing(space::S1).align_y(Alignment::Center);
     for f in Filter::ALL {
         let color = if f == active { t::text_primary() } else { t::text_muted() };
         r = r.push(
@@ -411,7 +411,7 @@ fn group_header<'a>(
         .push(
             text(g.group.name.clone())
                 .size(type_scale::SM)
-                .font(fonts::bold(fonts::active()))
+                .font(fonts::bold_active())
                 .color(t::text_strong()),
         )
         .push(count_pill);
@@ -425,7 +425,7 @@ fn group_header<'a>(
         .push(delete_group_button(&g.group.id, read_only));
     mouse_area(
         container(r)
-            .padding([6.0, space::S3])
+            .padding([space::S1_5, space::S3])
             .width(Length::Fill)
             .center_y(Length::Fixed(HEADER_H))
             .style(move |_theme: &Theme| container::Style {
@@ -499,7 +499,7 @@ fn move_buttons<'a>(group_id: &str, index: usize, count: usize, read_only: bool)
         }
     };
     row![]
-        .spacing(4)
+        .spacing(space::S1)
         .push(button_for("Up", MoveDirection::Up, index > 0))
         .push(button_for("Down", MoveDirection::Down, index + 1 < count))
         .into()
