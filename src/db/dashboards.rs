@@ -204,6 +204,7 @@ pub fn apply_snapshot(conn: &Connection, rows: &[DashboardIn]) -> Result<Applied
             continue;
         }
         tx.execute("DELETE FROM dashboards WHERE id = ?1", params![id])?;
+        super::home_page::clear_if_dashboard(&tx, remote_id)?;
         applied.dashboards_removed += 1;
     }
     tx.commit()?;
@@ -465,6 +466,9 @@ pub fn delete_local(conn: &Connection, dashboard_id: &str) -> Result<Option<Stri
     }
     // Groups and their sources go with the row (ON DELETE CASCADE).
     tx.execute("DELETE FROM dashboards WHERE id = ?1", params![dashboard_id])?;
+    if let Some(remote_id) = dashboard.remote_id {
+        super::home_page::clear_if_dashboard(&tx, remote_id)?;
+    }
     tx.commit()?;
     Ok(dashboard
         .remote_id

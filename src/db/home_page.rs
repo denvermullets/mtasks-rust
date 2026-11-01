@@ -190,6 +190,15 @@ pub fn clear_if_view(conn: &Connection, remote_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Clear the stored home if it points at the dashboard `remote_id`. Nothing
+/// is queued: the server treats a missing dashboard as the default home.
+pub fn clear_if_dashboard(conn: &Connection, remote_id: i64) -> Result<()> {
+    if get(conn)?.is_some_and(|h| h.target == HomeTarget::Dashboard(remote_id)) {
+        clear(conn)?;
+    }
+    Ok(())
+}
+
 /// `(kind, id)` from a queued `home_page` payload.
 pub fn parse_payload(payload: Option<&str>) -> Option<(String, i64)> {
     let v: serde_json::Value = serde_json::from_str(payload?).ok()?;
@@ -275,6 +284,50 @@ mod tests {
             params![synced.then_some("2026-10-31T00:00:01.000Z")],
         )
         .unwrap();
+    }
+
+    fn mirror(conn: &Connection, remote_id: i64, name: &str) -> Dashboard {
+        let row = crate::db::dashboards::DashboardIn {
+            id: remote_id,
+            name: name.into(),
+            description: None,
+            position: remote_id,
+            updated_at: "2026-10-31T00:00:00.000Z".into(),
+            groups: vec![],
+        };
+        crate::db::dashboards::apply_snapshot(conn, &[row]).unwrap();
+        crate::db::dashboards::find_by_remote_id(conn, remote_id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn local_delete_of_the_home_dashboard_clears_home_and_queues_no_home_write() {
+        let conn = mem();
+        let d = mirror(&conn, 3, "Home one");
+        apply_me(&conn, Some(&dto("dashboard", 3))).unwrap();
+        crate::db::dashboards::delete_local(&conn, &d.id).unwrap();
+        assert_eq!(get(&conn).unwrap(), None);
+        assert_eq!(launch_target(get(&conn).unwrap().as_ref(), &[], &Default::default(), &[]), LaunchTarget::Default);
+        assert!(crate::db::sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pull_that_drops_the_home_dashboard_clears_home() {
+        let conn = mem();
+        mirror(&conn, 3, "Home one");
+        apply_me(&conn, Some(&dto("dashboard", 3))).unwrap();
+        crate::db::dashboards::apply_snapshot(&conn, &[]).unwrap();
+        assert_eq!(get(&conn).unwrap(), None);
+        assert_eq!(launch_target(get(&conn).unwrap().as_ref(), &[], &Default::default(), &[]), LaunchTarget::Default);
+    }
+
+    #[test]
+    fn deleting_another_dashboard_leaves_home_alone() {
+        let conn = mem();
+        mirror(&conn, 3, "Home one");
+        let other = mirror(&conn, 4, "Other");
+        apply_me(&conn, Some(&dto("dashboard", 3))).unwrap();
+        crate::db::dashboards::delete_local(&conn, &other.id).unwrap();
+        assert_eq!(get(&conn).unwrap(), Some(HomePage { target: HomeTarget::Dashboard(3) }));
     }
 
     #[test]
