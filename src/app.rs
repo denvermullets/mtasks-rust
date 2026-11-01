@@ -142,6 +142,7 @@ pub enum Message {
     IssueDetailDescriptionChanged(iced::widget::text_editor::Action),
     /// Click on the rendered description: open the editor with focus.
     EditIssueDescription,
+    StopEditingIssueDescription,
     IssueDetailDueDateChanged(String),
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
@@ -3154,7 +3155,9 @@ impl App {
                     }
                 }
                 if matches!(self.view, View::IssueDetail(_)) && !modal_open {
-                    if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers) {
+                    let editing_description =
+                        self.issue_detail.as_ref().is_some_and(|d| d.editing_description);
+                    if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers, editing_description) {
                         return self.update(msg);
                     }
                 }
@@ -4212,6 +4215,11 @@ impl App {
                 self.refresh_suggestions(crate::mentions::EditorTarget::Description);
             }
 
+            Message::StopEditingIssueDescription => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.editing_description = false;
+                }
+            }
             Message::EditIssueDescription => {
                 if let Some(d) = &mut self.issue_detail {
                     d.editing_description = true;
