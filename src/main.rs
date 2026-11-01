@@ -17,6 +17,7 @@ mod palette_results;
 mod saved_view;
 mod schedule_summary;
 mod scroll;
+mod search_match;
 mod sync;
 mod theme;
 mod views;

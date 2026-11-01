@@ -2,30 +2,12 @@ use iced::widget::{button, container, row, text, text_input};
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::models::{Issue, Project, Team};
+use crate::db::models::Project;
 use crate::theme as t;
 
 /// Id of the header search box, so a shortcut can focus it.
 pub fn search_input_id() -> text_input::Id {
     text_input::Id::new("header-search")
-}
-
-/// Normalize a raw search query into the lowercase needle the matchers expect.
-/// An empty needle matches everything.
-pub fn needle(query: &str) -> String {
-    query.trim().to_lowercase()
-}
-
-/// Whether `issue` matches `needle` by title or identifier (e.g. "JAIT-111").
-pub fn issue_matches(issue: &Issue, team: Option<&Team>, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let ident = match team {
-        Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),
-        None => format!("#{}", issue.team_number.unwrap_or(0)),
-    };
-    ident.to_lowercase().contains(needle) || issue.title.to_lowercase().contains(needle)
 }
 
 /// Whether `project` matches `needle` by name.

@@ -2,7 +2,7 @@
 //! source picker. State is a `GroupDraft` (see `db::dashboards`), so every
 //! source kind selects and flags sources through the same two methods.
 //!
-//! A new source kind joins by adding a `*_sources` section to `source_picker`
+//! A new source kind joins by adding a `*_sources` block to `source_picker`
 //! whose rows send `Message::GroupToggleSource` and `Message::GroupSetIncludeAll`.
 
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, Column};

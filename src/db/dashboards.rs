@@ -292,15 +292,27 @@ fn color_of(g: &GroupIn) -> String {
     g.color.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| "#6366f1".to_string())
 }
 
+/// Store one source of a group; a source listed twice is kept once.
+fn insert_source(
+    conn: &Connection,
+    group_id: &str,
+    source_type: SourceType,
+    remote_id: i64,
+    include_all: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![group_id, source_type.as_str(), remote_id, include_all as i64],
+    )?;
+    Ok(())
+}
+
 fn replace_sources(conn: &Connection, group_id: &str, g: &GroupIn) -> Result<()> {
     conn.execute("DELETE FROM dashboard_group_sources WHERE group_id = ?1", params![group_id])?;
     let insert = |t: SourceType, ids: &[i64], all: &[i64]| -> Result<()> {
         for id in ids {
-            conn.execute(
-                "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![group_id, t.as_str(), id, all.contains(id) as i64],
-            )?;
+            insert_source(conn, group_id, t, *id, all.contains(id))?;
         }
         Ok(())
     };
@@ -592,12 +604,29 @@ pub fn delete_group_local(conn: &Connection, group_id: &str) -> Result<Option<St
     }
     tx.commit()?;
     Ok(match (group.remote_id, dashboard.and_then(|d| d.remote_id)) {
-        (Some(remote_id), Some(dashboard_remote_id)) => Some(
-            serde_json::json!({ "dashboard_remote_id": dashboard_remote_id, "remote_id": remote_id })
-                .to_string(),
-        ),
+        (Some(remote_id), Some(dashboard_remote_id)) => {
+            Some(GroupDeletePayload { dashboard_remote_id, remote_id }.to_json())
+        }
         _ => None,
     })
+}
+
+/// Payload of a queued `dashboard_group` delete: where the group lives on the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroupDeletePayload {
+    pub dashboard_remote_id: i64,
+    pub remote_id: i64,
+}
+
+impl GroupDeletePayload {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("two integers serialize")
+    }
+
+    /// None for a missing payload or one lacking either id.
+    pub fn parse(payload: Option<&str>) -> Option<Self> {
+        serde_json::from_str(payload?).ok()
+    }
 }
 
 /// After a successful `POST`: the local row takes the server's id, position
@@ -758,11 +787,7 @@ pub fn create_group_local(
     )?;
     for s in &draft.sources {
         let all = s.include_all && s.source_type != SourceType::Label;
-        tx.execute(
-            "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![id, s.source_type.as_str(), s.remote_id, all as i64],
-        )?;
+        insert_source(&tx, &id, s.source_type, s.remote_id, all)?;
     }
     sync_queue::enqueue(&tx, GROUP_ENTITY_TYPE, &id, "create", None)?;
     tx.commit()?;
@@ -810,11 +835,7 @@ pub fn update_group_local(
     tx.execute("DELETE FROM dashboard_group_sources WHERE group_id = ?1", params![group_id])?;
     for s in &draft.sources {
         let all = s.include_all && s.source_type != SourceType::Label;
-        tx.execute(
-            "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![group_id, s.source_type.as_str(), s.remote_id, all as i64],
-        )?;
+        insert_source(&tx, group_id, s.source_type, s.remote_id, all)?;
     }
     sync_queue::enqueue(&tx, GROUP_ENTITY_TYPE, group_id, "update", None)?;
     tx.commit()?;
@@ -1105,6 +1126,23 @@ mod tests {
         // And the dashboard itself stays while it has a local-only group.
         apply_snapshot(&conn, &[]).unwrap();
         assert!(get(&conn, &d.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn discarding_an_orphaned_group_lets_the_next_pull_remove_the_dashboard() {
+        let conn = setup();
+        apply_snapshot(&conn, &[dash(1, "A", 0, vec![])]).unwrap();
+        let d = find_by_remote_id(&conn, 1).unwrap().unwrap();
+        let draft = GroupDraft { name: "G".into(), ..GroupDraft::default() };
+        let g = create_group_local(&conn, &d.id, &draft).unwrap();
+        // Deleted on the web while the group is unpushed: the dashboard is kept...
+        apply_snapshot(&conn, &[]).unwrap();
+        assert!(get(&conn, &d.id).unwrap().is_some());
+        // ...until the failed create discards the group and retires its entry.
+        assert_eq!(delete_group_local(&conn, &g.id).unwrap(), None);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+        apply_snapshot(&conn, &[]).unwrap();
+        assert!(get(&conn, &d.id).unwrap().is_none());
     }
 
     #[test]

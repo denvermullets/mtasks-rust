@@ -1180,6 +1180,8 @@ impl App {
         self.dashboard_header = session.header;
         self.focused_lane = session.focused_lane;
         self.focused_issue = session.focused_issue;
+        // The parked focus may point past rows or groups that went away.
+        self.clamp_focus();
     }
 
     /// Re-read the selected team's Recurring issue rows from the mirror.
@@ -1679,7 +1681,7 @@ impl App {
         let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
         let visible: usize = self.board_columns().iter().map(|c| c.issues.len()).sum();
         let narrowed = self.board_filters().count() > self.board_filters().assignees.len()
-            || !header::needle(self.active_search()).is_empty();
+            || !crate::search_match::needle(self.active_search()).is_empty();
         display::my_issues_empty_message(!ids.is_empty(), visible, narrowed)
     }
 
@@ -1735,7 +1737,7 @@ impl App {
             labels: &self.labels,
             issue_labels: &self.issue_labels,
         };
-        let needle = header::needle(self.active_search());
+        let needle = crate::search_match::needle(self.active_search());
         if my {
             let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
             let filters = display::my_issues_filters(self.board_filters(), &ids, &self.lanes);
@@ -1943,20 +1945,8 @@ impl App {
             .iter()
             .map(|c| c.issues.len())
             .collect();
-        if counts.is_empty() {
-            self.focused_lane = 0;
-            self.focused_issue = 0;
-            return;
-        }
-        if self.focused_lane >= counts.len() {
-            self.focused_lane = counts.len() - 1;
-        }
-        let count = counts[self.focused_lane];
-        if count == 0 {
-            self.focused_issue = 0;
-        } else if self.focused_issue >= count {
-            self.focused_issue = count - 1;
-        }
+        (self.focused_lane, self.focused_issue) =
+            clamped_focus(&counts, self.focused_lane, self.focused_issue);
     }
 
     /// Persist the display/filter settings and re-validate board focus.
@@ -1980,7 +1970,7 @@ impl App {
             _ => 0,
         };
         self.board_filters().count() - ignored
-            + usize::from(!header::needle(self.active_search()).is_empty())
+            + usize::from(!crate::search_match::needle(self.active_search()).is_empty())
     }
 
     /// The header's view actions on an open view on the Board: Update view, Save
@@ -2046,6 +2036,10 @@ impl App {
     /// the detail is that team's, remembering the dashboard and the team that
     /// was selected before, so Back restores both.
     fn open_issue_from_dashboard(&mut self, dashboard_id: String, issue: Issue) -> Task<Message> {
+        // The view is about to stop being a dashboard, which skips the stash
+        // `update` does afterwards: park the focus now (a click sets it and
+        // opens the issue in the same message).
+        self.stash_dashboard_session();
         self.detail_from_dashboard = Some(DashboardOrigin {
             dashboard_id,
             prev_team_id: self.selected_team_id.clone(),
@@ -6214,7 +6208,7 @@ impl App {
         ];
 
         let search = self.active_search();
-        let needle = header::needle(search);
+        let needle = crate::search_match::needle(search);
         let header = header::view(
             self.breadcrumb(),
             search,
@@ -6406,17 +6400,20 @@ impl App {
                         members: &self.members,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
-                        display: self.board_display(),
+                        display: DisplayOptions::dashboard_rows(),
                     },
-                    self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
-                    self.focused_lane,
-                    self.focused_issue,
                     self.dashboard_header.clone(),
-                    self.sync_read_only,
-                    self.dashboards
-                        .iter()
-                        .find(|d| d.id == *id)
-                        .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
+                    &crate::views::dashboard::ViewState {
+                        collapsed: self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
+                        focused_group: self.focused_lane,
+                        focused_issue: self.focused_issue,
+                        read_only: self.sync_read_only,
+                        is_home: self
+                            .dashboards
+                            .iter()
+                            .find(|d| d.id == *id)
+                            .is_some_and(|d| self.home_page.as_ref().is_some_and(|h| h.matches_dashboard(d))),
+                    },
                 )
             }
         };
@@ -7177,8 +7174,32 @@ fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'
         .into()
 }
 
+/// Pull a focus position back onto a real row given each group's row count:
+/// the lane to the last group, the issue to the last row of that group.
+fn clamped_focus(counts: &[usize], lane: usize, issue: usize) -> (usize, usize) {
+    let Some(last) = counts.len().checked_sub(1) else {
+        return (0, 0);
+    };
+    let lane = lane.min(last);
+    let issue = match counts[lane] {
+        0 => 0,
+        n => issue.min(n - 1),
+    };
+    (lane, issue)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_focus_is_clamped_onto_a_real_row() {
+        // A group vanished: lane 3 of 2 groups lands on the last group.
+        assert_eq!(super::clamped_focus(&[2, 4], 3, 1), (1, 1));
+        // Rows shrank: issue 9 lands on the last row.
+        assert_eq!(super::clamped_focus(&[2, 4], 1, 9), (1, 3));
+        assert_eq!(super::clamped_focus(&[2, 0], 1, 5), (1, 0));
+        assert_eq!(super::clamped_focus(&[], 2, 5), (0, 0));
+    }
+
     #[test]
     fn comment_content_rule_allows_files_without_text() {
         assert!(!super::comment_has_content("", false));
@@ -7278,7 +7299,7 @@ mod tests {
     fn issue_search_matches_title_or_identifier() {
         let jait = team("JAIT", false);
         let i = issue("i1", "Header bar — Search", 184);
-        let m = |q: &str| header::issue_matches(&i, Some(&jait), &header::needle(q));
+        let m = |q: &str| crate::search_match::issue_matches(&i, Some(&jait), &crate::search_match::needle(q));
         assert!(m(""));
         assert!(m("  HEADER "));
         assert!(m("jait-184"));
