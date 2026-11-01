@@ -53,6 +53,12 @@ fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
     if let Some(name) = &issue.assignee {
         facts.push(fact(vec![initials_badge(name), muted(name.clone())]));
     }
+    if let Some(name) = &issue.project {
+        facts.push(fact(vec![muted("▣"), muted(name.clone())]));
+    }
+    if let Some(due) = &issue.due {
+        facts.push(fact(vec![muted("◷"), muted(due.clone())]));
+    }
     let meta = iced::widget::Row::with_children(facts)
         .spacing(t::space::S3)
         .align_y(iced::Alignment::Center)

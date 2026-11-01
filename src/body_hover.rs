@@ -119,6 +119,17 @@ pub struct IssueCard {
     pub priority_label: &'static str,
     /// The assignee's name; `None` when unassigned or not in the records.
     pub assignee: Option<String>,
+    /// The project's name; `None` when there is none or it isn't in the records.
+    pub project: Option<String>,
+    /// `Jul 6`, as the web's `%b %-d`; `None` when unset or unparseable.
+    pub due: Option<String>,
+}
+
+/// `YYYY-MM-DD` (or an RFC 3339 timestamp) as `Jul 6`.
+pub fn due_label(raw: &str) -> Option<String> {
+    let day = raw.get(..10)?;
+    let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    Some(date.format("%b %-d").to_string())
 }
 
 /// A lane as the card shows it: icon beside the name.
@@ -141,7 +152,7 @@ pub struct Records<'a> {
 
 /// Card content for an anchor from local data; `None` draws no card.
 pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
-    let Records { issues, teams, lanes, members, .. } = *records;
+    let Records { issues, teams, lanes, members, projects } = *records;
     match anchor {
         Anchor::Issue(id) => {
             let issue = issues.iter().find(|i| i.id == *id)?;
@@ -160,6 +171,12 @@ pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
                 .as_ref()
                 .and_then(|id| members.iter().find(|m| m.id == *id))
                 .map(|m| m.name.clone());
+            let project = issue
+                .project_id
+                .as_ref()
+                .and_then(|id| projects.iter().find(|p| p.id == *id))
+                .map(|p| p.name.clone());
+            let due = issue.due_date.as_deref().and_then(due_label);
             Some(CardContent::Issue(IssueCard {
                 identifier,
                 title: issue.title.clone(),
@@ -167,6 +184,8 @@ pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
                 priority,
                 priority_label: crate::display::PRIORITY_TITLES[priority.to_i32() as usize],
                 assignee,
+                project,
+                due,
             }))
         }
         Anchor::Mention(_) => None,
@@ -371,6 +390,8 @@ mod tests {
                     priority: Priority::Urgent,
                     priority_label: "Urgent",
                     assignee: None,
+                    project: None,
+                    due: None,
                 })
             });
             assert_eq!(got, want, "{anchor:?}");
@@ -442,6 +463,53 @@ mod tests {
             };
             assert_eq!(card.priority_label, label);
             assert_eq!(card.assignee.as_deref(), name);
+        }
+    }
+
+    fn project(id: &str, name: &str) -> Project {
+        Project {
+            id: id.into(),
+            remote_id: None,
+            team_id: "t".into(),
+            name: name.into(),
+            description: None,
+            status: None,
+            priority: 0,
+            lead_id: None,
+            start_date: None,
+            due_date: None,
+            roadmap_commitment: None,
+            velocity_score: 0,
+            completed_issues_count: 0,
+            total_issues_count: 0,
+            progress_percentage: 0,
+            behind_schedule: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn card_carries_project_and_due_date() {
+        let projects = [project("p", "Launch")];
+        let rows = [
+            (Some("p"), Some("2026-07-06"), Some("Launch"), Some("Jul 6")),
+            (Some("p"), Some("2026-12-25T10:00:00Z"), Some("Launch"), Some("Dec 25")),
+            (Some("gone"), Some("not a date"), None, None),
+            (None, None, None, None),
+            (Some("p"), Some("2026-13-45"), Some("Launch"), None),
+        ];
+        for (project_id, due, project, label) in rows {
+            let mut i = issue("a", "t", Some(1), "x");
+            i.project_id = project_id.map(String::from);
+            i.due_date = due.map(String::from);
+            let issues = [i];
+            let records = Records { issues: &issues, projects: &projects, ..Default::default() };
+            let Some(CardContent::Issue(card)) = content_for(&Anchor::Issue("a".into()), &records) else {
+                panic!("card expected");
+            };
+            assert_eq!(card.project.as_deref(), project, "{project_id:?}");
+            assert_eq!(card.due.as_deref(), label, "{due:?}");
         }
     }
 }
