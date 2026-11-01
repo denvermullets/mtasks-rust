@@ -84,6 +84,7 @@ pub fn view<'a>(
     lanes: &'a [Lane],
     teams: &'a [Team],
     comments: &'a [Comment],
+    attachments: &'a [crate::db::attachments::Attachment],
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -151,6 +152,7 @@ pub fn view<'a>(
                 .size(14)
                 .height(Length::Fixed(160.0)),
         )
+        .push_maybe(crate::views::attachments::section(attachments))
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(

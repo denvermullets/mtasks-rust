@@ -907,7 +907,12 @@ impl App {
             )
             .unwrap_or_default();
         } else if let View::ProjectDetail(ref project_id) = self.view {
-            self.detail_attachments.clear();
+            self.detail_attachments = crate::db::attachments::list_for_owner(
+                conn,
+                crate::db::attachments::OwnerKind::Project,
+                project_id,
+            )
+            .unwrap_or_default();
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments =
@@ -4730,6 +4735,7 @@ impl App {
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,
+                            &self.detail_attachments,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
