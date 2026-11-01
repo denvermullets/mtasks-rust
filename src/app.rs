@@ -6400,7 +6400,7 @@ impl App {
                         members: &self.members,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
-                        display: self.board_display(),
+                        display: DisplayOptions::dashboard_rows(),
                     },
                     self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
                     self.focused_lane,

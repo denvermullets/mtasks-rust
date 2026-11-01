@@ -257,6 +257,24 @@ impl Default for DisplayOptions {
 }
 
 impl DisplayOptions {
+    /// What dashboard rows always show: identifier, priority, status, project,
+    /// assignee, labels and due date. Independent of the board's own settings.
+    pub fn dashboard_rows() -> &'static DisplayOptions {
+        static ROWS: std::sync::OnceLock<DisplayOptions> = std::sync::OnceLock::new();
+        ROWS.get_or_init(|| DisplayOptions {
+            properties: vec![
+                CardProperty::Id,
+                CardProperty::Priority,
+                CardProperty::Status,
+                CardProperty::Project,
+                CardProperty::Assignee,
+                CardProperty::Labels,
+                CardProperty::DueDate,
+            ],
+            ..DisplayOptions::default()
+        })
+    }
+
     pub fn shows(&self, p: CardProperty) -> bool {
         self.properties.contains(&p)
     }
@@ -887,6 +905,22 @@ pub fn build_columns<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_rows_show_every_story_12_column() {
+        let d = DisplayOptions::dashboard_rows();
+        for p in [
+            CardProperty::Id,
+            CardProperty::Priority,
+            CardProperty::Status,
+            CardProperty::Project,
+            CardProperty::Assignee,
+            CardProperty::Labels,
+            CardProperty::DueDate,
+        ] {
+            assert!(d.shows(p), "{p:?}");
+        }
+    }
 
     pub(super) fn issue(id: &str, lane: &str, priority: i32) -> Issue {
         Issue {
