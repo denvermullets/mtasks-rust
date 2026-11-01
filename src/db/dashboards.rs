@@ -419,6 +419,35 @@ pub fn move_group(conn: &Connection, group_id: &str, direction: MoveDirection) -
     Ok(true)
 }
 
+/// Remove a dashboard and its groups and sources locally, and retire every
+/// unpushed queue entry for the dashboard, its groups and its group order (a
+/// never-pushed create is simply dropped). Returns the `dashboard` delete
+/// payload (`{"remote_id": n}`) when the dashboard exists on the server, i.e.
+/// when a delete must be queued; `None` otherwise (or if it is already gone).
+pub fn delete_local(conn: &Connection, dashboard_id: &str) -> Result<Option<String>> {
+    let Some(dashboard) = get(conn, dashboard_id)? else {
+        return Ok(None);
+    };
+    let group_ids: Vec<String> = groups_for(conn, dashboard_id)?.into_iter().map(|g| g.id).collect();
+    let now = crate::db::now_iso();
+    let tx = conn.unchecked_transaction()?;
+    let retire = "UPDATE sync_queue SET synced_at = ?3
+                  WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL";
+    for (entity_type, id) in group_ids
+        .iter()
+        .map(|g| (GROUP_ENTITY_TYPE, g.as_str()))
+        .chain([(ENTITY_TYPE, dashboard_id), (GROUP_ORDER_ENTITY_TYPE, dashboard_id)])
+    {
+        tx.execute(retire, params![entity_type, id, now])?;
+    }
+    // Groups and their sources go with the row (ON DELETE CASCADE).
+    tx.execute("DELETE FROM dashboards WHERE id = ?1", params![dashboard_id])?;
+    tx.commit()?;
+    Ok(dashboard
+        .remote_id
+        .map(|id| serde_json::json!({ "remote_id": id }).to_string()))
+}
+
 /// After a successful `POST`: the local row takes the server's id, position
 /// and `updated_at`. The name and description stay as typed (a later local
 /// edit may be queued). A pull that ran first may have mirrored the pushed
@@ -1066,5 +1095,62 @@ mod tests {
             .unwrap();
         apply_snapshot(&conn, &[]).unwrap();
         assert_eq!(groups_for(&conn, &d.id).unwrap()[0].id, g.id);
+    }
+
+    fn queue_for(conn: &Connection, entity_type: &str) -> Vec<(String, String)> {
+        sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.entity_type == entity_type)
+            .map(|e| (e.entity_id, e.action))
+            .collect()
+    }
+
+    #[test]
+    fn delete_local_of_a_never_pushed_dashboard_discards_everything_and_queues_nothing() {
+        let conn = setup();
+        let d = create_local(&conn, "D", "").unwrap();
+        let mut draft = GroupDraft { name: "G".into(), ..Default::default() };
+        draft.toggle_source(SourceType::Team, 7);
+        let g = create_group_local(&conn, &d.id, &draft).unwrap();
+        sync_queue::enqueue(&conn, GROUP_ORDER_ENTITY_TYPE, &d.id, "update", Some("{}")).unwrap();
+        assert_eq!(delete_local(&conn, &d.id).unwrap(), None);
+        assert!(get(&conn, &d.id).unwrap().is_none());
+        assert!(groups_for(&conn, &d.id).unwrap().is_empty());
+        assert!(sources_for(&conn, &g.id).unwrap().is_empty());
+        assert_eq!(sync_queue::pending_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_local_of_a_pushed_dashboard_cascades_retires_queue_and_returns_payload() {
+        let conn = setup();
+        let mut gi = group(10, "G", 0);
+        gi.team_ids = vec![1];
+        apply_snapshot(&conn, &[dash(5, "A", 0, vec![gi]), dash(6, "B", 1, vec![group(11, "H", 0)])])
+            .unwrap();
+        let a = find_by_remote_id(&conn, 5).unwrap().unwrap();
+        let b = find_by_remote_id(&conn, 6).unwrap().unwrap();
+        let ga = groups_for(&conn, &a.id).unwrap().remove(0);
+        let gb = groups_for(&conn, &b.id).unwrap().remove(0);
+        sync_queue::enqueue(&conn, ENTITY_TYPE, &a.id, "update", None).unwrap();
+        sync_queue::enqueue(&conn, GROUP_ENTITY_TYPE, &ga.id, "update", None).unwrap();
+        sync_queue::enqueue(&conn, GROUP_ORDER_ENTITY_TYPE, &a.id, "update", Some("{}")).unwrap();
+        sync_queue::enqueue(&conn, GROUP_ENTITY_TYPE, &gb.id, "update", None).unwrap();
+
+        let payload = delete_local(&conn, &a.id).unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&payload).unwrap()["remote_id"], 5);
+        assert!(get(&conn, &a.id).unwrap().is_none());
+        assert!(sources_for(&conn, &ga.id).unwrap().is_empty());
+        assert!(queue_for(&conn, ENTITY_TYPE).is_empty());
+        assert!(queue_for(&conn, GROUP_ORDER_ENTITY_TYPE).is_empty());
+        // The other dashboard is untouched.
+        assert_eq!(queue_for(&conn, GROUP_ENTITY_TYPE), [(gb.id.clone(), "update".to_string())]);
+        assert!(get(&conn, &b.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_local_of_a_missing_dashboard_is_a_no_op() {
+        let conn = setup();
+        assert_eq!(delete_local(&conn, "nope").unwrap(), None);
     }
 }

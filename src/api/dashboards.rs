@@ -20,6 +20,11 @@ pub async fn create(
     client.post("api/v1/dashboards", &create_body(name, description)).await
 }
 
+/// `DELETE /api/v1/dashboards/:id` (cascades to its groups on the server).
+pub async fn delete(client: &ApiClient, id: i64) -> Result<(), ApiError> {
+    client.delete(&format!("api/v1/dashboards/{id}")).await
+}
+
 fn create_body(name: &str, description: &str) -> serde_json::Value {
     serde_json::json!({ "dashboard": { "name": name, "description": description } })
 }
