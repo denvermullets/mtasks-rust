@@ -791,6 +791,7 @@ impl App {
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
             saved_views: self.palette_saved_views(),
+            on_issue_detail: matches!(self.view, View::IssueDetail(_)),
         }
     }
 
@@ -4054,6 +4055,7 @@ impl App {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
+                    PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
