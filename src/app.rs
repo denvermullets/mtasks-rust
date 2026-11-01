@@ -34,6 +34,14 @@ use crate::views::{
     team_list, team_members, team_picker, toast,
 };
 
+/// Where an issue detail opened from a dashboard returns to.
+#[derive(Debug, Clone, PartialEq)]
+struct DashboardOrigin {
+    dashboard_id: String,
+    /// The team selected before the detail switched to the issue's own team.
+    prev_team_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     // Navigation
@@ -190,6 +198,7 @@ pub enum Message {
     OpenIssueDetail(String),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
+    BackToDashboard,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
     /// Step the open picker's link kind (Tab forward, Shift+Tab back).
@@ -716,6 +725,8 @@ pub struct App {
     detail_from_my_issues: bool,
     /// The open issue detail was reached from the Inbox (Back returns there).
     detail_from_inbox: bool,
+    /// The open issue detail was reached from a dashboard (Back returns there).
+    detail_from_dashboard: Option<DashboardOrigin>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -918,7 +929,11 @@ impl App {
 
         // Filters are global but hold per-team ids; drop the ones this data
         // doesn't contain (My Issues loads every team, so its ids all stay).
+        // Skipped while a dashboard-opened detail is up: the selected team is
+        // temporarily the issue's, and pruning would drop the board filters of
+        // the team that was selected before.
         if self.selected_team_id.is_some()
+            && self.detail_from_dashboard.is_none()
             && self.prune_board_filters()
         {
             if let Err(e) = config::save(&self.config) {
@@ -1407,6 +1422,7 @@ impl App {
                     self.commit_issue_detail();
                     self.detail_from_my_issues = false;
                     self.detail_from_inbox = false;
+                    self.detail_from_dashboard = None;
                 }
                 self.view = View::Board;
                 self.focused_lane = 0;
@@ -1477,6 +1493,11 @@ impl App {
         }
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "My Issues".into());
+        }
+        if let (Some(o), View::IssueDetail(_)) = (&self.detail_from_dashboard, &self.view) {
+            if let Some(d) = self.dashboards.iter().find(|d| d.id == o.dashboard_id) {
+                crumbs.insert(0, d.name.clone());
+            }
         }
         if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
             crumbs.insert(0, "Inbox".into());
@@ -1800,9 +1821,8 @@ impl App {
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
-        // Opening an issue from a dashboard (and Back) is its own ticket.
-        if matches!(self.view, View::Dashboard(_)) {
-            return Task::none();
+        if let View::Dashboard(dashboard_id) = self.view.clone() {
+            return self.open_issue_from_dashboard(dashboard_id, issue);
         }
         if self.view == View::MyIssues {
             self.selected_team_id = Some(issue.team_id.clone());
@@ -1811,6 +1831,34 @@ impl App {
             self.detail_from_my_issues = true;
         }
         self.open_issue_detail(&issue)
+    }
+
+    /// Open `issue` from a dashboard: select its own team (like My Issues) so
+    /// the detail is that team's, remembering the dashboard and the team that
+    /// was selected before, so Back restores both.
+    fn open_issue_from_dashboard(&mut self, dashboard_id: String, issue: Issue) -> Task<Message> {
+        self.detail_from_dashboard = Some(DashboardOrigin {
+            dashboard_id,
+            prev_team_id: self.selected_team_id.clone(),
+        });
+        self.selected_team_id = Some(issue.team_id.clone());
+        self.view = View::Board;
+        self.reload_data();
+        self.open_issue_detail(&issue)
+    }
+
+    /// Leave an issue detail opened from a dashboard: put the previously
+    /// selected team back and return to the dashboard. False when the detail
+    /// didn't come from one.
+    fn back_to_dashboard(&mut self) -> bool {
+        let Some(origin) = self.detail_from_dashboard.take() else {
+            return false;
+        };
+        self.commit_issue_detail();
+        self.issue_detail = None;
+        self.selected_team_id = origin.prev_team_id;
+        self.switch_view(View::Dashboard(origin.dashboard_id));
+        true
     }
 
     /// Open `issue` from the Inbox: select its own team (like My Issues) so the
@@ -2337,6 +2385,10 @@ impl App {
                     .to_string();
                 self.push_toast(summary.toast(&name), ToastKind::Info, false);
                 if self.issue_detail.as_ref().is_some_and(|d| d.issue_id == issue_id) {
+                    if self.back_to_dashboard() {
+                        self.reload_data();
+                        return;
+                    }
                     let back = if self.detail_from_my_issues {
                         View::MyIssues
                     } else if self.detail_from_inbox {
@@ -2346,6 +2398,7 @@ impl App {
                     };
                     self.detail_from_my_issues = false;
                     self.detail_from_inbox = false;
+                    self.detail_from_dashboard = None;
                     self.issue_detail = None;
                     self.switch_view(back);
                 }
@@ -2602,6 +2655,7 @@ impl App {
             detail_deps: Default::default(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
+            detail_from_dashboard: None,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
@@ -3225,6 +3279,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 let from_my = self.view == View::MyIssues;
                 if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
                     self.selected_team_id = Some(team_id);
@@ -3295,6 +3350,7 @@ impl App {
             Message::BackToInbox => {
                 self.commit_issue_detail();
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.issue_detail = None;
                 self.switch_view(View::Inbox);
             }
@@ -3309,6 +3365,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(View::Inbox);
                 let crate::db::notifications::BannerTarget::Notification(remote_id) = target else {
                     return Task::batch([focus, self.scroll_inbox_to_selection()]);
@@ -3367,6 +3424,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(View::Dashboard(id));
             }
 
@@ -3375,6 +3433,7 @@ impl App {
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
+                self.detail_from_dashboard = None;
                 self.switch_view(view);
             }
 
@@ -3864,6 +3923,9 @@ impl App {
                 self.detail_from_my_issues = false;
                 self.issue_detail = None;
                 self.switch_view(View::MyIssues);
+            }
+            Message::BackToDashboard => {
+                self.back_to_dashboard();
             }
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
@@ -5625,6 +5687,11 @@ impl App {
                 .or_else(|| {
                     (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
                         .then_some(Message::BackToInbox)
+                })
+                .or_else(|| {
+                    (self.detail_from_dashboard.is_some()
+                        && matches!(self.view, View::IssueDetail(_)))
+                    .then_some(Message::BackToDashboard)
                 }),
             self.update_view_action(),
         );
