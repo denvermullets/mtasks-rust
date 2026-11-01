@@ -83,7 +83,7 @@ fn list<'a>(state: &'a InboxState) -> Element<'a, Message> {
 fn notification_row<'a>(index: usize, n: &'a Notification, selected: bool) -> Element<'a, Message> {
     let unread = n.is_unread();
     let (font, primary) = if unread {
-        (fonts::bold(fonts::active()), t::text_body())
+        (fonts::bold_active(), t::text_body())
     } else {
         let body = t::text_body();
         (fonts::active(), iced::Color { a: body.a * 0.6, ..body })

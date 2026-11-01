@@ -58,12 +58,30 @@ pub fn sidebar_heading_text(label: &str) -> String {
     label.to_uppercase()
 }
 
+/// Section heading (web `text-sm font-semibold text-gray-400`) over its
+/// content, `space::S4` apart. Shared by the issue and project detail views.
+pub fn with_heading<'a, M: 'a>(
+    label: impl Into<String>,
+    content: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
+    column![]
+        .spacing(space::S4)
+        .push(
+            text(label.into())
+                .size(type_scale::SM)
+                .font(crate::fonts::bold_active())
+                .color(t::text_secondary()),
+        )
+        .push(content)
+        .into()
+}
+
 /// Sidebar group heading: small, bold, uppercase, muted (web
 /// `text-xs font-semibold text-gray-500 uppercase`).
 pub fn sidebar_heading<'a, M: 'a>(label: &str) -> Element<'a, M> {
     text(sidebar_heading_text(label))
         .size(type_scale::XS)
-        .font(crate::fonts::bold(crate::fonts::active()))
+        .font(crate::fonts::bold_active())
         .color(t::text_muted())
         .into()
 }

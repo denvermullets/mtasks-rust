@@ -411,7 +411,7 @@ fn group_header<'a>(
         .push(
             text(g.group.name.clone())
                 .size(type_scale::SM)
-                .font(fonts::bold(fonts::active()))
+                .font(fonts::bold_active())
                 .color(t::text_strong()),
         )
         .push(count_pill);

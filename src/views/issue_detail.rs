@@ -18,7 +18,7 @@ use crate::views::lane_icon;
 use crate::views::projects::MemberOption;
 use crate::views::util::{
     relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_menu_style,
-    sidebar_panel, sidebar_pick_list_style, SIDEBAR_CONTROL_PADDING,
+    sidebar_panel, sidebar_pick_list_style, with_heading, SIDEBAR_CONTROL_PADDING,
 };
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
@@ -174,7 +174,7 @@ pub fn view<'a>(
                 .on_input(Message::IssueDetailTitleChanged)
                 .on_submit(Message::CommitIssueDetail)
                 .size(type_scale::XXL)
-                .font(crate::fonts::bold(crate::fonts::active()))
+                .font(crate::fonts::bold_active())
                 .padding(space::S1)
                 .style(title_input_style),
         )
@@ -1087,24 +1087,6 @@ fn comments_section<'a>(
         .padding(iced::Padding::ZERO.top(space::S4)),
     );
     with_heading("Activity", col)
-}
-
-/// Section heading (web `text-sm font-semibold text-gray-400`) over its
-/// content, `space::S4` apart.
-fn with_heading<'a>(
-    label: &'a str,
-    content: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    column![]
-        .spacing(space::S4)
-        .push(
-            text(label)
-                .size(type_scale::SM)
-                .font(crate::fonts::bold(crate::fonts::active()))
-                .color(t::text_secondary()),
-        )
-        .push(content)
-        .into()
 }
 
 /// Small action button (web `px-3 py-1.5 text-xs rounded`): the theme's
