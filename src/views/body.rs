@@ -74,8 +74,8 @@ pub fn image_list(body: &str, host: &str) -> Vec<InlineImage> {
         .collect()
 }
 
-/// `src` of every image in `body` that can be fetched (blob images; pending skipped).
-pub fn fetchable_srcs(body: &str, host: &str) -> Vec<String> {
+/// `src` of every image in ONE `body` that can be fetched (blob images; pending skipped).
+pub fn fetchable_srcs_of_body(body: &str, host: &str) -> Vec<String> {
     image_list(body, host)
         .into_iter()
         .filter(|i| i.key.is_some())
@@ -83,13 +83,14 @@ pub fn fetchable_srcs(body: &str, host: &str) -> Vec<String> {
         .collect()
 }
 
-/// Fetchable (blob) image srcs across `bodies`, in order; pending placeholders skipped.
-pub fn blob_srcs<'b>(bodies: impl IntoIterator<Item = &'b str>, host: &str) -> Vec<String> {
+/// [`fetchable_srcs_of_body`] across MANY `bodies`, in order.
+pub fn fetchable_srcs_of_bodies<'b>(
+    bodies: impl IntoIterator<Item = &'b str>,
+    host: &str,
+) -> Vec<String> {
     bodies
         .into_iter()
-        .flat_map(|b| image_list(b, host))
-        .filter(|i| i.key.is_some())
-        .map(|i| i.src)
+        .flat_map(|b| fetchable_srcs_of_body(b, host))
         .collect()
 }
 
@@ -261,21 +262,21 @@ mod tests {
     }
 
     #[test]
-    fn fetchable_srcs_lists_only_blob_images() {
+    fn fetchable_srcs_of_body_lists_only_blob_images() {
         let body = "![a](/rails/active_storage/blobs/redirect/AA--1/a.png) \
                     ![p](jait-pending://123e4567-e89b-12d3-a456-426614174000)";
         assert_eq!(
-            fetchable_srcs(body, HOST),
+            fetchable_srcs_of_body(body, HOST),
             ["/rails/active_storage/blobs/redirect/AA--1/a.png"]
         );
     }
 
     #[test]
-    fn blob_srcs_collects_fetchable_images_across_bodies() {
+    fn fetchable_srcs_of_bodies_collects_fetchable_images_across_bodies() {
         let a = "![one](/rails/active_storage/blobs/redirect/AA--1/one.png)";
         let b = "text ![p](jait-pending://123e4567-e89b-12d3-a456-426614174000) \
                  ![two](/rails/active_storage/blobs/redirect/BB--2/two.png)";
-        let srcs = blob_srcs([a, b, "none"], HOST);
+        let srcs = fetchable_srcs_of_bodies([a, b, "none"], HOST);
         assert_eq!(
             srcs,
             [

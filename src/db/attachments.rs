@@ -167,6 +167,8 @@ pub const UPLOAD_ENTITY: &str = "upload";
 /// Sync queue entity for attaching the uploaded blob to its owner
 /// (`attachment/create`; `attachment/delete` belongs to JRST-215).
 pub const ATTACHMENT_ENTITY: &str = "attachment";
+/// Sync queue entity for comments (their create carries staged files).
+pub const COMMENT_ENTITY: &str = "comment";
 
 /// Record a Pending upload: insert the `pending` row and enqueue `upload/create`
 /// (plus `attachment/create` for [`UploadKind::Attachment`]), atomically. Queue
@@ -428,10 +430,10 @@ pub fn replace_synced(
 fn has_pending_delete(conn: &Connection, kind: OwnerKind, remote_id: i64) -> Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sync_queue
-         WHERE entity_type = 'attachment' AND action = 'delete' AND synced_at IS NULL
+         WHERE entity_type = ?3 AND action = 'delete' AND synced_at IS NULL
            AND json_extract(payload, '$.owner_kind') = ?1
            AND json_extract(payload, '$.remote_id') = ?2)",
-        params![kind.as_str(), remote_id],
+        params![kind.as_str(), remote_id, ATTACHMENT_ENTITY],
         |r| r.get(0),
     )
 }

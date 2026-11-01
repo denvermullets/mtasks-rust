@@ -1890,7 +1890,7 @@ impl App {
         if !matches!(&self.view, View::IssueDetail(id) if *id == detail.issue_id) {
             return Task::none();
         }
-        let srcs = crate::views::body::blob_srcs(
+        let srcs = crate::views::body::fetchable_srcs_of_bodies(
             [detail.description_text().as_str()],
             &self.config.api_base_url,
         );
@@ -1903,7 +1903,7 @@ impl App {
         if !matches!(self.view, View::IssueDetail(_) | View::ProjectDetail(_)) {
             return Task::none();
         }
-        let srcs = crate::views::body::blob_srcs(
+        let srcs = crate::views::body::fetchable_srcs_of_bodies(
             self.detail_comments.iter().map(|c| c.body.as_str()),
             &self.config.api_base_url,
         );
@@ -1918,7 +1918,7 @@ impl App {
         if !matches!(&self.view, View::ProjectDetail(id) if *id == detail.project_id) {
             return Task::none();
         }
-        let srcs = crate::views::body::fetchable_srcs(
+        let srcs = crate::views::body::fetchable_srcs_of_body(
             &detail.description_text(),
             &self.config.api_base_url,
         );
@@ -2110,7 +2110,7 @@ impl App {
             return false;
         }
         drop(conn);
-        self.enqueue_sync("comment", &comment.id, "create", None);
+        self.enqueue_sync(crate::db::attachments::COMMENT_ENTITY, &comment.id, "create", None);
         if let Some(d) = self.comment_drafts_mut() {
             // Fresh owner id for the next comment / reply (the old ones now belong to this one).
             if comment.parent_id.is_none() {
@@ -5000,7 +5000,7 @@ impl App {
                 if let Modal::DeleteCommentConfirm(ref comment_id) = self.modal {
                     let conn = self.db();
                     if let Ok((_, Some(payload))) = queries::delete_comment(&conn, comment_id) {
-                        self.enqueue_sync("comment", comment_id, "delete", Some(payload.as_str()));
+                        self.enqueue_sync(crate::db::attachments::COMMENT_ENTITY, comment_id, "delete", Some(payload.as_str()));
                     }
                     if let Some(d) = &mut self.issue_detail {
                         if d.reply_to.as_deref() == Some(comment_id.as_str()) {
@@ -5036,7 +5036,7 @@ impl App {
                     if let Ok(Some(payload)) =
                         crate::db::attachments::remove_synced_attachment(&conn, id)
                     {
-                        self.enqueue_sync("attachment", id, "delete", Some(payload.as_str()));
+                        self.enqueue_sync(crate::db::attachments::ATTACHMENT_ENTITY, id, "delete", Some(payload.as_str()));
                     }
                 }
                 self.modal = Modal::None;

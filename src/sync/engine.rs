@@ -404,11 +404,11 @@ async fn process(
         ("label", "create") => label_create(client, &entry.entity_id, entry_id).await,
         ("label", "update") => label_update(client, &entry.entity_id).await,
         ("label", "delete") => label_delete(client, entry.payload.as_deref()).await,
-        ("comment", "create") => comment_create(client, &entry.entity_id, entry_id).await,
-        ("comment", "delete") => comment_delete(client, entry.payload.as_deref()).await,
-        ("upload", "create") => upload_create(client, &entry.entity_id).await,
-        ("attachment", "create") => attachment_create(client, &entry.entity_id).await,
-        ("attachment", "delete") => attachment_delete(client, entry.payload.as_deref()).await,
+        (attachments::COMMENT_ENTITY, "create") => comment_create(client, &entry.entity_id, entry_id).await,
+        (attachments::COMMENT_ENTITY, "delete") => comment_delete(client, entry.payload.as_deref()).await,
+        (attachments::UPLOAD_ENTITY, "create") => upload_create(client, &entry.entity_id).await,
+        (attachments::ATTACHMENT_ENTITY, "create") => attachment_create(client, &entry.entity_id).await,
+        (attachments::ATTACHMENT_ENTITY, "delete") => attachment_delete(client, entry.payload.as_deref()).await,
         ("dependency", "create") => dependency_create(client, &entry.entity_id, entry_id).await,
         ("dependency", "delete") => dependency_delete(client, entry.payload.as_deref()).await,
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
@@ -3271,11 +3271,11 @@ fn entry_team_remote_id(conn: &Connection, entry: &SyncQueueEntry) -> Option<i64
                 .ok()?;
             team_remote(&team_id)
         }
-        ("upload", _) | ("attachment", _) => {
+        (attachments::UPLOAD_ENTITY, _) | (attachments::ATTACHMENT_ENTITY, _) => {
             let a = attachments::get(conn, id).ok()??;
             team_remote(&attachments::owner_ref(conn, &a).ok()??.team_id)
         }
-        ("comment", _) => {
+        (attachments::COMMENT_ENTITY, _) => {
             let c = queries::get_comment(conn, id).ok()??;
             let team_id = match (&c.issue_id, &c.project_id) {
                 (Some(i), _) => queries::get_issue(conn, i).ok()??.team_id,
