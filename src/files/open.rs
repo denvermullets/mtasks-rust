@@ -66,6 +66,11 @@ mod tests {
             created_at: "t".into(),
             upload_state: UploadState::Synced,
             failure_reason: None,
+            outbox_path: None,
+            upload_kind: crate::db::attachments::UploadKind::Attachment,
+            placeholder_uuid: None,
+            signed_id: None,
+            blob_filename: None,
         }
     }
 

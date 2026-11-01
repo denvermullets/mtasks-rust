@@ -173,6 +173,12 @@ pub fn view<'a>(
             issues,
             members,
         ))
+        .push(
+            button(text("+ Attach file").size(12).color(t::accent()))
+                .on_press(Message::PickAttachmentFiles)
+                .padding(0)
+                .style(button::text),
+        )
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
