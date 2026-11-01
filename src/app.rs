@@ -755,6 +755,11 @@ pub struct App {
     sync_paused_auth: bool,
 }
 
+/// A comment needs text or staged files (Rails: `body_or_files_present`).
+fn comment_has_content(body: &str, has_staged_files: bool) -> bool {
+    !body.is_empty() || has_staged_files
+}
+
 impl App {
     /// Snapshot of what the command palette searches, taken when it opens.
     fn palette_data(&self) -> PaletteData {
@@ -1914,7 +1919,12 @@ impl App {
             (_, Some(d), _) => (Some(d.issue_id.clone()), None),
             _ => return false,
         };
-        if body.is_empty() {
+        // A top-level comment takes the id its staged files are owned by.
+        let staged_id = match (&parent_id, self.comment_drafts_mut()) {
+            (None, Some(d)) if !d.files.files.is_empty() => Some(d.files.comment_id.clone()),
+            _ => None,
+        };
+        if !comment_has_content(&body, staged_id.is_some()) {
             return false;
         }
         if let Some(pid) = &parent_id {
@@ -1936,11 +1946,6 @@ impl App {
                 .map(|m| m.id)
         });
         let now = crate::db::now_iso();
-        // A top-level comment takes the id its staged files are owned by.
-        let staged_id = match (&parent_id, self.comment_drafts_mut()) {
-            (None, Some(d)) if !d.files.files.is_empty() => Some(d.files.comment_id.clone()),
-            _ => None,
-        };
         let comment = Comment {
             id: staged_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             remote_id: None,
@@ -5930,6 +5935,13 @@ fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn comment_content_rule_allows_files_without_text() {
+        assert!(!super::comment_has_content("", false));
+        assert!(super::comment_has_content("", true));
+        assert!(super::comment_has_content("hi", false));
+    }
+
     use super::*;
 
     fn team(id: &str, archived: bool) -> Team {
