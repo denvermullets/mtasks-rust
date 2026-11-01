@@ -103,6 +103,27 @@ pub fn is_openable_link(url: &str) -> bool {
     }
 }
 
+/// Resolve a link target to the URL to open, or `None` when it is inert.
+/// A path-relative link (`/issues/1`) is joined onto `host` (a trailing
+/// slash on the host is fine). Protocol-relative (`//x`) and backslash
+/// forms are never resolved, because browsers read them as another host.
+/// Everything else must pass [`is_openable_link`]. Targets with control
+/// characters are inert, since browsers strip some of them mid-URL.
+pub fn resolve_link(url: &str, host: &str) -> Option<String> {
+    let url = url.trim();
+    if url.chars().any(char::is_control) {
+        return None;
+    }
+    if url.starts_with("//") || url.starts_with('\\') {
+        return None;
+    }
+    if url.starts_with('/') {
+        let host = host.trim().trim_end_matches('/');
+        return (is_openable_link(host) && !host.to_ascii_lowercase().starts_with("mailto:")).then(|| format!("{host}{url}"));
+    }
+    is_openable_link(url).then(|| url.to_string())
+}
+
 /// Parser options: the web feature set. Hard breaks are never produced from
 /// plain newlines, so nothing to switch off.
 fn parse_options() -> Options {
@@ -216,7 +237,7 @@ impl Builder {
                     let (url, text) = self.link.take().unwrap_or_default();
                     self.literal_depth = self.literal_depth.saturating_sub(1);
                     self.flush_pending();
-                    if is_openable_link(&url) {
+                    if let Some(url) = resolve_link(&url, &self.host) {
                         self.current.push(Inline::Link { text, url });
                     } else {
                         self.push_plain(&text);
@@ -959,7 +980,7 @@ mod tests {
             ("mailto link", "[me](mailto:a@b.c)", vec![para(vec![link("me", "mailto:a@b.c")])]),
             ("file link is inert text", "[x](file:///etc/hosts)", vec![para(vec![text("x")])]),
             ("custom scheme is inert text", "a [x](slack://open) b", vec![para(vec![text("a x b")])]),
-            ("relative link is inert text", "[x](/foo)", vec![para(vec![text("x")])]),
+            ("relative link without a host is inert text", "[x](/foo)", vec![para(vec![text("x")])]),
             (
                 "tokens in link text stay literal",
                 "[PROJ-1 @Ann](http://x.y)",
@@ -985,5 +1006,50 @@ mod tests {
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
         }
+    }
+
+    #[test]
+    fn resolves_links_against_the_host() {
+        let cases = [
+            ("path-relative", "/issues/1", "https://jait.example", Some("https://jait.example/issues/1")),
+            ("host trailing slash", "/issues/1", "https://jait.example/", Some("https://jait.example/issues/1")),
+            ("host with port", "/a?b=1#c", "http://localhost:3000", Some("http://localhost:3000/a?b=1#c")),
+            ("surrounding whitespace", "  /a  ", "https://h.x", Some("https://h.x/a")),
+            ("relative, no host", "/a", "", None),
+            ("relative, host is not web", "/a", "file:///etc", None),
+            ("relative, host is mailto", "/a", "mailto:a@b.c", None),
+            ("protocol-relative", "//evil.example/x", "https://h.x", None),
+            ("protocol-relative, no host", "//evil.example/x", "", None),
+            ("protocol-relative, padded", "  //evil.example", "https://h.x", None),
+            ("backslash form", "\\\\evil.example", "https://h.x", None),
+            ("slash backslash", "/\\evil.example", "https://h.x", Some("https://h.x/\\evil.example")),
+            ("tab inside", "/\t/evil.example", "https://h.x", None),
+            ("newline inside scheme", "ht\ntps://a.b", "https://h.x", None),
+            ("absolute passes through", "https://a.b/x", "https://h.x", Some("https://a.b/x")),
+            ("mixed case scheme", "HtTpS://a.b", "https://h.x", Some("HtTpS://a.b")),
+            ("padded mixed case", "  HTTP://a.b ", "", Some("HTTP://a.b")),
+            ("mailto", "MailTo:a@b.c", "", Some("MailTo:a@b.c")),
+            ("javascript", "javascript:alert(1)", "https://h.x", None),
+            ("javascript mixed case", " JaVaScRiPt:alert(1)", "https://h.x", None),
+            ("leading control char", "\u{1}javascript:x", "https://h.x", None),
+            ("data", "data:text/html,x", "https://h.x", None),
+            ("bare word is not resolved", "page.html", "https://h.x", None),
+            ("empty", "", "https://h.x", None),
+        ];
+        for (name, url, host, want) in cases {
+            assert_eq!(resolve_link(url, host).as_deref(), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn relative_links_resolve_when_parsed() {
+        let doc = parse_with("[x](/issues/2) [y](//evil.example)", "https://h.x/", &[]);
+        assert_eq!(
+            doc.blocks,
+            vec![para(vec![
+                Inline::Link { text: "x".into(), url: "https://h.x/issues/2".into() },
+                text(" y"),
+            ])]
+        );
     }
 }
