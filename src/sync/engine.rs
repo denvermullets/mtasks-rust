@@ -424,6 +424,9 @@ async fn process(
         (dashboards::ENTITY_TYPE, "create") => {
             dashboard_create(client, &entry.entity_id, entry_id).await
         }
+        (dashboards::GROUP_ENTITY_TYPE, "create") => {
+            dashboard_group_create(client, &entry.entity_id, entry_id).await
+        }
         (dashboards::ENTITY_TYPE, "update") => dashboard_update(client, &entry.entity_id).await,
         (dashboards::ENTITY_TYPE, "delete") => {
             dashboard_delete(client, entry.payload.as_deref()).await
@@ -2664,6 +2667,107 @@ async fn dashboard_update(client: &ApiClient, entity_id: &str) -> Outcome {
     let result =
         crate::api::dashboards::update(client, prep.remote_id, &prep.name, &prep.description).await;
     done_if_gone(result, |_| {})
+}
+
+struct DashboardGroupCreatePrep {
+    local_id: String,
+    /// The parent dashboard's server id, resolved at push time.
+    dashboard_remote_id: i64,
+    name: String,
+    description: String,
+    color: String,
+    sources: Vec<dashboards::GroupSource>,
+}
+
+/// Re-read the group and its parent. Waits (`LeavePending`) while the parent
+/// dashboard has no server id; its create entry is earlier in the queue and
+/// drains first. Sources are read as stored, so edits made while waiting go out.
+fn dashboard_group_create_prep(conn: &Connection, entity_id: &str) -> Prep<DashboardGroupCreatePrep> {
+    let group = match dashboards::get_group(conn, entity_id) {
+        Ok(Some(g)) => g,
+        // Deleted (or its dashboard was) before it was ever pushed.
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "dashboard group {entity_id} missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    if group.remote_id.is_some() {
+        return Prep::Done(Outcome::Success);
+    }
+    let parent = match dashboards::get(conn, &group.dashboard_id) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return Prep::Done(Outcome::DropAndLog(format!(
+                "dashboard group {entity_id}: dashboard missing locally"
+            )))
+        }
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    let Some(dashboard_remote_id) = parent.remote_id else {
+        return Prep::Done(Outcome::LeavePending("dashboard create not yet drained".into()));
+    };
+    let sources = match dashboards::sources_for(conn, &group.id) {
+        Ok(s) => s,
+        Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
+    };
+    Prep::Ready(DashboardGroupCreatePrep {
+        local_id: group.id,
+        dashboard_remote_id,
+        name: group.name,
+        description: group.description,
+        color: group.color,
+        sources,
+    })
+}
+
+/// Adopt the server's group (id, position, returned sources) and retire the
+/// queue entry together.
+fn commit_dashboard_group_create(
+    conn: &mut Connection,
+    entry_id: i64,
+    local_id: &str,
+    dto: &crate::api::dashboards::GroupDto,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
+    dashboards::adopt_created_group(&tx, local_id, dto).map_err(|e| format!("adopt group: {e}"))?;
+    sync_queue::mark_synced(&tx, entry_id).map_err(|e| format!("mark_synced: {e}"))?;
+    tx.commit().map_err(|e| format!("commit: {e}"))
+}
+
+/// `POST /dashboards/:id/groups`. Like the dashboard create, a re-drain after a
+/// lost response makes a second server group that the pull mirrors separately.
+async fn dashboard_group_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> Outcome {
+    let prep = match open() {
+        Ok(conn) => match dashboard_group_create_prep(&conn, entity_id) {
+            Prep::Ready(p) => p,
+            Prep::Done(o) => return o,
+        },
+        Err(e) => return Outcome::LeavePending(e),
+    };
+    let result = crate::api::dashboards::create_group(
+        client,
+        prep.dashboard_remote_id,
+        &prep.name,
+        &prep.description,
+        &prep.color,
+        &prep.sources,
+    )
+    .await;
+    match result {
+        Ok(dto) => {
+            let mut conn = match open() {
+                Ok(c) => c,
+                Err(e) => return Outcome::LeavePending(e),
+            };
+            match commit_dashboard_group_create(&mut conn, entry_id, &prep.local_id, &dto) {
+                Ok(()) => Outcome::Created,
+                Err(e) => Outcome::LeavePending(e),
+            }
+        }
+        Err(e) => classify(&e),
+    }
 }
 
 // Group order: one coalesced entry per dashboard (see `dashboards::move_group`).
@@ -8150,6 +8254,71 @@ mod tests {
             }
         }
     }
+
+    fn group_prep_db() -> (Connection, String, String) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let d = dashboards::create_local(&conn, "D", "").unwrap();
+        let mut draft = dashboards::GroupDraft::default();
+        draft.name = "G".into();
+        draft.toggle_source(dashboards::SourceType::Team, 3);
+        let g = dashboards::create_group_local(&conn, &d.id, &draft).unwrap();
+        (conn, d.id, g.id)
+    }
+
+    #[test]
+    fn committing_a_group_create_adopts_and_retires_the_entry() {
+        let (mut conn, did, gid) = group_prep_db();
+        let entry = sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.entity_type == dashboards::GROUP_ENTITY_TYPE)
+            .and_then(|e| e.id)
+            .unwrap();
+        let dto: crate::api::dashboards::GroupDto = serde_json::from_value(serde_json::json!({
+            "id": 41, "name": "G", "position": 2, "team_ids": [3]
+        }))
+        .unwrap();
+        commit_dashboard_group_create(&mut conn, entry, &gid, &dto).unwrap();
+        let g = dashboards::groups_for(&conn, &did).unwrap();
+        assert_eq!((g[0].remote_id, g[0].position), (Some(41), 2));
+        assert!(!sync_queue::has_pending_entry(&conn, dashboards::GROUP_ENTITY_TYPE, &gid).unwrap());
+    }
+
+    #[test]
+    fn group_create_waits_for_the_parent_dashboards_server_id() {
+        let (conn, _, gid) = group_prep_db();
+        assert!(matches!(
+            dashboard_group_create_prep(&conn, &gid),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+    }
+
+    #[test]
+    fn group_create_is_ready_once_the_parent_is_adopted() {
+        let (conn, did, gid) = group_prep_db();
+        conn.execute("UPDATE dashboards SET remote_id = 9 WHERE id = ?1", [&did]).unwrap();
+        match dashboard_group_create_prep(&conn, &gid) {
+            Prep::Ready(p) => {
+                assert_eq!((p.dashboard_remote_id, p.name.as_str()), (9, "G"));
+                assert_eq!(p.sources.len(), 1);
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn group_create_drops_when_gone_and_succeeds_when_already_pushed() {
+        let (conn, did, gid) = group_prep_db();
+        conn.execute("UPDATE dashboard_groups SET remote_id = 5 WHERE id = ?1", [&gid]).unwrap();
+        assert!(matches!(dashboard_group_create_prep(&conn, &gid), Prep::Done(Outcome::Success)));
+        conn.execute("DELETE FROM dashboards WHERE id = ?1", [&did]).unwrap();
+        assert!(matches!(
+            dashboard_group_create_prep(&conn, &gid),
+            Prep::Done(Outcome::DropAndLog(_))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -8157,11 +8326,11 @@ mod group_order_live {
     use super::*;
 
     /// Live check of `dashboard_group_order` against local Rails (:3005), run
-    /// with `--ignored` and HOME pointed at a scratch dir holding a copy of
-    /// config.toml, so the engine's `open()` uses a scratch database. Creates a
-    /// dashboard with three groups, makes several quick local moves, drains the
-    /// one queue entry through the engine, reads the web order back, and always
-    /// deletes the dashboard.
+    /// with `--ignored` and MTASKS_TEST_DATA_DIR pointed at a scratch dir, so
+    /// the engine's `open()` uses a scratch database. Creates a dashboard with
+    /// three groups, makes several quick local moves, drains the one queue
+    /// entry through the engine, reads the web order back, and always deletes
+    /// the dashboard.
     #[tokio::test]
     #[ignore]
     async fn reorder_through_the_engine_matches_the_server() {
@@ -8174,16 +8343,14 @@ mod group_order_live {
     }
 
     async fn run_live(client: &ApiClient, dashboard: i64) -> Result<(), String> {
-        let mut remote_ids = Vec::new();
         for name in ["one", "two", "three"] {
             let body = serde_json::json!({"dashboard_group": {"name": name, "description": "",
                 "color": "#6366f1", "team_ids": [], "project_ids": [], "label_ids": [],
                 "all_team_ids": [], "all_project_ids": []}});
-            let g: crate::db::dashboards::GroupIn = client
+            let _: crate::db::dashboards::GroupIn = client
                 .post(&format!("api/v1/dashboards/{dashboard}/groups"), &body)
                 .await
                 .map_err(|e| format!("create group: {e}"))?;
-            remote_ids.push(g.id);
         }
         let conn = open()?;
         let rows = crate::api::dashboards::list(client).await.map_err(|e| e.to_string())?;
@@ -8195,11 +8362,14 @@ mod group_order_live {
         for (i, dir) in [(2, Up), (2, Up), (1, Down), (0, Down)] {
             dashboards::move_group(&conn, &ids[i], dir).unwrap();
         }
-        let want: Vec<i64> = dashboards::groups_for(&conn, &d.id)
-            .unwrap()
-            .into_iter()
-            .map(|g| g.remote_id.unwrap())
-            .collect();
+        let remote_order = |conn: &Connection| -> Vec<i64> {
+            dashboards::groups_for(conn, &d.id)
+                .unwrap()
+                .into_iter()
+                .map(|g| g.remote_id.unwrap())
+                .collect()
+        };
+        let want = remote_order(&conn);
         let entries = sync_queue::pending_entries(&conn).unwrap();
         let order: Vec<_> =
             entries.iter().filter(|e| e.entity_type == dashboards::GROUP_ORDER_ENTITY_TYPE).collect();
@@ -8220,11 +8390,7 @@ mod group_order_live {
             .find(|x| x.id == dashboard)
             .map(|x| x.groups.iter().map(|g| g.id).collect())
             .unwrap_or_default();
-        let local: Vec<i64> = dashboards::groups_for(&conn, &d.id)
-            .unwrap()
-            .into_iter()
-            .map(|g| g.remote_id.unwrap())
-            .collect();
+        let local = remote_order(&conn);
         if web_order != want || local != want {
             return Err(format!("want {want:?}, web {web_order:?}, local {local:?}"));
         }
