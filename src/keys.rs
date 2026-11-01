@@ -145,12 +145,15 @@ pub fn handle_issue_detail_key(
 /// issue detail handler, for the project description.
 pub fn handle_project_detail_key(
     key: &Key,
-    _modifiers: Modifiers,
+    modifiers: Modifiers,
     editing_description: bool,
 ) -> Option<Message> {
     match key {
         Key::Named(keyboard::key::Named::Escape) if editing_description => {
             Some(Message::StopEditingProjectDescription)
+        }
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "e" => {
+            Some(Message::EditProjectDescription)
         }
         _ => None,
     }
@@ -249,6 +252,17 @@ mod tests {
             Some(Message::StopEditingProjectDescription)
         ));
         assert!(handle_project_detail_key(&esc, Modifiers::empty(), false).is_none());
+    }
+
+    #[test]
+    fn e_edits_the_project_description_with_no_modifiers() {
+        let e = Key::Character("e".into());
+        assert!(matches!(
+            handle_project_detail_key(&e, Modifiers::empty(), false),
+            Some(Message::EditProjectDescription)
+        ));
+        assert!(handle_project_detail_key(&e, Modifiers::COMMAND, false).is_none());
+        assert!(handle_project_detail_key(&e, Modifiers::SHIFT, false).is_none());
     }
 
     #[test]
