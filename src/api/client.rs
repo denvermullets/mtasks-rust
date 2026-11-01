@@ -257,6 +257,43 @@ impl ApiClient {
         }
     }
 
+    /// PUT raw bytes to a storage target (a direct-upload URL). The target is
+    /// S3 or a Rails disk URL, not the API: no bearer token and no `Accept`
+    /// header, only exactly the headers the server returned. A relative URL
+    /// (Rails disk service behind a proxy) is resolved against the base URL.
+    /// Any non-2xx is `ApiError::Server` with the status, so callers can tell
+    /// an expired target (403) from a bad one.
+    pub async fn put_raw(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) -> Result<(), ApiError> {
+        let url = if url.starts_with("http://") || url.starts_with("https://") {
+            url.to_string()
+        } else {
+            self.url(url)
+        };
+        let mut req = self.http.put(url).body(body);
+        for (name, value) in headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        Err(ApiError::Server {
+            status: status.as_u16(),
+            message: if text.is_empty() {
+                status.canonical_reason().unwrap_or("error").to_string()
+            } else {
+                text
+            },
+        })
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
