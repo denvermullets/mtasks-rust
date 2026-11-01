@@ -60,7 +60,6 @@ pub enum Validation {
 }
 
 impl Validation {
-    #[allow(dead_code)] // used by the paste tickets (JRST-210)
     pub fn is_ok(&self) -> bool {
         matches!(self, Validation::Ok)
     }

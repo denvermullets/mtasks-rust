@@ -20,6 +20,8 @@ rfd = "0.15"
 mac-notification-sys = "0.6.15"
 md-5 = "0.10"
 base64 = "0.22"
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+png = "0.17"
 
 # Bundle metadata for `cargo bundle` (cargo-bundle). The identifier is fixed:
 # macOS keys notification permission and settings off it. Do not change it.

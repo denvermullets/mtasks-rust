@@ -117,6 +117,7 @@ pub fn view<'a>(
     recurring_origin: Option<&'a str>,
     my_member_ids: &[String],
     host: &'a str,
+    pending_paths: &'a std::collections::HashMap<String, std::path::PathBuf>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -159,9 +160,12 @@ pub fn view<'a>(
             text_editor(&detail.description)
                 .placeholder("Add description…  (@ to mention, # to link an issue)")
                 .on_action(Message::IssueDetailDescriptionChanged)
-                .key_binding(editor_binding(
-                    None,
-                    suggesting(detail.suggest.as_ref(), EditorTarget::Description),
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        None,
+                        suggesting(detail.suggest.as_ref(), EditorTarget::Description),
+                    ),
+                    Message::PasteImageIntoDescription,
                 ))
                 .padding(10)
                 .size(14)
@@ -177,7 +181,7 @@ pub fn view<'a>(
                 members,
                 images,
                 host,
-                pending_paths: None,
+                pending_paths: Some(pending_paths),
                 on_image: None,
             },
         ))
@@ -669,6 +673,43 @@ pub fn editor_binding(
             _ => text_editor::Binding::from_key_press(press),
         }
     }
+}
+
+/// Wrap an editor binding so Cmd+V with an image-only clipboard sends `paste`
+/// (text on the clipboard keeps the default paste).
+pub fn paste_image_binding(
+    inner: impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>>,
+    paste: Message,
+) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    move |press| {
+        let is_paste = press.modifiers.command()
+            && matches!(press.key.as_ref(), iced::keyboard::Key::Character("v"));
+        if is_paste
+            && matches!(
+                crate::files::paste::read_clipboard(),
+                crate::files::paste::ClipboardPaste::Image(_)
+            )
+        {
+            return Some(text_editor::Binding::Custom(paste.clone()));
+        }
+        inner(press)
+    }
+}
+
+/// Pending inline images by placeholder uuid -> outbox file, for `BodyCtx`.
+pub fn pending_inline_paths(
+    attachments: &[Attachment],
+) -> std::collections::HashMap<String, std::path::PathBuf> {
+    attachments
+        .iter()
+        .filter(|a| a.upload_kind == crate::db::attachments::UploadKind::InlineImage)
+        .filter_map(|a| {
+            Some((
+                a.placeholder_uuid.clone()?,
+                std::path::PathBuf::from(a.outbox_path.as_ref()?),
+            ))
+        })
+        .collect()
 }
 
 fn suggesting(suggest: Option<&SuggestState>, target: EditorTarget) -> bool {

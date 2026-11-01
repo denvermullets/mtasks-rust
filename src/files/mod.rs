@@ -17,6 +17,7 @@ pub mod intake;
 pub mod lightbox;
 pub mod open;
 pub mod outbox;
+pub mod paste;
 pub mod validate;
 
 use std::path::{Path, PathBuf};
