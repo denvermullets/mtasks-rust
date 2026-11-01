@@ -140,6 +140,8 @@ pub enum Message {
     // Issue detail — buffered text fields (committed on Enter / nav-away)
     IssueDetailTitleChanged(String),
     IssueDetailDescriptionChanged(iced::widget::text_editor::Action),
+    /// Click on the rendered description: open the editor with focus.
+    EditIssueDescription,
     IssueDetailDueDateChanged(String),
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
@@ -215,6 +217,8 @@ pub enum Message {
     OpenIssueDetail(String),
     /// Click on a link in rendered body text, carrying its typed target.
     OpenBodyLink(crate::mentions::LinkTarget),
+    /// The hovered body span changed (`None` = pointer left). JRST-299 consumes it.
+    BodyHover(Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -4208,6 +4212,16 @@ impl App {
                 self.refresh_suggestions(crate::mentions::EditorTarget::Description);
             }
 
+            Message::EditIssueDescription => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.editing_description = true;
+                    return iced::advanced::widget::operate(issue_detail::FocusFirstIn::new(
+                        issue_detail::description_editor_id(),
+                    ))
+                    .discard();
+                }
+            }
+
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
                 if let Some(d) = self.comment_drafts_mut() {
@@ -4443,6 +4457,7 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
+            Message::BodyHover(_) => {}
             Message::OpenBodyLink(target) => match target {
                 crate::mentions::LinkTarget::Issue(id) => {
                     return self.update(Message::OpenIssueDetail(id));

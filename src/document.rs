@@ -5,6 +5,14 @@
 //! dropped). Extension points for later tickets: add variants to `Block` and
 //! `Inline`, enable more `pulldown_cmark::Options` in `parse_options`, and
 //! handle the new events in `Builder::event`.
+//!
+//! Containers use a block stack (`Builder::stack`). To add a container
+//! (quote, ordered list, ...): add a `Frame` variant for it, open it in
+//! `Builder::event` on its `Event::Start` with `open`, and close it on its
+//! `Event::End` via `close`, which builds the `Block` and hands it to the
+//! enclosing frame. Everything inside it (paragraphs, images, other
+//! containers) lands in the frame's blocks through `push_block` with no
+//! further work. Add the `Block` variant and one renderer arm too.
 
 use crate::mentions::{classify_image_src, find_issue_tokens, find_mentions, ImageKind as MentionKind};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
@@ -23,6 +31,16 @@ pub enum Block {
     /// An image on its own line in reading order. An image inside a paragraph
     /// splits it into paragraph, image, paragraph.
     Image(ImageBlock),
+    /// A bulleted list. Ordered lists are not a block yet (JRST-275); until
+    /// then their items surface as flat paragraphs.
+    List(List),
+}
+
+/// A bulleted list: each item is its own block sequence, so an item can hold
+/// several paragraphs, images and (later) nested lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct List {
+    pub items: Vec<Vec<Block>>,
 }
 
 /// `![alt](src)` with its allowlist verdict.
@@ -110,6 +128,9 @@ pub fn parse_with(body: &str, host: &str, member_names: &[&str]) -> Document {
 
 #[derive(Default)]
 struct Builder {
+    /// Open containers, innermost last. Empty means the document root.
+    stack: Vec<Frame>,
+    /// Finished top-level blocks.
     blocks: Vec<Block>,
     current: Vec<Inline>,
     /// Depth inside raw HTML blocks (their text events are dropped).
@@ -128,10 +149,51 @@ struct Builder {
     link: Option<(String, String)>,
     /// Open wrappers (strong), innermost last: the buffer each one wraps into
     /// and its constructor. The wrapper's own content is in `current`.
-    open: Vec<(Vec<Inline>, fn(Vec<Inline>) -> Inline)>,
+    wrappers: Vec<(Vec<Inline>, fn(Vec<Inline>) -> Inline)>,
+}
+
+/// An open container and what it has collected so far.
+enum Frame {
+    /// A bulleted list; collects finished items.
+    List(Vec<Vec<Block>>),
+    /// An item of a bulleted list.
+    Item(Vec<Block>),
+    /// A container with no block of its own (ordered lists and their items for
+    /// now): children are spliced into the parent when it closes.
+    Flat(Vec<Block>),
 }
 
 impl Builder {
+    /// Open a container: text and blocks from here on belong to it.
+    fn open(&mut self, frame: Frame) {
+        self.flush();
+        self.stack.push(frame);
+    }
+
+    /// Close the innermost container and give its result to the one around it.
+    fn close(&mut self) {
+        self.flush();
+        match self.stack.pop() {
+            Some(Frame::List(items)) => self.push_block(Block::List(List { items })),
+            Some(Frame::Item(blocks)) => match self.stack.last_mut() {
+                Some(Frame::List(items)) => items.push(blocks),
+                _ => blocks.into_iter().for_each(|b| self.push_block(b)),
+            },
+            Some(Frame::Flat(blocks)) => blocks.into_iter().for_each(|b| self.push_block(b)),
+            None => {}
+        }
+    }
+
+    /// Add a finished block to the innermost open container, or the root.
+    fn push_block(&mut self, block: Block) {
+        match self.stack.last_mut() {
+            Some(Frame::Item(blocks) | Frame::Flat(blocks)) => blocks.push(block),
+            // A block directly in a list (never from the parser) is kept, not lost.
+            Some(Frame::List(items)) => items.push(vec![block]),
+            None => self.blocks.push(block),
+        }
+    }
+
     fn event(&mut self, ev: Event) {
         if let Some((_, text)) = &mut self.link {
             match ev {
@@ -164,7 +226,7 @@ impl Builder {
                         Some(MentionKind::Pending(id)) => ImageKind::Pending(id.to_string()),
                         None => ImageKind::Foreign,
                     };
-                    self.blocks.push(Block::Image(ImageBlock { alt, src, kind }));
+                    self.push_block(Block::Image(ImageBlock { alt, src, kind }));
                 }
                 _ => {}
             }
@@ -182,10 +244,20 @@ impl Builder {
             }
             Event::Start(Tag::Strong) if self.html_depth == 0 => {
                 self.flush_pending();
-                self.open.push((std::mem::take(&mut self.current), Inline::Strong));
+                self.wrappers.push((std::mem::take(&mut self.current), Inline::Strong));
             }
             Event::End(TagEnd::Strong) => self.close_wrapper(),
             Event::Html(_) | Event::InlineHtml(_) => {}
+            Event::Start(Tag::List(None)) => self.open(Frame::List(Vec::new())),
+            Event::Start(Tag::List(Some(_))) => self.open(Frame::Flat(Vec::new())),
+            Event::Start(Tag::Item) => {
+                let frame = match self.stack.last() {
+                    Some(Frame::List(_)) => Frame::Item(Vec::new()),
+                    _ => Frame::Flat(Vec::new()),
+                };
+                self.open(frame);
+            }
+            Event::End(TagEnd::List(_) | TagEnd::Item) => self.close(),
             Event::Text(s) => self.push_text(&s),
             Event::Code(s) => self.push_literal(&s),
             Event::SoftBreak => self.push_text(" "),
@@ -193,10 +265,16 @@ impl Builder {
                 self.flush_pending();
                 self.current.push(Inline::HardBreak);
             }
-            Event::Start(Tag::Link { .. } | Tag::Image { .. } | Tag::CodeBlock(_)) => {
+            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
                 self.flush_pending();
                 self.literal_depth += 1;
             }
+            // A block start ends the text of a tight list item before it.
+            Event::Start(Tag::CodeBlock(_)) => {
+                self.flush();
+                self.literal_depth += 1;
+            }
+            Event::Start(Tag::BlockQuote(_)) => self.flush(),
             Event::End(TagEnd::Link | TagEnd::Image) => {
                 self.literal_depth = self.literal_depth.saturating_sub(1);
             }
@@ -271,7 +349,7 @@ impl Builder {
     /// short by an image) does nothing.
     fn close_wrapper(&mut self) {
         self.flush_pending();
-        let Some((outer, wrap)) = self.open.pop() else { return };
+        let Some((outer, wrap)) = self.wrappers.pop() else { return };
         let inner = std::mem::replace(&mut self.current, outer);
         if !inner.is_empty() {
             self.current.push(wrap(inner));
@@ -281,15 +359,19 @@ impl Builder {
     fn flush(&mut self) {
         self.flush_pending();
         // A block boundary inside a wrapper (an image) ends the wrapper.
-        while !self.open.is_empty() {
+        while !self.wrappers.is_empty() {
             self.close_wrapper();
         }
         if !self.current.is_empty() {
-            self.blocks.push(Block::Paragraph(std::mem::take(&mut self.current)));
+            let runs = std::mem::take(&mut self.current);
+            self.push_block(Block::Paragraph(runs));
         }
     }
 
     fn finish(mut self) -> Document {
+        while !self.stack.is_empty() {
+            self.close();
+        }
         self.flush();
         Document { blocks: self.blocks }
     }
@@ -302,7 +384,6 @@ fn is_block_end(end: &TagEnd) -> bool {
             | TagEnd::Heading(_)
             | TagEnd::BlockQuote(_)
             | TagEnd::CodeBlock
-            | TagEnd::Item
             | TagEnd::TableCell
             | TagEnd::TableRow
             | TagEnd::TableHead
@@ -434,6 +515,88 @@ mod tests {
         }
     }
 
+    fn list(items: Vec<Vec<Block>>) -> Block {
+        Block::List(List { items })
+    }
+
+    #[test]
+    fn parses_bulleted_lists() {
+        let names = ["ann"];
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            (
+                "tight list",
+                "- one\n- two\n- three",
+                vec![list(vec![vec![para(vec![text("one")])], vec![para(vec![text("two")])], vec![para(vec![text("three")])]])],
+            ),
+            ("star and plus markers", "* a\n\n+ b", vec![
+                list(vec![vec![para(vec![text("a")])]]),
+                list(vec![vec![para(vec![text("b")])]]),
+            ]),
+            (
+                "loose list keeps its items",
+                "- one\n\n- two",
+                vec![list(vec![vec![para(vec![text("one")])], vec![para(vec![text("two")])]])],
+            ),
+            (
+                "long item reflows to one paragraph",
+                "- one\n  continued",
+                vec![list(vec![vec![para(vec![text("one continued")])]])],
+            ),
+            (
+                "list between paragraphs",
+                "before\n\n- a\n- b\n\nafter",
+                vec![
+                    para(vec![text("before")]),
+                    list(vec![vec![para(vec![text("a")])], vec![para(vec![text("b")])]]),
+                    para(vec![text("after")]),
+                ],
+            ),
+            (
+                "mentions and references inside items",
+                "- hi @ann\n- see PROJ-3",
+                vec![list(vec![
+                    vec![para(vec![text("hi "), mention("@ann")])],
+                    vec![para(vec![text("see "), issue("PROJ-3", "PROJ", 3)])],
+                ])],
+            ),
+            (
+                "inline code in an item stays literal",
+                "- `PROJ-1`",
+                vec![list(vec![vec![para(vec![text("PROJ-1")])]])],
+            ),
+            ("empty item", "- \n- b", vec![list(vec![vec![], vec![para(vec![text("b")])]])]),
+            (
+                "second paragraph in an item",
+                "- a\n\n  b",
+                vec![list(vec![vec![para(vec![text("a")]), para(vec![text("b")])]])],
+            ),
+            (
+                "nested list lives in its item",
+                "- a\n  - b",
+                vec![list(vec![vec![para(vec![text("a")]), list(vec![vec![para(vec![text("b")])]])]])],
+            ),
+            (
+                "ordered lists stay flat paragraphs until they get their own block",
+                "1. a\n2. b",
+                vec![para(vec![text("a")]), para(vec![text("b")])],
+            ),
+            (
+                "quote inside an item stays flat",
+                "- a\n  > q",
+                vec![list(vec![vec![para(vec![text("a")]), para(vec![text("q")])]])],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &names).blocks, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn strong_inside_a_list_item() {
+        let want = vec![list(vec![vec![para(vec![text("a "), strong(vec![text("b")])])]])];
+        assert_eq!(parse("- a **b**").blocks, want);
+    }
+
     #[test]
     fn an_image_inside_strong_ends_the_run_without_losing_text() {
         let body = format!("**a ![x]({BLOB}) b**");
@@ -441,6 +604,18 @@ mod tests {
         assert_eq!(blocks[0], para(vec![strong(vec![text("a ")])]));
         assert!(matches!(blocks[1], Block::Image(_)));
         assert_eq!(blocks[2], para(vec![text(" b")]));
+    }
+
+    #[test]
+    fn image_inside_a_list_item_stays_in_the_item() {
+        let body = format!("- see ![a]({BLOB}) now");
+        let got = parse(&body).blocks;
+        let want = vec![list(vec![vec![
+            para(vec![text("see ")]),
+            image("a", BLOB, ImageKind::Blob),
+            para(vec![text(" now")]),
+        ]])];
+        assert_eq!(got, want);
     }
 
     const HOST: &str = "https://jait.example.com";
