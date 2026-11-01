@@ -32,7 +32,7 @@ pub fn view<'a>(
         list = list.push(group_header(g));
         if g.issues.is_empty() {
             list = list.push(
-                container(text("No issues").size(13).color(t::text_muted())).padding([4, 16]),
+                container(text(empty_message(g)).size(13).color(t::text_muted())).padding([4, 16]),
             );
         }
         for (issue_idx, issue) in g.issues.iter().copied().enumerate() {
@@ -97,6 +97,17 @@ fn filter_tabs<'a>(active: Filter) -> Element<'a, Message> {
         );
     }
     r.into()
+}
+
+/// Why a group shows no rows: no sources, unreachable sources, or no matches.
+fn empty_message(g: &GroupResult<'_>) -> &'static str {
+    if g.no_sources {
+        "No sources yet. Edit this group to add teams, projects or labels."
+    } else if g.inaccessible {
+        "This group's sources are no longer reachable (left, archived or outside your access). Edit or delete the group."
+    } else {
+        "No issues"
+    }
 }
 
 /// A group's section header: color swatch, name, description and issue count.
