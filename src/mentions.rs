@@ -196,6 +196,111 @@ pub fn segments<'a>(
     out
 }
 
+// ── Body segments: text runs and image blocks ──
+
+/// Path prefix of a JAIT (Rails ActiveStorage) blob redirect URL.
+const BLOB_PATH_PREFIX: &str = "/rails/active_storage/blobs/redirect/";
+/// Scheme of the local placeholder used for a not-yet-uploaded image.
+pub const PENDING_SCHEME: &str = "jait-pending://";
+
+/// Where an image block's `src` points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind<'a> {
+    /// JAIT blob-redirect URL (relative or on the configured host).
+    Blob,
+    /// Local `jait-pending://<uuid>` placeholder; carries the uuid.
+    Pending(&'a str),
+}
+
+/// `![alt](src)` that passed the JAIT-only allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageBlock<'a> {
+    pub alt: &'a str,
+    pub src: &'a str,
+    pub kind: ImageKind<'a>,
+}
+
+/// One piece of a description/comment body, in order. Text runs can be fed to
+/// [`segments`] for mention and issue-reference highlighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodySegment<'a> {
+    Text(&'a str),
+    Image(ImageBlock<'a>),
+}
+
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Classify an image URL. Only JAIT blob URLs and pending placeholders pass;
+/// `host` is the configured base URL (trailing slash tolerated).
+fn classify_image_src<'a>(src: &'a str, host: &str) -> Option<ImageKind<'a>> {
+    if let Some(id) = src.strip_prefix(PENDING_SCHEME) {
+        return is_uuid(id).then_some(ImageKind::Pending(id));
+    }
+    let host = host.trim_end_matches('/');
+    let path = if src.starts_with('/') {
+        src
+    } else if !host.is_empty() {
+        src.strip_prefix(host).filter(|p| p.starts_with('/'))?
+    } else {
+        return None;
+    };
+    let rest = path.strip_prefix(BLOB_PATH_PREFIX)?;
+    let (signed_id, filename) = rest.split_once('/')?;
+    (!signed_id.is_empty() && !filename.is_empty() && !filename.contains('/'))
+        .then_some(ImageKind::Blob)
+}
+
+/// Try to parse an image at the start of `s` (which begins with `![`).
+/// Returns the block and the byte length consumed.
+fn parse_image<'a>(s: &'a str, host: &str) -> Option<(ImageBlock<'a>, usize)> {
+    let alt_end = s[2..].find(']')? + 2;
+    let alt = &s[2..alt_end];
+    if alt.contains(['[', '\n']) {
+        return None;
+    }
+    let url_part = s[alt_end + 1..].strip_prefix('(')?;
+    let close = url_part.find(')')?;
+    let src = &url_part[..close];
+    if src.contains(char::is_whitespace) {
+        return None;
+    }
+    let kind = classify_image_src(src, host)?;
+    Some((ImageBlock { alt, src, kind }, alt_end + 2 + close + 1))
+}
+
+/// Split a body into ordered text runs and image blocks. `host` is the
+/// configured JAIT base URL, used to recognise absolute blob URLs. Anything
+/// that is not a recognised image (including malformed syntax) stays text.
+pub fn body_segments<'a>(text: &'a str, host: &str) -> Vec<BodySegment<'a>> {
+    let mut out = Vec::new();
+    let mut run_start = 0;
+    let mut i = 0;
+    while let Some(off) = text[i..].find("![") {
+        let at = i + off;
+        match parse_image(&text[at..], host) {
+            Some((block, len)) => {
+                if at > run_start {
+                    out.push(BodySegment::Text(&text[run_start..at]));
+                }
+                out.push(BodySegment::Image(block));
+                i = at + len;
+                run_start = i;
+            }
+            None => i = at + 2,
+        }
+    }
+    if run_start < text.len() {
+        out.push(BodySegment::Text(&text[run_start..]));
+    }
+    out
+}
+
 // ── Referenced In ──
 
 /// An issue that mentions the open issue, and where.
@@ -442,6 +547,153 @@ pub fn line_before_cursor(line: &str, col: usize) -> &str {
         end -= 1;
     }
     &line[..end]
+}
+
+#[cfg(test)]
+mod body_segment_tests {
+    use super::*;
+
+    const HOST: &str = "https://jait.example.com";
+    const BLOB: &str = "/rails/active_storage/blobs/redirect/abc123/shot.png";
+    const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    fn img<'a>(alt: &'a str, src: &'a str, kind: ImageKind<'a>) -> BodySegment<'a> {
+        BodySegment::Image(ImageBlock { alt, src, kind })
+    }
+
+    #[test]
+    fn text_only_is_one_run_identical_to_input() {
+        let t = "hello world\nsecond line";
+        assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)]);
+    }
+
+    #[test]
+    fn empty_body_has_no_segments() {
+        assert!(body_segments("", HOST).is_empty());
+    }
+
+    #[test]
+    fn single_image() {
+        let t = format!("![shot]({BLOB})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![img("shot", BLOB, ImageKind::Blob)]
+        );
+    }
+
+    #[test]
+    fn image_between_text_runs() {
+        let t = format!("before ![a]({BLOB}) after");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                BodySegment::Text("before "),
+                img("a", BLOB, ImageKind::Blob),
+                BodySegment::Text(" after"),
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_images() {
+        let t = format!("![a]({BLOB})![b]({BLOB})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                img("a", BLOB, ImageKind::Blob),
+                img("b", BLOB, ImageKind::Blob)
+            ]
+        );
+    }
+
+    #[test]
+    fn absolute_blob_url_on_configured_host() {
+        let src = format!("{HOST}{BLOB}");
+        let t = format!("![a]({src})");
+        assert_eq!(
+            body_segments(&t, "https://jait.example.com/"),
+            vec![img("a", &src, ImageKind::Blob)]
+        );
+    }
+
+    #[test]
+    fn foreign_host_blob_url_stays_text() {
+        let t = format!("![a](https://evil.example.org{BLOB})");
+        assert_eq!(body_segments(&t, HOST), vec![BodySegment::Text(&t)]);
+    }
+
+    #[test]
+    fn non_jait_url_stays_text() {
+        let t = "![a](https://example.com/cat.png)";
+        assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)]);
+    }
+
+    #[test]
+    fn pending_placeholder_exposes_uuid() {
+        let src = format!("jait-pending://{UUID}");
+        let t = format!("x ![a]({src})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                BodySegment::Text("x "),
+                img("a", &src, ImageKind::Pending(UUID))
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_with_bad_uuid_stays_text() {
+        let t = "![a](jait-pending://not-a-uuid)";
+        assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)]);
+    }
+
+    #[test]
+    fn malformed_syntax_stays_text() {
+        for t in [
+            "![alt](",
+            "![alt](/rails/active_storage/blobs/redirect/a/b.png",
+            "![alt]",
+            "![alt] (/rails/active_storage/blobs/redirect/a/b.png)",
+            "![alt",
+        ] {
+            assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)], "{t}");
+        }
+    }
+
+    #[test]
+    fn malformed_then_valid_image() {
+        let t = format!("![oops ![a]({BLOB})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                BodySegment::Text("![oops "),
+                img("a", BLOB, ImageKind::Blob)
+            ]
+        );
+    }
+
+    #[test]
+    fn mentions_and_references_still_segment_in_text_runs() {
+        let t = format!("ping @Ann re PROJ-7 ![a]({BLOB}) PROJ-8");
+        let segs = body_segments(&t, HOST);
+        let BodySegment::Text(first) = segs[0] else {
+            panic!("expected text first");
+        };
+        assert_eq!(
+            segments(first, "PROJ", &["Ann"]),
+            vec![
+                Segment::Text("ping "),
+                Segment::Mention("@Ann"),
+                Segment::Text(" re "),
+                Segment::Issue {
+                    text: "PROJ-7",
+                    number: Some(7)
+                },
+                Segment::Text(" "),
+            ]
+        );
+        assert_eq!(segs.len(), 3);
+    }
 }
 
 #[cfg(test)]
