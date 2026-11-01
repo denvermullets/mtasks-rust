@@ -143,6 +143,10 @@ pub enum Message {
     /// Cancel a pending upload (local row id): drops the row, queue entries and outbox file.
     CancelAttachmentUpload(String),
     DeleteAttachmentConfirmed,
+    /// "Retry" on a failed upload card (local attachment id).
+    RetryUpload(String),
+    /// "Remove" on a failed upload card (local attachment id).
+    RemoveFailedUpload(String),
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -4568,6 +4572,31 @@ impl App {
                 }
                 self.modal = Modal::None;
                 self.reload_data();
+            }
+
+            Message::RetryUpload(id) => {
+                let conn = self.db();
+                let _ = crate::db::attachments::retry_failed(&conn, &id);
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::RemoveFailedUpload(id) => {
+                let conn = self.db();
+                let row = crate::db::attachments::get(&conn, &id)
+                    .ok()
+                    .flatten()
+                    .filter(|a| a.upload_state == crate::db::attachments::UploadState::Failed);
+                if let Some(row) = row {
+                    if let Ok(true) = crate::db::attachments::remove_local(&conn, &id) {
+                        // JRST-214 hook: for an inline image (`row.placeholder_uuid`),
+                        // strip its `jait-pending://` placeholder from the body here
+                        // via `mentions::strip_placeholder`.
+                        let _ = row;
+                    }
+                }
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
             }
 
             Message::DeleteProjectConfirmed => {
