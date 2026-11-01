@@ -6,6 +6,7 @@ pub mod error;
 
 pub mod comments;
 pub mod deleted;
+pub mod dashboards;
 pub mod dependencies;
 pub mod issues;
 pub mod labels;

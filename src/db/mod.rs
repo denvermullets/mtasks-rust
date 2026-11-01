@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod attachments;
 pub mod connection;
+pub mod dashboards;
 pub mod home_page;
 pub mod migrations;
 pub mod models;

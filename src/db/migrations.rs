@@ -687,6 +687,40 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE attachments ADD COLUMN blob_filename TEXT;
         ",
     },
+    Migration {
+        version: 33,
+        name: "dashboards",
+        up: "
+            -- Local mirror of the user's Dashboards (config only; issues are
+            -- evaluated locally). Group sources hold the source's REMOTE id.
+            CREATE TABLE IF NOT EXISTS dashboards (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dashboard_groups (
+                id TEXT PRIMARY KEY,
+                remote_id INTEGER UNIQUE,
+                dashboard_id TEXT NOT NULL REFERENCES dashboards(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT '#6366f1',
+                position INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_dashboard_groups_dashboard_position
+                ON dashboard_groups (dashboard_id, position);
+            CREATE TABLE IF NOT EXISTS dashboard_group_sources (
+                group_id TEXT NOT NULL REFERENCES dashboard_groups(id) ON DELETE CASCADE,
+                source_type TEXT NOT NULL CHECK (source_type IN ('team', 'project', 'label')),
+                source_remote_id INTEGER NOT NULL,
+                include_all INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (group_id, source_type, source_remote_id)
+            );
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with

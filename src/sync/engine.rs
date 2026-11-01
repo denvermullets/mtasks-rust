@@ -3460,6 +3460,16 @@ impl SyncEngine {
             }
         }
 
+        // Phase 2d: the user's Dashboards (full snapshot every cycle).
+        match pull_dashboards_step(client).await {
+            Ok(()) => report.processed += 1,
+            Err(msg) => {
+                report.failed += 1;
+                note_pull_failure(&mut report, &msg);
+                report.last_error = Some(msg);
+            }
+        }
+
         // Phase 3: figure out which teams to deeply sync.
         let targets = match collect_pull_targets(me.token.scoped_team_ids().as_deref()) {
             Ok(t) => t,
@@ -3871,6 +3881,32 @@ async fn pull_saved_views_step(client: &ApiClient) -> Result<(), String> {
             page.rows.len(),
             applied.upserted,
             applied.skipped_unmirrored,
+            applied.skipped_pending
+        ),
+    );
+    Ok(())
+}
+
+/// Pull the user's Dashboards. The endpoint has no paging or `updated_since`, so
+/// every cycle fetches the whole list and the apply reconciles removals (which
+/// is why `Dashboard` / `DashboardGroup` tombstones are not consumed).
+async fn pull_dashboards_step(client: &ApiClient) -> Result<(), String> {
+    let rows = crate::api::dashboards::list(client)
+        .await
+        .map_err(|e| format!("dashboards: {e}"))?;
+    let conn = open()?;
+    let applied = crate::db::dashboards::apply_snapshot(&conn, &rows)
+        .map_err(|e| format!("db (dashboards): {e}"))?;
+    sync_log(
+        "phase=pull_dashboards",
+        "ok",
+        &format!(
+            "rows={} upserted={} removed={} groups_upserted={} groups_removed={} skipped_pending={}",
+            rows.len(),
+            applied.dashboards_upserted,
+            applied.dashboards_removed,
+            applied.groups_upserted,
+            applied.groups_removed,
             applied.skipped_pending
         ),
     );
