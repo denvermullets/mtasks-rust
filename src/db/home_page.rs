@@ -5,6 +5,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
 use crate::api::HomePageDto;
+use crate::db::dashboards::Dashboard;
 use crate::db::models::Team;
 use crate::db::saved_views::SavedView;
 
@@ -51,6 +52,11 @@ impl HomePage {
             HomeTarget::LocalView(local) => &view.id == local,
             _ => false,
         }
+    }
+
+    /// True if this Home page is the given dashboard (by remote id).
+    pub fn matches_dashboard(&self, dashboard: &Dashboard) -> bool {
+        matches!(&self.target, HomeTarget::Dashboard(id) if dashboard.remote_id == Some(*id))
     }
 
     /// True if this Home page is the given team.

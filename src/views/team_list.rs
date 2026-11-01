@@ -89,11 +89,16 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         let active = open_dashboard_id == Some(d.id.as_str());
         // Rows don't open anything yet (the open ticket wires this up).
         col = col.push(
-            container(text(&d.name).size(13).color(if active {
-                t::text_primary()
-            } else {
-                t::text_secondary()
-            }))
+            container(
+                row![text(&d.name).size(13).color(if active {
+                    t::text_primary()
+                } else {
+                    t::text_secondary()
+                })]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+                .push_maybe(is_home_dashboard(home, d).then(home_marker)),
+            )
             .padding([6, 14])
             .width(Length::Fill)
             .style(move |_theme: &Theme| selected_row_container_style(active)),
@@ -307,6 +312,11 @@ pub fn is_home_team(home: Option<&HomePage>, team: &Team) -> bool {
     home.is_some_and(|h| h.matches_team(team))
 }
 
+/// True when `home` is this dashboard. One without a remote id never matches.
+pub fn is_home_dashboard(home: Option<&HomePage>, dashboard: &Dashboard) -> bool {
+    home.is_some_and(|h| h.matches_dashboard(dashboard))
+}
+
 /// True when `home` is this Saved view, by remote id or (chosen before its
 /// create pushed) by local id.
 pub fn is_home_view(home: Option<&HomePage>, view: &SavedView) -> bool {
@@ -489,7 +499,7 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_label, is_home_team, is_home_view, ordered_dashboards};
+    use super::{badge_label, is_home_dashboard, is_home_team, is_home_view, ordered_dashboards};
     use crate::db::dashboards::Dashboard;
     use crate::db::home_page::HomePage;
     use crate::db::models::Team;
@@ -542,7 +552,23 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_or_missing_home_marks_nothing() {
+    fn dashboard_home_marks_that_dashboard_only() {
+        let h = home("dashboard", 7);
+        let mut d = dash("a", 0);
+        d.remote_id = Some(7);
+        assert!(is_home_dashboard(Some(&h), &d));
+        d.remote_id = Some(8);
+        assert!(!is_home_dashboard(Some(&h), &d));
+        d.remote_id = None;
+        assert!(!is_home_dashboard(Some(&h), &d));
+        assert!(!is_home_dashboard(None, &d));
+        let t = home("team", 7);
+        d.remote_id = Some(7);
+        assert!(!is_home_dashboard(Some(&t), &d));
+    }
+
+    #[test]
+    fn dashboard_or_missing_home_marks_no_team_or_view() {
         let d = home("dashboard", 7);
         assert!(!is_home_team(Some(&d), &team(Some(7))));
         assert!(!is_home_view(Some(&d), &sv(Some(7))));
