@@ -1756,14 +1756,23 @@ impl App {
         if !matches!(&self.view, View::IssueDetail(id) if *id == detail.issue_id) {
             return Task::none();
         }
-        let srcs: Vec<String> = crate::views::body::image_list(
-            &detail.description_text(),
+        let srcs = crate::views::body::blob_srcs(
+            [detail.description_text().as_str()],
             &self.config.api_base_url,
-        )
-        .into_iter()
-        .filter(|i| i.key.is_some())
-        .map(|i| i.src)
-        .collect();
+        );
+        Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
+    }
+
+    /// `request_inline_image` for every blob image in the open detail's comments
+    /// (issue and project detail share `detail_comments`).
+    fn request_comment_images(&mut self) -> Task<Message> {
+        if !matches!(self.view, View::IssueDetail(_) | View::ProjectDetail(_)) {
+            return Task::none();
+        }
+        let srcs = crate::views::body::blob_srcs(
+            self.detail_comments.iter().map(|c| c.body.as_str()),
+            &self.config.api_base_url,
+        );
         Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
     }
 
@@ -1777,7 +1786,12 @@ impl App {
             .cloned()
             .collect();
         let inline = self.request_description_images();
-        Task::batch(atts.iter().map(|a| self.request_image(a)).chain([inline]))
+        let comment_inline = self.request_comment_images();
+        Task::batch(
+            atts.iter()
+                .map(|a| self.request_image(a))
+                .chain([inline, comment_inline]),
+        )
     }
 
     /// Copy a cached blob to its real filename and hand it to the OS.
@@ -5056,6 +5070,7 @@ impl App {
                             &self.detail_attachments,
                             &self.detail_comment_attachments,
                             &self.images,
+                            &self.config.api_base_url,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
