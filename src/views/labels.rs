@@ -67,14 +67,21 @@ fn pill<'a>(label: &'a Label, selected: bool) -> Element<'a, Message> {
     };
     let border_color = if selected { color } else { t::border() };
 
-    container(text(&label.name).size(11).color(text_color))
-        .padding([2, 8])
+    // XS text on the XS line height is 16px; with S0_5 padding the pill is 20px tall,
+    // which is `scroll::CARD_CHIP_ROW_H`.
+    container(
+        text(&label.name)
+            .size(t::type_scale::XS)
+            .line_height(iced::widget::text::LineHeight::Relative(t::type_scale::LH_XS))
+            .color(text_color),
+    )
+    .padding([t::space::S0_5, t::space::S2])
         .style(move |_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(bg)),
             border: Border {
                 color: border_color,
                 width: border_w,
-                radius: 8.0.into(),
+                radius: t::radius::SM.into(),
             },
             ..Default::default()
         })
