@@ -769,7 +769,7 @@ pub(crate) fn rich_body<'a>(
 
 /// Rendered (highlighted, clickable) view of the description, shown only when
 /// it contains at least one token; the editor itself is plain text.
-fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
+pub(crate) fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
     let ident = ctx.team.map(|t| t.identifier.as_str()).unwrap_or("");
     let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
     let has_token = mentions::segments(body, ident, &names)
