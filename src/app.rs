@@ -356,6 +356,8 @@ pub enum Message {
     /// Files chosen for the open issue (picker, drag-and-drop, shortcut all
     /// send this). Each is validated, copied to the outbox and queued.
     FilesPicked(Vec<std::path::PathBuf>),
+    /// Cmd+V with an image-only clipboard in the issue description editor.
+    PasteImageIntoDescription,
     /// A file dropped on the window; routed by `files::drop::drop_target`.
     FileDropped(std::path::PathBuf),
     /// "+ Attach file" on a comment composer (issue or project detail).
@@ -675,6 +677,8 @@ pub struct App {
     /// Files attached to the open issue (synced, then pending/failed). Repopulated
     /// each reload only while `view` is `IssueDetail`.
     detail_attachments: Vec<crate::db::attachments::Attachment>,
+    /// Pending inline images (placeholder uuid -> outbox file) of the open issue.
+    detail_pending_paths: std::collections::HashMap<String, std::path::PathBuf>,
     /// Fetch state per blob key for images shown in the UI (thumbnails now;
     /// inline images and the lightbox reuse it). Bytes live in the file cache.
     images: crate::files::images::ImageStore,
@@ -954,6 +958,8 @@ impl App {
                 issue_id,
             )
             .unwrap_or_default();
+            self.detail_pending_paths =
+                crate::views::issue_detail::pending_inline_paths(&self.detail_attachments);
             self.load_comment_attachments(conn);
         } else if let View::ProjectDetail(ref project_id) = self.view {
             self.detail_attachments = crate::db::attachments::list_for_owner(
@@ -2341,6 +2347,7 @@ impl App {
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
+            detail_pending_paths: Default::default(),
             images: Default::default(),
             detail_comment_attachments: Default::default(),
             detail_references: Vec::new(),
@@ -4014,6 +4021,37 @@ impl App {
                 );
             }
 
+            Message::PasteImageIntoDescription => {
+                let View::IssueDetail(ref issue_id) = self.view else {
+                    return Task::none();
+                };
+                let issue_id = issue_id.clone();
+                let crate::files::paste::ClipboardPaste::Image(png) =
+                    crate::files::paste::read_clipboard()
+                else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                match crate::files::paste::paste_image_placeholder(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Issue,
+                    &issue_id,
+                    &png,
+                ) {
+                    Ok(text) => {
+                        if let Some(d) = &mut self.issue_detail {
+                            d.description.perform(iced::widget::text_editor::Action::Edit(
+                                iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)),
+                            ));
+                        }
+                        self.load_detail_dependencies(&conn);
+                        self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+                    }
+                    Err(reason) => self.push_toast(reason, ToastKind::Error, false),
+                }
+            }
+
             Message::FileDropped(path) => {
                 use crate::files::drop::{drop_target, DropTarget};
                 match drop_target(&self.view, &self.modal) {
@@ -5280,6 +5318,7 @@ impl App {
                             self.detail_origin.as_deref(),
                             &my_member_ids,
                             &self.config.api_base_url,
+                            &self.detail_pending_paths,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.

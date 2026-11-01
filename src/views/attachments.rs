@@ -24,11 +24,16 @@ pub fn section_with<'a>(
     images: &'a ImageStore,
     deletable: bool,
 ) -> Option<Element<'a, Message>> {
-    if attachments.is_empty() {
+    // Inline images are part of the body, not file cards.
+    let files = || {
+        attachments
+            .iter()
+            .filter(|a| a.upload_kind != crate::db::attachments::UploadKind::InlineImage)
+    };
+    if files().next().is_none() {
         return None;
     }
-    let cards = attachments
-        .iter()
+    let cards = files()
         .fold(column![].spacing(8), |col, a| col.push(card(a, images, deletable)));
     Some(
         column![]
