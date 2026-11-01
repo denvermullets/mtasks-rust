@@ -20,6 +20,16 @@ pub async fn create(
     client.post("api/v1/dashboards", &create_body(name, description)).await
 }
 
+/// `PATCH /api/v1/dashboards/:id`: name and description.
+pub async fn update(
+    client: &ApiClient,
+    id: i64,
+    name: &str,
+    description: &str,
+) -> Result<DashboardDto, ApiError> {
+    client.patch(&format!("api/v1/dashboards/{id}"), &create_body(name, description)).await
+}
+
 fn create_body(name: &str, description: &str) -> serde_json::Value {
     serde_json::json!({ "dashboard": { "name": name, "description": description } })
 }
