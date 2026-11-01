@@ -40,6 +40,12 @@ fn member_card<'a>(member: &MemberCard) -> Element<'a, Message> {
     let body = column![
         text(member.name.clone()).size(t::type_scale::SM).color(t::text_primary()),
         text(member.email.clone()).size(t::type_scale::XS).color(t::text_secondary()),
+        text(match member.open_issues {
+            1 => "1 open issue".to_string(),
+            n => format!("{n} open issues"),
+        })
+        .size(t::type_scale::XS)
+        .color(t::text_secondary()),
     ]
     .spacing(t::space::S1);
     panel(body.into())

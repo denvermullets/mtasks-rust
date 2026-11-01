@@ -111,6 +111,8 @@ pub enum CardContent {
 pub struct MemberCard {
     pub name: String,
     pub email: String,
+    /// Open issues assigned to this member on their team.
+    pub open_issues: usize,
 }
 
 /// The fields of an issue card.
@@ -144,9 +146,29 @@ pub fn content_for(
         Anchor::Mention(text) => {
             let wanted = text.strip_prefix('@').unwrap_or(text).to_lowercase();
             let member = members.iter().find(|m| m.name.to_lowercase() == wanted)?;
-            Some(CardContent::Member(MemberCard { name: member.name.clone(), email: member.email.clone() }))
+            Some(CardContent::Member(MemberCard {
+                name: member.name.clone(),
+                email: member.email.clone(),
+                open_issues: open_issue_count(member, issues),
+            }))
         }
     }
+}
+
+/// Issues assigned to `member` on the member's team that are still open:
+/// not completed, canceled or archived. Counted from the loaded issues, so
+/// it needs no query and works offline; run only when a card is drawn.
+fn open_issue_count(member: &Member, issues: &[Issue]) -> usize {
+    issues
+        .iter()
+        .filter(|i| {
+            i.assignee_id.as_deref() == Some(member.id.as_str())
+                && i.team_id == member.team_id
+                && i.completed_at.is_none()
+                && i.canceled_at.is_none()
+                && i.archived_at.is_none()
+        })
+        .count()
 }
 
 #[cfg(test)]
@@ -365,8 +387,49 @@ mod tests {
         ];
         for (text, want) in rows {
             let got = content_for(&Anchor::Mention(text.into()), &[], &[], &members);
-            let want = want.map(|(n, e)| CardContent::Member(MemberCard { name: n.into(), email: e.into() }));
+            let want = want.map(|(n, e)| {
+                CardContent::Member(MemberCard { name: n.into(), email: e.into(), open_issues: 0 })
+            });
             assert_eq!(got, want, "{text}");
         }
+    }
+
+    #[test]
+    fn mention_card_counts_open_issues_for_the_members_team() {
+        let members = [member("Ann", "ann@x.io"), member("Bob", "bob@x.io")];
+        let mine = |mut i: Issue| {
+            i.assignee_id = Some("m-Ann".into());
+            i
+        };
+        let mut done = mine(issue("2", "t", Some(2), "done"));
+        done.completed_at = Some("x".into());
+        let mut canceled = mine(issue("3", "t", Some(3), "canceled"));
+        canceled.canceled_at = Some("x".into());
+        let mut archived = mine(issue("4", "t", Some(4), "archived"));
+        archived.archived_at = Some("x".into());
+        let mut bobs = issue("6", "t", Some(6), "bobs");
+        bobs.assignee_id = Some("m-Bob".into());
+        let issues = [
+            mine(issue("1", "t", Some(1), "open")),
+            mine(issue("1b", "t", Some(8), "open too")),
+            done,
+            canceled,
+            archived,
+            mine(issue("5", "other", Some(5), "other team")),
+            bobs,
+            issue("7", "t", Some(7), "unassigned"),
+        ];
+        let count = |text: &str, issues: &[Issue]| match content_for(
+            &Anchor::Mention(text.into()),
+            issues,
+            &[],
+            &members,
+        ) {
+            Some(CardContent::Member(m)) => m.open_issues,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(count("@Ann", &issues), 2);
+        assert_eq!(count("@Bob", &issues), 1);
+        assert_eq!(count("@Ann", &[]), 0, "zero is shown, not left out");
     }
 }
