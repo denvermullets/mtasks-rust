@@ -2790,6 +2790,15 @@ fn upload_outcome(err: &ApiError) -> Outcome {
     }
 }
 
+/// Outcome for an error from the PUT to the upload target. Kept apart from
+/// [`upload_outcome`] (the direct-upload-create step) because the storage host
+/// answers with its own statuses: a 403 there means the signed target expired,
+/// never that the file is refused, so it must never become a permanent failure.
+/// The target isn't stored, so every retry starts a fresh direct upload.
+fn put_outcome(err: &ApiError) -> Outcome {
+    Outcome::LeavePending(format!("upload target failed, will restart the upload: {err:?}"))
+}
+
 async fn upload_create(client: &ApiClient, entity_id: &str) -> Outcome {
     let prep = match open() {
         Ok(conn) => match prep_upload_create_in(&conn, entity_id) {
@@ -2807,7 +2816,7 @@ async fn upload_create(client: &ApiClient, entity_id: &str) -> Outcome {
         Err(e) => return upload_outcome(&e),
     };
     if let Err(e) = attachments_api::put_bytes(client, &direct.direct_upload, bytes).await {
-        return upload_outcome(&e);
+        return put_outcome(&e);
     }
     let blob_filename = direct.filename.unwrap_or(prep.blob.filename);
     let saved = open().and_then(|c| {
@@ -7449,5 +7458,22 @@ mod tests {
         assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
         let e = ApiError::NotFound("x".into());
         assert!(matches!(upload_outcome(&e), Outcome::LeavePending(_)));
+    }
+
+    #[test]
+    fn a_put_step_error_is_always_temporary() {
+        // An expired target (403 from the storage host) is not the user's
+        // file being refused: the next retry restarts the direct upload.
+        for e in [
+            ApiError::Server { status: 403, message: "expired".into() },
+            ApiError::Validation { errors: vec!["x".into()] },
+            ApiError::NotFound("x".into()),
+            ApiError::Server { status: 400, message: "bad".into() },
+        ] {
+            match put_outcome(&e) {
+                Outcome::LeavePending(reason) => assert!(reason.contains("restart")),
+                _ => panic!("PUT error must stay pending"),
+            }
+        }
     }
 }
