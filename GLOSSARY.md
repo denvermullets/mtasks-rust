@@ -28,6 +28,20 @@ _Avoid_: Dirty view, unsaved view
 The one team board, Saved view or dashboard the user lands on at launch, shared with the web app.
 _Avoid_: Default view, start page
 
+### Dashboards
+
+**Dashboard**:
+A user-owned, cross-team page made of Dashboard groups, shared with the web app. It can be the user's Home page.
+_Avoid_: Board (a single team's Lane columns), view (see Saved view)
+
+**Dashboard group**:
+A named, colored section of a Dashboard with its own Sources and a position among the Dashboard's groups.
+_Avoid_: Widget, panel, section
+
+**Source**:
+A team, project or label that a Dashboard group pulls issues from. A team or project Source is either "all issues" or "assigned to me". Label Sources narrow the group's issues; if the group has only label Sources, it pulls in every issue on those labels' teams.
+_Avoid_: Filter, feed, query
+
 ### Staying current
 
 **Notification**:
