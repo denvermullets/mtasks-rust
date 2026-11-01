@@ -37,6 +37,16 @@ pub enum Block {
     Quote(Vec<Block>),
     /// A fenced or indented code block: verbatim text, never tokenized.
     Code(CodeBlock),
+    /// A pipe table.
+    Table(Table),
+}
+
+/// A table: a header row and body rows. A cell is a block sequence so
+/// mentions, references and images inside it work as in any body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Table {
+    pub header: Vec<Vec<Block>>,
+    pub rows: Vec<Vec<Vec<Block>>>,
 }
 
 /// A code block's language tag and exact text.
@@ -206,7 +216,7 @@ fn find_bare_urls(text: &str) -> Vec<(usize, usize)> {
 /// Parser options: the web feature set. Hard breaks are never produced from
 /// plain newlines, so nothing to switch off.
 fn parse_options() -> Options {
-    Options::ENABLE_TASKLISTS
+    Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES
 }
 
 /// Parse `body` into a [`Document`]. Never panics; input that isn't valid
@@ -270,6 +280,12 @@ enum Frame {
     Flat(Vec<Block>),
     /// A block quote; becomes `Block::Quote`.
     Quote(Vec<Block>),
+    /// A table; collects its header and body rows.
+    Table(Table),
+    /// A table row (`true` for the header row); collects its cells.
+    Row(bool, Vec<Vec<Block>>),
+    /// A table cell.
+    Cell(Vec<Block>),
 }
 
 impl Builder {
@@ -295,6 +311,21 @@ impl Builder {
             },
             Some(Frame::Flat(blocks)) => blocks.into_iter().for_each(|b| self.push_block(b)),
             Some(Frame::Quote(blocks)) => self.push_block(Block::Quote(blocks)),
+            Some(Frame::Table(table)) => self.push_block(Block::Table(table)),
+            Some(Frame::Row(head, cells)) => {
+                if let Some(Frame::Table(table)) = self.stack.last_mut() {
+                    if head {
+                        table.header = cells;
+                    } else {
+                        table.rows.push(cells);
+                    }
+                }
+            }
+            Some(Frame::Cell(blocks)) => {
+                if let Some(Frame::Row(_, cells)) = self.stack.last_mut() {
+                    cells.push(blocks);
+                }
+            }
             None => {}
         }
     }
@@ -302,7 +333,11 @@ impl Builder {
     /// Add a finished block to the innermost open container, or the root.
     fn push_block(&mut self, block: Block) {
         match self.stack.last_mut() {
-            Some(Frame::Item(blocks, _) | Frame::Flat(blocks) | Frame::Quote(blocks)) => blocks.push(block),
+            Some(Frame::Item(blocks, _) | Frame::Flat(blocks) | Frame::Quote(blocks) | Frame::Cell(blocks)) => {
+                blocks.push(block)
+            }
+            // Only cells are ever opened inside a table or row; keep stray blocks.
+            Some(Frame::Table(_) | Frame::Row(..)) => {}
             // A block directly in a list (never from the parser) is kept, not lost.
             Some(Frame::List(_, items, checked)) => {
                 items.push(vec![block]);
@@ -422,6 +457,13 @@ impl Builder {
             }
             Event::Start(Tag::BlockQuote(_)) => self.open(Frame::Quote(Vec::new())),
             Event::End(TagEnd::BlockQuote(_)) => self.close(),
+            Event::Start(Tag::Table(_)) => self.open(Frame::Table(Table::default())),
+            Event::End(TagEnd::Table) => self.close(),
+            Event::Start(Tag::TableHead) => self.open(Frame::Row(true, Vec::new())),
+            Event::Start(Tag::TableRow) => self.open(Frame::Row(false, Vec::new())),
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => self.close(),
+            Event::Start(Tag::TableCell) => self.open(Frame::Cell(Vec::new())),
+            Event::End(TagEnd::TableCell) => self.close(),
             Event::End(TagEnd::Link | TagEnd::Image) => {
                 self.literal_depth = self.literal_depth.saturating_sub(1);
             }
@@ -530,9 +572,6 @@ fn is_block_end(end: &TagEnd) -> bool {
         end,
         TagEnd::Paragraph
             | TagEnd::Heading(_)
-            | TagEnd::TableCell
-            | TagEnd::TableRow
-            | TagEnd::TableHead
     )
 }
 
@@ -794,6 +833,73 @@ mod tests {
 
     fn tasks(marks: &[Option<bool>], items: Vec<Vec<Block>>) -> Block {
         Block::List(List { start: None, items, checked: marks.to_vec() })
+    }
+
+    fn table(header: Vec<Vec<Block>>, rows: Vec<Vec<Vec<Block>>>) -> Block {
+        Block::Table(Table { header, rows })
+    }
+
+    #[test]
+    fn parses_tables() {
+        let cell = |s: &str| vec![para(vec![text(s)])];
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            (
+                "header and rows",
+                "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+                vec![table(
+                    vec![cell("a"), cell("b")],
+                    vec![vec![cell("1"), cell("2")], vec![cell("3"), cell("4")]],
+                )],
+            ),
+            (
+                "header only",
+                "| a |\n|---|",
+                vec![table(vec![cell("a")], vec![])],
+            ),
+            (
+                "empty cell",
+                "| a | b |\n|---|---|\n| 1 |  |",
+                vec![table(vec![cell("a"), cell("b")], vec![vec![cell("1"), vec![]]])],
+            ),
+            (
+                "text around a table",
+                "before\n\n| a |\n|---|\n| 1 |\n\nafter",
+                vec![
+                    para(vec![text("before")]),
+                    table(vec![cell("a")], vec![vec![cell("1")]]),
+                    para(vec![text("after")]),
+                ],
+            ),
+            (
+                "inline styles and code in a cell",
+                "| h |\n|---|\n| **b** `c` |",
+                vec![table(
+                    vec![cell("h")],
+                    vec![vec![vec![para(vec![
+                        Inline::Strong(vec![text("b")]),
+                        text(" "),
+                        code("c"),
+                    ])]]],
+                )],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse(body).blocks, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn tokens_work_inside_table_cells() {
+        let doc = parse_with("| who |\n|---|\n| @Ann on PROJ-3 |", "", &["Ann"]);
+        let Block::Table(t) = &doc.blocks[0] else { panic!("not a table") };
+        assert_eq!(
+            t.rows[0][0],
+            vec![para(vec![
+                Inline::Mention("@Ann".into()),
+                text(" on "),
+                issue_ref("PROJ-3", "PROJ", 3),
+            ])]
+        );
     }
 
     #[test]

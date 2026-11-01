@@ -91,6 +91,11 @@ fn collect_images(blocks: &[Block], out: &mut Vec<InlineImage>) {
             Block::Image(img) => out.extend(InlineImage::from_document(img)),
             Block::List(list) => list.items.iter().for_each(|item| collect_images(item, out)),
             Block::Quote(inner) => collect_images(inner, out),
+            Block::Table(table) => table
+                .header
+                .iter()
+                .chain(table.rows.iter().flatten())
+                .for_each(|cell| collect_images(cell, out)),
             Block::Paragraph(_) | Block::Code(_) => {}
         }
     }
@@ -167,6 +172,7 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
         Block::List(list) => list_block(list, size, plain, ctx),
         Block::Code(code) => code_block(code, size),
         Block::Quote(blocks) => quote_block(blocks, size, t::text_muted(), ctx),
+        Block::Table(table) => table_block(table, size, plain, ctx),
     }
 }
 
@@ -250,6 +256,41 @@ fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>)
         .height(iced::Length::Fill)
         .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() });
     row![rule, content].spacing(t::space::S3).height(iced::Length::Shrink).into()
+}
+
+/// A bordered grid of equal-width columns. The border is the table's
+/// background showing through a 1px gap between cells, so adjacent cells share
+/// one line. The header row is filled with the context-foreground token.
+fn table_block<'a>(table: &document::Table, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+    let cells = |cells: &[Vec<Block>], header: bool| -> Element<'a, Message> {
+        let mut r = row![].spacing(1);
+        for cell in cells {
+            let mut content = column![].spacing(t::space::S1);
+            for b in cell {
+                content = content.push(block(b, size, plain, ctx));
+            }
+            r = r.push(
+                container(content)
+                    .padding([t::space::S1, t::space::S2])
+                    .width(iced::Length::Fill)
+                    .style(move |_| container::Style {
+                        background: Some(if header { t::bg_card() } else { t::bg_primary() }.into()),
+                        ..Default::default()
+                    }),
+            );
+        }
+        r.into()
+    };
+    let mut grid = column![].spacing(1);
+    grid = grid.push(cells(&table.header, true));
+    for r in &table.rows {
+        grid = grid.push(cells(r, false));
+    }
+    container(grid)
+        .padding(1)
+        .width(iced::Length::Fill)
+        .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() })
+        .into()
 }
 
 /// Marker for item `index` (0-based): a bullet, or the number counted from
