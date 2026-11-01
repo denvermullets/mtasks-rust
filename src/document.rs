@@ -85,7 +85,7 @@ impl Builder {
                 self.flush_pending();
                 self.current.push(Inline::HardBreak);
             }
-            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
+            Event::Start(Tag::Link { .. } | Tag::Image { .. } | Tag::CodeBlock(_)) => {
                 self.flush_pending();
                 self.literal_depth += 1;
             }
@@ -94,7 +94,12 @@ impl Builder {
             }
             Event::Start(Tag::HtmlBlock) => self.html_depth += 1,
             Event::End(TagEnd::HtmlBlock) => self.html_depth = self.html_depth.saturating_sub(1),
-            Event::End(end) if is_block_end(&end) => self.flush(),
+            Event::End(end) if is_block_end(&end) => {
+                if end == TagEnd::CodeBlock {
+                    self.literal_depth = self.literal_depth.saturating_sub(1);
+                }
+                self.flush();
+            }
             _ => {}
         }
     }
