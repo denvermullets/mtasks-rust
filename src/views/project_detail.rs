@@ -32,6 +32,8 @@ pub struct ProjectDetailState {
     pub reply_to: Option<String>,
     pub reply_composer: text_editor::Content,
     pub suggest: Option<crate::mentions::SuggestState>,
+    /// Files staged on the new-comment composer.
+    pub composer_files: crate::views::issue_detail::ComposerFiles,
 }
 
 impl ProjectDetailState {
@@ -48,6 +50,7 @@ impl ProjectDetailState {
             reply_to: None,
             reply_composer: text_editor::Content::new(),
             suggest: None,
+            composer_files: Default::default(),
         }
     }
 
@@ -87,6 +90,7 @@ pub fn view<'a>(
     attachments: &'a [crate::db::attachments::Attachment],
     comment_attachments: &'a CommentAttachments,
     images: &'a crate::files::images::ImageStore,
+    host: &'a str,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -154,6 +158,19 @@ pub fn view<'a>(
                 .size(14)
                 .height(Length::Fixed(160.0)),
         )
+        .push_maybe(crate::views::issue_detail::description_preview(
+            &detail.description_text(),
+            &crate::views::body::BodyCtx {
+                team,
+                teams,
+                issues,
+                members,
+                images,
+                host,
+                pending_paths: None,
+                on_image: None,
+            },
+        ))
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
@@ -306,6 +323,7 @@ fn discussion_section<'a>(
         .push(new_comment_composer(
             &detail.comment_composer,
             detail.suggest.as_ref(),
+            &detail.composer_files.files,
         ))
         .into()
 }

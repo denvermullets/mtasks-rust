@@ -164,11 +164,54 @@ pub fn add_pending(conn: &Connection, new: &NewPending) -> Result<Attachment> {
         ],
     )?;
     crate::db::sync_queue::enqueue(&tx, UPLOAD_ENTITY, &id, "create", None)?;
-    if new.kind == UploadKind::Attachment {
+    // A comment's files ride on its comment-create (`files: [signed_id]`).
+    if new.kind == UploadKind::Attachment && new.owner_kind != OwnerKind::Comment {
         crate::db::sync_queue::enqueue(&tx, ATTACHMENT_ENTITY, &id, "create", None)?;
     }
     tx.commit()?;
     Ok(get(conn, &id)?.expect("row just inserted"))
+}
+
+/// Drop a staged (still pending) row, e.g. its chip was removed from the
+/// composer. Returns its outbox path for the caller to delete; its queued
+/// upload then finishes as a no-op. `None` when there is no such pending row.
+pub fn remove_staged(conn: &Connection, id: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let path: Option<Option<String>> = conn
+        .query_row(
+            "SELECT outbox_path FROM attachments WHERE id = ?1 AND upload_state != 'synced'",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(path) = path else { return Ok(None) };
+    conn.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
+    Ok(Some(path.unwrap_or_default()))
+}
+
+/// The comment-create carrying a comment's files succeeded: its pending rows
+/// are replaced by the server's list (when it sent one). Returns the outbox
+/// paths of the removed rows for the caller to delete.
+pub fn finish_comment_files(
+    conn: &Connection,
+    comment_id: &str,
+    dtos: Option<&[AttachmentDto]>,
+) -> Result<Vec<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut paths = Vec::new();
+    for a in list_for_owner(&tx, OwnerKind::Comment, comment_id)? {
+        if a.upload_state == UploadState::Pending {
+            if let Some(p) = a.outbox_path {
+                paths.push(p);
+            }
+            tx.execute("DELETE FROM attachments WHERE id = ?1", params![a.id])?;
+        }
+    }
+    if let Some(d) = dtos {
+        replace_synced(&tx, OwnerKind::Comment, comment_id, d)?;
+    }
+    tx.commit()?;
+    Ok(paths)
 }
 
 /// The direct upload and PUT finished: remember what the attach needs.
@@ -207,6 +250,42 @@ pub fn mark_attached(conn: &Connection, id: &str, dto: &AttachmentDto) -> Result
         ],
     )?;
     tx.commit()
+}
+
+/// A permanent upload error: the row stays (with its outbox copy) as `failed`,
+/// showing `reason`, until the user retries or removes it.
+pub fn mark_failed(conn: &Connection, id: &str, reason: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE attachments SET upload_state = 'failed', failure_reason = ?2
+         WHERE id = ?1 AND upload_state = 'pending'",
+        params![id, reason],
+    )?;
+    Ok(())
+}
+
+/// Retry a `failed` row: back to `pending` and requeue what is still missing
+/// (the upload unless it already finished, plus the attach for
+/// [`UploadKind::Attachment`]), skipping anything still queued. False when the
+/// row is not failed.
+pub fn retry_failed(conn: &Connection, id: &str) -> Result<bool> {
+    use crate::db::sync_queue::{enqueue, has_pending_entry};
+    let Some(a) = get(conn, id)? else { return Ok(false) };
+    if a.upload_state != UploadState::Failed {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE attachments SET upload_state = 'pending', failure_reason = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    if a.signed_id.is_none() && !has_pending_entry(&tx, UPLOAD_ENTITY, id)? {
+        enqueue(&tx, UPLOAD_ENTITY, id, "create", None)?;
+    }
+    if a.upload_kind == UploadKind::Attachment && !has_pending_entry(&tx, ATTACHMENT_ENTITY, id)? {
+        enqueue(&tx, ATTACHMENT_ENTITY, id, "create", None)?;
+    }
+    tx.commit()?;
+    Ok(true)
 }
 
 /// An owner's attachments: server-known ones in remote `id` order, then
@@ -439,6 +518,72 @@ pub fn restore_from_snapshot(conn: &Connection, snap: &serde_json::Value, remote
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod comment_file_tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&c).unwrap();
+        c
+    }
+
+    fn new_comment_file(owner: &str) -> NewPending {
+        NewPending {
+            owner_kind: OwnerKind::Comment,
+            owner_id: owner.into(),
+            filename: "log.txt".into(),
+            content_type: "text/plain".into(),
+            byte_size: 3,
+            checksum: "abc==".into(),
+            outbox_path: "/tmp/outbox/c".into(),
+            kind: UploadKind::Attachment,
+            placeholder_uuid: None,
+        }
+    }
+
+    #[test]
+    fn comment_files_queue_only_an_upload_because_comment_create_carries_them() {
+        let c = conn();
+        let a = add_pending(&c, &new_comment_file("c1")).unwrap();
+        let kinds: Vec<String> = c
+            .prepare("SELECT entity_type FROM sync_queue WHERE entity_id = ?1")
+            .unwrap()
+            .query_map([&a.id], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(kinds, vec![UPLOAD_ENTITY.to_string()]);
+    }
+
+    #[test]
+    fn removing_a_staged_file_returns_its_outbox_path_and_deletes_the_row() {
+        let c = conn();
+        let a = add_pending(&c, &new_comment_file("c1")).unwrap();
+        assert_eq!(remove_staged(&c, &a.id).unwrap().as_deref(), Some("/tmp/outbox/c"));
+        assert!(get(&c, &a.id).unwrap().is_none());
+        assert_eq!(remove_staged(&c, &a.id).unwrap(), None);
+    }
+
+    #[test]
+    fn finishing_comment_files_swaps_pending_rows_for_the_servers_list() {
+        let c = conn();
+        add_pending(&c, &new_comment_file("c1")).unwrap();
+        let dto: AttachmentDto = serde_json::from_value(serde_json::json!({
+            "id": 9, "blob_id": 109, "filename": "log.txt", "content_type": "text/plain",
+            "byte_size": 3, "checksum": "abc==", "created_at": "2026-01-01T00:00:00.000Z",
+            "download_url": "/api/v1/attachments/9/download"
+        }))
+        .unwrap();
+        let paths = finish_comment_files(&c, "c1", Some(&[dto])).unwrap();
+        assert_eq!(paths, vec!["/tmp/outbox/c".to_string()]);
+        let rows = list_for_owner(&c, OwnerKind::Comment, "c1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].remote_id, Some(9));
+        assert_eq!(rows[0].upload_state, UploadState::Synced);
+    }
 }
 
 #[cfg(test)]
@@ -753,6 +898,52 @@ mod tests {
         assert_eq!(map["c1"].len(), 1);
         assert_eq!(map["c2"].iter().map(|a| a.filename.as_str()).collect::<Vec<_>>(), ["b", "c"]);
         assert!(!map.contains_key("c3"), "issue files are not comment files");
+    }
+
+    #[test]
+    fn mark_failed_keeps_the_row_with_a_reason() {
+        let c = conn();
+        let a = add_pending(&c, &new_pending("big.bin")).unwrap();
+        mark_failed(&c, &a.id, "validation: too big").unwrap();
+        let row = get(&c, &a.id).unwrap().unwrap();
+        assert_eq!(row.upload_state, UploadState::Failed);
+        assert_eq!(row.failure_reason.as_deref(), Some("validation: too big"));
+        assert_eq!(row.outbox_path.as_deref(), Some("/tmp/outbox/x"), "file is never dropped");
+    }
+
+    #[test]
+    fn retry_requeues_upload_and_attach_once() {
+        let c = conn();
+        let a = add_pending(&c, &new_pending("big.bin")).unwrap();
+        mark_failed(&c, &a.id, "nope").unwrap();
+        for e in crate::db::sync_queue::pending_entries(&c).unwrap() {
+            crate::db::sync_queue::mark_synced(&c, e.id.unwrap()).unwrap();
+        }
+        assert!(retry_failed(&c, &a.id).unwrap());
+        let row = get(&c, &a.id).unwrap().unwrap();
+        assert_eq!((row.upload_state, row.failure_reason), (UploadState::Pending, None));
+        assert_eq!(
+            queue(&c),
+            vec![
+                ("upload".into(), "create".into(), a.id.clone()),
+                ("attachment".into(), "create".into(), a.id.clone()),
+            ]
+        );
+        assert!(!retry_failed(&c, &a.id).unwrap(), "only failed rows retry");
+        assert_eq!(queue(&c).len(), 2);
+    }
+
+    #[test]
+    fn retry_after_the_upload_finished_only_requeues_the_attach() {
+        let c = conn();
+        let a = add_pending(&c, &new_pending("big.bin")).unwrap();
+        set_uploaded(&c, &a.id, "signed", "big.bin").unwrap();
+        mark_failed(&c, &a.id, "owner gone").unwrap();
+        for e in crate::db::sync_queue::pending_entries(&c).unwrap() {
+            crate::db::sync_queue::mark_synced(&c, e.id.unwrap()).unwrap();
+        }
+        assert!(retry_failed(&c, &a.id).unwrap());
+        assert_eq!(queue(&c), vec![("attachment".into(), "create".into(), a.id)]);
     }
 
     #[test]

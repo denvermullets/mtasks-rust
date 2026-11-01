@@ -57,6 +57,31 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore, deletable: bool) -> E
     // Pending marker: the file is safe in the outbox but not on the server yet.
     let pending = (a.upload_state == UploadState::Pending)
         .then(|| text("Pending upload").size(11).color(t::accent()));
+    // Failed marker: why, and the two ways out.
+    let failed = (a.upload_state == UploadState::Failed).then(|| {
+        text(format!(
+            "Upload failed: {}",
+            a.failure_reason.as_deref().unwrap_or("unknown error")
+        ))
+        .size(11)
+        .color(t::danger())
+    });
+    let failed_actions = (a.upload_state == UploadState::Failed).then(|| {
+        row![]
+            .spacing(8)
+            .push(
+                button(text("Retry").size(11).color(t::accent()))
+                    .on_press(Message::RetryUpload(a.id.clone()))
+                    .padding(0)
+                    .style(button::text),
+            )
+            .push(
+                button(text("Remove").size(11).color(t::text_muted()))
+                    .on_press(Message::RemoveFailedUpload(a.id.clone()))
+                    .padding(0)
+                    .style(button::text),
+            )
+    });
     let info = column![]
         .spacing(2)
         .width(Length::Fill)
@@ -66,7 +91,9 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore, deletable: bool) -> E
                 .spacing(8)
                 .push(text(meta).size(11).color(t::text_muted()))
                 .push_maybe(pending),
-        );
+        )
+        .push_maybe(failed)
+        .push_maybe(failed_actions);
     // Only files the server has can be deleted this way; pending/failed ones
     // are cancelled or removed by the upload tickets.
     let delete = (deletable && a.upload_state == UploadState::Synced).then(|| {
