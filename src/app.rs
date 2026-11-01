@@ -140,6 +140,8 @@ pub enum Message {
     // Issue detail — buffered text fields (committed on Enter / nav-away)
     IssueDetailTitleChanged(String),
     IssueDetailDescriptionChanged(iced::widget::text_editor::Action),
+    /// Click on the rendered description: open the editor with focus.
+    EditIssueDescription,
     IssueDetailDueDateChanged(String),
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
@@ -4206,6 +4208,16 @@ impl App {
                     d.description.perform(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Description);
+            }
+
+            Message::EditIssueDescription => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.editing_description = true;
+                    return iced::advanced::widget::operate(issue_detail::FocusFirstIn::new(
+                        issue_detail::description_editor_id(),
+                    ))
+                    .discard();
+                }
             }
 
             // --- Issue detail: comments ---
