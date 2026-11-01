@@ -308,6 +308,8 @@ pub enum Message {
     ToggleViewMode,
     /// List mode: collapse/expand the section with this title (header click).
     ToggleSection(String),
+    /// Collapse/expand a dashboard group (its local id) on the open dashboard.
+    ToggleDashboardGroup(String),
     /// List mode `c`: collapse/expand the focused section.
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
@@ -722,6 +724,8 @@ pub struct App {
     dashboard_groups: Vec<crate::dashboard_eval::GroupConfig>,
     /// Header state of the open dashboard. Per-dashboard memory is a later ticket.
     dashboard_header: crate::dashboard_eval::Header,
+    /// Collapsed group ids per dashboard, for the session.
+    collapsed_dashboard_groups: crate::views::dashboard::CollapsedGroups,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -1054,7 +1058,10 @@ impl App {
             },
             current_user_remote_id: self.config.current_user_remote_id,
             today: chrono::Local::now().date_naive(),
-            header: self.dashboard_header,
+            header: crate::dashboard_eval::Header {
+                search: self.active_search().to_string(),
+                ..self.dashboard_header.clone()
+            },
         })
     }
 
@@ -1604,6 +1611,7 @@ impl App {
             self.view,
             View::Board
                 | View::MyIssues
+                | View::Dashboard(_)
                 | View::ProjectList
                 | View::ProjectDetail(_)
                 | View::Roadmap
@@ -1699,6 +1707,21 @@ impl App {
     /// Per-section counts for list-mode navigation: collapsed sections count
     /// as empty so j/k and h/l skip their hidden rows.
     fn list_nav_counts(&self) -> Vec<usize> {
+        if let View::Dashboard(did) = &self.view {
+            let collapsed = self.collapsed_dashboard_groups.get(did);
+            return self
+                .dashboard_evaluation()
+                .groups
+                .iter()
+                .map(|g| {
+                    if collapsed.is_some_and(|c| c.contains(&g.group.id)) {
+                        0
+                    } else {
+                        g.issues.len()
+                    }
+                })
+                .collect();
+        }
         self.board_columns()
             .iter()
             .map(|c| {
@@ -2773,6 +2796,7 @@ impl App {
             group_form: GroupForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
+            collapsed_dashboard_groups: Default::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -3013,6 +3037,13 @@ impl App {
                     if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers) {
                         return self.update(msg);
                     }
+                }
+                if matches!(self.view, View::Dashboard(_))
+                    && !modal_open
+                    && modifiers.is_empty()
+                    && matches!(&key, iced::keyboard::Key::Character(c) if c.as_str() == "c")
+                {
+                    return self.update(Message::ToggleFocusedSection);
                 }
                 if let Some(msg) = keys::handle_key_press(key, modifiers, modal_open, palette_open, on_board) {
                     return self.update(msg);
@@ -4353,6 +4384,9 @@ impl App {
                 if matches!(self.view, View::Board | View::MyIssues) {
                     self.focused_issue = 0;
                     self.clamp_focus();
+                } else if matches!(self.view, View::Dashboard(_)) {
+                    self.focused_lane = 0;
+                    self.focused_issue = 0;
                 }
             }
             Message::FocusSearch => {
@@ -4376,6 +4410,25 @@ impl App {
             Message::ToggleSection(title) => {
                 if !self.collapsed_sections.remove(&title) {
                     self.collapsed_sections.insert(title);
+                }
+            }
+            Message::ToggleDashboardGroup(group_id) => {
+                if let View::Dashboard(did) = self.view.clone() {
+                    crate::views::dashboard::toggle_group(
+                        &mut self.collapsed_dashboard_groups,
+                        &did,
+                        &group_id,
+                    );
+                }
+            }
+            Message::ToggleFocusedSection if matches!(self.view, View::Dashboard(_)) => {
+                let gid = self
+                    .dashboard_evaluation()
+                    .groups
+                    .get(self.focused_lane)
+                    .map(|g| g.group.id.clone());
+                if let Some(gid) = gid {
+                    return self.update(Message::ToggleDashboardGroup(gid));
                 }
             }
             Message::ToggleFocusedSection => {
@@ -6066,9 +6119,10 @@ impl App {
                         issue_labels: &self.issue_labels,
                         display: self.board_display(),
                     },
+                    self.collapsed_dashboard_groups.get(id).unwrap_or(&HashSet::new()),
                     self.focused_lane,
                     self.focused_issue,
-                    self.dashboard_header,
+                    self.dashboard_header.clone(),
                     self.sync_read_only,
                 )
             }

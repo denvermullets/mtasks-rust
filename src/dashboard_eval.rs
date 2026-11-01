@@ -87,10 +87,13 @@ impl std::fmt::Display for Sort {
 }
 
 /// The header state. Held in memory per dashboard; not persisted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Header {
     pub filter: Filter,
     pub sort: Sort,
+    /// Raw view-search text. Narrows rows only (never counts); matched like
+    /// the other lists: title, or team identifier plus number.
+    pub search: String,
 }
 
 pub struct Input<'a> {
@@ -116,6 +119,11 @@ pub struct GroupResult<'a> {
 pub struct Evaluation<'a> {
     /// In the order of `Input::groups`.
     pub groups: Vec<GroupResult<'a>>,
+    /// Distinct issues across all groups with effective due = today. Computed
+    /// from the refined base sets, so it ignores the filter tab (and search).
+    pub due_today: usize,
+    /// Distinct issues across all groups with effective due < today.
+    pub overdue: usize,
 }
 
 pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
@@ -135,17 +143,22 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
         .map(|mem| mem.id.as_str())
         .collect();
 
+    // Ids across all groups' refined base sets, deduplicated for the counts.
+    let mut counted: HashSet<&str> = HashSet::new();
+    let needle = crate::views::header::needle(&input.header.search);
     let groups = input
         .groups
         .iter()
         .map(|cfg| {
             let pool = pool(cfg, m, &accessible, &my_members);
             let pool = apply_label_sources(cfg, m, &accessible, pool);
-            let mut issues: Vec<&Issue> = m
-                .issues
-                .iter()
-                .filter(|i| pool.contains(i.id.as_str()) && is_active(i, m.lanes))
+            // The refined base set: counts read this, rows narrow it further.
+            let base = base_set(input, &pool);
+            counted.extend(base.iter().map(|i| i.id.as_str()));
+            let mut issues: Vec<&Issue> = base
+                .into_iter()
                 .filter(|i| passes_filter(i, input.header.filter, input.today, m.projects))
+                .filter(|i| matches_search(i, m.teams, &needle))
                 .collect();
             sort(&mut issues, input.header.sort, m.projects);
             GroupResult {
@@ -156,7 +169,39 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
             }
         })
         .collect();
-    Evaluation { groups }
+    let (due_today, overdue) = due_counts(&counted, m, input.today);
+    Evaluation { groups, due_today, overdue }
+}
+
+/// A group's pool narrowed to the starting set rows and counts both read.
+/// Refinements (Mine, team, assignee, label, status) plug in here, so rows and
+/// counts narrow together. The status picker swaps `is_active` for a
+/// lane-name match in this function.
+fn base_set<'a>(input: &Input<'a>, pool: &HashSet<&'a str>) -> Vec<&'a Issue> {
+    let m = &input.mirror;
+    m.issues
+        .iter()
+        .filter(|i| pool.contains(i.id.as_str()) && is_active(i, m.lanes))
+        .collect()
+}
+
+/// (due today, overdue) over distinct issue ids, by effective due date.
+fn due_counts(ids: &HashSet<&str>, m: &Mirror<'_>, today: NaiveDate) -> (usize, usize) {
+    let (mut due_today, mut overdue) = (0, 0);
+    for i in m.issues.iter().filter(|i| ids.contains(i.id.as_str())) {
+        match effective_due(i, m.projects) {
+            Some(d) if d == today => due_today += 1,
+            Some(d) if d < today => overdue += 1,
+            _ => {}
+        }
+    }
+    (due_today, overdue)
+}
+
+/// The view search: title text, or a team identifier plus number.
+fn matches_search(i: &Issue, teams: &[Team], needle: &str) -> bool {
+    let team = teams.iter().find(|t| t.id == i.team_id);
+    crate::views::header::issue_matches(i, team, needle)
 }
 
 /// The local project behind a project source, if mirrored and on an accessible team.
@@ -772,6 +817,68 @@ mod tests {
         assert_eq!(effective_due(&i, &projects), NaiveDate::from_ymd_opt(2026, 1, 1));
     }
 
+    /// Issue ids per group with `search` typed into the header.
+    fn run_search(fx: &Fx, groups: &[GroupConfig], search: &str) -> Vec<Vec<String>> {
+        let header = Header { filter: Filter::Open, search: search.into(), ..Header::default() };
+        evaluate(&Input {
+            groups,
+            mirror: Mirror {
+                teams: &fx.teams,
+                projects: &fx.projects,
+                labels: &fx.labels,
+                lanes: &fx.lanes,
+                members: &fx.members,
+                issues: &fx.issues,
+                issue_labels: &fx.issue_labels,
+            },
+            current_user_remote_id: Some(99),
+            today: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            header,
+        })
+        .groups
+        .iter()
+        .map(|g| g.issues.iter().map(|i| i.id.clone()).collect())
+        .collect()
+    }
+
+    fn search_fixture() -> (Fx, Vec<GroupConfig>) {
+        let mut fx = Fx::new();
+        let mut a12 = issue("a12", "a", "la");
+        a12.team_number = Some(12);
+        a12.title = "Fix login".into();
+        let mut a3 = issue("a3", "a", "la");
+        a3.team_number = Some(3);
+        a3.title = "Login page".into();
+        let mut b12 = issue("b12", "b", "lb");
+        b12.team_number = Some(12);
+        b12.title = "Other".into();
+        fx.issues = vec![a12, a3, b12];
+        let groups = vec![cfg("g", vec![team_src(1, true), team_src(2, true)])];
+        (fx, groups)
+    }
+
+    #[test]
+    fn search_matches_title_across_teams() {
+        let (fx, groups) = search_fixture();
+        assert_eq!(run_search(&fx, &groups, "LOGIN"), vec![ids(&["a12", "a3"])]);
+    }
+
+    #[test]
+    fn search_matches_team_identifier_and_number() {
+        let (fx, groups) = search_fixture();
+        assert_eq!(run_search(&fx, &groups, "a-12"), vec![ids(&["a12"])]);
+        assert_eq!(run_search(&fx, &groups, " B-12 "), vec![ids(&["b12"])]);
+        assert_eq!(run_search(&fx, &groups, "-12"), vec![ids(&["a12", "b12"])]);
+    }
+
+    #[test]
+    fn empty_search_restores_all_rows_and_applies_to_every_group() {
+        let (fx, mut groups) = search_fixture();
+        groups.push(cfg("g2", vec![team_src(1, true)]));
+        assert_eq!(run_search(&fx, &groups, "a-3"), vec![ids(&["a3"]), ids(&["a3"])]);
+        assert_eq!(run_search(&fx, &groups, "  "), vec![ids(&["a12", "a3", "b12"]), ids(&["a12", "a3"])]);
+    }
+
     fn filter_ids(fx: &Fx, filter: Filter) -> Vec<String> {
         let groups = vec![cfg("g", vec![team_src(1, true)])];
         let header = Header { filter, ..Header::default() };
@@ -1039,5 +1146,65 @@ mod tests {
         assert!(ev.groups.iter().all(|g| !g.inaccessible && g.issues.is_empty()));
         assert!(ev.groups[0].no_sources);
         assert!(!ev.groups[1].no_sources);
+    }
+
+    fn counts(fx: &Fx, groups: Vec<GroupConfig>, header: Header) -> (usize, usize) {
+        let e = fx.eval_with(&groups, Some(99), header);
+        (e.due_today, e.overdue)
+    }
+
+    fn count_fx() -> Fx {
+        let mut fx = Fx::new();
+        let mut a = dated("today", Some("2026-11-01"), 3);
+        let mut b = dated("late", Some("2026-10-30"), 3);
+        let mut c = dated("soon", Some("2026-11-03"), 3);
+        let d = dated("none", None, 3);
+        for i in [&mut a, &mut b, &mut c] {
+            i.team_id = "a".into();
+            i.lane_id = "la".into();
+        }
+        let mut d = d;
+        d.team_id = "a".into();
+        d.lane_id = "la".into();
+        a.title = "findme".into();
+        fx.issues = vec![a, b, c, d];
+        fx
+    }
+
+    #[test]
+    fn counts_split_today_and_overdue_by_effective_due() {
+        let fx = count_fx();
+        let g = vec![cfg("g", vec![team_src(1, true)])];
+        assert_eq!(counts(&fx, g, Header::default()), (1, 1));
+    }
+
+    #[test]
+    fn counts_dedupe_issue_in_several_groups() {
+        let fx = count_fx();
+        let g = vec![cfg("g1", vec![team_src(1, true)]), cfg("g2", vec![team_src(1, true)])];
+        assert_eq!(counts(&fx, g, Header::default()), (1, 1));
+    }
+
+    #[test]
+    fn counts_ignore_the_filter_tab() {
+        let fx = count_fx();
+        for filter in Filter::ALL {
+            let g = vec![cfg("g", vec![team_src(1, true)])];
+            let h = Header { filter, ..Header::default() };
+            assert_eq!(counts(&fx, g, h), (1, 1), "{filter:?}");
+        }
+        // Hot shows no rows (all priority 3) yet the counts stay.
+        let g = vec![cfg("g", vec![team_src(1, true)])];
+        let e = fx.eval_with(&g, Some(99), Header { filter: Filter::Hot, ..Header::default() });
+        assert!(e.groups[0].issues.is_empty());
+        assert_eq!(e.due_today, 1);
+    }
+
+    #[test]
+    fn counts_skip_closed_issues() {
+        let mut fx = count_fx();
+        fx.issues[0].lane_id = "done".into();
+        let g = vec![cfg("g", vec![team_src(1, true)])];
+        assert_eq!(counts(&fx, g, Header::default()), (0, 1));
     }
 }
