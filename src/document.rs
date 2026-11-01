@@ -88,6 +88,9 @@ pub enum Inline {
     /// references in bold text stay tokens. Wrapper inlines for other styles
     /// (emphasis, strikethrough) nest the same way.
     Strong(Vec<Inline>),
+    /// `` `inline code` ``: kept verbatim, never tokenized. Inside link or
+    /// image text it is flattened into the surrounding string.
+    Code(String),
 }
 
 /// Whether a link target may be opened: only `http`, `https` and `mailto`
@@ -276,7 +279,10 @@ impl Builder {
                 }
             }
             Event::Text(s) => self.push_text(&s),
-            Event::Code(s) => self.push_literal(&s),
+            Event::Code(s) if self.html_depth == 0 => {
+                self.flush_pending();
+                self.current.push(Inline::Code(s.to_string()));
+            }
             Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => {
                 self.flush_pending();
@@ -414,6 +420,9 @@ mod tests {
     fn text(s: &str) -> Inline {
         Inline::Text(s.to_string())
     }
+    fn code(s: &str) -> Inline {
+        Inline::Code(s.to_string())
+    }
     fn para(runs: Vec<Inline>) -> Block {
         Block::Paragraph(runs)
     }
@@ -501,7 +510,7 @@ mod tests {
             (
                 "code inside strong stays one literal run",
                 "**run `x` now**",
-                vec![para(vec![strong(vec![text("run x now")])])],
+                vec![para(vec![strong(vec![text("run "), code("x"), text(" now")])])],
             ),
             (
                 "link inside strong",
@@ -519,7 +528,7 @@ mod tests {
             (
                 "strong in code is literal",
                 "`**x**`",
-                vec![para(vec![text("**x**")])],
+                vec![para(vec![code("**x**")])],
             ),
             (
                 "strong in a second paragraph",
@@ -530,6 +539,28 @@ mod tests {
         for (name, body, want) in cases {
             assert_eq!(parse_with(body, "", &["Ann"]).blocks, want, "{name}");
         }
+    }
+
+    #[test]
+    fn parses_inline_code() {
+        let cases: Vec<(&str, &str, Vec<Inline>)> = vec![
+            ("simple", "run `ls -la` now", vec![text("run "), code("ls -la"), text(" now")]),
+            ("only code", "`x`", vec![code("x")]),
+            ("two spans", "`a` and `b`", vec![code("a"), text(" and "), code("b")]),
+            ("double backticks hold one", "``a ` b``", vec![code("a ` b")]),
+            ("markers stay literal", "`**x** _y_`", vec![code("**x** _y_")]),
+            ("tokens stay literal", "`ABC-12 @Ann`", vec![code("ABC-12 @Ann")]),
+            ("tokens beside code still tokenize", "@Ann `x` ABC-1", vec![Inline::Mention("@Ann".into()), text(" "), code("x"), text(" "), issue_ref("ABC-1", "ABC", 1)]),
+            ("unclosed stays text", "a `b", vec![text("a `b")]),
+            ("in a link, flattened", "[`x` y](http://a.b)", vec![Inline::Link { text: "x y".into(), url: "http://a.b".into() }]),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["Ann"]).blocks, vec![para(want)], "{name}");
+        }
+    }
+
+    fn issue_ref(t: &str, p: &str, n: i64) -> Inline {
+        Inline::IssueRef { text: t.into(), prefix: p.into(), number: n }
     }
 
     fn list(items: Vec<Vec<Block>>) -> Block {
@@ -589,7 +620,7 @@ mod tests {
             (
                 "inline code in an item stays literal",
                 "- `PROJ-1`",
-                vec![list(vec![vec![para(vec![text("PROJ-1")])]])],
+                vec![list(vec![vec![para(vec![code("PROJ-1")])]])],
             ),
             ("empty item", "- \n- b", vec![list(vec![vec![], vec![para(vec![text("b")])]])]),
             (
@@ -808,7 +839,7 @@ mod tests {
             (
                 "inline code is not an image",
                 format!("see `![a]({BLOB})` here"),
-                vec![para(vec![text(&format!("see ![a]({BLOB}) here"))])],
+                vec![para(vec![text(&format!("see ")), code(&format!("![a]({BLOB})")), text(" here")])],
             ),
             (
                 "indented code is not an image",
@@ -861,11 +892,11 @@ mod tests {
                 "**PROJ-1** and *@ann*",
                 vec![Inline::Strong(vec![issue("PROJ-1", "PROJ", 1)]), text(" and "), mention("@ann")],
             ),
-            ("inline code not tokenized", "`PROJ-1 @ann` x", vec![text("PROJ-1 @ann x")]),
+            ("inline code not tokenized", "`PROJ-1 @ann` x", vec![code("PROJ-1 @ann"), text(" x")]),
             (
                 "code between tokens",
                 "PROJ-1 `PROJ-2` PROJ-3",
-                vec![issue("PROJ-1", "PROJ", 1), text(" PROJ-2 "), issue("PROJ-3", "PROJ", 3)],
+                vec![issue("PROJ-1", "PROJ", 1), text(" "), code("PROJ-2"), text(" "), issue("PROJ-3", "PROJ", 3)],
             ),
             (
                 "link text not tokenized",
@@ -980,7 +1011,7 @@ mod tests {
                 "PROJ-2 [a](http://x.y) PROJ-3",
                 vec![para(vec![issue("PROJ-2", "PROJ", 2), text(" "), link("a", "http://x.y"), text(" "), issue("PROJ-3", "PROJ", 3)])],
             ),
-            ("link in code stays text", "`[a](http://x.y)`", vec![para(vec![text("[a](http://x.y)")])]),
+            ("link in code stays text", "`[a](http://x.y)`", vec![para(vec![code("[a](http://x.y)")])]),
         ];
         for (name, body, want) in cases {
             assert_eq!(parse(body).blocks, want, "{name}");
