@@ -874,6 +874,51 @@ impl iced::advanced::widget::Operation<()> for FocusFirstIn {
     }
 }
 
+/// Reports whether a focusable widget outside the container `target` has
+/// focus. Run on Escape: the description editor is left unless the pointer's
+/// keyboard focus is in another editor (the comment composer), where Escape
+/// isn't about the description. iced 0.13 can't query focus directly, but an
+/// operation can read it widget by widget.
+pub(crate) struct FocusedOutside {
+    target: iced::advanced::widget::Id,
+    inside: bool,
+    outside: bool,
+}
+
+impl FocusedOutside {
+    pub(crate) fn new(target: iced::widget::container::Id) -> Self {
+        Self { target: target.into(), inside: false, outside: false }
+    }
+}
+
+impl iced::advanced::widget::Operation<bool> for FocusedOutside {
+    fn container(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<bool>),
+    ) {
+        let was_inside = self.inside;
+        self.inside |= id == Some(&self.target);
+        operate_on_children(self);
+        self.inside = was_inside;
+    }
+
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        _id: Option<&iced::advanced::widget::Id>,
+    ) {
+        if !self.inside && state.is_focused() {
+            self.outside = true;
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<bool> {
+        iced::advanced::widget::operation::Outcome::Some(self.outside)
+    }
+}
+
 /// The description: rendered markdown (click to edit), an empty prompt, or the editor.
 fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     let text_now = detail.description_text();
@@ -1360,6 +1405,42 @@ mod description_tests {
         ];
         for (text, editing, want) in cases {
             assert_eq!(description_display(text, editing), want, "{text:?} {editing}");
+        }
+    }
+
+    struct Fake(bool);
+
+    impl iced::advanced::widget::operation::Focusable for Fake {
+        fn is_focused(&self) -> bool {
+            self.0
+        }
+        fn focus(&mut self) {
+            self.0 = true;
+        }
+        fn unfocus(&mut self) {
+            self.0 = false;
+        }
+    }
+
+    #[test]
+    fn escape_probe_sees_focus_only_outside_the_description_editor() {
+        use iced::advanced::widget::Operation;
+        let editor = description_editor_id();
+        let editor_id: iced::advanced::widget::Id = editor.clone().into();
+        // (focused inside the editor, focused outside it) -> reported "elsewhere"
+        let cases = [(false, false, false), (true, false, false), (false, true, true), (true, true, true)];
+        for (inside, outside, want) in cases {
+            let mut op = FocusedOutside::new(editor.clone());
+            op.container(None, iced::Rectangle::default(), &mut |op| {
+                op.focusable(&mut Fake(outside), None);
+                op.container(Some(&editor_id), iced::Rectangle::default(), &mut |op| {
+                    op.focusable(&mut Fake(inside), None);
+                });
+                // Back outside the editor after leaving it.
+                op.focusable(&mut Fake(false), None);
+            });
+            let got = matches!(op.finish(), iced::advanced::widget::operation::Outcome::Some(true));
+            assert_eq!(got, want, "inside {inside} outside {outside}");
         }
     }
 }

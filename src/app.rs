@@ -3164,6 +3164,25 @@ impl App {
         self.push_toast(msg, ToastKind::Error, false);
     }
 
+    /// Apply a detail-view key message. Leaving a description editor is
+    /// skipped when another editor (the comment composer) has focus, so
+    /// Escape there doesn't also close the description. Focus is read with
+    /// an operation, then the stop is sent.
+    fn update_unless_focus_elsewhere(&mut self, msg: Message) -> Task<Message> {
+        let (editor, stop): (_, fn() -> Message) = match msg {
+            Message::StopEditingIssueDescription => {
+                (issue_detail::description_editor_id(), || Message::StopEditingIssueDescription)
+            }
+            Message::StopEditingProjectDescription => {
+                (project_detail::description_editor_id(), || Message::StopEditingProjectDescription)
+            }
+            other => return self.update(other),
+        };
+        iced::advanced::widget::operate(issue_detail::FocusedOutside::new(editor)).then(move |elsewhere| {
+            if elsewhere { Task::none() } else { Task::done(stop()) }
+        })
+    }
+
     /// Whether either detail view has its description editor open.
     fn editing_description(&self) -> bool {
         self.issue_detail.as_ref().is_some_and(|d| d.editing_description)
@@ -3247,14 +3266,14 @@ impl App {
                     let editing_description =
                         self.issue_detail.as_ref().is_some_and(|d| d.editing_description);
                     if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers, editing_description) {
-                        return self.update(msg);
+                        return self.update_unless_focus_elsewhere(msg);
                     }
                 }
                 if matches!(self.view, View::ProjectDetail(_)) && !modal_open {
                     let editing_description =
                         self.project_detail.as_ref().is_some_and(|d| d.editing_description);
                     if let Some(msg) = keys::handle_project_detail_key(&key, modifiers, editing_description) {
-                        return self.update(msg);
+                        return self.update_unless_focus_elsewhere(msg);
                     }
                 }
                 if matches!(self.view, View::Dashboard(_)) && !modal_open {
