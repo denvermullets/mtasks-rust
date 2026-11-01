@@ -24,11 +24,13 @@ pub fn section_with<'a>(
     images: &'a ImageStore,
     deletable: bool,
 ) -> Option<Element<'a, Message>> {
-    // Inline images are part of the body, not file cards.
+    // Inline images are part of the body, not file cards, unless one failed:
+    // its card carries Retry/Remove (JRST-214).
     let files = || {
-        attachments
-            .iter()
-            .filter(|a| a.upload_kind != crate::db::attachments::UploadKind::InlineImage)
+        attachments.iter().filter(|a| {
+            a.upload_kind != crate::db::attachments::UploadKind::InlineImage
+                || a.upload_state == UploadState::Failed
+        })
     };
     if files().next().is_none() {
         return None;
