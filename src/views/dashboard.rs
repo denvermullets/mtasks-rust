@@ -83,6 +83,7 @@ fn controls<'a>(
             .align_y(Alignment::Center)
             .push(text(&dashboard.name).size(14).color(t::text_primary()))
             .push(filter_tabs(header.filter))
+            .push(mine_toggle(header.mine))
             .push(due_counts(evaluation))
             .push(sort_picker(header.sort))
             .push(add_group_button(read_only))
@@ -166,6 +167,21 @@ fn filter_tabs<'a>(active: Filter) -> Element<'a, Message> {
         );
     }
     r.into()
+}
+
+/// The Mine toggle; highlighted while on.
+fn mine_toggle<'a>(on: bool) -> Element<'a, Message> {
+    let color = if on { t::text_primary() } else { t::text_muted() };
+    button(text("Mine").size(13).color(color))
+        .padding([2, 8])
+        .style(move |_theme: &Theme, _status| button::Style {
+            background: on.then(|| iced::Background::Color(t::bg_card_focused())),
+            text_color: color,
+            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .on_press(Message::ToggleDashboardMine)
+        .into()
 }
 
 /// Why a group shows no rows: no sources, unreachable sources, or no matches.
