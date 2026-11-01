@@ -134,6 +134,9 @@ pub fn handle_issue_detail_key(
         Key::Character(c) if modifiers.is_empty() && c.as_str() == "a" => {
             Some(Message::PickAttachmentFiles)
         }
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "e" => {
+            Some(Message::EditIssueDescription)
+        }
         _ => None,
     }
 }
@@ -196,6 +199,20 @@ mod tests {
         // The global handler never binds it, so it's inert off the detail view.
         assert!(press("a", false, true).is_none());
         assert!(press("a", false, false).is_none());
+    }
+
+    #[test]
+    fn e_edits_the_description_in_issue_detail_only() {
+        let e = Key::Character("e".into());
+        assert!(matches!(
+            handle_issue_detail_key(&e, Modifiers::empty(), false),
+            Some(Message::EditIssueDescription)
+        ));
+        assert!(handle_issue_detail_key(&e, Modifiers::COMMAND, false).is_none());
+        assert!(handle_issue_detail_key(&e, Modifiers::SHIFT, false).is_none());
+        // The board keeps its own `e`; elsewhere the global handler is inert.
+        assert!(matches!(press("e", false, true), Some(Message::EditFocusedIssue)));
+        assert!(press("e", false, false).is_none());
     }
 
     #[test]
