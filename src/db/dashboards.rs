@@ -292,15 +292,27 @@ fn color_of(g: &GroupIn) -> String {
     g.color.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| "#6366f1".to_string())
 }
 
+/// Store one source of a group; a source listed twice is kept once.
+fn insert_source(
+    conn: &Connection,
+    group_id: &str,
+    source_type: SourceType,
+    remote_id: i64,
+    include_all: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![group_id, source_type.as_str(), remote_id, include_all as i64],
+    )?;
+    Ok(())
+}
+
 fn replace_sources(conn: &Connection, group_id: &str, g: &GroupIn) -> Result<()> {
     conn.execute("DELETE FROM dashboard_group_sources WHERE group_id = ?1", params![group_id])?;
     let insert = |t: SourceType, ids: &[i64], all: &[i64]| -> Result<()> {
         for id in ids {
-            conn.execute(
-                "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![group_id, t.as_str(), id, all.contains(id) as i64],
-            )?;
+            insert_source(conn, group_id, t, *id, all.contains(id))?;
         }
         Ok(())
     };
@@ -775,11 +787,7 @@ pub fn create_group_local(
     )?;
     for s in &draft.sources {
         let all = s.include_all && s.source_type != SourceType::Label;
-        tx.execute(
-            "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![id, s.source_type.as_str(), s.remote_id, all as i64],
-        )?;
+        insert_source(&tx, &id, s.source_type, s.remote_id, all)?;
     }
     sync_queue::enqueue(&tx, GROUP_ENTITY_TYPE, &id, "create", None)?;
     tx.commit()?;
@@ -827,11 +835,7 @@ pub fn update_group_local(
     tx.execute("DELETE FROM dashboard_group_sources WHERE group_id = ?1", params![group_id])?;
     for s in &draft.sources {
         let all = s.include_all && s.source_type != SourceType::Label;
-        tx.execute(
-            "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![group_id, s.source_type.as_str(), s.remote_id, all as i64],
-        )?;
+        insert_source(&tx, group_id, s.source_type, s.remote_id, all)?;
     }
     sync_queue::enqueue(&tx, GROUP_ENTITY_TYPE, group_id, "update", None)?;
     tx.commit()?;
