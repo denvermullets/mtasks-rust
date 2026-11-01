@@ -265,7 +265,25 @@ fn parse_image<'a>(s: &'a str, host: &str) -> Option<(ImageBlock<'a>, usize)> {
         return None;
     }
     let url_part = s[alt_end + 1..].strip_prefix('(')?;
-    let close = url_part.find(')')?;
+    // The URL ends at the `)` that balances the opening one, so filenames
+    // containing parentheses (which the web leaves unescaped) still parse.
+    let mut depth = 1usize;
+    let mut close = None;
+    for (i, c) in url_part.char_indices() {
+        match c {
+            c if c.is_whitespace() => return None,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
     let src = &url_part[..close];
     if src.contains(char::is_whitespace) {
         return None;
@@ -1109,6 +1127,34 @@ mod tests {
             r.body,
             "![x](/rails/active_storage/blobs/redirect/s/my%20pic%20%C3%A9%2B%23%3F.png)"
         );
+    }
+
+    #[test]
+    fn filename_with_parens_round_trips_through_rewrite() {
+        let text = format!("![x]({PENDING_SCHEME}{U1}) tail");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "s", "shot (1).png")]));
+        let segs = body_segments(&r.body, "");
+        assert_eq!(segs.len(), 2);
+        match segs[0] {
+            BodySegment::Image(b) => {
+                assert_eq!(b.kind, ImageKind::Blob);
+                assert!(b.src.ends_with("/shot%20(1).png"));
+            }
+            _ => panic!("expected image"),
+        }
+        assert_eq!(segs[1], BodySegment::Text(" tail"));
+    }
+
+    #[test]
+    fn web_body_with_unescaped_parens_parses() {
+        let body = "a ![p](/rails/active_storage/blobs/redirect/sid/photo(2).png) b";
+        let segs = body_segments(body, "");
+        assert_eq!(segs.len(), 3);
+        assert!(matches!(segs[1], BodySegment::Image(b) if b.src.ends_with("photo(2).png")));
+        assert_eq!(segs[2], BodySegment::Text(" b"));
+        // Unbalanced stays text.
+        let bad = "![p](/rails/active_storage/blobs/redirect/sid/a(b.png";
+        assert_eq!(body_segments(bad, ""), vec![BodySegment::Text(bad)]);
     }
 
     #[test]
