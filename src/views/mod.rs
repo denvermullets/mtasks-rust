@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod board;
 pub mod command_palette;
 pub mod csv_import;

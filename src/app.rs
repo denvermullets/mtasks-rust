@@ -632,6 +632,9 @@ pub struct App {
     detail_comments: Vec<Comment>,
     /// Local change history for the open issue (see `db::activity`).
     detail_activity: Vec<ActivityItem>,
+    /// Files attached to the open issue (synced, then pending/failed). Repopulated
+    /// each reload only while `view` is `IssueDetail`.
+    detail_attachments: Vec<crate::db::attachments::Attachment>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
     /// Title of the recurring issue that spawned the open issue detail, if any.
@@ -897,7 +900,14 @@ impl App {
             self.detail_activity =
                 activity_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
+            self.detail_attachments = crate::db::attachments::list_for_owner(
+                conn,
+                crate::db::attachments::OwnerKind::Issue,
+                issue_id,
+            )
+            .unwrap_or_default();
         } else if let View::ProjectDetail(ref project_id) = self.view {
+            self.detail_attachments.clear();
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments =
@@ -905,6 +915,7 @@ impl App {
             self.detail_activity.clear();
             return;
         } else {
+            self.detail_attachments.clear();
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments.clear();
@@ -2076,6 +2087,7 @@ impl App {
             detail_from_inbox: false,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
+            detail_attachments: Vec::new(),
             detail_references: Vec::new(),
             detail_origin: None,
             issue_picker: None,
@@ -4761,6 +4773,7 @@ impl App {
                             &self.detail_comments,
                             &self.detail_activity,
                             &self.detail_references,
+                            &self.detail_attachments,
                             &self.issues,
                             parent,
                             sub_issues,
