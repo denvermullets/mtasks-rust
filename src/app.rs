@@ -221,7 +221,16 @@ pub enum Message {
     /// Click on a link in rendered body text, carrying its typed target.
     OpenBodyLink(crate::mentions::LinkTarget),
     /// The hovered body span changed (`None` = pointer left). JRST-299 consumes it.
-    BodyHover(Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// A body paragraph's hovered span changed. The id is the reporting
+    /// widget's owner id (see `hover_rich::HoverRich::on_hover`).
+    BodyHover(u64, Option<crate::views::hover_rich::Hover<crate::mentions::LinkTarget>>),
+    /// A hover-card timer elapsed (see `hover_card::Effect`).
+    HoverTimer(u64),
+    /// The pointer entered or left the hover card itself.
+    HoverCardEntered,
+    HoverCardLeft,
+    /// The mouse wheel or trackpad scrolled somewhere.
+    HoverScrolled,
     /// Leave an issue detail that was opened from My Issues and return there.
     BackToMyIssues,
     BackToDashboard,
@@ -888,6 +897,8 @@ pub struct App {
     sync_next_delay: Option<std::time::Duration>,
     /// Active toasts, newest last. Rendered as a bottom-right stack over the UI.
     toasts: Vec<Toast>,
+    /// Hover card over body references (JRST-299).
+    body_hover: crate::body_hover::BodyHover,
     /// Monotonic id source for toasts (so dismiss/retry target the right one).
     next_toast_id: u64,
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
@@ -2931,6 +2942,7 @@ impl App {
             scheduler: Scheduler::with_notifications(std::time::Instant::now()),
             sync_next_delay: Some(crate::sync::scheduler::FOCUSED_INTERVAL),
             toasts: Vec::new(),
+            body_hover: crate::body_hover::BodyHover::new(),
             next_toast_id: 0,
             sync_paused_auth: false,
         };
@@ -2995,9 +3007,17 @@ impl App {
             _ => None,
         });
 
+        // Scrolling moves content out from under a card, so it closes.
+        let scrolls = event::listen_with(|event, _status, _id| match event {
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
+                Some(Message::HoverScrolled)
+            }
+            _ => None,
+        });
+
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
 
-        let mut subs = vec![keys, activity, banner_clicks];
+        let mut subs = vec![keys, activity, scrolls, banner_clicks];
         // The scheduler picks the delay; the timer restarts whenever it changes.
         if let Some(delay) = self.sync_next_delay {
             subs.push(
@@ -3012,6 +3032,16 @@ impl App {
             );
         }
         Subscription::batch(subs)
+    }
+
+    /// Turn a hover-card effect into the delayed message the machine asked for.
+    fn hover_timer(effect: Option<crate::hover_card::Effect>) -> Task<Message> {
+        match effect {
+            Some(e) => Task::perform(tokio::time::sleep(e.delay), move |_| {
+                Message::HoverTimer(e.generation)
+            }),
+            None => Task::none(),
+        }
     }
 
     /// Feed the sync scheduler an event, re-arm its timer, and start the cycle
@@ -3105,7 +3135,14 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         // Discard stale signals so only writes made by this message count.
         sync_queue::take_local_write();
-        let task = self.update_inner(message);
+        let view_before = self.view.clone();
+        let mut task = self.update_inner(message);
+        // The one place that closes hover cards on a view change or modal
+        // open, whatever message caused it (keyboard included).
+        if self.view != view_before || self.modal != Modal::None {
+            let effect = self.body_hover.event(crate::hover_card::Event::ViewChanged);
+            task = Task::batch([task, Self::hover_timer(effect)]);
+        }
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
@@ -3130,6 +3167,13 @@ impl App {
         }
         match message {
             Message::KeyPressed(key, modifiers) => {
+                // Esc with a hover card open only closes the card.
+                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                    && self.body_hover.is_open()
+                {
+                    let effect = self.body_hover.event(crate::hover_card::Event::Escape);
+                    return Self::hover_timer(effect);
+                }
                 // Esc with an autocomplete list open only closes the list.
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
                     if let Some(slot) = self.open_suggest_mut() {
@@ -4489,22 +4533,54 @@ impl App {
             Message::BackToDashboard => {
                 self.back_to_dashboard();
             }
-            Message::BodyHover(_) => {}
-            Message::OpenBodyLink(target) => match target {
-                crate::mentions::LinkTarget::Issue(id) => {
-                    return self.update(Message::OpenIssueDetail(id));
-                }
-                crate::mentions::LinkTarget::External(url) => {
-                    // Defence in depth: the document module already filters.
-                    if crate::document::is_openable_link(&url) {
-                        if let Err(e) = std::process::Command::new("open").arg(url.trim()).spawn() {
-                            self.push_toast(format!("Couldn't open link: {e}"), ToastKind::Error, false);
+            Message::HoverScrolled => {
+                let effect = self.body_hover.event(crate::hover_card::Event::Scrolled);
+                return Self::hover_timer(effect);
+            }
+            // No cards behind a modal.
+            Message::BodyHover(..) if self.modal != Modal::None => {}
+            Message::BodyHover(owner, hover) => {
+                let span = hover.map(|h| {
+                    let anchor = h.link.as_ref().and_then(crate::body_hover::Anchor::from_link);
+                    // The widget saw no pointer move yet (fresh after a rebuild):
+                    // fall back to the content-space rectangle.
+                    let rect = h.window_bounds.unwrap_or(h.bounds);
+                    (anchor, rect)
+                });
+                let effect = self.body_hover.body_hover(owner, span);
+                return Self::hover_timer(effect);
+            }
+            Message::HoverTimer(generation) => {
+                let effect = self.body_hover.event(crate::hover_card::Event::TimerFired(generation));
+                return Self::hover_timer(effect);
+            }
+            Message::HoverCardEntered => {
+                let effect = self.body_hover.event(crate::hover_card::Event::EnteredCard);
+                return Self::hover_timer(effect);
+            }
+            Message::HoverCardLeft => {
+                let effect = self.body_hover.event(crate::hover_card::Event::LeftCard);
+                return Self::hover_timer(effect);
+            }
+            Message::OpenBodyLink(target) => {
+                // A click ends the hover: close the card, cancel a pending one.
+                self.body_hover.event(crate::hover_card::Event::Clicked);
+                match target {
+                    crate::mentions::LinkTarget::Issue(id) => {
+                        return self.update(Message::OpenIssueDetail(id));
+                    }
+                    crate::mentions::LinkTarget::External(url) => {
+                        // Defence in depth: the document module already filters.
+                        if crate::document::is_openable_link(&url) {
+                            if let Err(e) = std::process::Command::new("open").arg(url.trim()).spawn() {
+                                self.push_toast(format!("Couldn't open link: {e}"), ToastKind::Error, false);
+                            }
                         }
                     }
+                    // A later ticket fills this.
+                    crate::mentions::LinkTarget::Mention(_) => {}
                 }
-                // A later ticket fills this.
-                crate::mentions::LinkTarget::Mention(_) => {}
-            },
+            }
             Message::OpenIssueDetail(issue_id) => {
                 if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                     return self.open_issue_detail(&issue);
@@ -6247,6 +6323,16 @@ impl App {
         Task::none()
     }
 
+    /// The hover card for the current anchor, positioned under its span.
+    fn hover_card_overlay(&self) -> Option<Element<'_, Message>> {
+        if self.modal != Modal::None {
+            return None;
+        }
+        let (anchor, rect) = self.body_hover.current()?;
+        let content = crate::body_hover::content_for(anchor, &self.issues, &self.teams)?;
+        Some(crate::views::hover_card_view::overlay(&content, rect))
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let team_sidebar = team_list::view(team_list::SidebarState {
             teams: &self.teams,
@@ -6815,6 +6901,11 @@ impl App {
                 iced::widget::stack![base, command_palette::view(palette)].into()
             }
             Modal::None => base,
+        };
+
+        let content = match self.hover_card_overlay() {
+            Some(card) => iced::widget::stack![content, card].into(),
+            None => content,
         };
 
         // Toasts sit above everything, including any open modal.

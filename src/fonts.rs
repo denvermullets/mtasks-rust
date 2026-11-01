@@ -145,6 +145,31 @@ pub fn italic(font: Font) -> Font {
     }
 }
 
+/// Family names of the monospace entries in the catalog.
+const MONO_FAMILIES: [&str; 6] = [
+    "IBM Plex Mono",
+    "JetBrains Mono",
+    "Fira Code",
+    "SUSE Mono",
+    "Roboto Mono",
+    "Atkinson Hyperlegible Mono",
+];
+
+/// The bundled monospace face used when the UI font is not monospace.
+const FALLBACK_MONO: &str = "JetBrains Mono";
+
+/// Font for code: the UI font when that is monospace, else JetBrains Mono.
+pub fn code() -> Font {
+    code_for(active())
+}
+
+fn code_for(ui: Font) -> Font {
+    match ui.family {
+        iced::font::Family::Name(n) if MONO_FAMILIES.contains(&n) => ui,
+        _ => Font::with_name(FALLBACK_MONO),
+    }
+}
+
 /// A catalog entry for pick lists: displays as the font name, carries the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontChoice {
@@ -259,6 +284,18 @@ mod tests {
             let f = bold(font_for_key(key));
             assert_eq!(f.family, font_for_key(key).family, "{key} keeps its family");
             assert_eq!(f.weight == iced::font::Weight::Bold, bolded, "{key}");
+        }
+    }
+
+    #[test]
+    fn code_font_is_monospace_for_every_font_choice() {
+        for f in FONTS.iter() {
+            let code = code_for(font_for_key(f.key));
+            let iced::font::Family::Name(n) = code.family else { panic!("{} gave a non-named family", f.key) };
+            assert!(MONO_FAMILIES.contains(&n), "{}: {n}", f.key);
+            // A monospace choice keeps itself; everything else gets JetBrains Mono.
+            let mono = MONO_FAMILIES.iter().any(|m| Some(*m) == f.family);
+            assert_eq!(n, if mono { f.family.unwrap() } else { FALLBACK_MONO }, "{}", f.key);
         }
     }
 

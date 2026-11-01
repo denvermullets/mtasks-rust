@@ -39,6 +39,17 @@ pub struct Hover<Link> {
     pub cursor: Point,
     /// The visible clip rectangle, in that same space.
     pub viewport: Rectangle,
+    /// `bounds` in window pixels, from the last `CursorMoved` this widget saw
+    /// (scrollables pass events through untranslated; only `cursor` is
+    /// shifted). `None` until the widget has seen the pointer move.
+    pub window_bounds: Option<Rectangle>,
+}
+
+/// The span's rectangle in window pixels. `bounds` and `cursor` share one
+/// coordinate space (content space inside a scrollable), so their difference
+/// is scroll-independent.
+pub fn window_rect(bounds: Rectangle, cursor: Point, window_cursor: Point) -> Rectangle {
+    Rectangle::new(window_cursor + (bounds.position() - cursor), bounds.size())
 }
 
 /// Whether a left press on a span is captured: only for a span known to be a
@@ -64,8 +75,31 @@ impl HoverTracker {
     }
 }
 
+#[cfg(test)]
+mod window_rect_tests {
+    use super::*;
+
+    #[test]
+    fn window_rect_is_independent_of_scroll() {
+        // The same span at three scroll offsets: bounds and cursor both shift
+        // by the offset in content space while the window pointer is fixed.
+        let size = Size::new(40.0, 16.0);
+        let window_cursor = Point::new(300.0, 200.0);
+        for scroll in [0.0, 150.0, 900.0] {
+            let bounds = Rectangle::new(Point::new(100.0, 500.0 + scroll), size);
+            let cursor = Point::new(110.0, 508.0 + scroll);
+            let r = window_rect(bounds, cursor, window_cursor);
+            assert_eq!(r, Rectangle::new(Point::new(290.0, 192.0), size));
+        }
+    }
+
+}
+
 type OnLink<'a, Link, Message> = Box<dyn Fn(Link) -> Message + 'a>;
-type OnHover<'a, Link, Message> = Box<dyn Fn(Option<Hover<Link>>) -> Message + 'a>;
+type OnHover<'a, Link, Message> = Box<dyn Fn(u64, Option<Hover<Link>>) -> Message + 'a>;
+
+/// Source of widget owner ids; see [`HoverRich::on_hover`].
+static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub struct HoverRich<'a, Link, Message>
 where
@@ -97,7 +131,12 @@ where
     }
 
     /// Called when the hovered span changes; `None` when the pointer leaves.
-    pub fn on_hover(mut self, f: impl Fn(Option<Hover<Link>>) -> Message + 'a) -> Self {
+    /// The first argument identifies this widget instance: it is stable while
+    /// the widget stays in the tree and unique among live widgets. Several
+    /// widgets can sit side by side, so a `None` from one widget may arrive
+    /// after a `Some` from the next; the owner lets the receiver tell whose
+    /// `None` it is.
+    pub fn on_hover(mut self, f: impl Fn(u64, Option<Hover<Link>>) -> Message + 'a) -> Self {
         self.on_hover = Some(Box::new(f));
         self
     }
@@ -107,6 +146,9 @@ struct State<Link> {
     spans: Vec<Span<'static, Link, iced::Font>>,
     span_pressed: Option<usize>,
     hover: HoverTracker,
+    owner: u64,
+    /// Last pointer position seen in a raw `CursorMoved` (window space).
+    window_cursor: Option<Point>,
     paragraph: Paragraph,
 }
 
@@ -124,6 +166,8 @@ where
             spans: Vec::new(),
             span_pressed: None,
             hover: HoverTracker::default(),
+            window_cursor: None,
+            owner: NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             paragraph: Paragraph::default(),
         })
     }
@@ -268,6 +312,10 @@ where
         let state = tree.state.downcast_mut::<State<Link>>();
         let Event::Mouse(mouse_event) = &event else { return event::Status::Ignored };
 
+        if let mouse::Event::CursorMoved { position } = mouse_event {
+            state.window_cursor = Some(*position);
+        }
+
         // Hover: checked on every mouse event, but only a changed span is published.
         if let Some(on_hover) = &self.on_hover {
             let hit = cursor
@@ -282,15 +330,17 @@ where
                         .first()
                         .copied()
                         .unwrap_or(Rectangle::new(Point::ORIGIN, Size::ZERO));
+                    let bounds = line + origin;
                     Hover {
                         span,
                         link: self.spans.get(span).and_then(|s| s.link.clone()),
-                        bounds: line + origin,
+                        bounds,
+                        window_bounds: state.window_cursor.map(|w| window_rect(bounds, at, w)),
                         cursor: at,
                         viewport: *viewport,
                     }
                 });
-                shell.publish(on_hover(hover));
+                shell.publish(on_hover(state.owner, hover));
             }
         }
 
