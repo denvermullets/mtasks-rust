@@ -200,7 +200,7 @@ pub fn finish_comment_files(
     let tx = conn.unchecked_transaction()?;
     let mut paths = Vec::new();
     for a in list_for_owner(&tx, OwnerKind::Comment, comment_id)? {
-        if a.upload_state == UploadState::Pending {
+        if a.upload_state == UploadState::Pending && a.upload_kind != UploadKind::InlineImage {
             if let Some(p) = a.outbox_path {
                 paths.push(p);
             }

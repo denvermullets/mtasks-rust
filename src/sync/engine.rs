@@ -2166,6 +2166,7 @@ struct CommentCreatePrep {
     target: CommentTarget,
     params: CommentParams,
     local_id: String,
+    inline: InlineImages,
 }
 
 fn prep_comment_create(entity_id: &str, entry_id: i64) -> Prep<CommentCreatePrep> {
@@ -2245,15 +2246,17 @@ fn prep_comment_create_in(
         Ok(f) => f,
         Err(o) => return Prep::Done(o),
     };
+    let (body, inline) =
+        match prepare_body(conn, attachments::OwnerKind::Comment, &comment.id, Some(comment.body)) {
+            Ok((b, i)) => (b.unwrap_or_default(), i),
+            Err(o) => return Prep::Done(o),
+        };
     Prep::Ready(CommentCreatePrep {
         team_remote_id,
         target,
-        params: CommentParams {
-            body: comment.body,
-            parent_id: parent_remote_id,
-            files,
-        },
+        params: CommentParams { body, parent_id: parent_remote_id, files },
         local_id: comment.id,
+        inline,
     })
 }
 
@@ -2263,7 +2266,12 @@ fn comment_create_files(conn: &Connection, comment_id: &str) -> Result<Vec<Strin
     let files = attachments::list_for_owner(conn, attachments::OwnerKind::Comment, comment_id)
         .map_err(|e| Outcome::LeavePending(format!("db: {e}")))?;
     let mut ids = Vec::new();
-    for f in files.iter().filter(|f| f.upload_state != UploadState::Synced) {
+    // Pasted inline images ride in the body (see `prepare_body`), not `files`.
+    let staged = |f: &&Attachment| {
+        f.upload_state != UploadState::Synced
+            && f.upload_kind != attachments::UploadKind::InlineImage
+    };
+    for f in files.iter().filter(staged) {
         match &f.signed_id {
             Some(s) => ids.push(s.clone()),
             None => return Err(Outcome::LeavePending("comment files still uploading".into())),
@@ -2775,7 +2783,9 @@ async fn comment_create(client: &ApiClient, entity_id: &str, entry_id: i64) -> O
                     }
                 }
             }
-            commit_create(entry_id, "comments", &prep.local_id, dto.id)
+            let out = commit_create(entry_id, "comments", &prep.local_id, dto.id);
+            settle_inline(attachments::OwnerKind::Comment, &prep.local_id, &prep.inline);
+            out
         }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
@@ -7806,6 +7816,35 @@ mod tests {
         attachments::set_uploaded(&conn, &a.id, "signed-1", "log.txt").unwrap();
         match prep_comment_create_in(&conn, "pc", i64::MAX) {
             Prep::Ready(p) => assert_eq!(p.params.files, vec!["signed-1".to_string()]),
+            Prep::Done(o) => panic!("expected ready, got {o:?}"),
+        }
+    }
+
+    fn pasted_inline_image(conn: &Connection, owner: &str, signed: Option<&str>) {
+        conn.execute(
+            "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state, upload_kind, placeholder_uuid, signed_id, blob_filename)
+             VALUES ('inl','comment',?1,'p.png','2026-02-01T00:00:00.000Z','pending','inline_image',?2,?3,'p.png')",
+            rusqlite::params![owner, PH, signed],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn comment_create_waits_for_pasted_image_then_rewrites_body_without_attaching_it() {
+        let conn = project_comment_fixture(Some(80));
+        exec(&conn, &format!("UPDATE comments SET body = '![image](jait-pending://{PH})' WHERE id = 'pc'"));
+        pasted_inline_image(&conn, "pc", None);
+        assert!(matches!(
+            prep_comment_create_in(&conn, "pc", i64::MAX),
+            Prep::Done(Outcome::LeavePending(_))
+        ));
+        attachments::set_uploaded(&conn, "inl", "sig", "p.png").unwrap();
+        match prep_comment_create_in(&conn, "pc", i64::MAX) {
+            Prep::Ready(p) => {
+                assert_eq!(p.params.body, "![image](/rails/active_storage/blobs/redirect/sig/p.png)");
+                assert!(p.params.files.is_empty(), "inline images are not file attachments");
+                assert!(p.inline.contains_key(PH));
+            }
             Prep::Done(o) => panic!("expected ready, got {o:?}"),
         }
     }
