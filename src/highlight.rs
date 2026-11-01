@@ -2,9 +2,11 @@
 //!
 //! Pure: `highlight(lang, text)` splits `text` into runs tagged with a color
 //! [`Role`]; the renderer maps roles to colors. Roles follow the web's Monokai
-//! palette. The syntax set is deserialized on first use (tens of milliseconds),
-//! so a body with no fenced language never pays for it. Results are cached
-//! with the parsed body (`body_cache`).
+//! palette. The syntax set takes tens of milliseconds to deserialize, so
+//! [`preload`] builds it on a background thread at startup. If a code block
+//! is drawn first, `highlight` initializes it on the spot (the `OnceLock`
+//! makes the two safe: whoever is second waits for the first). Results are
+//! cached with the parsed body (`body_cache`).
 
 use std::sync::OnceLock;
 
@@ -28,6 +30,16 @@ pub enum Role {
 pub struct Span {
     pub text: String,
     pub role: Role,
+}
+
+/// Start building the syntax set and scope rules on a background thread, so
+/// the first code block doesn't stall `view`. Safe to skip or race with
+/// `highlight`; the handle is only for tests.
+pub fn preload() -> std::thread::JoinHandle<()> {
+    std::thread::spawn(|| {
+        syntaxes();
+        rules();
+    })
 }
 
 fn syntaxes() -> &'static SyntaxSet {
@@ -130,6 +142,16 @@ pub fn highlight(lang: Option<&str>, text: &str) -> Vec<Span> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preload_and_a_racing_highlight_agree() {
+        let handle = preload();
+        // Reached before the preload finishes (or after): same answer.
+        let early = highlight(Some("rust"), "fn main() {}\n");
+        handle.join().unwrap();
+        assert_eq!(highlight(Some("rust"), "fn main() {}\n"), early);
+        assert!(early.iter().any(|s| s.role != Role::Plain));
+    }
 
     fn role_of_text(spans: &[Span], needle: &str) -> Option<Role> {
         spans.iter().find(|s| s.text.trim() == needle).map(|s| s.role)
