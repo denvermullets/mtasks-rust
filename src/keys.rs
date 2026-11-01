@@ -95,9 +95,76 @@ pub fn handle_inbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
     }
 }
 
+/// Keys bound only while an issue detail is showing. Checked before the
+/// global handler; `None` falls through to it.
+pub fn handle_issue_detail_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    match key {
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "a" => {
+            Some(Message::PickAttachmentFiles)
+        }
+        _ => None,
+    }
+}
+
+/// Keys bound only while the lightbox modal is open. Checked before the
+/// modal fallthrough in `handle_key_press`; `None` falls through to it
+/// (Esc closes). ←/→ step through the issue's images.
+pub fn handle_lightbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    match key {
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "o" => {
+            Some(Message::OpenLightboxExternally)
+        }
+        Key::Named(keyboard::key::Named::ArrowRight) if modifiers.is_empty() => Some(Message::LightboxStep(1)),
+        Key::Named(keyboard::key::Named::ArrowLeft) if modifiers.is_empty() => Some(Message::LightboxStep(-1)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn o_opens_lightbox_image_in_preview() {
+        let o = Key::Character("o".into());
+        assert!(matches!(
+            handle_lightbox_key(&o, Modifiers::empty()),
+            Some(Message::OpenLightboxExternally)
+        ));
+        assert!(handle_lightbox_key(&o, Modifiers::COMMAND).is_none());
+        assert!(handle_lightbox_key(&Key::Character("x".into()), Modifiers::empty()).is_none());
+        // Inert in the global handler (no lightbox open).
+        assert!(press("o", false, true).is_none());
+    }
+
+    #[test]
+    fn arrows_step_the_lightbox() {
+        let right = Key::Named(keyboard::key::Named::ArrowRight);
+        let left = Key::Named(keyboard::key::Named::ArrowLeft);
+        assert!(matches!(
+            handle_lightbox_key(&right, Modifiers::empty()),
+            Some(Message::LightboxStep(1))
+        ));
+        assert!(matches!(
+            handle_lightbox_key(&left, Modifiers::empty()),
+            Some(Message::LightboxStep(-1))
+        ));
+        assert!(handle_lightbox_key(&right, Modifiers::SHIFT).is_none());
+    }
+
+    #[test]
+    fn a_attaches_a_file_in_issue_detail_only() {
+        let a = Key::Character("a".into());
+        assert!(matches!(
+            handle_issue_detail_key(&a, Modifiers::empty()),
+            Some(Message::PickAttachmentFiles)
+        ));
+        assert!(handle_issue_detail_key(&a, Modifiers::COMMAND).is_none());
+        assert!(handle_issue_detail_key(&Key::Character("b".into()), Modifiers::empty()).is_none());
+        // The global handler never binds it, so it's inert off the detail view.
+        assert!(press("a", false, true).is_none());
+        assert!(press("a", false, false).is_none());
+    }
 
     #[test]
     fn inbox_jk_move_selection() {

@@ -1,0 +1,248 @@
+//! Reusable file-card list for an owner's attachments (issue, project or
+//! comment). Callers load the rows with `db::attachments::list_for_owner`.
+
+use iced::widget::{button, column, container, image, row, text};
+use iced::{Alignment, Border, ContentFit, Element, Length, Theme};
+
+use crate::app::Message;
+use crate::db::attachments::{Attachment, UploadState};
+use crate::files::images::ImageStore;
+use crate::theme as t;
+
+/// The "Attachments" section: a heading plus one card per file, in the order
+/// given (`list_for_owner` returns them in the order they were added).
+/// Returns `None` when there are no files so callers can `push_maybe` it and
+/// the section stays hidden.
+pub fn section<'a>(attachments: &'a [Attachment], images: &'a ImageStore) -> Option<Element<'a, Message>> {
+    section_with(attachments, images, true)
+}
+
+/// [`section`] with the Delete action switched on or off for every card (comment
+/// attachments: only the comment's author may delete).
+pub fn section_with<'a>(
+    attachments: &'a [Attachment],
+    images: &'a ImageStore,
+    deletable: bool,
+) -> Option<Element<'a, Message>> {
+    // Inline images are part of the body, not file cards: a failed one shows
+    // its Retry/Remove on the image block itself (views::body).
+    let files = || {
+        attachments
+            .iter()
+            .filter(|a| a.upload_kind != crate::db::attachments::UploadKind::InlineImage)
+    };
+    if files().next().is_none() {
+        return None;
+    }
+    let cards = files()
+        .fold(column![].spacing(8), |col, a| col.push(card(a, images, deletable)));
+    Some(
+        column![]
+            .spacing(8)
+            .push(text("Attachments").size(14).color(t::text_secondary()))
+            .push(cards)
+            .into(),
+    )
+}
+
+/// One file card: filename, then "TYPE · size". Later tickets hang the
+/// thumbnail, open, delete and pending/failed states off this.
+/// `deletable` is the permission to show Delete (which still shows on synced
+/// rows only).
+pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore, deletable: bool) -> Element<'a, Message> {
+    let meta = format!(
+        "{} · {}",
+        type_label(&a.content_type, &a.filename),
+        format_size(a.byte_size)
+    );
+    // Pending marker: the file is safe in the outbox but not on the server yet.
+    let pending = (a.upload_state == UploadState::Pending)
+        .then(|| text("Pending upload").size(11).color(t::accent()));
+    // Failed marker: why, and the two ways out.
+    let failed = (a.upload_state == UploadState::Failed).then(|| {
+        text(format!(
+            "Upload failed: {}",
+            a.failure_reason.as_deref().unwrap_or("unknown error")
+        ))
+        .size(11)
+        .color(t::danger())
+    });
+    let failed_actions = (a.upload_state == UploadState::Failed).then(|| {
+        row![]
+            .spacing(8)
+            .push(
+                button(text("Retry").size(11).color(t::accent()))
+                    .on_press(Message::RetryUpload(a.id.clone()))
+                    .padding(0)
+                    .style(button::text),
+            )
+            .push(
+                button(text("Remove").size(11).color(t::text_muted()))
+                    .on_press(Message::RemoveFailedUpload(a.id.clone()))
+                    .padding(0)
+                    .style(button::text),
+            )
+    });
+    let info = column![]
+        .spacing(2)
+        .width(Length::Fill)
+        .push(text(&a.filename).size(13).color(t::text_primary()))
+        .push(
+            row![]
+                .spacing(8)
+                .push(text(meta).size(11).color(t::text_muted()))
+                .push_maybe(pending),
+        )
+        .push_maybe(failed)
+        .push_maybe(failed_actions);
+    // Only files the server has can be deleted this way; pending/failed ones
+    // are cancelled or removed by the upload tickets.
+    let delete = (deletable && a.upload_state == UploadState::Synced).then(|| {
+        button(text("Delete").size(11).color(t::text_muted()))
+            .on_press(Message::ConfirmDeleteAttachment(a.id.clone()))
+            .padding(0)
+            .style(button::text)
+    });
+    let cancel = (a.upload_state == UploadState::Pending).then(|| {
+        button(text("Cancel").size(11).color(t::text_muted()))
+            .on_press(Message::CancelAttachmentUpload(a.id.clone()))
+            .padding(0)
+            .style(button::text)
+    });
+    let body = container(
+        row![]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push_maybe(thumbnail(a, images))
+            .push(info)
+            .push_maybe(delete)
+            .push_maybe(cancel),
+    )
+    .padding(10)
+    .width(Length::Fill)
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_secondary())),
+        border: Border {
+            color: t::border(),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    });
+    // Clicking opens an image in the lightbox, any other file in its default app.
+    let on_press = if crate::files::images::is_thumbnailable(&a.content_type)
+        && crate::files::open::blob_key(a).is_some()
+    {
+        Message::OpenLightbox(a.clone())
+    } else {
+        Message::OpenAttachment(a.clone())
+    };
+    button(body)
+        .padding(0)
+        .width(Length::Fill)
+        .on_press(on_press)
+        .style(|_theme: &Theme, _status| button::Style::default())
+        .into()
+}
+
+/// Side length of the square thumbnail slot.
+const THUMB: f32 = 48.0;
+
+/// Square thumbnail for an image Attachment once its bytes are cached; `None`
+/// for other files, so their cards stay unchanged. While the fetch is pending
+/// or failed an empty placeholder keeps the card from jumping around.
+fn thumbnail<'a>(a: &'a Attachment, images: &'a ImageStore) -> Option<Element<'a, Message>> {
+    if !crate::files::images::is_thumbnailable(&a.content_type) {
+        return None;
+    }
+    let slot: Element<'a, Message> = match crate::files::open::blob_key(a)
+        .as_deref()
+        .and_then(|k| images.path(k))
+    {
+        Some(path) => image(path)
+            .width(THUMB)
+            .height(THUMB)
+            .content_fit(ContentFit::Cover)
+            .into(),
+        None => container(text("")).width(THUMB).height(THUMB).into(),
+    };
+    Some(
+        container(slot)
+            .width(THUMB)
+            .height(THUMB)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::bg_primary())),
+                border: Border {
+                    color: t::border(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into(),
+    )
+}
+
+/// Byte count as "999 B", "1.5 KB", "1.2 MB", "3.0 GB" (1024-based, one decimal).
+pub fn format_size(bytes: i64) -> String {
+    let bytes = bytes.max(0) as f64;
+    if bytes < 1024.0 {
+        return format!("{} B", bytes as i64);
+    }
+    let mut value = bytes;
+    let mut unit = "B";
+    for next in ["KB", "MB", "GB"] {
+        value /= 1024.0;
+        unit = next;
+        if value < 1024.0 {
+            break;
+        }
+    }
+    format!("{value:.1} {unit}")
+}
+
+/// Short uppercase type tag from the content type, falling back to the file
+/// extension, then "FILE".
+pub fn type_label(content_type: &str, filename: &str) -> String {
+    let ext = filename
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_uppercase())
+        .filter(|e| !e.is_empty() && e.len() <= 5);
+    let sub = content_type
+        .split_once('/')
+        .map(|(_, s)| s.split('+').next().unwrap_or(s));
+    match sub {
+        Some("plain") => "TXT".to_string(),
+        Some("octet-stream") | None => ext.unwrap_or_else(|| "FILE".to_string()),
+        Some(s) if s.len() <= 5 && !s.contains('.') => s.to_ascii_uppercase(),
+        Some(_) => ext.unwrap_or_else(|| "FILE".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_in_the_largest_fitting_unit() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(999), "999 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(1_258_291), "1.2 MB");
+        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+        assert_eq!(format_size(-5), "0 B");
+    }
+
+    #[test]
+    fn type_label_is_short_and_uppercase() {
+        assert_eq!(type_label("application/pdf", "a.pdf"), "PDF");
+        assert_eq!(type_label("image/png", "a.png"), "PNG");
+        assert_eq!(type_label("image/jpeg", "a.jpg"), "JPEG");
+        assert_eq!(type_label("text/plain", "n.txt"), "TXT");
+        assert_eq!(type_label("application/octet-stream", "data.bin"), "BIN");
+        assert_eq!(type_label("application/octet-stream", "noext"), "FILE");
+        assert_eq!(type_label("", "x"), "FILE");
+    }
+}

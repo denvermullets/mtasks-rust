@@ -6,7 +6,7 @@ use iced::{Alignment, Border, Element, Length, Theme};
 use crate::app::{Message, View};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme as t;
-use crate::views::issue_detail::{new_comment_composer, push_thread, ThreadCtx};
+use crate::views::issue_detail::{new_comment_composer, push_thread, CommentAttachments, ThreadCtx};
 use crate::display::{CardProperty, DisplayOptions};
 use crate::views::util;
 use crate::views::progress_chart;
@@ -32,6 +32,8 @@ pub struct ProjectDetailState {
     pub reply_to: Option<String>,
     pub reply_composer: text_editor::Content,
     pub suggest: Option<crate::mentions::SuggestState>,
+    /// Files staged on the new-comment composer.
+    pub composer_files: crate::views::issue_detail::ComposerFiles,
 }
 
 impl ProjectDetailState {
@@ -48,6 +50,7 @@ impl ProjectDetailState {
             reply_to: None,
             reply_composer: text_editor::Content::new(),
             suggest: None,
+            composer_files: Default::default(),
         }
     }
 
@@ -84,6 +87,11 @@ pub fn view<'a>(
     lanes: &'a [Lane],
     teams: &'a [Team],
     comments: &'a [Comment],
+    attachments: &'a [crate::db::attachments::Attachment],
+    comment_attachments: &'a CommentAttachments,
+    images: &'a crate::files::images::ImageStore,
+    host: &'a str,
+    pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let breadcrumb = row![]
@@ -147,14 +155,39 @@ pub fn view<'a>(
             text_editor(&detail.description)
                 .placeholder("Add description…")
                 .on_action(Message::ProjectDetailDescriptionChanged)
+                .key_binding(crate::views::issue_detail::paste_image_binding(
+                    text_editor::Binding::from_key_press,
+                    Message::PasteImageIntoProjectDescription,
+                ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(160.0)),
         )
+        .push_maybe(crate::views::issue_detail::description_preview(
+            &detail.description_text(),
+            &crate::views::body::BodyCtx {
+                team,
+                teams,
+                issues,
+                members,
+                images,
+                host,
+                pending_paths: Some(pending_paths),
+                on_image: Some(Message::OpenInlineImage),
+            },
+        ))
+        .push(
+            button(text("+ Attach file").size(12).color(t::accent()))
+                .on_press(Message::PickAttachmentFiles)
+                .padding(0)
+                .style(button::text),
+        )
+        .push_maybe(crate::views::attachments::section(attachments, images))
         .push(burndown(project, issues))
         .push(issues_section(visible, display, team, lanes, members))
         .push(discussion_section(
-            comments, detail, members, team, teams, issues,
+            comments, detail, members, team, teams, issues, comment_attachments, images, host,
+            pending_paths,
         ));
 
     // ---- Right sidebar: properties ----
@@ -276,6 +309,10 @@ fn discussion_section<'a>(
     team: Option<&'a Team>,
     teams: &'a [Team],
     issues: &'a [Issue],
+    comment_attachments: &'a CommentAttachments,
+    images: &'a crate::files::images::ImageStore,
+    host: &'a str,
+    pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
     let mut col = column![]
         .spacing(12)
@@ -293,11 +330,16 @@ fn discussion_section<'a>(
         reply_to: detail.reply_to.as_deref(),
         reply_composer: &detail.reply_composer,
         suggest: detail.suggest.as_ref(),
+        comment_attachments,
+        images,
+        host,
+        pending_paths,
     };
     push_thread(col, Comment::thread_order(comments), &ctx)
         .push(new_comment_composer(
             &detail.comment_composer,
             detail.suggest.as_ref(),
+            &detail.composer_files.files,
         ))
         .into()
 }

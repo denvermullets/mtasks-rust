@@ -5,11 +5,14 @@ use iced::widget::{
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
+use crate::db::attachments::Attachment;
+use crate::files::images::ImageStore;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{self, EditorTarget, Reference, Segment, SuggestState};
 use crate::theme as t;
+use crate::views::body::BodyCtx;
 use crate::views::issue_form::LaneOption;
 use crate::views::lane_icon;
 use crate::views::projects::MemberOption;
@@ -38,6 +41,28 @@ pub struct IssueDetailState {
     pub reply_composer: text_editor::Content,
     /// Open `@`/`#` autocomplete list (under the editor named by `target`).
     pub suggest: Option<SuggestState>,
+    /// Files staged on the new-comment composer.
+    pub composer_files: ComposerFiles,
+}
+
+/// Files staged on a comment composer (issue or project detail). They are
+/// queued as Pending uploads owned by `comment_id`, the id the comment will be
+/// inserted with when sent, so the composer shows them before the comment exists.
+pub struct ComposerFiles {
+    pub comment_id: String,
+    pub files: Vec<Attachment>,
+    /// Id the open inline reply will be inserted with (owns its pasted images).
+    pub reply_id: String,
+}
+
+impl Default for ComposerFiles {
+    fn default() -> Self {
+        Self {
+            comment_id: uuid::Uuid::new_v4().to_string(),
+            files: Vec::new(),
+            reply_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
 }
 
 impl IssueDetailState {
@@ -63,6 +88,7 @@ impl IssueDetailState {
             reply_to: None,
             reply_composer: text_editor::Content::new(),
             suggest: None,
+            composer_files: ComposerFiles::default(),
         }
     }
 
@@ -105,11 +131,16 @@ pub fn view<'a>(
     comments: &'a [Comment],
     activity: &'a [ActivityItem],
     references: &'a [Reference],
+    attachments: &'a [Attachment],
+    comment_attachments: &'a CommentAttachments,
+    images: &'a ImageStore,
     issues: &'a [Issue],
     parent: Option<&'a Issue>,
     sub_issues: Vec<&'a Issue>,
     recurring_origin: Option<&'a str>,
     my_member_ids: &[String],
+    host: &'a str,
+    pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -152,9 +183,12 @@ pub fn view<'a>(
             text_editor(&detail.description)
                 .placeholder("Add description…  (@ to mention, # to link an issue)")
                 .on_action(Message::IssueDetailDescriptionChanged)
-                .key_binding(editor_binding(
-                    None,
-                    suggesting(detail.suggest.as_ref(), EditorTarget::Description),
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        None,
+                        suggesting(detail.suggest.as_ref(), EditorTarget::Description),
+                    ),
+                    Message::PasteImageIntoDescription,
                 ))
                 .padding(10)
                 .size(14)
@@ -163,11 +197,24 @@ pub fn view<'a>(
         .push_maybe(suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
         .push_maybe(description_preview(
             &detail.description_text(),
-            team,
-            teams,
-            issues,
-            members,
+            &BodyCtx {
+                team,
+                teams,
+                issues,
+                members,
+                images,
+                host,
+                pending_paths: Some(pending_paths),
+                on_image: Some(Message::OpenInlineImage),
+            },
         ))
+        .push(
+            button(text("+ Attach file").size(12).color(t::accent()))
+                .on_press(Message::PickAttachmentFiles)
+                .padding(0)
+                .style(button::text),
+        )
+        .push_maybe(crate::views::attachments::section(attachments, images))
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
@@ -192,6 +239,10 @@ pub fn view<'a>(
                 reply_to: detail.reply_to.as_deref(),
                 reply_composer: &detail.reply_composer,
                 suggest: detail.suggest.as_ref(),
+                comment_attachments,
+                images,
+                host,
+                pending_paths,
             },
         ));
 
@@ -649,6 +700,47 @@ pub fn editor_binding(
     }
 }
 
+/// Wrap an editor binding so Cmd+V with an image-only clipboard sends `paste`
+/// (text on the clipboard keeps the default paste).
+pub fn paste_image_binding(
+    inner: impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>>,
+    paste: Message,
+) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    move |press| {
+        let is_paste = press.modifiers.command()
+            && matches!(press.key.as_ref(), iced::keyboard::Key::Character("v"));
+        if is_paste
+            && matches!(
+                crate::files::paste::read_clipboard(),
+                crate::files::paste::ClipboardPaste::Image(_)
+            )
+        {
+            return Some(text_editor::Binding::Custom(paste.clone()));
+        }
+        inner(press)
+    }
+}
+
+/// Pending inline images by placeholder uuid -> outbox file, for `BodyCtx`.
+pub fn pending_inline_paths(attachments: &[Attachment]) -> crate::views::body::PendingInlineMap {
+    use crate::db::attachments::UploadState;
+    attachments
+        .iter()
+        .filter(|a| a.upload_kind == crate::db::attachments::UploadKind::InlineImage)
+        .filter_map(|a| {
+            Some((
+                a.placeholder_uuid.clone()?,
+                crate::views::body::PendingInline {
+                    id: a.id.clone(),
+                    path: std::path::PathBuf::from(a.outbox_path.as_ref()?),
+                    failure: (a.upload_state == UploadState::Failed)
+                        .then(|| a.failure_reason.clone().unwrap_or_else(|| "unknown error".into())),
+                },
+            ))
+        })
+        .collect()
+}
+
 fn suggesting(suggest: Option<&SuggestState>, target: EditorTarget) -> bool {
     suggest.is_some_and(|s| s.target == target)
 }
@@ -711,7 +803,7 @@ pub fn suggestion_rows<'a>(s: &'a crate::mentions::SuggestState) -> Element<'a, 
 /// Body text with `@mentions` and `IDENT-n` references highlighted. Own-team
 /// references that resolve to a local issue are clickable. Spans own their
 /// text so this also works for live editor content.
-fn rich_body<'a>(
+pub(crate) fn rich_body<'a>(
     body: &str,
     size: f32,
     plain: iced::Color,
@@ -747,18 +839,13 @@ fn rich_body<'a>(
 
 /// Rendered (highlighted, clickable) view of the description, shown only when
 /// it contains at least one token; the editor itself is plain text.
-fn description_preview<'a>(
-    body: &str,
-    team: Option<&Team>,
-    teams: &[Team],
-    issues: &[Issue],
-    members: &[Member],
-) -> Option<Element<'a, Message>> {
-    let ident = team.map(|t| t.identifier.as_str()).unwrap_or("");
-    let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+pub(crate) fn description_preview<'a>(body: &str, ctx: &BodyCtx<'a>) -> Option<Element<'a, Message>> {
+    let ident = ctx.team.map(|t| t.identifier.as_str()).unwrap_or("");
+    let names: Vec<&str> = ctx.members.iter().map(|m| m.name.as_str()).collect();
     let has_token = mentions::segments(body, ident, &names)
         .iter()
-        .any(|s| !matches!(s, Segment::Text(_)));
+        .any(|s| !matches!(s, Segment::Text(_)))
+        || crate::views::body::has_images(body, ctx.host);
     if !has_token {
         return None;
     }
@@ -767,15 +854,7 @@ fn description_preview<'a>(
             column![]
                 .spacing(4)
                 .push(text("Preview").size(10).color(t::text_muted()))
-                .push(rich_body(
-                    body,
-                    12.0,
-                    t::text_secondary(),
-                    team,
-                    teams,
-                    issues,
-                    members,
-                )),
+                .push(crate::views::body::view(body, 12.0, t::text_secondary(), ctx)),
         )
         .padding([6, 10])
         .into(),
@@ -857,6 +936,7 @@ fn comments_section<'a>(
     col.push(new_comment_composer(
         &detail.comment_composer,
         detail.suggest.as_ref(),
+        &detail.composer_files.files,
     ))
     .into()
 }
@@ -875,7 +955,18 @@ pub struct ThreadCtx<'a, 'b> {
     pub reply_to: Option<&'a str>,
     pub reply_composer: &'a text_editor::Content,
     pub suggest: Option<&'a SuggestState>,
+    /// Files per comment, keyed by the comment's local id.
+    pub comment_attachments: &'a CommentAttachments,
+    /// Image fetch state, for attachment thumbnails.
+    pub images: &'a ImageStore,
+    /// Configured JAIT base URL (resolves inline image URLs).
+    pub host: &'a str,
+    /// Unsent pasted images (placeholder uuid -> outbox file), comments included.
+    pub pending_paths: &'a crate::views::body::PendingInlineMap,
 }
+
+/// Comment local id -> its files (absent when it has none).
+pub type CommentAttachments = std::collections::HashMap<String, Vec<Attachment>>;
 
 /// Append a threaded run of comments (indented replies, inline reply composer
 /// under the comment being replied to).
@@ -900,6 +991,7 @@ pub fn push_thread<'a>(
 pub fn new_comment_composer<'a>(
     content: &'a text_editor::Content,
     suggest: Option<&'a SuggestState>,
+    staged: &'a [Attachment],
 ) -> Element<'a, Message> {
     column![]
         .spacing(8)
@@ -907,22 +999,57 @@ pub fn new_comment_composer<'a>(
             text_editor(content)
                 .placeholder("Leave a comment…  (Cmd+Enter to send)")
                 .on_action(Message::CommentComposerChanged)
-                .key_binding(editor_binding(
-                    Some(Message::SubmitComment),
-                    suggesting(suggest, EditorTarget::Comment),
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        Some(Message::SubmitComment),
+                        suggesting(suggest, EditorTarget::Comment),
+                    ),
+                    Message::PasteImageIntoComment,
                 ))
                 .padding(10)
                 .size(14)
                 .height(Length::Fixed(80.0)),
         )
         .push_maybe(suggestion_list(suggest, EditorTarget::Comment))
+        .push_maybe((!staged.is_empty()).then(|| staged_chips(staged)))
         .push(
-            button(text("Comment").size(13))
-                .on_press(Message::SubmitComment)
-                .padding([6, 14])
-                .style(button::primary),
+            row![]
+                .spacing(8)
+                .push(
+                    button(text("Comment").size(13))
+                        .on_press(Message::SubmitComment)
+                        .padding([6, 14])
+                        .style(button::primary),
+                )
+                .push(
+                    button(text("+ Attach file").size(13))
+                        .on_press(Message::PickCommentFiles)
+                        .padding([6, 14])
+                        .style(button::secondary),
+                ),
         )
         .into()
+}
+
+/// One removable chip per file staged on the composer.
+fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
+    let mut chips = row![].spacing(6).align_y(Alignment::Center);
+    for a in staged {
+        chips = chips.push(
+            button(
+                text(format!(
+                    "{} ({})  ✕",
+                    a.filename,
+                    crate::views::attachments::format_size(a.byte_size)
+                ))
+                .size(12),
+            )
+            .on_press(Message::RemoveStagedFile(a.id.clone()))
+            .padding([3, 8])
+            .style(button::secondary),
+        );
+    }
+    chips.wrap().into()
 }
 
 /// One change-history line: "actor description  ·  3d ago".
@@ -970,9 +1097,12 @@ fn reply_composer<'a>(
             text_editor(content)
                 .placeholder("Write a reply…  (Cmd+Enter to send)")
                 .on_action(Message::ReplyComposerChanged)
-                .key_binding(editor_binding(
-                    Some(Message::SubmitReply),
-                    suggesting(suggest, EditorTarget::Reply),
+                .key_binding(paste_image_binding(
+                    editor_binding(
+                        Some(Message::SubmitReply),
+                        suggesting(suggest, EditorTarget::Reply),
+                    ),
+                    Message::PasteImageIntoReply,
                 ))
                 .padding(8)
                 .size(13)
@@ -1034,20 +1164,34 @@ fn comment_row<'a>(
                     .color(t::text_muted()),
             ),
     );
-    col = col.push(rich_body(
+    col = col.push(crate::views::body::view(
         &comment.body,
         13.0,
         t::text_primary(),
-        team,
-        teams,
-        issues,
-        members,
+        &BodyCtx {
+            team,
+            teams,
+            issues,
+            members,
+            images: ctx.images,
+            host: ctx.host,
+            pending_paths: Some(ctx.pending_paths),
+            on_image: Some(Message::OpenInlineImage),
+        },
     ));
-    // Delete is offered on the user's own comments, synced or not.
+    // Delete is offered on the user's own comments, synced or not. The desktop
+    // does not know member roles, so team admins are not offered it on others'
+    // comments (the server would 403 anyone else; the row is then restored).
     let can_delete = comment
         .author_id
         .as_ref()
         .is_some_and(|aid| my_member_ids.contains(aid));
+    // Attachment delete follows the same author rule.
+    col = col.push_maybe(
+        ctx.comment_attachments
+            .get(&comment.id)
+            .and_then(|files| crate::views::attachments::section_with(files, ctx.images, can_delete)),
+    );
     let mut actions = row![].spacing(10);
     let can_reply = can_reply && Comment::can_reply_at(depth);
     if can_reply {

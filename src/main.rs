@@ -4,6 +4,7 @@ mod config;
 mod csv_io;
 mod db;
 mod display;
+mod files;
 mod fonts;
 mod inbox;
 mod issue_match;

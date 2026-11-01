@@ -138,6 +138,15 @@ pub enum Message {
     /// "Delete" pressed on one of the user's own unsynced comments (local id).
     ConfirmDeleteComment(String),
     DeleteCommentConfirmed,
+    /// "Delete" pressed on a synced attachment card (local attachment id).
+    ConfirmDeleteAttachment(String),
+    /// Cancel a pending upload (local row id): drops the row, queue entries and outbox file.
+    CancelAttachmentUpload(String),
+    DeleteAttachmentConfirmed,
+    /// "Retry" on a failed upload card (local attachment id).
+    RetryUpload(String),
+    /// "Remove" on a failed upload card (local attachment id).
+    RemoveFailedUpload(String),
     /// Autocomplete row `n` chosen (click or Tab) in the open `@`/`#` suggestion list.
     PickSuggestion(usize),
     /// Enter/Tab in an editor with the suggestion list open: take the highlighted row.
@@ -149,6 +158,20 @@ pub enum Message {
     /// Activity fetch for an issue's detail finished (JRST-149); `true` when entries were stored.
     /// Issue id and how many Activity entries the fetch stored.
     ActivityFetched(String, usize),
+    /// A file card was clicked: open the Attachment in its default app (JRST-186).
+    OpenAttachment(crate::db::attachments::Attachment),
+    /// An image Attachment card was clicked: open the lightbox on it.
+    OpenLightbox(crate::db::attachments::Attachment),
+    /// An inline image in a description/comment was clicked: open the lightbox on it.
+    OpenInlineImage(crate::views::body::InlineImage),
+    /// ←/→ in the lightbox: step by this many images.
+    LightboxStep(isize),
+    /// `o` in the lightbox: open the current image in the default app (Preview).
+    OpenLightboxExternally,
+    /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
+    AttachmentDownloaded(crate::db::attachments::Attachment, Result<Vec<u8>, String>),
+    /// Bytes for an image fetched into the cache for display (JRST-187), keyed by blob key.
+    ImageFetched(String, Result<Vec<u8>, String>),
     ProjectCommentsFetched(String, Result<Vec<CommentDto>, String>),
     /// Result of the fresh fetch made when an issue detail is opened.
     IssueFetched(Result<(), String>),
@@ -331,6 +354,31 @@ pub enum Message {
     /// Open the "Add project to roadmap" picker preset to `commitment`.
     OpenRoadmapAdd(RoadmapCommitment),
 
+    // Attachments
+    /// "Attach file" on the issue detail: open the multi-file picker.
+    PickAttachmentFiles,
+    /// Files chosen for the open issue (picker, drag-and-drop, shortcut all
+    /// send this). Each is validated, copied to the outbox and queued.
+    FilesPicked(Vec<std::path::PathBuf>),
+    /// Cmd+V with an image-only clipboard in the issue description editor.
+    PasteImageIntoDescription,
+    PasteImageIntoProjectDescription,
+    /// Cmd+V with an image-only clipboard in the comment / inline reply composer.
+    PasteImageIntoComment,
+    PasteImageIntoReply,
+    /// A file dropped on the window; routed by `files::drop::drop_target`.
+    FileDropped(std::path::PathBuf),
+    /// The batch window after the first `FileDropped` closed: route the whole
+    /// buffered drop at once.
+    FlushDrops,
+    /// "+ Attach file" on a comment composer (issue or project detail).
+    PickCommentFiles,
+    /// Files chosen for the open detail view's comment composer (picker now;
+    /// drag-and-drop sends this too). Staged as chips, sent with the comment.
+    CommentFilesPicked(Vec<std::path::PathBuf>),
+    /// Remove a staged composer file (local attachment id) before sending.
+    RemoveStagedFile(String),
+
     // CSV import / export (sidebar footer)
     /// Export the selected team's issues via a native save dialog.
     ExportCsv,
@@ -390,6 +438,7 @@ struct CommentDrafts<'a> {
     reply_to: &'a mut Option<String>,
     reply: &'a mut iced::widget::text_editor::Content,
     suggest: &'a mut Option<crate::mentions::SuggestState>,
+    files: &'a mut crate::views::issue_detail::ComposerFiles,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -404,6 +453,10 @@ pub enum Modal {
     DeleteProjectConfirm(String),
     /// Confirm deleting an unsynced comment (local id) and its replies.
     DeleteCommentConfirm(String),
+    /// Confirm deleting a synced attachment (local attachment id).
+    DeleteAttachmentConfirm(String),
+    /// Full-size image viewer over an ordered list of images (see `files::lightbox`).
+    Lightbox(crate::files::lightbox::LightboxState),
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
@@ -632,6 +685,24 @@ pub struct App {
     detail_comments: Vec<Comment>,
     /// Local change history for the open issue (see `db::activity`).
     detail_activity: Vec<ActivityItem>,
+    /// Files attached to the open issue (synced, then pending/failed). Repopulated
+    /// each reload only while `view` is `IssueDetail`.
+    detail_attachments: Vec<crate::db::attachments::Attachment>,
+    /// Pending inline images (placeholder uuid -> outbox file) of the open issue.
+    detail_pending_paths: crate::views::body::PendingInlineMap,
+    /// The top-level comment composer was the last editor touched; a file drop
+    /// then stages onto it (JRST-208). Cleared on view change.
+    composer_focused: bool,
+    /// Files of an in-progress multi-file drop, flushed by `Message::FlushDrops`.
+    drop_buffer: crate::files::drop::DropBuffer,
+    /// Fetch state per blob key for images shown in the UI (thumbnails now;
+    /// inline images and the lightbox reuse it). Bytes live in the file cache.
+    images: crate::files::images::ImageStore,
+    /// Files attached to each comment of the open issue/project, keyed by the
+    /// comment's local id (comments without files have no entry). Repopulated
+    /// each reload while `view` is `IssueDetail` or `ProjectDetail`.
+    detail_comment_attachments:
+        std::collections::HashMap<String, Vec<crate::db::attachments::Attachment>>,
     /// Issues whose description/comments mention the open detail issue ("Referenced In").
     detail_references: Vec<crate::mentions::Reference>,
     /// Title of the recurring issue that spawned the open issue detail, if any.
@@ -700,6 +771,11 @@ pub struct App {
     sync_paused_auth: bool,
 }
 
+/// A comment needs text or staged files (Rails: `body_or_files_present`).
+fn comment_has_content(body: &str, has_staged_files: bool) -> bool {
+    !body.is_empty() || has_staged_files
+}
+
 impl App {
     /// Snapshot of what the command palette searches, taken when it opens.
     fn palette_data(&self) -> PaletteData {
@@ -715,6 +791,7 @@ impl App {
                 .collect(),
             projects: queries::searchable_projects(&conn).unwrap_or_default(),
             saved_views: self.palette_saved_views(),
+            on_issue_detail: matches!(self.view, View::IssueDetail(_)),
         }
     }
 
@@ -847,6 +924,7 @@ impl App {
     fn switch_view(&mut self, view: View) {
         let crossing = (self.view == View::MyIssues) != (view == View::MyIssues);
         self.view = view;
+        self.composer_focused = false;
         self.retain_open_view();
         if self.view == View::Inbox {
             self.reload_inbox();
@@ -897,18 +975,82 @@ impl App {
             self.detail_activity =
                 activity_for_issue(conn, issue_id).unwrap_or_default();
             self.detail_references = self.compute_references(conn, issue_id);
+            self.detail_attachments = crate::db::attachments::list_for_owner(
+                conn,
+                crate::db::attachments::OwnerKind::Issue,
+                issue_id,
+            )
+            .unwrap_or_default();
+            self.detail_pending_paths =
+                crate::views::issue_detail::pending_inline_paths(&self.detail_attachments);
+            self.load_comment_attachments(conn);
         } else if let View::ProjectDetail(ref project_id) = self.view {
+            self.detail_attachments = crate::db::attachments::list_for_owner(
+                conn,
+                crate::db::attachments::OwnerKind::Project,
+                project_id,
+            )
+            .unwrap_or_default();
+            self.detail_pending_paths =
+                crate::views::issue_detail::pending_inline_paths(&self.detail_attachments);
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments =
                 queries::comments_for_project(conn, project_id).unwrap_or_default();
             self.detail_activity.clear();
+            self.load_comment_attachments(conn);
             return;
         } else {
+            self.detail_comment_attachments.clear();
+            self.detail_attachments.clear();
             self.detail_references.clear();
             self.detail_deps = Default::default();
             self.detail_comments.clear();
             self.detail_activity.clear();
+        }
+    }
+
+    /// JRST-214: a failed inline image was removed; drop its placeholder from the
+    /// owner's body and the open editor. Waiting body writers read the body from
+    /// the DB, so they proceed on their own; an update is only enqueued when
+    /// nothing is queued for the owner.
+    fn strip_removed_inline(&mut self, conn: &rusqlite::Connection, row: &crate::db::attachments::Attachment) {
+        use crate::db::attachments::OwnerKind;
+        let Some(uuid) = row.placeholder_uuid.as_deref() else { return };
+        let kind = row.owner_kind;
+        let Ok(Some(body)) = crate::db::attachments::strip_inline_placeholder(conn, kind, &row.owner_id, uuid) else {
+            return;
+        };
+        let entity = match kind {
+            OwnerKind::Issue => {
+                if let Some(d) = self.issue_detail.as_mut().filter(|d| d.issue_id == row.owner_id) {
+                    d.description = iced::widget::text_editor::Content::with_text(&body);
+                }
+                "issue"
+            }
+            OwnerKind::Project => {
+                if let Some(d) = self.project_detail.as_mut().filter(|d| d.project_id == row.owner_id) {
+                    d.description = iced::widget::text_editor::Content::with_text(&body);
+                }
+                "project"
+            }
+            OwnerKind::Comment => return,
+        };
+        if !sync_queue::has_pending_entry(conn, entity, &row.owner_id).unwrap_or(true) {
+            let _ = sync_queue::enqueue(conn, entity, &row.owner_id, "update", None);
+        }
+        self.reload_data();
+    }
+
+    /// Refill `detail_comment_attachments` for the comments in `detail_comments`.
+    fn load_comment_attachments(&mut self, conn: &rusqlite::Connection) {
+        let ids: Vec<&str> = self.detail_comments.iter().map(|c| c.id.as_str()).collect();
+        self.detail_comment_attachments =
+            crate::db::attachments::list_for_comments(conn, &ids).unwrap_or_default();
+        // Pasted-but-unsent images in comments render from the outbox too.
+        for files in self.detail_comment_attachments.values() {
+            self.detail_pending_paths
+                .extend(crate::views::issue_detail::pending_inline_paths(files));
         }
     }
 
@@ -933,6 +1075,7 @@ impl App {
     /// Recompute the `@`/`#` suggestion list for `target` from its cursor.
     fn refresh_suggestions(&mut self, target: crate::mentions::EditorTarget) {
         use crate::mentions::{self as m, EditorTarget};
+        self.composer_focused = matches!(target, EditorTarget::Comment);
         // On project detail only the comment composers exist; the id excluded
         // from `#` suggestions is the project's, which matches no issue.
         let (content, exclude_id) = match (&self.view, &self.issue_detail, &self.project_detail) {
@@ -1020,6 +1163,37 @@ impl App {
         self.issue_detail.as_mut().map(|d| &mut d.suggest)
     }
 
+    /// Comment drafts do not survive leaving their detail view (the state is
+    /// rebuilt on open), so cancel the unsent staged files / pasted images
+    /// they own: their uploads never send. Submitted comments' rows are kept.
+    fn drop_drafts(&mut self, ids: &[String]) {
+        let conn = self.db();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        if matches!(crate::db::attachments::discard_unsent_for_drafts(&conn, &refs), Ok(n) if n > 0) {
+            self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+        }
+    }
+
+    /// Drop the drafts of a detail state that is no longer the open view.
+    fn discard_dead_composers(&mut self) {
+        let mut ids = Vec::new();
+        if let Some(d) = &self.issue_detail {
+            if !matches!(&self.view, View::IssueDetail(id) if *id == d.issue_id) {
+                ids.extend([d.composer_files.comment_id.clone(), d.composer_files.reply_id.clone()]);
+                self.issue_detail = None;
+            }
+        }
+        if let Some(d) = &self.project_detail {
+            if !matches!(&self.view, View::ProjectDetail(id) if *id == d.project_id) {
+                ids.extend([d.composer_files.comment_id.clone(), d.composer_files.reply_id.clone()]);
+                self.project_detail = None;
+            }
+        }
+        if !ids.is_empty() {
+            self.drop_drafts(&ids);
+        }
+    }
+
     /// The comment composers of whichever detail view is open (issue or project).
     fn comment_drafts_mut(&mut self) -> Option<CommentDrafts<'_>> {
         if matches!(self.view, View::ProjectDetail(_)) {
@@ -1028,6 +1202,7 @@ impl App {
                 reply_to: &mut d.reply_to,
                 reply: &mut d.reply_composer,
                 suggest: &mut d.suggest,
+                files: &mut d.composer_files,
             });
         }
         self.issue_detail.as_mut().map(|d| CommentDrafts {
@@ -1035,6 +1210,7 @@ impl App {
             reply_to: &mut d.reply_to,
             reply: &mut d.reply_composer,
             suggest: &mut d.suggest,
+            files: &mut d.composer_files,
         })
     }
 
@@ -1568,8 +1744,12 @@ impl App {
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
         self.commit_issue_detail();
         self.commit_project_detail();
+        if let Some(old) = self.issue_detail.take() {
+            self.drop_drafts(&[old.composer_files.comment_id, old.composer_files.reply_id]);
+        }
         self.issue_detail = Some(issue_detail::IssueDetailState::from_issue(issue));
         self.view = View::IssueDetail(issue.id.clone());
+        self.composer_focused = false;
         let conn = self.db();
         self.load_detail_dependencies(&conn);
         self.reload_detail_origin(&conn);
@@ -1590,6 +1770,238 @@ impl App {
         match queries::get_issue(&conn, id) {
             Ok(Some(issue)) => self.fetch_activity_task(&issue),
             _ => Task::none(),
+        }
+    }
+
+    /// Open an Attachment in its default app: straight from the file cache on a
+    /// hit, otherwise download it (authenticated, redirect followed) first.
+    fn open_attachment(&mut self, att: crate::db::attachments::Attachment) -> Task<Message> {
+        let (Some(key), Some(remote_id)) = (crate::files::open::blob_key(&att), att.remote_id)
+        else {
+            self.push_toast(
+                format!("{} hasn't finished uploading yet", att.filename),
+                ToastKind::Error,
+                false,
+            );
+            return Task::none();
+        };
+        if !self.files_unlocked() {
+            self.push_toast("Sign in to open files", ToastKind::Error, false);
+            return Task::none();
+        }
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.open_cached_attachment(&att, &key, &path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.push_toast("Sign in to download files", ToastKind::Error, false);
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                crate::api::attachments::download(&client, remote_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |r| Message::AttachmentDownloaded(att.clone(), r),
+        )
+    }
+
+    /// Make sure `att`'s image is on its way into the cache for display.
+    /// No-op for non-images, unuploaded files, and keys already known to
+    /// `images`. A cache hit becomes `Ready` at once; a miss downloads and
+    /// reports `Message::ImageFetched`.
+    pub(crate) fn request_image(&mut self, att: &crate::db::attachments::Attachment) -> Task<Message> {
+        if !crate::files::images::is_thumbnailable(&att.content_type) {
+            return Task::none();
+        }
+        let (Some(key), Some(remote_id)) = (crate::files::open::blob_key(att), att.remote_id)
+        else {
+            return Task::none();
+        };
+        if !self.images.begin(&key) {
+            return Task::none();
+        }
+        if !self.files_unlocked() {
+            self.images.set_failed(&key);
+            return Task::none();
+        }
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.images.set_ready(&key, path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.images.set_failed(&key);
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                crate::api::attachments::download(&client, remote_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |r| Message::ImageFetched(key.clone(), r),
+        )
+    }
+
+    /// Fetch one inline image (a signed blob-redirect URL, no auth) into the
+    /// file cache under its `files::inline::blob_key`; reports
+    /// `Message::ImageFetched`. No-op for keys already known to `images`.
+    pub(crate) fn request_inline_image(&mut self, src: &str) -> Task<Message> {
+        let Some(key) = crate::files::inline::blob_key(src) else {
+            return Task::none();
+        };
+        if !self.images.begin(&key) {
+            return Task::none();
+        }
+        if !self.files_unlocked() {
+            self.images.set_failed(&key);
+            return Task::none();
+        }
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.images.set_ready(&key, path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let url = crate::files::inline::fetch_url(src, &base_url);
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.images.set_failed(&key);
+            return Task::none();
+        };
+        Task::perform(
+            async move { client.get_bytes_public(&url).await.map_err(|e| e.to_string()) },
+            move |r| Message::ImageFetched(key.clone(), r),
+        )
+    }
+
+    /// `request_inline_image` for every blob image in the open issue's description.
+    fn request_description_images(&mut self) -> Task<Message> {
+        let Some(detail) = self.issue_detail.as_ref() else {
+            return Task::none();
+        };
+        if !matches!(&self.view, View::IssueDetail(id) if *id == detail.issue_id) {
+            return Task::none();
+        }
+        let srcs = crate::views::body::fetchable_srcs_of_bodies(
+            [detail.description_text().as_str()],
+            &self.config.api_base_url,
+        );
+        Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
+    }
+
+    /// `request_inline_image` for every blob image in the open detail's comments
+    /// (issue and project detail share `detail_comments`).
+    fn request_comment_images(&mut self) -> Task<Message> {
+        if !matches!(self.view, View::IssueDetail(_) | View::ProjectDetail(_)) {
+            return Task::none();
+        }
+        let srcs = crate::views::body::fetchable_srcs_of_bodies(
+            self.detail_comments.iter().map(|c| c.body.as_str()),
+            &self.config.api_base_url,
+        );
+        Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
+    }
+
+    /// `request_inline_image` for every blob image in the open project's description.
+    fn request_project_description_images(&mut self) -> Task<Message> {
+        let Some(detail) = self.project_detail.as_ref() else {
+            return Task::none();
+        };
+        if !matches!(&self.view, View::ProjectDetail(id) if *id == detail.project_id) {
+            return Task::none();
+        }
+        let srcs = crate::views::body::fetchable_srcs_of_body(
+            &detail.description_text(),
+            &self.config.api_base_url,
+        );
+        Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
+    }
+
+    /// Lightbox set for the open issue/project detail, in reading order.
+    fn lightbox_images(&self) -> Vec<crate::files::lightbox::LightboxImage> {
+        use crate::files::lightbox::{reading_order_images, CommentImages};
+        let description = match (&self.view, &self.issue_detail, &self.project_detail) {
+            (View::IssueDetail(_), Some(d), _) => d.description_text(),
+            (View::ProjectDetail(_), _, Some(d)) => d.description_text(),
+            _ => return Vec::new(),
+        };
+        let comments: Vec<CommentImages> = Comment::thread_order(&self.detail_comments)
+            .into_iter()
+            .map(|(_, c)| CommentImages {
+                body: &c.body,
+                attachments: self
+                    .detail_comment_attachments
+                    .get(&c.id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]),
+            })
+            .collect();
+        reading_order_images(
+            &description,
+            &self.detail_attachments,
+            &comments,
+            &self.config.api_base_url,
+        )
+    }
+
+    /// Fetch the lightbox's current image and its neighbours (Attachments and Inline).
+    fn request_lightbox_images(&mut self) -> Task<Message> {
+        let Modal::Lightbox(state) = &self.modal else {
+            return Task::none();
+        };
+        let lo = state.index.saturating_sub(1);
+        let wanted: Vec<_> = state.images[lo..(state.index + 2).min(state.images.len())].to_vec();
+        Task::batch(wanted.iter().map(|i| match i {
+            crate::files::lightbox::LightboxImage::Attachment(a) => self.request_image(a),
+            crate::files::lightbox::LightboxImage::Inline { src, .. } => {
+                self.request_inline_image(src)
+            }
+        }))
+    }
+
+    /// `request_image` for every Attachment currently rendered in the open detail view.
+    fn request_visible_images(&mut self) -> Task<Message> {
+        let atts: Vec<crate::db::attachments::Attachment> = self
+            .detail_attachments
+            .iter()
+            .chain(self.detail_comment_attachments.values().flatten())
+            .filter(|a| crate::files::images::is_thumbnailable(&a.content_type))
+            .cloned()
+            .collect();
+        let inline = self.request_description_images();
+        let project_inline = self.request_project_description_images();
+        let comment_inline = self.request_comment_images();
+        Task::batch(
+            atts.iter()
+                .map(|a| self.request_image(a))
+                .chain([inline, project_inline, comment_inline]),
+        )
+    }
+
+    /// Copy a cached blob to its real filename and hand it to the OS.
+    fn open_cached_attachment(
+        &mut self,
+        att: &crate::db::attachments::Attachment,
+        key: &str,
+        cached: &std::path::Path,
+    ) {
+        let root = crate::files::default_root();
+        let opened = crate::files::open::materialize(&root, key, &att.filename, cached)
+            .and_then(|p| crate::files::open::open_in_default_app(&p));
+        if let Err(e) = opened {
+            self.push_toast(
+                format!("Couldn't open {}: {e}", att.filename),
+                ToastKind::Error,
+                false,
+            );
         }
     }
 
@@ -1654,7 +2066,14 @@ impl App {
             (_, Some(d), _) => (Some(d.issue_id.clone()), None),
             _ => return false,
         };
-        if body.is_empty() {
+        // A top-level comment takes the id its staged files are owned by.
+        // (and pasted images); a reply takes the id its pasted images were owned by.
+        let (local_id, staged) = match (&parent_id, self.comment_drafts_mut()) {
+            (None, Some(d)) => (Some(d.files.comment_id.clone()), !d.files.files.is_empty()),
+            (Some(_), Some(d)) => (Some(d.files.reply_id.clone()), false),
+            _ => (None, false),
+        };
+        if !comment_has_content(&body, staged) {
             return false;
         }
         if let Some(pid) = &parent_id {
@@ -1677,7 +2096,7 @@ impl App {
         });
         let now = crate::db::now_iso();
         let comment = Comment {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: local_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             remote_id: None,
             issue_id,
             project_id,
@@ -1691,7 +2110,16 @@ impl App {
             return false;
         }
         drop(conn);
-        self.enqueue_sync("comment", &comment.id, "create", None);
+        self.enqueue_sync(crate::db::attachments::COMMENT_ENTITY, &comment.id, "create", None);
+        if let Some(d) = self.comment_drafts_mut() {
+            // Fresh owner id for the next comment / reply (the old ones now belong to this one).
+            if comment.parent_id.is_none() {
+                d.files.files.clear();
+                d.files.comment_id = uuid::Uuid::new_v4().to_string();
+            } else {
+                d.files.reply_id = uuid::Uuid::new_v4().to_string();
+            }
+        }
         self.reload_data();
         true
     }
@@ -1903,8 +2331,12 @@ impl App {
     fn open_project_detail(&mut self, project: &Project) -> Task<Message> {
         self.commit_issue_detail();
         self.commit_project_detail();
+        if let Some(old) = self.project_detail.take() {
+            self.drop_drafts(&[old.composer_files.comment_id, old.composer_files.reply_id]);
+        }
         self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
         self.view = View::ProjectDetail(project.id.clone());
+        self.composer_focused = false;
         let conn = self.db();
         self.load_detail_dependencies(&conn);
         self.fetch_project_comments_task(&conn, project)
@@ -2076,6 +2508,12 @@ impl App {
             detail_from_inbox: false,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
+            detail_attachments: Vec::new(),
+            detail_pending_paths: Default::default(),
+            composer_focused: false,
+            drop_buffer: Default::default(),
+            images: Default::default(),
+            detail_comment_attachments: Default::default(),
             detail_references: Vec::new(),
             detail_origin: None,
             issue_picker: None,
@@ -2173,6 +2611,9 @@ impl App {
             | iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => {
                 Some(Message::UserInput)
             }
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                Some(Message::FileDropped(path))
+            }
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused),
             _ => None,
@@ -2257,8 +2698,22 @@ impl App {
         self.drive_sync(SchedEvent::CycleFinished { success: false })
     }
 
+    /// Cached attachment/inline files are only served while an API token is
+    /// configured (spec story 68).
+    fn files_unlocked(&self) -> bool {
+        self.config.api_token.as_deref().is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// The token lost access: delete the file cache (never the outbox) and
+    /// forget what is on screen, so cached files are no longer reachable.
+    fn lock_files(&mut self) {
+        let _ = crate::files::cache::FileCache::at_default_root().clear(&self.db());
+        self.images.clear();
+    }
+
     /// The existing 401 path: pause sync and ask for a new token.
     fn pause_for_auth(&mut self) {
+        self.lock_files();
         self.sync_paused_auth = true;
         let msg = "Token expired or revoked — please re-enter";
         if self.settings_form.is_none() {
@@ -2276,6 +2731,8 @@ impl App {
         sync_queue::take_local_write();
         let task = self.update_inner(message);
         self.retain_open_view();
+        self.discard_dead_composers();
+        let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
@@ -2309,11 +2766,21 @@ impl App {
                 {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
                 }
+                if let Modal::Lightbox(_) = self.modal {
+                    if let Some(msg) = keys::handle_lightbox_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
                 let modal_open = self.modal != Modal::None;
                 let palette_open = matches!(self.modal, Modal::CommandPalette(_));
                 let on_board = matches!(self.view, View::Board | View::MyIssues);
                 if self.view == View::Inbox && !modal_open {
                     if let Some(msg) = keys::handle_inbox_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
+                if matches!(self.view, View::IssueDetail(_)) && !modal_open {
+                    if let Some(msg) = keys::handle_issue_detail_key(&key, modifiers) {
                         return self.update(msg);
                     }
                 }
@@ -3028,17 +3495,34 @@ impl App {
                 }
             }
             Message::StartReply(parent_id) => {
+                let mut dropped = None;
                 if let Some(d) = self.comment_drafts_mut() {
                     *d.reply_to = Some(parent_id);
                     *d.suggest = None;
                     *d.reply = iced::widget::text_editor::Content::new();
+                    // The previous reply draft is gone: its pasted images go too.
+                    dropped = Some(std::mem::replace(
+                        &mut d.files.reply_id,
+                        uuid::Uuid::new_v4().to_string(),
+                    ));
+                }
+                if let Some(id) = dropped {
+                    self.drop_drafts(&[id]);
                 }
             }
             Message::CancelReply => {
+                let mut dropped = None;
                 if let Some(d) = self.comment_drafts_mut() {
                     *d.reply_to = None;
                     *d.reply = iced::widget::text_editor::Content::new();
                     *d.suggest = None;
+                    dropped = Some(std::mem::replace(
+                        &mut d.files.reply_id,
+                        uuid::Uuid::new_v4().to_string(),
+                    ));
+                }
+                if let Some(id) = dropped {
+                    self.drop_drafts(&[id]);
                 }
             }
             Message::ReplyComposerChanged(action) => {
@@ -3066,6 +3550,84 @@ impl App {
             Message::IssueFetched(result) => {
                 if result.is_ok() {
                     self.reload_data();
+                }
+            }
+            Message::OpenAttachment(att) => return self.open_attachment(att),
+            Message::OpenLightbox(att) => {
+                if let Some(state) = crate::files::lightbox::LightboxState::at(
+                    self.lightbox_images(),
+                    |i| matches!(i, crate::files::lightbox::LightboxImage::Attachment(a) if a.id == att.id),
+                ) {
+                    self.modal = Modal::Lightbox(state);
+                    return self.request_lightbox_images();
+                }
+                return self.open_attachment(att);
+            }
+            Message::OpenInlineImage(img) => {
+                if let Some(state) = crate::files::lightbox::LightboxState::at(
+                    self.lightbox_images(),
+                    |i| i.key() == img.key,
+                ) {
+                    self.modal = Modal::Lightbox(state);
+                    return self.request_lightbox_images();
+                }
+            }
+            Message::LightboxStep(delta) => {
+                if let Modal::Lightbox(state) = &mut self.modal {
+                    state.step(delta);
+                    return self.request_lightbox_images();
+                }
+            }
+            Message::OpenLightboxExternally => {
+                let target = match &self.modal {
+                    Modal::Lightbox(state) => state
+                        .open_target(&self.images)
+                        .map(|(key, name, path)| (key, name.to_string(), path)),
+                    _ => return Task::none(),
+                };
+                match target {
+                    Some((key, name, cached)) => {
+                        let root = crate::files::default_root();
+                        let opened = crate::files::open::materialize(&root, &key, &name, &cached)
+                            .and_then(|p| crate::files::open::open_in_default_app(&p));
+                        if let Err(e) = opened {
+                            self.push_toast(
+                                format!("Couldn't open {name}: {e}"),
+                                ToastKind::Error,
+                                false,
+                            );
+                        }
+                    }
+                    None => self.push_toast("Image hasn't loaded yet", ToastKind::Error, false),
+                }
+            }
+            Message::AttachmentDownloaded(att, result) => match result {
+                Ok(bytes) => {
+                    let conn = self.db();
+                    let cache = crate::files::cache::FileCache::at_default_root();
+                    let key = crate::files::open::blob_key(&att).unwrap_or_default();
+                    match cache.put(&conn, &key, &bytes) {
+                        Ok(path) => self.open_cached_attachment(&att, &key, &path),
+                        Err(e) => self.push_toast(
+                            format!("Couldn't cache {}: {e}", att.filename),
+                            ToastKind::Error,
+                            false,
+                        ),
+                    }
+                }
+                Err(e) => self.push_toast(
+                    format!("Couldn't download {}: {e}", att.filename),
+                    ToastKind::Error,
+                    false,
+                ),
+            },
+            Message::ImageFetched(key, result) => {
+                let cache = crate::files::cache::FileCache::at_default_root();
+                match result.map_err(|e| e.to_string()).and_then(|bytes| {
+                    cache.put(&self.db(), &key, &bytes).map_err(|e| e.to_string())
+                }) {
+                    Ok(path) => self.images.set_ready(&key, path),
+                    Err(_) => self.images.set_failed(&key),
                 }
             }
             Message::ActivityFetched(issue_id, stored) => {
@@ -3514,6 +4076,7 @@ impl App {
                         return self.update(Message::SelectTeamView(id, View::Board))
                     }
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
+                    PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
@@ -3643,6 +4206,214 @@ impl App {
                 Ok(None) => {}
                 Err(e) => self.push_toast(format!("Export failed: {e}"), ToastKind::Error, false),
             },
+
+            Message::PickAttachmentFiles => {
+                if !matches!(self.view, View::IssueDetail(_) | View::ProjectDetail(_)) {
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .pick_files()
+                            .await
+                            .map(|hs| hs.iter().map(|h| h.path().to_path_buf()).collect())
+                            .unwrap_or_default()
+                    },
+                    Message::FilesPicked,
+                );
+            }
+
+            Message::PasteImageIntoDescription => {
+                let View::IssueDetail(ref issue_id) = self.view else {
+                    return Task::none();
+                };
+                let issue_id = issue_id.clone();
+                let crate::files::paste::ClipboardPaste::Image(png) =
+                    crate::files::paste::read_clipboard()
+                else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                match crate::files::paste::paste_image_placeholder(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Issue,
+                    &issue_id,
+                    &png,
+                ) {
+                    Ok(text) => {
+                        if let Some(d) = &mut self.issue_detail {
+                            d.description.perform(iced::widget::text_editor::Action::Edit(
+                                iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)),
+                            ));
+                        }
+                        self.load_detail_dependencies(&conn);
+                        self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+                    }
+                    Err(reason) => self.push_toast(reason, ToastKind::Error, false),
+                }
+            }
+
+            Message::PasteImageIntoProjectDescription => {
+                let View::ProjectDetail(ref project_id) = self.view else {
+                    return Task::none();
+                };
+                let project_id = project_id.clone();
+                let crate::files::paste::ClipboardPaste::Image(png) =
+                    crate::files::paste::read_clipboard()
+                else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                match crate::files::paste::paste_image_placeholder(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Project,
+                    &project_id,
+                    &png,
+                ) {
+                    Ok(text) => {
+                        if let Some(d) = &mut self.project_detail {
+                            d.description.perform(iced::widget::text_editor::Action::Edit(
+                                iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)),
+                            ));
+                        }
+                        self.load_detail_dependencies(&conn);
+                        self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+                    }
+                    Err(reason) => self.push_toast(reason, ToastKind::Error, false),
+                }
+            }
+
+            Message::PasteImageIntoComment | Message::PasteImageIntoReply => {
+                let reply = matches!(message, Message::PasteImageIntoReply);
+                let crate::files::paste::ClipboardPaste::Image(png) =
+                    crate::files::paste::read_clipboard()
+                else {
+                    return Task::none();
+                };
+                let conn = self.db();
+                let Some(d) = self.comment_drafts_mut() else {
+                    return Task::none();
+                };
+                let owner = if reply { d.files.reply_id.clone() } else { d.files.comment_id.clone() };
+                match crate::files::paste::paste_image_placeholder(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Comment,
+                    &owner,
+                    &png,
+                ) {
+                    Ok(text) => {
+                        let editor = if reply { d.reply } else { d.comment };
+                        editor.perform(iced::widget::text_editor::Action::Edit(
+                            iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(text)),
+                        ));
+                        self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+                    }
+                    Err(reason) => self.push_toast(reason, ToastKind::Error, false),
+                }
+            }
+
+            // A multi-file drop arrives as one event per file: buffer them and
+            // route the batch once the window closes.
+            Message::FileDropped(path) => {
+                if self.drop_buffer.push(path) {
+                    return Task::perform(
+                        async { tokio::time::sleep(crate::files::drop::BATCH_WINDOW).await },
+                        |_| Message::FlushDrops,
+                    );
+                }
+            }
+
+            Message::FlushDrops => {
+                use crate::files::drop::{drop_target, DropTarget};
+                let paths = self.drop_buffer.take();
+                match drop_target(&self.view, &self.modal, self.composer_focused) {
+                    DropTarget::Issue | DropTarget::Project => {
+                        return self.update(Message::FilesPicked(paths))
+                    }
+                    DropTarget::CommentComposer => {
+                        return self.update(Message::CommentFilesPicked(paths))
+                    }
+                    DropTarget::Ignore => {}
+                }
+            }
+
+            Message::FilesPicked(paths) => {
+                let (owner_kind, owner_id) = match &self.view {
+                    View::IssueDetail(id) => (crate::db::attachments::OwnerKind::Issue, id.clone()),
+                    View::ProjectDetail(id) => {
+                        (crate::db::attachments::OwnerKind::Project, id.clone())
+                    }
+                    _ => return Task::none(),
+                };
+                if paths.is_empty() {
+                    return Task::none();
+                }
+                let conn = self.db();
+                let intake = crate::files::intake::queue_files(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    owner_kind,
+                    &owner_id,
+                    &paths,
+                );
+                if let Some(toast) = intake.refusal_toast() {
+                    self.push_toast(toast, ToastKind::Error, false);
+                }
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::PickCommentFiles => {
+                if self.comment_drafts_mut().is_none() {
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .pick_files()
+                            .await
+                            .map(|hs| hs.iter().map(|h| h.path().to_path_buf()).collect())
+                            .unwrap_or_default()
+                    },
+                    Message::CommentFilesPicked,
+                );
+            }
+
+            Message::CommentFilesPicked(paths) => {
+                if paths.is_empty() {
+                    return Task::none();
+                }
+                let conn = self.db();
+                let Some(d) = self.comment_drafts_mut() else {
+                    return Task::none();
+                };
+                let intake = crate::files::intake::queue_files(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Comment,
+                    &d.files.comment_id,
+                    &paths,
+                );
+                d.files.files.extend(intake.queued);
+                if !intake.refused.is_empty() {
+                    self.push_toast(intake.refused.join("\n"), ToastKind::Error, false);
+                }
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::RemoveStagedFile(id) => {
+                let conn = self.db();
+                if let Some(Some(path)) = crate::db::attachments::remove_staged(&conn, &id).ok() {
+                    let _ = crate::files::outbox::remove(std::path::Path::new(&path));
+                }
+                if let Some(d) = self.comment_drafts_mut() {
+                    d.files.files.retain(|a| a.id != id);
+                }
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
 
             Message::PickCsvImport => {
                 if self.selected_team_id.is_none() {
@@ -3795,6 +4566,12 @@ impl App {
                     match config::save(&new_cfg) {
                         Ok(()) => {
                             self.config = new_cfg;
+                            if self.files_unlocked() {
+                                // Failed fetches (no token before) may retry.
+                                self.images.clear();
+                            } else {
+                                self.lock_files();
+                            }
                             self.config_error = None;
                             self.modal = Modal::None;
                             self.settings_form = None;
@@ -4223,7 +5000,7 @@ impl App {
                 if let Modal::DeleteCommentConfirm(ref comment_id) = self.modal {
                     let conn = self.db();
                     if let Ok((_, Some(payload))) = queries::delete_comment(&conn, comment_id) {
-                        self.enqueue_sync("comment", comment_id, "delete", Some(payload.as_str()));
+                        self.enqueue_sync(crate::db::attachments::COMMENT_ENTITY, comment_id, "delete", Some(payload.as_str()));
                     }
                     if let Some(d) = &mut self.issue_detail {
                         if d.reply_to.as_deref() == Some(comment_id.as_str()) {
@@ -4233,6 +5010,59 @@ impl App {
                 }
                 self.modal = Modal::None;
                 self.reload_data();
+            }
+
+            Message::ConfirmDeleteAttachment(id) => {
+                if self.sync_read_only {
+                    self.push_toast(
+                        "Read-only token: can't delete an attachment",
+                        ToastKind::Error,
+                        false,
+                    );
+                } else {
+                    self.modal = Modal::DeleteAttachmentConfirm(id);
+                }
+            }
+
+            Message::CancelAttachmentUpload(id) => {
+                let _ = crate::db::attachments::remove_local(&self.db(), &id);
+                self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
+                self.reload_data();
+            }
+
+            Message::DeleteAttachmentConfirmed => {
+                if let Modal::DeleteAttachmentConfirm(ref id) = self.modal {
+                    let conn = self.db();
+                    if let Ok(Some(payload)) =
+                        crate::db::attachments::remove_synced_attachment(&conn, id)
+                    {
+                        self.enqueue_sync(crate::db::attachments::ATTACHMENT_ENTITY, id, "delete", Some(payload.as_str()));
+                    }
+                }
+                self.modal = Modal::None;
+                self.reload_data();
+            }
+
+            Message::RetryUpload(id) => {
+                let conn = self.db();
+                let _ = crate::db::attachments::retry_failed(&conn, &id);
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
+
+            Message::RemoveFailedUpload(id) => {
+                let conn = self.db();
+                let row = crate::db::attachments::get(&conn, &id)
+                    .ok()
+                    .flatten()
+                    .filter(|a| a.upload_state == crate::db::attachments::UploadState::Failed);
+                if let Some(row) = row {
+                    if let Ok(true) = crate::db::attachments::remove_local(&conn, &id) {
+                        self.strip_removed_inline(&conn, &row);
+                    }
+                }
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
             }
 
             Message::DeleteProjectConfirmed => {
@@ -4718,6 +5548,11 @@ impl App {
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,
+                            &self.detail_attachments,
+                            &self.detail_comment_attachments,
+                            &self.images,
+                            &self.config.api_base_url,
+                            &self.detail_pending_paths,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -4761,11 +5596,16 @@ impl App {
                             &self.detail_comments,
                             &self.detail_activity,
                             &self.detail_references,
+                            &self.detail_attachments,
+                            &self.detail_comment_attachments,
+                            &self.images,
                             &self.issues,
                             parent,
                             sub_issues,
                             self.detail_origin.as_deref(),
                             &my_member_ids,
+                            &self.config.api_base_url,
+                            &self.detail_pending_paths,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
@@ -4973,6 +5813,22 @@ impl App {
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
+            }
+            Modal::Lightbox(state) => {
+                iced::widget::stack![base, crate::views::lightbox::view(state, &self.images)].into()
+            }
+            Modal::DeleteAttachmentConfirm(id) => {
+                let name = crate::db::attachments::get(&self.db(), id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.filename)
+                    .unwrap_or_default();
+                let body = format!("Delete the attachment \"{name}\"? This can't be undone.");
+                iced::widget::stack![
+                    base,
+                    delete_modal("Delete Attachment?", body, Message::DeleteAttachmentConfirmed)
+                ]
+                .into()
             }
             Modal::IssuePicker => match (&self.issue_picker, &self.issue_detail) {
                 (Some(picker), Some(detail)) => {
@@ -5361,6 +6217,13 @@ fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn comment_content_rule_allows_files_without_text() {
+        assert!(!super::comment_has_content("", false));
+        assert!(super::comment_has_content("", true));
+        assert!(super::comment_has_content("hi", false));
+    }
+
     use super::*;
 
     fn team(id: &str, archived: bool) -> Team {

@@ -196,6 +196,209 @@ pub fn segments<'a>(
     out
 }
 
+// ── Body segments: text runs and image blocks ──
+
+/// Path prefix of a JAIT (Rails ActiveStorage) blob redirect URL.
+const BLOB_PATH_PREFIX: &str = "/rails/active_storage/blobs/redirect/";
+/// Scheme of the local placeholder used for a not-yet-uploaded image.
+pub const PENDING_SCHEME: &str = "jait-pending://";
+
+/// Where an image block's `src` points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind<'a> {
+    /// JAIT blob-redirect URL (relative or on the configured host).
+    Blob,
+    /// Local `jait-pending://<uuid>` placeholder; carries the uuid.
+    Pending(&'a str),
+}
+
+/// `![alt](src)` that passed the JAIT-only allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageBlock<'a> {
+    pub alt: &'a str,
+    pub src: &'a str,
+    pub kind: ImageKind<'a>,
+}
+
+/// One piece of a description/comment body, in order. Text runs can be fed to
+/// [`segments`] for mention and issue-reference highlighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodySegment<'a> {
+    Text(&'a str),
+    Image(ImageBlock<'a>),
+}
+
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Classify an image URL. Only JAIT blob URLs and pending placeholders pass;
+/// `host` is the configured base URL (trailing slash tolerated).
+fn classify_image_src<'a>(src: &'a str, host: &str) -> Option<ImageKind<'a>> {
+    if let Some(id) = src.strip_prefix(PENDING_SCHEME) {
+        return is_uuid(id).then_some(ImageKind::Pending(id));
+    }
+    let host = host.trim_end_matches('/');
+    let path = if src.starts_with('/') {
+        src
+    } else if !host.is_empty() {
+        src.strip_prefix(host).filter(|p| p.starts_with('/'))?
+    } else {
+        return None;
+    };
+    let rest = path.strip_prefix(BLOB_PATH_PREFIX)?;
+    let (signed_id, filename) = rest.split_once('/')?;
+    (!signed_id.is_empty() && !filename.is_empty() && !filename.contains('/'))
+        .then_some(ImageKind::Blob)
+}
+
+/// Try to parse an image at the start of `s` (which begins with `![`).
+/// Returns the block and the byte length consumed.
+fn parse_image<'a>(s: &'a str, host: &str) -> Option<(ImageBlock<'a>, usize)> {
+    let alt_end = s[2..].find(']')? + 2;
+    let alt = &s[2..alt_end];
+    if alt.contains(['[', '\n']) {
+        return None;
+    }
+    let url_part = s[alt_end + 1..].strip_prefix('(')?;
+    // The URL ends at the `)` that balances the opening one, so filenames
+    // containing parentheses (which the web leaves unescaped) still parse.
+    let mut depth = 1usize;
+    let mut close = None;
+    for (i, c) in url_part.char_indices() {
+        match c {
+            c if c.is_whitespace() => return None,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let src = &url_part[..close];
+    if src.contains(char::is_whitespace) {
+        return None;
+    }
+    let kind = classify_image_src(src, host)?;
+    Some((ImageBlock { alt, src, kind }, alt_end + 2 + close + 1))
+}
+
+/// Split a body into ordered text runs and image blocks. `host` is the
+/// configured JAIT base URL, used to recognise absolute blob URLs. Anything
+/// that is not a recognised image (including malformed syntax) stays text.
+pub fn body_segments<'a>(text: &'a str, host: &str) -> Vec<BodySegment<'a>> {
+    let mut out = Vec::new();
+    let mut run_start = 0;
+    let mut i = 0;
+    while let Some(off) = text[i..].find("![") {
+        let at = i + off;
+        match parse_image(&text[at..], host) {
+            Some((block, len)) => {
+                if at > run_start {
+                    out.push(BodySegment::Text(&text[run_start..at]));
+                }
+                out.push(BodySegment::Image(block));
+                i = at + len;
+                run_start = i;
+            }
+            None => i = at + 2,
+        }
+    }
+    if run_start < text.len() {
+        out.push(BodySegment::Text(&text[run_start..]));
+    }
+    out
+}
+
+/// Result of [`rewrite_placeholders`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceholderRewrite {
+    /// The body with every resolved placeholder URL replaced.
+    pub body: String,
+    /// Placeholder uuids still in the body with no entry in the map, in order of
+    /// first appearance, without repeats.
+    pub unresolved: Vec<String>,
+}
+
+/// Percent-encode like the web's JS `encodeURIComponent`: everything except
+/// `A-Z a-z 0-9 - _ . ! ~ * ' ( )`.
+fn encode_uri_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Rewrite every resolved `jait-pending://<uuid>` image URL to the web's form
+/// `/rails/active_storage/blobs/redirect/<signed_id>/<filename>`. `resolved` maps
+/// placeholder uuid to `(signed_id, filename)`; the filename is encoded as the web
+/// does. Everything else is left byte-for-byte as is.
+pub fn rewrite_placeholders(
+    text: &str,
+    resolved: &std::collections::HashMap<String, (String, String)>,
+) -> PlaceholderRewrite {
+    let mut body = String::with_capacity(text.len());
+    let mut unresolved: Vec<String> = Vec::new();
+    for seg in body_segments(text, "") {
+        match seg {
+            BodySegment::Text(t) => body.push_str(t),
+            BodySegment::Image(ImageBlock { alt, src, kind }) => match kind {
+                ImageKind::Pending(id) => match resolved.get(id) {
+                    Some((signed_id, filename)) => {
+                        body.push_str(&format!(
+                            "![{alt}]({BLOB_PATH_PREFIX}{signed_id}/{})",
+                            encode_uri_component(filename)
+                        ));
+                    }
+                    None => {
+                        if !unresolved.iter().any(|u| u == id) {
+                            unresolved.push(id.to_string());
+                        }
+                        body.push_str(&format!("![{alt}]({src})"));
+                    }
+                },
+                ImageKind::Blob => body.push_str(&format!("![{alt}]({src})")),
+            },
+        }
+    }
+    PlaceholderRewrite { body, unresolved }
+}
+
+/// Remove the whole `![alt](jait-pending://<uuid>)` for one placeholder (e.g. a
+/// failed Inline image), alt text included. Only the first occurrence goes; the
+/// rest of the body is unchanged.
+pub fn strip_placeholder(text: &str, uuid: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut removed = false;
+    for seg in body_segments(text, "") {
+        match seg {
+            BodySegment::Text(t) => out.push_str(t),
+            BodySegment::Image(ImageBlock { alt, src, kind }) => {
+                if !removed && kind == ImageKind::Pending(uuid) {
+                    removed = true;
+                } else {
+                    out.push_str(&format!("![{alt}]({src})"));
+                }
+            }
+        }
+    }
+    out
+}
+
 // ── Referenced In ──
 
 /// An issue that mentions the open issue, and where.
@@ -442,6 +645,153 @@ pub fn line_before_cursor(line: &str, col: usize) -> &str {
         end -= 1;
     }
     &line[..end]
+}
+
+#[cfg(test)]
+mod body_segment_tests {
+    use super::*;
+
+    const HOST: &str = "https://jait.example.com";
+    const BLOB: &str = "/rails/active_storage/blobs/redirect/abc123/shot.png";
+    const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    fn img<'a>(alt: &'a str, src: &'a str, kind: ImageKind<'a>) -> BodySegment<'a> {
+        BodySegment::Image(ImageBlock { alt, src, kind })
+    }
+
+    #[test]
+    fn text_only_is_one_run_identical_to_input() {
+        let t = "hello world\nsecond line";
+        assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)]);
+    }
+
+    #[test]
+    fn empty_body_has_no_segments() {
+        assert!(body_segments("", HOST).is_empty());
+    }
+
+    #[test]
+    fn single_image() {
+        let t = format!("![shot]({BLOB})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![img("shot", BLOB, ImageKind::Blob)]
+        );
+    }
+
+    #[test]
+    fn image_between_text_runs() {
+        let t = format!("before ![a]({BLOB}) after");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                BodySegment::Text("before "),
+                img("a", BLOB, ImageKind::Blob),
+                BodySegment::Text(" after"),
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_images() {
+        let t = format!("![a]({BLOB})![b]({BLOB})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                img("a", BLOB, ImageKind::Blob),
+                img("b", BLOB, ImageKind::Blob)
+            ]
+        );
+    }
+
+    #[test]
+    fn absolute_blob_url_on_configured_host() {
+        let src = format!("{HOST}{BLOB}");
+        let t = format!("![a]({src})");
+        assert_eq!(
+            body_segments(&t, "https://jait.example.com/"),
+            vec![img("a", &src, ImageKind::Blob)]
+        );
+    }
+
+    #[test]
+    fn foreign_host_blob_url_stays_text() {
+        let t = format!("![a](https://evil.example.org{BLOB})");
+        assert_eq!(body_segments(&t, HOST), vec![BodySegment::Text(&t)]);
+    }
+
+    #[test]
+    fn non_jait_url_stays_text() {
+        let t = "![a](https://example.com/cat.png)";
+        assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)]);
+    }
+
+    #[test]
+    fn pending_placeholder_exposes_uuid() {
+        let src = format!("jait-pending://{UUID}");
+        let t = format!("x ![a]({src})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                BodySegment::Text("x "),
+                img("a", &src, ImageKind::Pending(UUID))
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_with_bad_uuid_stays_text() {
+        let t = "![a](jait-pending://not-a-uuid)";
+        assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)]);
+    }
+
+    #[test]
+    fn malformed_syntax_stays_text() {
+        for t in [
+            "![alt](",
+            "![alt](/rails/active_storage/blobs/redirect/a/b.png",
+            "![alt]",
+            "![alt] (/rails/active_storage/blobs/redirect/a/b.png)",
+            "![alt",
+        ] {
+            assert_eq!(body_segments(t, HOST), vec![BodySegment::Text(t)], "{t}");
+        }
+    }
+
+    #[test]
+    fn malformed_then_valid_image() {
+        let t = format!("![oops ![a]({BLOB})");
+        assert_eq!(
+            body_segments(&t, HOST),
+            vec![
+                BodySegment::Text("![oops "),
+                img("a", BLOB, ImageKind::Blob)
+            ]
+        );
+    }
+
+    #[test]
+    fn mentions_and_references_still_segment_in_text_runs() {
+        let t = format!("ping @Ann re PROJ-7 ![a]({BLOB}) PROJ-8");
+        let segs = body_segments(&t, HOST);
+        let BodySegment::Text(first) = segs[0] else {
+            panic!("expected text first");
+        };
+        assert_eq!(
+            segments(first, "PROJ", &["Ann"]),
+            vec![
+                Segment::Text("ping "),
+                Segment::Mention("@Ann"),
+                Segment::Text(" re "),
+                Segment::Issue {
+                    text: "PROJ-7",
+                    number: Some(7)
+                },
+                Segment::Text(" "),
+            ]
+        );
+        assert_eq!(segs.len(), 3);
+    }
 }
 
 #[cfg(test)]
@@ -716,5 +1066,108 @@ mod tests {
         let mut target = issue("t", 1, None);
         target.team_number = None;
         assert!(referenced_in(&target, "JAIT", &[], &[]).is_empty());
+    }
+
+    // ── placeholder rewrite ──
+
+    const U1: &str = "11111111-1111-4111-8111-111111111111";
+    const U2: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn map(entries: &[(&str, &str, &str)]) -> std::collections::HashMap<String, (String, String)> {
+        entries
+            .iter()
+            .map(|(u, s, f)| (u.to_string(), (s.to_string(), f.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn rewrite_full_map() {
+        let text = format!("a\n![x]({PENDING_SCHEME}{U1}) b ![y]({PENDING_SCHEME}{U2})");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "sig1", "a.png"), (U2, "sig2", "b.png")]));
+        assert_eq!(
+            r.body,
+            "a\n![x](/rails/active_storage/blobs/redirect/sig1/a.png) b ![y](/rails/active_storage/blobs/redirect/sig2/b.png)"
+        );
+        assert!(r.unresolved.is_empty());
+    }
+
+    #[test]
+    fn rewrite_partial_and_empty_map() {
+        let text = format!("![x]({PENDING_SCHEME}{U1})\n![y]({PENDING_SCHEME}{U2})\n![z]({PENDING_SCHEME}{U2})");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "sig1", "a.png")]));
+        assert_eq!(
+            r.body,
+            format!("![x](/rails/active_storage/blobs/redirect/sig1/a.png)\n![y]({PENDING_SCHEME}{U2})\n![z]({PENDING_SCHEME}{U2})")
+        );
+        assert_eq!(r.unresolved, vec![U2.to_string()]);
+
+        let r = rewrite_placeholders(&text, &map(&[]));
+        assert_eq!(r.body, text);
+        assert_eq!(r.unresolved, vec![U1.to_string(), U2.to_string()]);
+    }
+
+    #[test]
+    fn rewrite_leaves_other_text_untouched() {
+        let text = format!(
+            "héllo 🎉\r\n\n![](/rails/active_storage/blobs/redirect/s/k.png) [x] ![bad]( {U1}) ![y]({PENDING_SCHEME}{U1})  \n"
+        );
+        let r = rewrite_placeholders(&text, &map(&[(U1, "s", "k.png")]));
+        assert_eq!(
+            r.body,
+            "héllo 🎉\r\n\n![](/rails/active_storage/blobs/redirect/s/k.png) [x] ![bad]( 11111111-1111-4111-8111-111111111111) ![y](/rails/active_storage/blobs/redirect/s/k.png)  \n"
+        );
+        assert!(rewrite_placeholders("no images é", &map(&[])).body == "no images é");
+    }
+
+    #[test]
+    fn rewrite_encodes_filename_like_encode_uri_component() {
+        let text = format!("![x]({PENDING_SCHEME}{U1})");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "s", "my pic é+#?.png")]));
+        assert_eq!(
+            r.body,
+            "![x](/rails/active_storage/blobs/redirect/s/my%20pic%20%C3%A9%2B%23%3F.png)"
+        );
+    }
+
+    #[test]
+    fn filename_with_parens_round_trips_through_rewrite() {
+        let text = format!("![x]({PENDING_SCHEME}{U1}) tail");
+        let r = rewrite_placeholders(&text, &map(&[(U1, "s", "shot (1).png")]));
+        let segs = body_segments(&r.body, "");
+        assert_eq!(segs.len(), 2);
+        match segs[0] {
+            BodySegment::Image(b) => {
+                assert_eq!(b.kind, ImageKind::Blob);
+                assert!(b.src.ends_with("/shot%20(1).png"));
+            }
+            _ => panic!("expected image"),
+        }
+        assert_eq!(segs[1], BodySegment::Text(" tail"));
+    }
+
+    #[test]
+    fn web_body_with_unescaped_parens_parses() {
+        let body = "a ![p](/rails/active_storage/blobs/redirect/sid/photo(2).png) b";
+        let segs = body_segments(body, "");
+        assert_eq!(segs.len(), 3);
+        assert!(matches!(segs[1], BodySegment::Image(b) if b.src.ends_with("photo(2).png")));
+        assert_eq!(segs[2], BodySegment::Text(" b"));
+        // Unbalanced stays text.
+        let bad = "![p](/rails/active_storage/blobs/redirect/sid/a(b.png";
+        assert_eq!(body_segments(bad, ""), vec![BodySegment::Text(bad)]);
+    }
+
+    #[test]
+    fn strip_removes_exactly_one_placeholder_image() {
+        let text = format!("a ![alt text]({PENDING_SCHEME}{U1}) b ![k]({PENDING_SCHEME}{U2})\n");
+        assert_eq!(
+            strip_placeholder(&text, U1),
+            format!("a  b ![k]({PENDING_SCHEME}{U2})\n")
+        );
+        // Unknown uuid: unchanged.
+        assert_eq!(strip_placeholder(&text, "33333333-3333-4333-8333-333333333333"), text);
+        // Duplicate: only the first goes.
+        let dup = format!("![a]({PENDING_SCHEME}{U1})|![b]({PENDING_SCHEME}{U1})");
+        assert_eq!(strip_placeholder(&dup, U1), format!("|![b]({PENDING_SCHEME}{U1})"));
     }
 }
