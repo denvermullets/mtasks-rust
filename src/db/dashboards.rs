@@ -376,6 +376,49 @@ pub fn create_local(
     Ok(get(conn, &id)?.expect("dashboard just inserted"))
 }
 
+/// Which way to move a group in its dashboard's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up,
+    Down,
+}
+
+/// Move a group one place up or down, renumber the dashboard's groups 0..n
+/// locally, and queue the new order. All moves on one dashboard coalesce into
+/// a single pending `GROUP_ORDER_ENTITY_TYPE` entry (entity_id = dashboard
+/// local id, action "update") whose payload `{"group_ids": [..]}` holds the
+/// final order as local group ids. Returns false at an edge (nothing written).
+pub fn move_group(conn: &Connection, group_id: &str, direction: MoveDirection) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let dashboard_id: String = tx.query_row(
+        "SELECT dashboard_id FROM dashboard_groups WHERE id = ?1",
+        params![group_id],
+        |r| r.get(0),
+    )?;
+    let mut ids: Vec<String> = groups_for(&tx, &dashboard_id)?.into_iter().map(|g| g.id).collect();
+    let Some(at) = ids.iter().position(|i| i == group_id) else { return Ok(false) };
+    let to = match direction {
+        MoveDirection::Up if at > 0 => at - 1,
+        MoveDirection::Down if at + 1 < ids.len() => at + 1,
+        _ => return Ok(false),
+    };
+    ids.swap(at, to);
+    for (pos, id) in ids.iter().enumerate() {
+        tx.execute("UPDATE dashboard_groups SET position = ?2 WHERE id = ?1", params![id, pos as i64])?;
+    }
+    let payload = serde_json::json!({ "group_ids": ids }).to_string();
+    let updated = tx.execute(
+        "UPDATE sync_queue SET payload = ?3
+         WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL AND attempted_at IS NULL",
+        params![GROUP_ORDER_ENTITY_TYPE, dashboard_id, payload],
+    )?;
+    if updated == 0 {
+        sync_queue::enqueue(&tx, GROUP_ORDER_ENTITY_TYPE, &dashboard_id, "update", Some(&payload))?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
 /// After a successful `POST`: the local row takes the server's id, position
 /// and `updated_at`. The name and description stay as typed (a later local
 /// edit may be queued). A pull that ran first may have mirrored the pushed
@@ -390,6 +433,127 @@ pub fn adopt_created(conn: &Connection, id: &str, dto: &DashboardIn) -> Result<(
         params![id, dto.id, dto.position, dto.updated_at],
     )?;
     Ok(())
+}
+
+/// The nine group color swatches Rails offers; the first is the default.
+pub const GROUP_SWATCHES: [&str; 9] = [
+    "#6366f1", "#ec4899", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6",
+    "#737373",
+];
+
+/// Working copy of a group being created (the group modal's state, minus UI).
+/// Every source kind joins through `toggle_source` / `set_include_all`, so the
+/// project and label tickets only add pickers that call these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDraft {
+    pub name: String,
+    pub description: String,
+    pub color: String,
+    pub sources: Vec<GroupSource>,
+}
+
+impl Default for GroupDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            color: GROUP_SWATCHES[0].to_string(),
+            sources: Vec::new(),
+        }
+    }
+}
+
+impl GroupDraft {
+    pub fn is_selected(&self, source_type: SourceType, remote_id: i64) -> bool {
+        self.sources.iter().any(|s| s.source_type == source_type && s.remote_id == remote_id)
+    }
+
+    pub fn include_all(&self, source_type: SourceType, remote_id: i64) -> bool {
+        self.sources
+            .iter()
+            .any(|s| s.source_type == source_type && s.remote_id == remote_id && s.include_all)
+    }
+
+    /// Select the source, or deselect it (which drops its include-all flag).
+    pub fn toggle_source(&mut self, source_type: SourceType, remote_id: i64) {
+        if self.is_selected(source_type, remote_id) {
+            self.sources.retain(|s| !(s.source_type == source_type && s.remote_id == remote_id));
+        } else {
+            self.sources.push(GroupSource { source_type, remote_id, include_all: false });
+        }
+    }
+
+    /// Set "all issues" on a selected Team or Project source. Ignored for an
+    /// unselected source and for labels, which have no such flag.
+    pub fn set_include_all(&mut self, source_type: SourceType, remote_id: i64, on: bool) {
+        if source_type == SourceType::Label {
+            return;
+        }
+        if let Some(s) = self
+            .sources
+            .iter_mut()
+            .find(|s| s.source_type == source_type && s.remote_id == remote_id)
+        {
+            s.include_all = on;
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum GroupError {
+    Name(NameError),
+    /// The parent dashboard doesn't exist locally.
+    NoDashboard,
+    Db(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for GroupError {
+    fn from(e: rusqlite::Error) -> Self {
+        GroupError::Db(e)
+    }
+}
+
+/// Create a group offline under a dashboard (pushed or not): validate the name,
+/// place it last, store its sources and queue a "create" entry without payload.
+/// An unknown color falls back to the default; `include_all` is stored only on
+/// selected Team and Project sources.
+pub fn create_group_local(
+    conn: &Connection,
+    dashboard_id: &str,
+    draft: &GroupDraft,
+) -> std::result::Result<DashboardGroup, GroupError> {
+    let name = validate_name(&draft.name).map_err(GroupError::Name)?;
+    if get(conn, dashboard_id)?.is_none() {
+        return Err(GroupError::NoDashboard);
+    }
+    let color = if GROUP_SWATCHES.contains(&draft.color.as_str()) {
+        draft.color.as_str()
+    } else {
+        GROUP_SWATCHES[0]
+    };
+    let tx = conn.unchecked_transaction()?;
+    let position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM dashboard_groups WHERE dashboard_id = ?1",
+        params![dashboard_id],
+        |r| r.get(0),
+    )?;
+    let id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO dashboard_groups (id, remote_id, dashboard_id, name, description, color, position)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+        params![id, dashboard_id, name, draft.description.trim(), color, position],
+    )?;
+    for s in &draft.sources {
+        let all = s.include_all && s.source_type != SourceType::Label;
+        tx.execute(
+            "INSERT OR IGNORE INTO dashboard_group_sources (group_id, source_type, source_remote_id, include_all)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, s.source_type.as_str(), s.remote_id, all as i64],
+        )?;
+    }
+    sync_queue::enqueue(&tx, GROUP_ENTITY_TYPE, &id, "create", None)?;
+    tx.commit()?;
+    Ok(groups_for(conn, dashboard_id)?.into_iter().find(|g| g.id == id).expect("group just inserted"))
 }
 
 pub fn find_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Dashboard>> {
@@ -709,6 +873,89 @@ mod tests {
         assert!(get(&conn, &d.id).unwrap().is_some());
     }
 
+    fn seeded_three() -> (Connection, String, Vec<String>) {
+        let conn = setup();
+        apply_snapshot(
+            &conn,
+            &[dash(1, "A", 0, vec![group(10, "G", 0), group(11, "H", 1), group(12, "I", 2)])],
+        )
+        .unwrap();
+        let d = find_by_remote_id(&conn, 1).unwrap().unwrap();
+        let ids = groups_for(&conn, &d.id).unwrap().into_iter().map(|g| g.id).collect();
+        (conn, d.id, ids)
+    }
+
+    fn names(conn: &Connection, d: &str) -> Vec<String> {
+        groups_for(conn, d).unwrap().into_iter().map(|g| g.name).collect()
+    }
+
+    #[test]
+    fn move_group_renumbers_the_groups_contiguously() {
+        let (conn, d, ids) = seeded_three();
+        // Server positions with gaps are normalised to 0..n.
+        conn.execute("UPDATE dashboard_groups SET position = position * 10 + 5", []).unwrap();
+        assert!(move_group(&conn, &ids[2], MoveDirection::Up).unwrap());
+        assert_eq!(names(&conn, &d), ["G", "I", "H"]);
+        let pos: Vec<_> = groups_for(&conn, &d).unwrap().into_iter().map(|g| g.position).collect();
+        assert_eq!(pos, [0, 1, 2]);
+        assert!(move_group(&conn, &ids[0], MoveDirection::Down).unwrap());
+        assert_eq!(names(&conn, &d), ["I", "G", "H"]);
+    }
+
+    #[test]
+    fn move_group_at_an_edge_changes_and_queues_nothing() {
+        let (conn, d, ids) = seeded_three();
+        assert!(!move_group(&conn, &ids[0], MoveDirection::Up).unwrap());
+        assert!(!move_group(&conn, &ids[2], MoveDirection::Down).unwrap());
+        assert_eq!(names(&conn, &d), ["G", "H", "I"]);
+        assert!(sync_queue::pending_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn several_moves_coalesce_into_one_entry_with_the_final_order() {
+        let (conn, d, ids) = seeded_three();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        move_group(&conn, &ids[2], MoveDirection::Up).unwrap();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].entity_type.as_str(), q[0].action.as_str(), q[0].entity_id.as_str()),
+                   (GROUP_ORDER_ENTITY_TYPE, "update", d.as_str()));
+        let payload: serde_json::Value = serde_json::from_str(q[0].payload.as_deref().unwrap()).unwrap();
+        let order: Vec<_> = groups_for(&conn, &d).unwrap().into_iter().map(|g| g.id).collect();
+        assert_eq!(payload["group_ids"], serde_json::json!(order));
+        assert_eq!(names(&conn, &d), ["I", "H", "G"]);
+    }
+
+    #[test]
+    fn a_move_after_the_order_was_pushed_queues_a_fresh_entry() {
+        let (conn, d, ids) = seeded_three();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        conn.execute("UPDATE sync_queue SET synced_at = 'x'", []).unwrap();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        let q = sync_queue::pending_entries(&conn).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].entity_id, d);
+        assert_eq!(names(&conn, &d), ["H", "I", "G"]);
+    }
+
+    #[test]
+    fn moves_on_different_dashboards_queue_separate_entries() {
+        let (conn, _d, ids) = seeded_three();
+        apply_snapshot(
+            &conn,
+            &[
+                dash(1, "A", 0, vec![group(10, "G", 0), group(11, "H", 1), group(12, "I", 2)]),
+                dash(2, "B", 1, vec![group(20, "X", 0), group(21, "Y", 1)]),
+            ],
+        )
+        .unwrap();
+        let x = find_group_by_remote_id(&conn, 20).unwrap().unwrap();
+        move_group(&conn, &ids[0], MoveDirection::Down).unwrap();
+        move_group(&conn, &x.id, MoveDirection::Down).unwrap();
+        assert_eq!(sync_queue::pending_entries(&conn).unwrap().len(), 2);
+    }
+
     #[test]
     fn adopt_created_takes_id_position_and_updated_at() {
         let conn = setup();
@@ -744,5 +991,80 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, d.id);
         assert_eq!(all[0].remote_id, Some(77));
+    }
+
+    #[test]
+    fn create_group_local_places_last_stores_sources_and_queues_a_create() {
+        let conn = setup();
+        let d = create_local(&conn, "D", "").unwrap();
+        let mut draft =
+            GroupDraft { name: " Mine ".into(), description: " d ".into(), ..Default::default() };
+        draft.color = "#ec4899".into();
+        draft.toggle_source(SourceType::Team, 7);
+        draft.set_include_all(SourceType::Team, 7, true);
+        draft.toggle_source(SourceType::Team, 8);
+        let a = create_group_local(&conn, &d.id, &draft).unwrap();
+        let b = create_group_local(&conn, &d.id, &GroupDraft { name: "B".into(), ..Default::default() })
+            .unwrap();
+        assert_eq!(
+            (a.name.as_str(), a.description.as_str(), a.color.as_str(), a.position),
+            ("Mine", "d", "#ec4899", 0)
+        );
+        assert_eq!((b.position, b.remote_id, b.color.as_str()), (1, None, "#6366f1"));
+        assert_eq!(
+            sources_for(&conn, &a.id).unwrap(),
+            [
+                GroupSource { source_type: SourceType::Team, remote_id: 7, include_all: true },
+                GroupSource { source_type: SourceType::Team, remote_id: 8, include_all: false },
+            ]
+        );
+        let q: Vec<_> = sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.entity_type == GROUP_ENTITY_TYPE)
+            .collect();
+        assert_eq!(q.len(), 2);
+        assert_eq!((q[0].action.as_str(), q[0].entity_id.as_str()), ("create", a.id.as_str()));
+    }
+
+    #[test]
+    fn create_group_local_rejects_bad_name_and_missing_dashboard_without_writing() {
+        let conn = setup();
+        let d = create_local(&conn, "D", "").unwrap();
+        let blank = GroupDraft { name: "  ".into(), ..Default::default() };
+        assert!(matches!(
+            create_group_local(&conn, &d.id, &blank),
+            Err(GroupError::Name(NameError::Blank))
+        ));
+        let ok = GroupDraft { name: "G".into(), ..Default::default() };
+        assert!(matches!(create_group_local(&conn, "nope", &ok), Err(GroupError::NoDashboard)));
+        assert!(groups_for(&conn, &d.id).unwrap().is_empty());
+        assert_eq!(sync_queue::pending_entries(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn include_all_counts_only_on_a_selected_source() {
+        let mut draft = GroupDraft::default();
+        draft.set_include_all(SourceType::Team, 1, true);
+        assert!(!draft.include_all(SourceType::Team, 1));
+        draft.toggle_source(SourceType::Team, 1);
+        draft.set_include_all(SourceType::Team, 1, true);
+        assert!(draft.include_all(SourceType::Team, 1));
+        draft.toggle_source(SourceType::Team, 1);
+        draft.toggle_source(SourceType::Team, 1);
+        assert!(!draft.include_all(SourceType::Team, 1));
+        draft.toggle_source(SourceType::Label, 5);
+        draft.set_include_all(SourceType::Label, 5, true);
+        assert!(!draft.include_all(SourceType::Label, 5));
+    }
+
+    #[test]
+    fn a_local_group_under_an_unpushed_dashboard_survives_a_pull() {
+        let conn = setup();
+        let d = create_local(&conn, "D", "").unwrap();
+        let g = create_group_local(&conn, &d.id, &GroupDraft { name: "G".into(), ..Default::default() })
+            .unwrap();
+        apply_snapshot(&conn, &[]).unwrap();
+        assert_eq!(groups_for(&conn, &d.id).unwrap()[0].id, g.id);
     }
 }

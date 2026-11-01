@@ -109,8 +109,9 @@ pub struct Input<'a> {
 pub struct GroupResult<'a> {
     pub group: &'a DashboardGroup,
     /// Every source was dropped as unreachable. Not widened to show everything.
-    #[allow(dead_code)]
     pub inaccessible: bool,
+    /// The group has no sources at all.
+    pub no_sources: bool,
     /// Sorted issues.
     pub issues: Vec<&'a Issue>,
 }
@@ -154,8 +155,8 @@ pub fn evaluate<'a>(input: &Input<'a>) -> Evaluation<'a> {
             sort(&mut issues, input.header.sort, m.projects);
             GroupResult {
                 group: &cfg.group,
-                inaccessible: !cfg.sources.is_empty()
-                    && cfg.sources.iter().all(|s| dropped(s, m, &accessible)),
+                inaccessible: is_inaccessible(cfg, m, &accessible),
+                no_sources: cfg.sources.is_empty(),
                 issues,
             }
         })
@@ -184,6 +185,20 @@ fn project_of_source<'a>(
 /// The local team behind a team source, if mirrored.
 fn team_of_source<'a>(s: &GroupSource, m: &Mirror<'a>) -> Option<&'a Team> {
     m.teams.iter().find(|t| t.remote_id == Some(s.remote_id))
+}
+
+/// A group is inaccessible when, for either kind (team/project; label), it has
+/// sources of that kind and every one was dropped. A kind with none doesn't count.
+fn is_inaccessible(cfg: &GroupConfig, m: &Mirror<'_>, accessible: &HashSet<&str>) -> bool {
+    let all_dropped = |label: bool| {
+        let kind: Vec<&GroupSource> = cfg
+            .sources
+            .iter()
+            .filter(|s| (s.source_type == SourceType::Label) == label)
+            .collect();
+        !kind.is_empty() && kind.iter().all(|s| dropped(s, m, accessible))
+    };
+    all_dropped(false) || all_dropped(true)
 }
 
 /// A source pointing at something outside the accessible teams.
@@ -1063,5 +1078,39 @@ mod tests {
         fx.issue_labels.insert("outside".into(), vec![fx.labels[0].clone()]);
         let got = fx.run(vec![cfg("g", vec![proj_src(10, true), label_src(20)])], Some(99));
         assert_eq!(got, vec![ids(&["mine"])]);
+    }
+
+    #[test]
+    fn inaccessible_when_one_kind_lost_access_even_with_other_kind() {
+        let fx = label_fx();
+        let groups = vec![
+            // Live team source, but its only label source is on an archived team.
+            cfg("labels_lost", vec![team_src(1, true), label_src(13)]),
+            // Live label source, but its only team source is unmirrored.
+            cfg("teams_lost", vec![team_src(77, true), label_src(10)]),
+            cfg("all_live", vec![team_src(1, true), label_src(10)]),
+        ];
+        let ev = fx.eval(&groups, Some(99));
+        let flags: Vec<bool> = ev.groups.iter().map(|g| g.inaccessible).collect();
+        assert_eq!(flags, [true, true, false]);
+        assert!(ev.groups[0].issues.is_empty());
+    }
+
+    #[test]
+    fn project_kind_lost_with_live_label_is_inaccessible() {
+        let mut fx = project_fx();
+        fx.labels = vec![label("bug_a", "a", 20)];
+        let groups = vec![cfg("g", vec![proj_src(11, true), label_src(20)])];
+        assert!(fx.eval(&groups, Some(99)).groups[0].inaccessible);
+    }
+
+    #[test]
+    fn no_sources_and_reachable_but_empty_are_distinct_states() {
+        let fx = Fx::new();
+        let groups = vec![cfg("none", vec![]), cfg("empty", vec![team_src(1, true)])];
+        let ev = fx.eval(&groups, Some(99));
+        assert!(ev.groups.iter().all(|g| !g.inaccessible && g.issues.is_empty()));
+        assert!(ev.groups[0].no_sources);
+        assert!(!ev.groups[1].no_sources);
     }
 }
