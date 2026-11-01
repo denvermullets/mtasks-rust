@@ -1684,6 +1684,12 @@ impl App {
         }
     }
 
+    /// Whether j/k/h/l use list-mode navigation: the list display mode, or a
+    /// dashboard (always a list of groups).
+    fn list_nav_active(&self) -> bool {
+        matches!(self.view, View::Dashboard(_)) || self.board_display().view_mode == ViewMode::List
+    }
+
     /// Per-section counts for list-mode navigation: collapsed sections count
     /// as empty so j/k and h/l skip their hidden rows.
     fn list_nav_counts(&self) -> Vec<usize> {
@@ -1718,6 +1724,40 @@ impl App {
     /// view. Positions come from fixed element heights (see `scroll`); the
     /// current offset and viewport height come from `Message::Scrolled`.
     fn scroll_to_focus(&mut self) -> Task<Message> {
+        if let View::Dashboard(did) = &self.view {
+            let collapsed = self.collapsed_dashboard_groups.get(did);
+            let groups: Vec<crate::views::dashboard::SpanGroup> = self
+                .dashboard_evaluation()
+                .groups
+                .iter()
+                .map(|g| crate::views::dashboard::SpanGroup {
+                    len: g.issues.len(),
+                    collapsed: collapsed.is_some_and(|c| c.contains(&g.group.id)),
+                })
+                .collect();
+            if self.focused_issue >= groups.get(self.focused_lane).map_or(0, |g| g.len)
+                || groups[self.focused_lane].collapsed
+            {
+                return Task::none();
+            }
+            let (top, height) =
+                crate::views::dashboard::focused_span(&groups, self.focused_lane, self.focused_issue);
+            let key = issue_list::SCROLL_KEY;
+            let (offset, viewport) = self
+                .scroll_state
+                .get(&key)
+                .copied()
+                .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
+            let new = scroll::offset_to_reveal(top, height, offset, viewport);
+            if (new - offset).abs() < 0.5 {
+                return Task::none();
+            }
+            self.scroll_state.insert(key, (new, viewport));
+            return scrollable::scroll_to(
+                crate::views::dashboard::scroll_id(),
+                scrollable::AbsoluteOffset { x: 0.0, y: new },
+            );
+        }
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
@@ -3018,6 +3058,11 @@ impl App {
                         return self.update(msg);
                     }
                 }
+                if matches!(self.view, View::Dashboard(_)) && !modal_open {
+                    if let Some(msg) = keys::handle_dashboard_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
                 if matches!(self.view, View::Dashboard(_))
                     && !modal_open
                     && modifiers.is_empty()
@@ -4270,7 +4315,7 @@ impl App {
             }
 
             Message::FocusNextIssue | Message::FocusPrevIssue
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: j/k walk rows top-to-bottom across sections.
                 let counts = self.list_nav_counts();
@@ -4284,7 +4329,7 @@ impl App {
                 return self.scroll_to_focus();
             }
             Message::FocusNextLane | Message::FocusPrevLane
-                if self.board_display().view_mode == ViewMode::List =>
+                if self.list_nav_active() =>
             {
                 // List mode: h/l jump to the next/previous non-empty section.
                 let counts = self.list_nav_counts();
