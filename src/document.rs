@@ -90,6 +90,8 @@ pub enum Inline {
     /// references in bold text stay tokens. Wrapper inlines for other styles
     /// (emphasis, strikethrough) nest the same way.
     Strong(Vec<Inline>),
+    /// `*emphasis*` text; nests like [`Inline::Strong`].
+    Emphasis(Vec<Inline>),
 }
 
 /// Whether a link target may be opened: only `http`, `https` and `mailto`
@@ -265,6 +267,11 @@ impl Builder {
                 self.wrappers.push((std::mem::take(&mut self.current), Inline::Strong));
             }
             Event::End(TagEnd::Strong) => self.close_wrapper(),
+            Event::Start(Tag::Emphasis) if self.html_depth == 0 => {
+                self.flush_pending();
+                self.wrappers.push((std::mem::take(&mut self.current), Inline::Emphasis));
+            }
+            Event::End(TagEnd::Emphasis) => self.close_wrapper(),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::Start(Tag::List(start)) => self.open(Frame::List(start, Vec::new(), Vec::new())),
             Event::Start(Tag::Item) => {
@@ -528,6 +535,41 @@ mod tests {
         Inline::Strong(runs)
     }
 
+    fn em(runs: Vec<Inline>) -> Inline {
+        Inline::Emphasis(runs)
+    }
+
+    #[test]
+    fn parses_emphasis_runs() {
+        let cases: Vec<(&str, &str, Vec<Block>)> = vec![
+            ("star italic", "a *b* c", vec![para(vec![text("a "), em(vec![text("b")]), text(" c")])]),
+            ("underscore italic", "a _b_ c", vec![para(vec![text("a "), em(vec![text("b")]), text(" c")])]),
+            ("unclosed stays literal", "*oops", vec![para(vec![text("*oops")])]),
+            (
+                "bold italic",
+                "***both***",
+                vec![para(vec![em(vec![strong(vec![text("both")])])])],
+            ),
+            (
+                "italic inside bold",
+                "**a *b* c**",
+                vec![para(vec![strong(vec![text("a "), em(vec![text("b")]), text(" c")])])],
+            ),
+            (
+                "tokens inside italic and strike",
+                "*@Ann* PROJ-7",
+                vec![para(vec![
+                    em(vec![Inline::Mention("@Ann".into())]),
+                    text(" "),
+                    Inline::IssueRef { text: "PROJ-7".into(), prefix: "PROJ".into(), number: 7 },
+                ])],
+            ),
+        ];
+        for (name, body, want) in cases {
+            assert_eq!(parse_with(body, "", &["Ann"]).blocks, want, "{name}");
+        }
+    }
+
     #[test]
     fn parses_strong_runs() {
         let cases: Vec<(&str, &str, Vec<Block>)> = vec![
@@ -541,7 +583,7 @@ mod tests {
             ),
             ("unclosed stays literal", "**oops", vec![para(vec![text("**oops")])]),
             ("empty marks stay literal", "a **** b", vec![para(vec![text("a **** b")])]),
-            ("single star is not strong", "a *b* c", vec![para(vec![text("a b c")])]),
+            ("single star is not strong", "a *b* c", vec![para(vec![text("a "), em(vec![text("b")]), text(" c")])]),
             (
                 "tokens inside strong",
                 "**ping @Ann on PROJ-7**",
@@ -900,7 +942,7 @@ mod tests {
             (
                 "underscore name inside underscore emphasis",
                 "ping _@john_smith_ now",
-                vec![text("ping "), mention("@john_smith"), text(" now")],
+                vec![text("ping "), Inline::Emphasis(vec![mention("@john_smith")]), text(" now")],
             ),
             ("longest name wins", "@Ann Lee ok", vec![mention("@Ann Lee"), text(" ok")]),
             ("unknown member stays text", "@bob", vec![text("@bob")]),
@@ -913,7 +955,7 @@ mod tests {
             (
                 "inside emphasis",
                 "**PROJ-1** and *@ann*",
-                vec![Inline::Strong(vec![issue("PROJ-1", "PROJ", 1)]), text(" and "), mention("@ann")],
+                vec![Inline::Strong(vec![issue("PROJ-1", "PROJ", 1)]), text(" and "), Inline::Emphasis(vec![mention("@ann")])],
             ),
             ("inline code not tokenized", "`PROJ-1 @ann` x", vec![text("PROJ-1 @ann x")]),
             (
