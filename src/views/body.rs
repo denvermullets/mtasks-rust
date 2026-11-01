@@ -163,21 +163,36 @@ fn block<'a>(b: &Block, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'
     match b {
         Block::Paragraph(inlines) => paragraph(inlines, size, plain, ctx),
         Block::Image(img) => image_block(img, ctx),
-        Block::List(list) => bullet_list(list, size, plain, ctx),
+        Block::List(list) => list_block(list, size, plain, ctx),
     }
 }
 
-/// Gutter holding the bullet; item content sits in its own column beside it,
-/// so wrapped lines hang under the first line rather than under the bullet.
-fn bullet_list<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
+/// Marker for item `index` (0-based): a bullet, or the number counted from
+/// the list's start.
+fn list_marker(start: Option<u64>, index: usize) -> String {
+    match start {
+        Some(n) => format!("{}.", n + index as u64),
+        None => "•".to_string(),
+    }
+}
+
+/// Gutter holding the marker; item content sits in its own column beside it,
+/// so wrapped lines hang under the first line rather than under the marker.
+/// A numbered gutter is as wide as its widest label so items stay aligned.
+fn list_block<'a>(list: &document::List, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     let mut col = column![].spacing(t::space::S1);
-    for item in &list.items {
+    let labels: Vec<String> = (0..list.items.len()).map(|i| list_marker(list.start, i)).collect();
+    let gutter = match list.start {
+        Some(_) => labels.iter().map(|l| l.chars().count()).max().unwrap_or(1) as f32 * size * 0.65 + size * 0.5,
+        None => size * 1.25,
+    };
+    for (item, label) in list.items.iter().zip(labels) {
         let mut content = column![].spacing(t::space::S1).width(iced::Length::Fill);
         for b in item {
             content = content.push(block(b, size, plain, ctx));
         }
         col = col.push(
-            row![container(text("•").size(size).color(plain)).width(size * 1.25), content]
+            row![container(text(label).size(size).color(plain)).width(gutter), content]
                 .spacing(t::space::S1),
         );
     }
@@ -355,6 +370,20 @@ mod tests {
     use super::*;
 
     const HOST: &str = "http://localhost:3005";
+
+    #[test]
+    fn list_markers_count_from_the_start() {
+        let cases = [
+            (None, 2, "•"),
+            (Some(1), 0, "1."),
+            (Some(1), 9, "10."),
+            (Some(3), 1, "4."),
+            (Some(0), 0, "0."),
+        ];
+        for (start, index, want) in cases {
+            assert_eq!(list_marker(start, index), want, "{start:?} {index}");
+        }
+    }
 
     fn resolve(token: &str) -> Option<LinkTarget> {
         (token == "PROJ-7").then(|| LinkTarget::Issue("id-7".into()))

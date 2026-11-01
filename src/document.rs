@@ -31,15 +31,17 @@ pub enum Block {
     /// An image on its own line in reading order. An image inside a paragraph
     /// splits it into paragraph, image, paragraph.
     Image(ImageBlock),
-    /// A bulleted list. Ordered lists are not a block yet (JRST-275); until
-    /// then their items surface as flat paragraphs.
+    /// A bulleted or numbered list.
     List(List),
 }
 
-/// A bulleted list: each item is its own block sequence, so an item can hold
-/// several paragraphs, images and (later) nested lists.
+/// A list: each item is its own block sequence, so an item can hold
+/// several paragraphs, images and nested lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct List {
+    /// `Some(n)` for a numbered list whose first item is numbered `n` (the
+    /// number the author wrote, so `3.` starts at 3); `None` for bullets.
+    pub start: Option<u64>,
     pub items: Vec<Vec<Block>>,
 }
 
@@ -147,12 +149,12 @@ struct Builder {
 
 /// An open container and what it has collected so far.
 enum Frame {
-    /// A bulleted list; collects finished items.
-    List(Vec<Vec<Block>>),
-    /// An item of a bulleted list.
+    /// A list (start number if ordered); collects finished items.
+    List(Option<u64>, Vec<Vec<Block>>),
+    /// An item of a list.
     Item(Vec<Block>),
-    /// A container with no block of its own (ordered lists and their items for
-    /// now): children are spliced into the parent when it closes.
+    /// A container with no block of its own (an item outside any list):
+    /// children are spliced into the parent when it closes.
     Flat(Vec<Block>),
 }
 
@@ -167,9 +169,9 @@ impl Builder {
     fn close(&mut self) {
         self.flush();
         match self.stack.pop() {
-            Some(Frame::List(items)) => self.push_block(Block::List(List { items })),
+            Some(Frame::List(start, items)) => self.push_block(Block::List(List { start, items })),
             Some(Frame::Item(blocks)) => match self.stack.last_mut() {
-                Some(Frame::List(items)) => items.push(blocks),
+                Some(Frame::List(_, items)) => items.push(blocks),
                 _ => blocks.into_iter().for_each(|b| self.push_block(b)),
             },
             Some(Frame::Flat(blocks)) => blocks.into_iter().for_each(|b| self.push_block(b)),
@@ -182,7 +184,7 @@ impl Builder {
         match self.stack.last_mut() {
             Some(Frame::Item(blocks) | Frame::Flat(blocks)) => blocks.push(block),
             // A block directly in a list (never from the parser) is kept, not lost.
-            Some(Frame::List(items)) => items.push(vec![block]),
+            Some(Frame::List(_, items)) => items.push(vec![block]),
             None => self.blocks.push(block),
         }
     }
@@ -236,11 +238,10 @@ impl Builder {
                 self.link = Some((dest_url.to_string(), String::new()));
             }
             Event::Html(_) | Event::InlineHtml(_) => {}
-            Event::Start(Tag::List(None)) => self.open(Frame::List(Vec::new())),
-            Event::Start(Tag::List(Some(_))) => self.open(Frame::Flat(Vec::new())),
+            Event::Start(Tag::List(start)) => self.open(Frame::List(start, Vec::new())),
             Event::Start(Tag::Item) => {
                 let frame = match self.stack.last() {
-                    Some(Frame::List(_)) => Frame::Item(Vec::new()),
+                    Some(Frame::List(..)) => Frame::Item(Vec::new()),
                     _ => Frame::Flat(Vec::new()),
                 };
                 self.open(frame);
@@ -426,7 +427,11 @@ mod tests {
     }
 
     fn list(items: Vec<Vec<Block>>) -> Block {
-        Block::List(List { items })
+        Block::List(List { start: None, items })
+    }
+
+    fn ordered(start: u64, items: Vec<Vec<Block>>) -> Block {
+        Block::List(List { start: Some(start), items })
     }
 
     #[test]
@@ -486,9 +491,34 @@ mod tests {
                 vec![list(vec![vec![para(vec![text("a")]), list(vec![vec![para(vec![text("b")])]])]])],
             ),
             (
-                "ordered lists stay flat paragraphs until they get their own block",
+                "ordered list starts at 1",
                 "1. a\n2. b",
-                vec![para(vec![text("a")]), para(vec![text("b")])],
+                vec![ordered(1, vec![vec![para(vec![text("a")])], vec![para(vec![text("b")])]])],
+            ),
+            (
+                "ordered list keeps the written start number",
+                "3. a\n4. b",
+                vec![ordered(3, vec![vec![para(vec![text("a")])], vec![para(vec![text("b")])]])],
+            ),
+            (
+                "paren delimiter is ordered too",
+                "1) a",
+                vec![ordered(1, vec![vec![para(vec![text("a")])]])],
+            ),
+            (
+                "ordered start of zero",
+                "0. a",
+                vec![ordered(0, vec![vec![para(vec![text("a")])]])],
+            ),
+            (
+                "ordered list after a paragraph",
+                "intro\n\n1. a",
+                vec![para(vec![text("intro")]), ordered(1, vec![vec![para(vec![text("a")])]])],
+            ),
+            (
+                "bullets and numbers are separate lists",
+                "- a\n\n1. b",
+                vec![list(vec![vec![para(vec![text("a")])]]), ordered(1, vec![vec![para(vec![text("b")])]])],
             ),
             (
                 "quote inside an item stays flat",
