@@ -154,6 +154,8 @@ pub enum Message {
     ActivityFetched(String, usize),
     /// A file card was clicked: open the Attachment in its default app (JRST-186).
     OpenAttachment(crate::db::attachments::Attachment),
+    /// An image Attachment card was clicked: open the lightbox on it.
+    OpenLightbox(crate::db::attachments::Attachment),
     /// Bytes for an Attachment downloaded on a cache miss; cache them, then open.
     AttachmentDownloaded(crate::db::attachments::Attachment, Result<Vec<u8>, String>),
     /// Bytes for an image fetched into the cache for display (JRST-187), keyed by blob key.
@@ -422,6 +424,8 @@ pub enum Modal {
     DeleteCommentConfirm(String),
     /// Confirm deleting a synced attachment (local attachment id).
     DeleteAttachmentConfirm(String),
+    /// Full-size image viewer over an ordered list of images (see `files::lightbox`).
+    Lightbox(crate::files::lightbox::LightboxState),
     Labels,
     /// Confirm deleting the label being edited (local id) from the labels panel.
     DeleteLabelConfirm(String),
@@ -1714,6 +1718,53 @@ impl App {
         )
     }
 
+    /// Fetch one inline image (a signed blob-redirect URL, no auth) into the
+    /// file cache under its `files::inline::blob_key`; reports
+    /// `Message::ImageFetched`. No-op for keys already known to `images`.
+    pub(crate) fn request_inline_image(&mut self, src: &str) -> Task<Message> {
+        let Some(key) = crate::files::inline::blob_key(src) else {
+            return Task::none();
+        };
+        if !self.images.begin(&key) {
+            return Task::none();
+        }
+        let cache = crate::files::cache::FileCache::at_default_root();
+        if let Ok(Some(path)) = cache.get(&self.db(), &key) {
+            self.images.set_ready(&key, path);
+            return Task::none();
+        }
+        let base_url = self.config.api_base_url.trim().to_string();
+        let url = crate::files::inline::fetch_url(src, &base_url);
+        let token = self.config.api_token.clone().unwrap_or_default();
+        let Ok(client) = ApiClient::new(base_url, token) else {
+            self.images.set_failed(&key);
+            return Task::none();
+        };
+        Task::perform(
+            async move { client.get_bytes_public(&url).await.map_err(|e| e.to_string()) },
+            move |r| Message::ImageFetched(key.clone(), r),
+        )
+    }
+
+    /// `request_inline_image` for every blob image in the open issue's description.
+    fn request_description_images(&mut self) -> Task<Message> {
+        let Some(detail) = self.issue_detail.as_ref() else {
+            return Task::none();
+        };
+        if !matches!(&self.view, View::IssueDetail(id) if *id == detail.issue_id) {
+            return Task::none();
+        }
+        let srcs: Vec<String> = crate::views::body::image_list(
+            &detail.description_text(),
+            &self.config.api_base_url,
+        )
+        .into_iter()
+        .filter(|i| i.key.is_some())
+        .map(|i| i.src)
+        .collect();
+        Task::batch(srcs.iter().map(|s| self.request_inline_image(s)))
+    }
+
     /// `request_image` for every Attachment currently rendered in the open detail view.
     fn request_visible_images(&mut self) -> Task<Message> {
         let atts: Vec<crate::db::attachments::Attachment> = self
@@ -1723,7 +1774,8 @@ impl App {
             .filter(|a| crate::files::images::is_thumbnailable(&a.content_type))
             .cloned()
             .collect();
-        Task::batch(atts.iter().map(|a| self.request_image(a)))
+        let inline = self.request_description_images();
+        Task::batch(atts.iter().map(|a| self.request_image(a)).chain([inline]))
     }
 
     /// Copy a cached blob to its real filename and hand it to the OS.
@@ -3225,6 +3277,26 @@ impl App {
                 }
             }
             Message::OpenAttachment(att) => return self.open_attachment(att),
+            Message::OpenLightbox(att) => {
+                // Siblings in the same list (issue/project files, or one comment's) form the set.
+                let group: &[crate::db::attachments::Attachment] =
+                    if self.detail_attachments.iter().any(|a| a.id == att.id) {
+                        &self.detail_attachments
+                    } else {
+                        self.detail_comment_attachments
+                            .values()
+                            .find(|v| v.iter().any(|a| a.id == att.id))
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[])
+                    };
+                if let Some(state) =
+                    crate::files::lightbox::LightboxState::for_attachment(group, &att.id)
+                {
+                    self.modal = Modal::Lightbox(state);
+                    return self.request_visible_images();
+                }
+                return self.open_attachment(att);
+            }
             Message::AttachmentDownloaded(att, result) => match result {
                 Ok(bytes) => {
                     let conn = self.db();
@@ -4476,7 +4548,7 @@ impl App {
                 if let Modal::DeleteAttachmentConfirm(ref id) = self.modal {
                     let conn = self.db();
                     if let Ok(Some(payload)) =
-                        crate::db::attachments::remove_synced_issue_attachment(&conn, id)
+                        crate::db::attachments::remove_synced_attachment(&conn, id)
                     {
                         self.enqueue_sync("attachment", id, "delete", Some(payload.as_str()));
                     }
@@ -5022,6 +5094,7 @@ impl App {
                             sub_issues,
                             self.detail_origin.as_deref(),
                             &my_member_ids,
+                            &self.config.api_base_url,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
@@ -5229,6 +5302,9 @@ impl App {
             Modal::DeleteCommentConfirm(comment_id) => {
                 let replies = queries::comment_reply_count(&self.db(), comment_id).unwrap_or(0);
                 iced::widget::stack![base, delete_comment_confirm_modal(replies)].into()
+            }
+            Modal::Lightbox(state) => {
+                iced::widget::stack![base, crate::views::lightbox::view(state, &self.images)].into()
             }
             Modal::DeleteAttachmentConfirm(id) => {
                 let name = crate::db::attachments::get(&self.db(), id)
