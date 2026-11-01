@@ -263,7 +263,9 @@ fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>)
 /// one line. The header row is filled with the context-foreground token.
 fn table_block<'a>(table: &document::Table, size: f32, plain: Color, ctx: &BodyCtx<'a>) -> Element<'a, Message> {
     let cells = |cells: &[Vec<Block>], header: bool| -> Element<'a, Message> {
-        let mut r = row![].spacing(1);
+        // Cells are `Fill` x `Fill` inside a `Shrink` row: the row is as tall
+        // as its tallest wrapped cell and every cell stretches to it.
+        let mut r = row![].spacing(1).height(iced::Length::Shrink);
         for cell in cells {
             let mut content = column![].spacing(t::space::S1);
             for b in cell {
@@ -273,6 +275,7 @@ fn table_block<'a>(table: &document::Table, size: f32, plain: Color, ctx: &BodyC
                 container(content)
                     .padding([t::space::S1, t::space::S2])
                     .width(iced::Length::Fill)
+                    .height(iced::Length::Fill)
                     .style(move |_| container::Style {
                         background: Some(if header { t::bg_card() } else { t::bg_primary() }.into()),
                         ..Default::default()
@@ -530,6 +533,16 @@ mod tests {
     use super::*;
 
     const HOST: &str = "http://localhost:3005";
+
+    #[test]
+    fn images_inside_table_cells_are_listed_in_reading_order() {
+        let a = "/rails/active_storage/blobs/redirect/aaa/a.png";
+        let b = "/rails/active_storage/blobs/redirect/bbb/b.png";
+        let body = format!("| h ![a]({a}) |\n|---|\n| ![b]({b}) |");
+        let alts: Vec<String> = image_list(&body, HOST).into_iter().map(|i| i.alt).collect();
+        assert_eq!(alts, ["a", "b"]);
+        assert_eq!(fetchable_srcs_of_body(&body, HOST), [a, b]);
+    }
 
     #[test]
     fn images_inside_lists_and_quotes_are_listed_in_reading_order() {
