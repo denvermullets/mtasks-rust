@@ -1145,7 +1145,7 @@ fn staged_chips<'a>(staged: &'a [Attachment]) -> Element<'a, Message> {
 /// A null actor shows the text alone; a Pending item is marked as unsynced.
 fn activity_row<'a>(item: &'a ActivityItem) -> Element<'a, Message> {
     let pending = item.origin == ItemOrigin::Pending;
-    row![]
+    let line = row![]
         .spacing(6)
         .align_y(Alignment::Center)
         .push(text("•").size(11).color(t::text_muted()))
@@ -1161,8 +1161,17 @@ fn activity_row<'a>(item: &'a ActivityItem) -> Element<'a, Message> {
             text(relative_time(&item.at))
                 .size(11)
                 .color(t::text_muted()),
-        )
-        .into()
+        );
+    // Only an incoming reference with a cached source issue has a card.
+    match &item.source_issue_id {
+        Some(id) => {
+            let clickable = iced::widget::mouse_area(line)
+                .on_press(Message::OpenIssueDetail(id.clone()))
+                .interaction(iced::mouse::Interaction::Pointer);
+            issue_row_anchor(clickable, id)
+        }
+        None => line.into(),
+    }
 }
 
 /// Left indent (px) per nesting level.
