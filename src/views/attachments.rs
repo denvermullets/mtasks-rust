@@ -1,11 +1,11 @@
 //! Reusable file-card list for an owner's attachments (issue, project or
 //! comment). Callers load the rows with `db::attachments::list_for_owner`.
 
-use iced::widget::{column, container, text};
+use iced::widget::{column, container, row, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
-use crate::db::attachments::Attachment;
+use crate::db::attachments::{Attachment, UploadState};
 use crate::theme as t;
 
 /// The "Attachments" section: a heading plus one card per file, in the order
@@ -36,11 +36,19 @@ pub fn card<'a>(a: &'a Attachment) -> Element<'a, Message> {
         type_label(&a.content_type, &a.filename),
         format_size(a.byte_size)
     );
+    // Pending marker: the file is safe in the outbox but not on the server yet.
+    let pending = (a.upload_state == UploadState::Pending)
+        .then(|| text("Pending upload").size(11).color(t::accent()));
     container(
         column![]
             .spacing(2)
             .push(text(&a.filename).size(13).color(t::text_primary()))
-            .push(text(meta).size(11).color(t::text_muted())),
+            .push(
+                row![]
+                    .spacing(8)
+                    .push(text(meta).size(11).color(t::text_muted()))
+                    .push_maybe(pending),
+            ),
     )
     .padding(10)
     .width(Length::Fill)

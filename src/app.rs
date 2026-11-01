@@ -331,6 +331,13 @@ pub enum Message {
     /// Open the "Add project to roadmap" picker preset to `commitment`.
     OpenRoadmapAdd(RoadmapCommitment),
 
+    // Attachments
+    /// "Attach file" on the issue detail: open the multi-file picker.
+    PickAttachmentFiles,
+    /// Files chosen for the open issue (picker, drag-and-drop, shortcut all
+    /// send this). Each is validated, copied to the outbox and queued.
+    FilesPicked(Vec<std::path::PathBuf>),
+
     // CSV import / export (sidebar footer)
     /// Export the selected team's issues via a native save dialog.
     ExportCsv,
@@ -3655,6 +3662,45 @@ impl App {
                 Ok(None) => {}
                 Err(e) => self.push_toast(format!("Export failed: {e}"), ToastKind::Error, false),
             },
+
+            Message::PickAttachmentFiles => {
+                if !matches!(self.view, View::IssueDetail(_)) {
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .pick_files()
+                            .await
+                            .map(|hs| hs.iter().map(|h| h.path().to_path_buf()).collect())
+                            .unwrap_or_default()
+                    },
+                    Message::FilesPicked,
+                );
+            }
+
+            Message::FilesPicked(paths) => {
+                let View::IssueDetail(ref issue_id) = self.view else {
+                    return Task::none();
+                };
+                if paths.is_empty() {
+                    return Task::none();
+                }
+                let issue_id = issue_id.clone();
+                let conn = self.db();
+                let intake = crate::files::intake::queue_files(
+                    &conn,
+                    &crate::files::outbox::default_root(),
+                    crate::db::attachments::OwnerKind::Issue,
+                    &issue_id,
+                    &paths,
+                );
+                if !intake.refused.is_empty() {
+                    self.push_toast(intake.refused.join("\n"), ToastKind::Error, false);
+                }
+                self.load_detail_dependencies(&conn);
+                self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
+            }
 
             Message::PickCsvImport => {
                 if self.selected_team_id.is_none() {
