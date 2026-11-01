@@ -38,6 +38,11 @@ pub async fn delete(client: &ApiClient, id: i64) -> Result<(), ApiError> {
     client.delete(&format!("api/v1/dashboards/{id}")).await
 }
 
+/// `DELETE /api/v1/dashboards/:dashboard_id/groups/:id`.
+pub async fn delete_group(client: &ApiClient, dashboard_remote_id: i64, id: i64) -> Result<(), ApiError> {
+    client.delete(&format!("api/v1/dashboards/{dashboard_remote_id}/groups/{id}")).await
+}
+
 fn create_body(name: &str, description: &str) -> serde_json::Value {
     serde_json::json!({ "dashboard": { "name": name, "description": description } })
 }
