@@ -70,6 +70,18 @@ impl LightboxState {
     pub fn current(&self) -> &LightboxImage {
         &self.images[self.index]
     }
+
+    /// `(blob key, filename, cached path)` of the current image, for handing
+    /// to the OS. `None` until the image has loaded into `images`.
+    pub fn open_target(
+        &self,
+        images: &crate::files::images::ImageStore,
+    ) -> Option<(String, &str, std::path::PathBuf)> {
+        let cur = self.current();
+        let key = cur.key()?;
+        let path = images.path(&key)?.to_path_buf();
+        Some((key, cur.filename(), path))
+    }
 }
 
 #[cfg(test)]
@@ -97,6 +109,26 @@ mod tests {
             signed_id: None,
             blob_filename: None,
         }
+    }
+
+    #[test]
+    fn open_target_needs_a_loaded_image_for_either_variant() {
+        use crate::files::images::ImageStore;
+        let mut store = ImageStore::default();
+        let a = LightboxState::new(vec![LightboxImage::Attachment(att("a", "image/png"))], 0).unwrap();
+        let i = LightboxState::new(
+            vec![LightboxImage::Inline { key: "inline-k".into(), filename: "p.png".into() }],
+            0,
+        )
+        .unwrap();
+        assert!(a.open_target(&store).is_none());
+        assert!(i.open_target(&store).is_none());
+        store.set_ready("blob-70", "/c/blob-70".into());
+        store.set_ready("inline-k", "/c/inline-k".into());
+        let (k, name, path) = a.open_target(&store).unwrap();
+        assert_eq!((k.as_str(), name, path.to_str()), ("blob-70", "a.bin", Some("/c/blob-70")));
+        let (k, name, path) = i.open_target(&store).unwrap();
+        assert_eq!((k.as_str(), name, path.to_str()), ("inline-k", "p.png", Some("/c/inline-k")));
     }
 
     #[test]

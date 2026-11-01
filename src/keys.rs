@@ -106,9 +106,34 @@ pub fn handle_issue_detail_key(key: &Key, modifiers: Modifiers) -> Option<Messag
     }
 }
 
+/// Keys bound only while the lightbox modal is open. Checked before the
+/// modal fallthrough in `handle_key_press`; `None` falls through to it
+/// (Esc closes). Extend here for stepping (JRST-193).
+pub fn handle_lightbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    match key {
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "o" => {
+            Some(Message::OpenLightboxExternally)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn o_opens_lightbox_image_in_preview() {
+        let o = Key::Character("o".into());
+        assert!(matches!(
+            handle_lightbox_key(&o, Modifiers::empty()),
+            Some(Message::OpenLightboxExternally)
+        ));
+        assert!(handle_lightbox_key(&o, Modifiers::COMMAND).is_none());
+        assert!(handle_lightbox_key(&Key::Character("x".into()), Modifiers::empty()).is_none());
+        // Inert in the global handler (no lightbox open).
+        assert!(press("o", false, true).is_none());
+    }
 
     #[test]
     fn a_attaches_a_file_in_issue_detail_only() {
