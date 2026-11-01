@@ -487,6 +487,35 @@ pub fn adopt_created(conn: &Connection, id: &str, dto: &DashboardIn) -> Result<(
     Ok(())
 }
 
+/// After a successful group `POST`: the local group takes the server's id and
+/// position, and the sources the server returned replace the local ones (it may
+/// have dropped ids it won't accept). Name, description and color stay as typed.
+/// A pull that ran first may have mirrored the pushed group as a second row;
+/// that duplicate goes, so the remote id stays unique. Takes no transaction of
+/// its own: the caller wraps it together with `mark_synced`.
+pub fn adopt_created_group(conn: &Connection, id: &str, dto: &GroupIn) -> Result<()> {
+    conn.execute(
+        "DELETE FROM dashboard_groups WHERE remote_id = ?2 AND id <> ?1",
+        params![id, dto.id],
+    )?;
+    conn.execute(
+        "UPDATE dashboard_groups SET remote_id = ?2, position = ?3 WHERE id = ?1",
+        params![id, dto.id, dto.position],
+    )?;
+    replace_sources(conn, id, dto)
+}
+
+/// A group by local id.
+pub fn get_group(conn: &Connection, id: &str) -> Result<Option<DashboardGroup>> {
+    conn.query_row(
+        "SELECT id, remote_id, dashboard_id, name, description, color, position
+         FROM dashboard_groups WHERE id = ?1",
+        params![id],
+        group_row,
+    )
+    .optional()
+}
+
 /// The nine group color swatches Rails offers; the first is the default.
 pub const GROUP_SWATCHES: [&str; 9] = [
     "#6366f1", "#ec4899", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6",
@@ -734,6 +763,52 @@ mod tests {
             updated_at: "2026-01-01T00:00:00.000Z".into(),
             groups,
         }
+    }
+
+    fn draft_named(name: &str) -> GroupDraft {
+        let mut d = GroupDraft::default();
+        d.name = name.into();
+        d
+    }
+
+    #[test]
+    fn adopt_created_group_takes_remote_id_and_server_sources() {
+        let conn = setup();
+        let d = create_local(&conn, "D", "").unwrap();
+        let mut draft = draft_named("G");
+        draft.toggle_source(SourceType::Team, 1);
+        draft.toggle_source(SourceType::Team, 2);
+        draft.set_include_all(SourceType::Team, 1, true);
+        let g = create_group_local(&conn, &d.id, &draft).unwrap();
+        // The server dropped team 2 and kept team 1 as include-all.
+        let mut dto = group(40, "G", 3);
+        dto.team_ids = vec![1];
+        dto.all_team_ids = vec![1];
+        adopt_created_group(&conn, &g.id, &dto).unwrap();
+        let got = groups_for(&conn, &d.id).unwrap();
+        assert_eq!((got.len(), got[0].remote_id, got[0].position), (1, Some(40), 3));
+        assert_eq!(got[0].name, "G");
+        assert_eq!(
+            sources_for(&conn, &g.id).unwrap(),
+            [GroupSource { source_type: SourceType::Team, remote_id: 1, include_all: true }]
+        );
+    }
+
+    #[test]
+    fn adopt_created_group_removes_a_pull_mirrored_duplicate() {
+        let conn = setup();
+        let d = create_local(&conn, "D", "").unwrap();
+        let g = create_group_local(&conn, &d.id, &draft_named("G")).unwrap();
+        // A pull saw the pushed group first and mirrored it as its own row.
+        conn.execute(
+            "INSERT INTO dashboard_groups (id, remote_id, dashboard_id, name, description, color, position)
+             VALUES ('dup', 40, ?1, 'G', '', '#6366f1', 1)",
+            params![d.id],
+        )
+        .unwrap();
+        adopt_created_group(&conn, &g.id, &group(40, "G", 1)).unwrap();
+        let ids: Vec<_> = groups_for(&conn, &d.id).unwrap().into_iter().map(|g| g.id).collect();
+        assert_eq!(ids, [g.id]);
     }
 
     #[test]
