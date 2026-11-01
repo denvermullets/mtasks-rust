@@ -613,12 +613,67 @@ struct IssueCreatePrep {
     team_remote_id: i64,
     params: IssueParams,
     local_id: String,
+    inline: InlineImages,
 }
 
 struct IssueUpdatePrep {
     team_remote_id: i64,
     remote_id: i64,
     params: IssueParams,
+    local_id: String,
+    inline: InlineImages,
+}
+
+/// Inline-image uploads a body was rewritten with: placeholder uuid ->
+/// (signed id, blob filename). Settled (local body rewritten, rows dropped)
+/// once the push succeeded.
+type InlineImages = std::collections::HashMap<String, (String, String)>;
+
+/// Pure decision for a body that may hold `jait-pending://` placeholders:
+/// the web-form body once every placeholder is resolved, else `LeavePending`
+/// (an upload still running, or a FAILED one, which stays blocking until the
+/// user retries or removes it). Reused by comment/project body writers.
+fn rewrite_body_or_wait(body: &str, resolved: &InlineImages) -> Result<String, Outcome> {
+    let rw = crate::mentions::rewrite_placeholders(body, resolved);
+    if rw.unresolved.is_empty() {
+        Ok(rw.body)
+    } else {
+        Err(Outcome::LeavePending(format!(
+            "waiting for {} inline image upload(s)",
+            rw.unresolved.len()
+        )))
+    }
+}
+
+/// DB side of [`rewrite_body_or_wait`]: look up the owner's inline-image
+/// uploads, then rewrite `body`. Returns the body to send plus the map to hand
+/// to [`settle_inline`] after a successful push.
+fn prepare_body(
+    conn: &Connection,
+    kind: attachments::OwnerKind,
+    owner_id: &str,
+    body: Option<String>,
+) -> Result<(Option<String>, InlineImages), Outcome> {
+    let Some(text) = body else { return Ok((None, InlineImages::new())) };
+    if !text.contains(crate::mentions::PENDING_SCHEME) {
+        return Ok((Some(text), InlineImages::new()));
+    }
+    let resolved = attachments::inline_resolutions(conn, kind, owner_id)
+        .map_err(|e| Outcome::LeavePending(format!("db: {e}")))?;
+    let rewritten = rewrite_body_or_wait(&text, &resolved)?;
+    Ok((Some(rewritten), resolved))
+}
+
+/// Best-effort cleanup after the body was accepted by Rails.
+fn settle_inline(kind: attachments::OwnerKind, owner_id: &str, inline: &InlineImages) {
+    if inline.is_empty() {
+        return;
+    }
+    if let Ok(conn) = open() {
+        if let Err(e) = attachments::settle_inline_images(&conn, kind, owner_id, inline) {
+            eprintln!("settle inline images: {e}");
+        }
+    }
 }
 
 fn prep_issue_create(entity_id: &str) -> Prep<IssueCreatePrep> {
@@ -652,8 +707,15 @@ fn prep_issue_create(entity_id: &str) -> Prep<IssueCreatePrep> {
         Err(e) => return Prep::Done(Outcome::LeavePending(format!("db: {e}"))),
     };
 
-    let params = match build_issue_params(&conn, &issue) {
+    let mut params = match build_issue_params(&conn, &issue) {
         Ok(p) => p,
+        Err(o) => return Prep::Done(o),
+    };
+    let inline = match prepare_body(&conn, attachments::OwnerKind::Issue, &issue.id, params.description.take()) {
+        Ok((d, i)) => {
+            params.description = d;
+            i
+        }
         Err(o) => return Prep::Done(o),
     };
 
@@ -661,6 +723,7 @@ fn prep_issue_create(entity_id: &str) -> Prep<IssueCreatePrep> {
         team_remote_id,
         params,
         local_id: issue.id,
+        inline,
     })
 }
 
@@ -721,11 +784,20 @@ fn prep_issue_update_in(conn: &Connection, entity_id: &str, entry_id: i64) -> Pr
         params.parent_issue_id = None;
         params.label_ids = None;
     }
+    let inline = match prepare_body(conn, attachments::OwnerKind::Issue, &issue.id, params.description.take()) {
+        Ok((d, i)) => {
+            params.description = d;
+            i
+        }
+        Err(o) => return Prep::Done(o),
+    };
 
     Prep::Ready(IssueUpdatePrep {
         team_remote_id,
         remote_id,
         params,
+        local_id: issue.id,
+        inline,
     })
 }
 
@@ -811,7 +883,11 @@ async fn issue_create(
     }
 
     match issues::create(client, prep.team_remote_id, &prep.params).await {
-        Ok(dto) => commit_create(entry_id, "issues", &prep.local_id, dto.id),
+        Ok(dto) => {
+            let out = commit_create(entry_id, "issues", &prep.local_id, dto.id);
+            settle_inline(attachments::OwnerKind::Issue, &prep.local_id, &prep.inline);
+            out
+        }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
@@ -823,7 +899,10 @@ async fn issue_update(client: &ApiClient, entity_id: &str, entry_id: i64) -> Out
     };
 
     match issues::update(client, prep.team_remote_id, prep.remote_id, &prep.params).await {
-        Ok(_) => Outcome::Success,
+        Ok(_) => {
+            settle_inline(attachments::OwnerKind::Issue, &prep.local_id, &prep.inline);
+            Outcome::Success
+        }
         Err(e) => classify_in_team(&e, prep.team_remote_id),
     }
 }
@@ -4493,6 +4572,37 @@ fn relax_issue_fks(conn: &Connection, mut dto: IssueDto) -> IssueDto {
 
 #[cfg(test)]
 mod tests {
+    const PH: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn body_waits_until_every_placeholder_resolved() {
+        let body = format!("a ![image](jait-pending://{PH}) b");
+        let none = InlineImages::new();
+        assert!(matches!(rewrite_body_or_wait(&body, &none), Err(Outcome::LeavePending(_))));
+        let mut ok = InlineImages::new();
+        ok.insert(PH.into(), ("sig".into(), "my pic.png".into()));
+        assert_eq!(
+            rewrite_body_or_wait(&body, &ok).ok().unwrap(),
+            "a ![image](/rails/active_storage/blobs/redirect/sig/my%20pic.png) b"
+        );
+        assert_eq!(rewrite_body_or_wait("plain", &none).ok().unwrap(), "plain");
+    }
+
+    #[test]
+    fn prepare_body_blocks_on_failed_inline_upload() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO attachments (id, owner_kind, owner_id, filename, created_at, upload_state, upload_kind, placeholder_uuid, signed_id, blob_filename)
+             VALUES ('a','issue','i1','p.png','2026-02-01T00:00:00.000Z','failed','inline_image',?1,'sig','p.png')",
+            [PH],
+        )
+        .unwrap();
+        let body = Some(format!("![image](jait-pending://{PH})"));
+        let r = prepare_body(&conn, attachments::OwnerKind::Issue, "i1", body);
+        assert!(matches!(r, Err(Outcome::LeavePending(_))));
+    }
+
     #[test]
     fn read_all_before_parses_payload() {
         assert_eq!(
