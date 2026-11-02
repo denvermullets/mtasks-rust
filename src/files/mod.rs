@@ -1,6 +1,6 @@
 //! Files: local storage for Attachment bytes. No networking.
 //!
-//! Layout under the files root (`data_local_dir()/mtasks-rusty/files/`):
+//! Layout under the files root (`data_local_dir()/<APP_DIR>/files/`):
 //! - `cache/`  downloaded blobs, tracked by the `file_cache` index and evicted
 //!   least-recently-accessed first ([`cache`]).
 //! - `outbox/` pending uploads. Never touched by cache eviction.
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 pub fn default_root() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("mtasks-rusty")
+        .join(crate::config::APP_DIR)
         .join("files")
 }
 

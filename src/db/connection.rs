@@ -12,7 +12,7 @@ pub fn db_path() -> PathBuf {
     }
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("mtasks-rusty");
+        .join(crate::config::APP_DIR);
     std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
     data_dir.join("jait.db")
 }

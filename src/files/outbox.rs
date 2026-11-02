@@ -15,7 +15,7 @@ pub struct OutboxEntry {
     pub checksum: String,
 }
 
-/// Default root: `<data_local_dir>/mtasks-rusty/files/outbox`.
+/// Default root: `<data_local_dir>/<APP_DIR>/files/outbox`.
 pub fn default_root() -> PathBuf {
     super::outbox_dir(&super::default_root())
 }

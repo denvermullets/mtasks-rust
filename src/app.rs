@@ -2922,9 +2922,10 @@ impl App {
 
         let conn = connection::open().expect("Failed to open database");
         // Skip the local "My Project" seed when the user has configured an API
-        // token — the first sync will populate teams from Rails. Without a
-        // token we keep the seed so the app is usable purely offline.
-        if config.api_token.is_none() {
+        // token — the first sync will populate teams from Rails. Dev builds keep
+        // the seed without a token so they stay usable offline; release builds
+        // never seed, or the stray team would outlive the first sync.
+        if cfg!(debug_assertions) && config.api_token.is_none() {
             connection::seed_default_data(&conn).expect("Failed to seed data");
         }
 
@@ -3055,6 +3056,12 @@ impl App {
             (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
             _ => Task::none(),
         };
+        // A release build does nothing without a token, so ask for one up front.
+        if !cfg!(debug_assertions) && app.config.api_token.is_none() {
+            app.settings_form = Some(settings::SettingsFormState::from_config(&app.config));
+            app.modal = Modal::Settings;
+        }
+
         (app, task)
     }
 

@@ -1,9 +1,23 @@
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::display::{DisplayOptions, Filters};
+
+/// Default API server. Only dev builds know about localhost; release builds talk
+/// to prod. `scripts/build-release.sh` checks the shipped binary for this.
+#[cfg(debug_assertions)]
+const DEFAULT_API_BASE_URL: &str = "http://localhost:3005";
+#[cfg(not(debug_assertions))]
+const DEFAULT_API_BASE_URL: &str = "https://justanotherissuetracker.com";
+
+/// Folder under the config and data dirs. Dev and release builds keep separate
+/// config, database and files: local rows are matched to the server by
+/// `remote_id`, so one database must never sync against two servers.
+pub const APP_DIR: &str = if cfg!(debug_assertions) { "mtasks-rusty" } else { "JAIT" };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -53,7 +67,7 @@ fn default_font() -> String {
 }
 
 fn default_api_base_url() -> String {
-    "http://localhost:3005".to_string()
+    DEFAULT_API_BASE_URL.to_string()
 }
 
 impl Default for Config {
@@ -76,7 +90,7 @@ impl Default for Config {
 pub fn config_path() -> PathBuf {
     let dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("mtasks-rusty");
+        .join(APP_DIR);
     let _ = std::fs::create_dir_all(&dir);
     dir.join("config.toml")
 }
@@ -115,13 +129,40 @@ pub fn load() -> (Config, Option<String>) {
 pub fn save(cfg: &Config) -> Result<(), String> {
     let path = config_path();
     let body = toml::to_string_pretty(cfg).map_err(|e| format!("serialize config: {}", e))?;
-    std::fs::write(&path, body).map_err(|e| format!("write {}: {}", path.display(), e))
+    write_private(&path, &body).map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+/// Write owner-only (0600): the config holds the API token in plain text. Also
+/// tightens a file that was created with looser permissions.
+fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(body.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::display::{CardProperty, FilterField, GroupBy, OrderBy, SubGroup};
+
+    #[test]
+    fn write_private_is_owner_only_even_over_a_loose_file() {
+        let path = std::env::temp_dir().join(format!("config-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "old body that is longer").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private(&path, "new").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn display_and_filters_round_trip() {
