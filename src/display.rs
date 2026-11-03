@@ -939,7 +939,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: format!("2026-01-0{id}T00:00:00Z"),
             updated_at: "2026-01-01T00:00:00Z".into(),

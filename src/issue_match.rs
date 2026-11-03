@@ -84,7 +84,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: String::new(),
             updated_at: String::new(),

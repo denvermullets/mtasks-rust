@@ -62,7 +62,7 @@ fn sample_days(days: Vec<NaiveDate>, target: usize) -> Vec<NaiveDate> {
 pub fn compute(project: &Project, issues: &[Issue], today: NaiveDate) -> ChartData {
     let scoped: Vec<&Issue> = issues
         .iter()
-        .filter(|i| i.project_id.as_deref() == Some(project.id.as_str()) && i.archived_at.is_none())
+        .filter(|i| i.project_id.as_deref() == Some(project.id.as_str()))
         .collect();
     if scoped.is_empty() {
         return ChartData::default();
@@ -530,7 +530,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: ts(created),
             updated_at: ts(created),

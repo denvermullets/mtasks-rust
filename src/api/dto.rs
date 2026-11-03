@@ -78,9 +78,6 @@ pub struct IssueDto {
     pub labels: Vec<LabelRef>,
     pub created_at: String,
     pub updated_at: String,
-    /// Set when the issue is archived upstream; absent/null when active.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_at: Option<String>,
     /// Remote id of the recurring issue that spawned this issue; null for
     /// hand-made issues. Server-set, never pushed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,7 +231,6 @@ impl IssueDto {
             parent_issue_id,
             assignee_id,
             creator_id,
-            archived_at: self.archived_at,
             remote_id: Some(self.id),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -659,7 +655,6 @@ mod tests {
                 labels,
                 created_at: issue.created_at.clone(),
                 updated_at: issue.updated_at.clone(),
-                archived_at: None,
                 recurring_issue_id: None,
                 description: issue.description.clone(),
                 parent_issue,
@@ -813,7 +808,7 @@ mod tests {
         conn.query_row(
             "SELECT id, title, description, priority, team_number, due_date, estimate,
                     started_at, completed_at, canceled_at, lane_id, team_id,
-                    project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                    project_id, parent_issue_id, assignee_id, creator_id,
                     remote_id, created_at, updated_at
              FROM issues WHERE id = ?1",
             params![id],
@@ -1520,14 +1515,14 @@ mod tests {
         conn.execute(
             "INSERT INTO issues (id, title, description, priority, team_number, due_date, estimate,
                                   started_at, completed_at, canceled_at, lane_id, team_id,
-                                  project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                                  project_id, parent_issue_id, assignee_id, creator_id,
                                   remote_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 issue.id, issue.title, issue.description, issue.priority, issue.team_number,
                 issue.due_date, issue.estimate, issue.started_at, issue.completed_at, issue.canceled_at,
                 issue.lane_id, issue.team_id, issue.project_id, issue.parent_issue_id,
-                issue.assignee_id, issue.creator_id, issue.archived_at, issue.remote_id,
+                issue.assignee_id, issue.creator_id, issue.remote_id,
                 issue.created_at, issue.updated_at,
             ],
         ).unwrap();

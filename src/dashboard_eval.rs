@@ -274,8 +274,8 @@ fn base_set<'a>(
 }
 
 
-/// The starting set. Without a status: active issues. With one: non-archived
-/// issues in any lane of that name on the source teams, closed lanes included.
+/// The starting set. Without a status: active issues. With one: issues
+/// in any lane of that name on the source teams, closed lanes included.
 fn passes_start(
     i: &Issue,
     status: Option<&str>,
@@ -283,10 +283,9 @@ fn passes_start(
     source_team_ids: &HashSet<&str>,
 ) -> bool {
     let Some(name) = status else { return is_active(i, lanes) };
-    i.archived_at.is_none()
-        && lanes.iter().any(|l| {
-            l.id == i.lane_id && l.name == name && source_team_ids.contains(l.team_id.as_str())
-        })
+    lanes.iter().any(|l| {
+        l.id == i.lane_id && l.name == name && source_team_ids.contains(l.team_id.as_str())
+    })
 }
 
 /// Distinct lane names on the source teams, in board order.
@@ -550,9 +549,9 @@ fn passes_filter(i: &Issue, filter: Filter, today: NaiveDate, projects: &[Projec
     }
 }
 
-/// Not archived, completed or canceled, and not in a completed/canceled lane.
+/// Not completed or canceled, and not in a completed/canceled lane.
 fn is_active(i: &Issue, lanes: &[Lane]) -> bool {
-    if i.archived_at.is_some() || i.completed_at.is_some() || i.canceled_at.is_some() {
+    if i.completed_at.is_some() || i.canceled_at.is_some() {
         return false;
     }
     let closed_lane = lanes
@@ -727,7 +726,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -874,15 +872,12 @@ mod tests {
     #[test]
     fn only_active_issues_show() {
         let mut fx = Fx::new();
-        let mut archived = issue("archived", "a", "la");
-        archived.archived_at = Some("2026-01-01".into());
         let mut completed = issue("completed", "a", "la");
         completed.completed_at = Some("2026-01-01".into());
         let mut canceled = issue("canceled", "a", "la");
         canceled.canceled_at = Some("2026-01-01".into());
         fx.issues = vec![
             issue("live", "a", "la"),
-            archived,
             completed,
             canceled,
             issue("in_done_lane", "a", "done"),
@@ -1465,9 +1460,7 @@ mod tests {
         id.due_date = Some("2026-11-01".into());
         let mut ib = issue("ib", "b", "bdone");
         ib.due_date = Some("2026-10-01".into());
-        let mut ar = issue("iarch", "a", "done");
-        ar.archived_at = Some("2026-10-01".into());
-        fx.issues = vec![ia, id, ib, ar];
+        fx.issues = vec![ia, id, ib];
         fx
     }
 
@@ -1507,7 +1500,6 @@ mod tests {
     fn status_closed_lane_shows_finished_work_in_rows_and_counts() {
         let fx = status_fx();
         let (ids, due_today, overdue) = status_ids(&fx, "Done", vec![team_src(1, true)]);
-        // Archived is still excluded.
         assert_eq!(ids, ["id"]);
         assert_eq!((due_today, overdue), (1, 0));
     }

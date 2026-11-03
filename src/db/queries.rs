@@ -1,4 +1,6 @@
-use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Result};
+use std::collections::HashSet;
+
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
 use super::activity::{self, Source};
 use super::models::{Comment, CommentOwner, Issue, IssueDependency, Label, Lane, Member, Project, Team};
@@ -31,7 +33,7 @@ pub fn issues_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Issue>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, description, priority, team_number, due_date, estimate,
                 started_at, completed_at, canceled_at, lane_id, team_id,
-                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                project_id, parent_issue_id, assignee_id, creator_id,
                 remote_id, created_at, updated_at
          FROM issues WHERE team_id = ?1 AND deleted_at IS NULL ORDER BY priority, created_at",
     )?;
@@ -47,23 +49,23 @@ pub struct SearchableIssue {
     pub team_name: String,
 }
 
-/// Every non-archived issue in every non-archived team, with its team's
+/// Every issue in every non-archived team, with its team's
 /// identifier. Soft-deleted issues are left out too.
 pub fn searchable_issues(conn: &Connection) -> Result<Vec<SearchableIssue>> {
     let mut stmt = conn.prepare(
         "SELECT i.id, i.title, i.description, i.priority, i.team_number, i.due_date, i.estimate,
                 i.started_at, i.completed_at, i.canceled_at, i.lane_id, i.team_id,
-                i.project_id, i.parent_issue_id, i.assignee_id, i.creator_id, i.archived_at,
+                i.project_id, i.parent_issue_id, i.assignee_id, i.creator_id,
                 i.remote_id, i.created_at, i.updated_at, t.identifier, t.name
          FROM issues i JOIN teams t ON t.id = i.team_id
-         WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND t.archived_at IS NULL
+         WHERE i.deleted_at IS NULL AND t.archived_at IS NULL
          ORDER BY i.created_at",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(SearchableIssue {
             issue: Issue::from_row(row)?,
-            team_identifier: row.get(20)?,
-            team_name: row.get(21)?,
+            team_identifier: row.get(19)?,
+            team_name: row.get(20)?,
         })
     })?;
     rows.collect()
@@ -738,7 +740,7 @@ pub fn get_issue(conn: &Connection, issue_id: &str) -> Result<Option<Issue>> {
     conn.query_row(
         "SELECT id, title, description, priority, team_number, due_date, estimate,
                 started_at, completed_at, canceled_at, lane_id, team_id,
-                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                project_id, parent_issue_id, assignee_id, creator_id,
                 remote_id, created_at, updated_at
          FROM issues WHERE id = ?1 AND deleted_at IS NULL",
         params![issue_id],
@@ -1577,7 +1579,7 @@ pub fn find_issue_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Opti
     conn.query_row(
         "SELECT id, title, description, priority, team_number, due_date, estimate,
                 started_at, completed_at, canceled_at, lane_id, team_id,
-                project_id, parent_issue_id, assignee_id, creator_id, archived_at,
+                project_id, parent_issue_id, assignee_id, creator_id,
                 remote_id, created_at, updated_at
          FROM issues WHERE remote_id = ?1",
         params![remote_id],
@@ -1810,10 +1812,10 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
         "INSERT INTO issues
             (id, title, description, priority, team_number, due_date, estimate,
              started_at, completed_at, canceled_at, lane_id, team_id, project_id,
-             parent_issue_id, assignee_id, creator_id, archived_at, remote_id,
+             parent_issue_id, assignee_id, creator_id, remote_id,
              created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19, ?20)
+                 ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             description = excluded.description,
@@ -1830,7 +1832,6 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             parent_issue_id = excluded.parent_issue_id,
             assignee_id = excluded.assignee_id,
             creator_id = excluded.creator_id,
-            archived_at = excluded.archived_at,
             remote_id = excluded.remote_id,
             updated_at = excluded.updated_at",
         params![
@@ -1850,7 +1851,6 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.parent_issue_id,
             issue.assignee_id,
             issue.creator_id,
-            issue.archived_at,
             issue.remote_id,
             issue.created_at,
             issue.updated_at,
@@ -1859,36 +1859,35 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     Ok(())
 }
 
-// ── Archive missing (soft-delete on next pull when remote omits the row) ──
+// ── Purge missing (hard-delete on a full pull when remote omits the row) ──
 
-/// Mark every issue whose `remote_id` is NOT in `active_remote_ids` (and isn't
-/// already archived) as archived. Scoped to a single team so we don't archive
-/// rows for teams that weren't part of this pull.
-pub fn archive_missing_issues(
+/// Hard-delete every synced issue in `team_id` whose `remote_id` is NOT in
+/// `listed_remote_ids`, with everything attached, and retire its pending sync
+/// entries. Scoped to a single team so teams outside this pull are untouched.
+/// Returns how many issues were removed.
+pub fn purge_issues_missing_from_listing(
     conn: &Connection,
     team_id: &str,
-    active_remote_ids: &[i64],
+    listed_remote_ids: &[i64],
 ) -> Result<usize> {
-    let now = crate::db::now_iso();
-    if active_remote_ids.is_empty() {
-        return conn.execute(
-            "UPDATE issues SET archived_at = ?1
-             WHERE team_id = ?2 AND remote_id IS NOT NULL AND archived_at IS NULL",
-            params![now, team_id],
-        );
+    let listed: HashSet<i64> = listed_remote_ids.iter().copied().collect();
+    let synced: Vec<(String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, remote_id FROM issues WHERE team_id = ?1 AND remote_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![team_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<_>>()?
+    };
+    let mut removed = 0;
+    for (local_id, remote_id) in synced {
+        if listed.contains(&remote_id) {
+            continue;
+        }
+        purge_issue_rows(conn, &local_id)?;
+        retire_pending_sync(conn, "issue", &local_id)?;
+        removed += 1;
     }
-    let placeholders: Vec<String> = (0..active_remote_ids.len())
-        .map(|i| format!("?{}", i + 3))
-        .collect();
-    let sql = format!(
-        "UPDATE issues SET archived_at = ?1
-         WHERE team_id = ?2 AND remote_id IS NOT NULL
-           AND remote_id NOT IN ({}) AND archived_at IS NULL",
-        placeholders.join(",")
-    );
-    let mut bound: Vec<Value> = vec![now.into(), team_id.to_string().into()];
-    bound.extend(active_remote_ids.iter().map(|id| (*id).into()));
-    conn.execute(&sql, params_from_iter(bound))
+    Ok(removed)
 }
 
 /// Flag (or clear) a team as inaccessible after Rails answered a push with a
@@ -2216,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn searchable_issues_spans_teams_and_skips_archived() {
+    fn searchable_issues_spans_teams_and_skips_archived_teams() {
         let conn = setup();
         conn.execute_batch(&format!(
             "INSERT INTO teams (id, name, identifier, created_at, updated_at)
@@ -2227,9 +2226,7 @@ mod tests {
                VALUES ('l2', 'B', 0, 't2', '{NOW}', '{NOW}'), ('l3', 'B', 0, 't3', '{NOW}', '{NOW}');
              INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
                VALUES ('i2', 'Other team', 0, 'l2', 't2', '{NOW}', '{NOW}'),
-                      ('i3', 'In dead team', 0, 'l3', 't3', '{NOW}', '{NOW}');
-             INSERT INTO issues (id, title, priority, lane_id, team_id, archived_at, created_at, updated_at)
-               VALUES ('i4', 'Archived', 0, 'l1', 't1', '{NOW}', '{NOW}', '{NOW}');"
+                      ('i3', 'In dead team', 0, 'l3', 't3', '{NOW}', '{NOW}');"
         ))
         .unwrap();
         let mut found: Vec<_> = searchable_issues(&conn)
@@ -2611,7 +2608,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: assignee_id.map(str::to_string),
             creator_id: creator_id.map(str::to_string),
-            archived_at: None,
             remote_id: None,
             created_at: NOW.to_string(),
             updated_at: NOW.to_string(),

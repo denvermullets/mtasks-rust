@@ -68,8 +68,8 @@ pub struct SearchableDashboard {
 }
 
 /// Local data the palette searches, owned so `PaletteState` can keep it and
-/// recompute rows on every keystroke. Archived issues, teams, and the
-/// projects of archived teams are already left out when this is loaded.
+/// recompute rows on every keystroke. Issues and projects of archived teams,
+/// and those teams themselves, are already left out when this is loaded.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PaletteData {
     pub issues: Vec<SearchableIssue>,
@@ -305,7 +305,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: String::new(),
             updated_at: String::new(),

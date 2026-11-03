@@ -13,7 +13,7 @@ use crate::db::models::{Issue, Label, Lane, Member, Priority, Project, ProjectSt
 use crate::db::{queries, sync_queue};
 
 /// Rails' documented header set, in export order.
-pub const HEADERS: [&str; 20] = [
+pub const HEADERS: [&str; 19] = [
     "ID",
     "Team",
     "Title",
@@ -31,7 +31,6 @@ pub const HEADERS: [&str; 20] = [
     "Started",
     "Completed",
     "Canceled",
-    "Archived",
     "Due Date",
     "Parent issue",
 ];
@@ -146,7 +145,6 @@ pub fn export_csv(data: &ExportData) -> Result<String, csv::Error> {
             opt(&issue.started_at),
             opt(&issue.completed_at),
             opt(&issue.canceled_at),
-            opt(&issue.archived_at),
             opt(&issue.due_date),
             parent,
         ])?;
@@ -200,7 +198,6 @@ pub struct ImportRow {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub canceled_at: Option<String>,
-    pub archived_at: Option<String>,
     pub due_date: Option<String>,
     pub parent_source_id: Option<String>,
     /// Parent that isn't in the file but exists locally (local issue id).
@@ -407,6 +404,16 @@ pub fn parse_import(text: &str, ctx: &ImportContext) -> Result<ImportPreview, St
             continue;
         }
 
+        // The desktop has no archive state, and an imported row is pushed to
+        // Rails as a live issue, so older exports' archived rows stay out.
+        if !cell("archived").is_empty() {
+            preview.warnings.push(RowProblem {
+                line,
+                message: format!("\"{title}\" is archived in the file; skipped"),
+            });
+            continue;
+        }
+
         let status = cell("status");
         let lane_id = if status.is_empty() {
             lanes.first().map(|l| l.id.clone())
@@ -455,7 +462,6 @@ pub fn parse_import(text: &str, ctx: &ImportContext) -> Result<ImportPreview, St
         let started_at = ts("started", "Started");
         let completed_at = ts("completed", "Completed");
         let canceled_at = ts("canceled", "Canceled");
-        let archived_at = ts("archived", "Archived");
         let due_date = parse_due(cell("due date")).unwrap_or_else(|_| {
             warns.push(format!(
                 "Invalid due date \"{}\"; ignored",
@@ -566,7 +572,6 @@ pub fn parse_import(text: &str, ctx: &ImportContext) -> Result<ImportPreview, St
             started_at,
             completed_at,
             canceled_at,
-            archived_at,
             due_date,
             parent_source_id: (!parent.is_empty()).then(|| parent.to_string()),
             parent_existing_id: None,
@@ -696,7 +701,6 @@ pub fn apply_import(
             parent_issue_id: None,
             assignee_id: row.assignee_id.clone(),
             creator_id: row.creator_id.clone(),
-            archived_at: row.archived_at.clone(),
             remote_id: None,
             created_at: row.created_at.clone().unwrap_or_else(|| now.clone()),
             updated_at: row.updated_at.clone().unwrap_or_else(|| now.clone()),
@@ -704,8 +708,8 @@ pub fn apply_import(
         queries::insert_issue(&tx, &issue)?;
         // insert_issue doesn't write these columns.
         tx.execute(
-            "UPDATE issues SET project_id = ?1, archived_at = ?2 WHERE id = ?3",
-            params![issue.project_id, issue.archived_at, issue.id],
+            "UPDATE issues SET project_id = ?1 WHERE id = ?2",
+            params![issue.project_id, issue.id],
         )?;
 
         let mut ids_for_issue = Vec::new();
@@ -872,7 +876,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: NOW.into(),
             updated_at: NOW.into(),
@@ -929,8 +932,8 @@ mod tests {
         assert_eq!(&rows[1][6], "Urgent");
         assert_eq!(&rows[1][10], "Ann Lee");
         assert_eq!(&rows[1][11], "bug, ui");
-        assert_eq!(&rows[1][18], "2026-02-03");
-        assert_eq!(&rows[1][19], "PROJ-1");
+        assert_eq!(&rows[1][17], "2026-02-03");
+        assert_eq!(&rows[1][18], "PROJ-1");
         assert_eq!(&rows[0][6], "No priority");
     }
 
@@ -1221,6 +1224,26 @@ mod tests {
         assert!(again.contains("PROJ-2"));
         assert!(again.contains("bug, ui"));
         assert!(again.contains("PROJ-1"));
+    }
+
+    #[test]
+    fn rows_archived_in_the_file_are_skipped_with_a_warning() {
+        let conn = db();
+        let tm = team();
+        let csv = "ID,Title,Archived\nPROJ-1,Live,\nPROJ-2,Old,2026-01-01T00:00:00Z\n";
+        let lanes = queries::lanes_for_team(&conn, "t1").unwrap();
+        let ctx = ImportContext {
+            team: &tm,
+            lanes: &lanes,
+            projects: &[],
+            members: &[],
+            issues: &[],
+            fallback_creator_id: None,
+        };
+        let preview = parse_import(csv, &ctx).unwrap();
+        let titles: Vec<&str> = preview.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["Live"]);
+        assert!(preview.warnings.iter().any(|w| w.message.contains("\"Old\" is archived")));
     }
 
     /// Rails-style export imported into a fresh team: creates the unknown

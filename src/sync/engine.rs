@@ -3879,12 +3879,12 @@ impl SyncEngine {
         }
 
         // A targeted pull (some teams not covered) can't tell "moved to an
-        // unpulled team" from "gone", so archiving needs every team pulled.
+        // unpulled team" from "gone", so purging needs every team pulled.
         let covers_all_teams = collect_pull_targets(None)
             .map(|all| all.len() == targets.len())
             .unwrap_or(false);
         if let Ok(conn) = open() {
-            archive_unlisted_issues(&conn, &issue_pulls, all_issue_pulls_ok && covers_all_teams);
+            purge_unlisted_issues(&conn, &issue_pulls, all_issue_pulls_ok && covers_all_teams);
         }
 
         PullOutcome {
@@ -4439,13 +4439,11 @@ fn apply_pulled_projects(
 const ISSUES_CURSOR: &str = "issues";
 
 /// The request for one page of the issue pull. A full pull (no cursor) is the
-/// same request as an incremental one minus `updated_since`: detail rows,
-/// archived issues included, so `archived_at` on the rows drives archive state.
+/// same request as an incremental one minus `updated_since`: detail rows.
 fn issue_pull_query(since: Option<&str>, after_id: Option<i64>) -> issues::IssuePageQuery {
     issues::IssuePageQuery {
         updated_since: since.map(str::to_string),
         include_detail: true,
-        include_archived: true,
         limit: Some(cursor::PAGE_LIMIT),
         after_id,
     }
@@ -4514,19 +4512,21 @@ struct IssueTeamPull {
     seen: Vec<i64>,
 }
 
-/// Archive local issues a full listing no longer returns (deleted or out of
-/// reach; full listings carry their own `archived_at` for archived rows). An
+/// Hard-delete local issues a full listing no longer returns (deleted or out
+/// of reach), along with their queued edits. An
 /// issue moved to another team on the web vanishes from its source listing, so
 /// absence is judged against every issue seen this cycle, and only when every
 /// team's issue pull succeeded (`complete`): otherwise the target team may
 /// simply not have been pulled yet.
-fn archive_unlisted_issues(conn: &Connection, pulls: &[IssueTeamPull], complete: bool) {
+fn purge_unlisted_issues(conn: &Connection, pulls: &[IssueTeamPull], complete: bool) {
     if !complete {
         return;
     }
     let seen: Vec<i64> = pulls.iter().flat_map(|p| p.seen.iter().copied()).collect();
     for p in pulls.iter().filter(|p| p.full_listing) {
-        let _ = queries::archive_missing_issues(conn, &p.local_team_id, &seen);
+        if let Err(e) = queries::purge_issues_missing_from_listing(conn, &p.local_team_id, &seen) {
+            sync_log("purge_unlisted_issues", "error", &format!("{}: {e}", p.local_team_id));
+        }
     }
 }
 
@@ -7416,7 +7416,7 @@ mod tests {
     fn full_issue_pull_is_the_incremental_request_without_updated_since() {
         let full = issue_pull_query(None, Some(9));
         let incremental = issue_pull_query(Some("2026-10-30T12:00:00Z"), Some(9));
-        assert!(full.include_archived && full.include_detail);
+        assert!(full.include_detail);
         assert_eq!(full.updated_since, None);
         assert_eq!(
             issues::IssuePageQuery {
@@ -7426,7 +7426,6 @@ mod tests {
             .query_string(),
             full.query_string()
         );
-        assert!(full.query_string().contains("include_archived=1"));
     }
 
     #[test]
@@ -7588,11 +7587,10 @@ mod tests {
         }
     }
 
-    fn assert_moved_not_archived_or_duplicated(conn: &Connection) {
+    fn assert_moved_not_purged_or_duplicated(conn: &Connection) {
         let i = queries::find_issue_by_remote_id(conn, 2).unwrap().unwrap();
         assert_eq!((i.id.as_str(), i.team_id.as_str(), i.lane_id.as_str()), ("i2", "t2", "l2"));
         assert_eq!(i.team_number, Some(9));
-        assert_eq!(i.archived_at, None);
         assert_eq!(count(conn, "SELECT COUNT(*) FROM issues WHERE remote_id = 2"), 1);
         assert_eq!(count(conn, "SELECT COUNT(*) FROM issues WHERE team_id='t1' AND id='i2'"), 0);
     }
@@ -7602,8 +7600,8 @@ mod tests {
         let conn = setup_move_db();
         let pulls = [team_pull("t1", true, &[1, 3]), team_pull("t2", true, &[2])];
         assert_eq!(apply_pulled_issues(&conn, "t2", vec![moved_dto()]), 0);
-        archive_unlisted_issues(&conn, &pulls, true);
-        assert_moved_not_archived_or_duplicated(&conn);
+        purge_unlisted_issues(&conn, &pulls, true);
+        assert_moved_not_purged_or_duplicated(&conn);
     }
 
     #[test]
@@ -7611,30 +7609,48 @@ mod tests {
         let conn = setup_move_db();
         let pulls = [team_pull("t2", true, &[2]), team_pull("t1", true, &[1, 3])];
         assert_eq!(apply_pulled_issues(&conn, "t2", vec![moved_dto()]), 0);
-        archive_unlisted_issues(&conn, &pulls, true);
-        assert_moved_not_archived_or_duplicated(&conn);
+        purge_unlisted_issues(&conn, &pulls, true);
+        assert_moved_not_purged_or_duplicated(&conn);
     }
 
     #[test]
-    fn issue_missing_from_only_the_source_listing_is_not_archived() {
+    fn issue_missing_from_only_the_source_listing_is_not_purged() {
         let conn = setup_move_db();
         // Only the source team was pulled (target skipped or failed).
         let pulls = [team_pull("t1", true, &[1, 3])];
-        archive_unlisted_issues(&conn, &pulls, false);
+        purge_unlisted_issues(&conn, &pulls, false);
         let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
-        assert_eq!((i.team_id.as_str(), i.archived_at), ("t1", None));
+        assert_eq!(i.team_id, "t1");
     }
 
     #[test]
-    fn issue_gone_from_every_listing_is_still_archived() {
+    fn issue_gone_from_every_listing_is_purged_with_its_queued_edits() {
         let conn = setup_move_db();
+        crate::db::sync_queue::enqueue(&conn, "issue", "i2", "update", None).unwrap();
         let pulls = [team_pull("t1", true, &[1, 3]), team_pull("t2", true, &[])];
-        archive_unlisted_issues(&conn, &pulls, true);
-        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
-        assert!(i.archived_at.is_some());
-        // Incremental pulls never archive.
-        let j = queries::find_issue_by_remote_id(&conn, 3).unwrap().unwrap();
-        assert_eq!(j.archived_at, None);
+        purge_unlisted_issues(&conn, &pulls, true);
+        assert!(queries::find_issue_by_remote_id(&conn, 2).unwrap().is_none());
+        assert!(queries::find_issue_by_remote_id(&conn, 3).unwrap().is_some());
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM sync_queue WHERE entity_id = 'i2' AND synced_at IS NULL"),
+            0
+        );
+    }
+
+    #[test]
+    fn incremental_listing_purges_nothing() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t1", false, &[1, 3]), team_pull("t2", true, &[])];
+        purge_unlisted_issues(&conn, &pulls, true);
+        assert!(queries::find_issue_by_remote_id(&conn, 2).unwrap().is_some());
+    }
+
+    #[test]
+    fn incomplete_pull_purges_nothing() {
+        let conn = setup_move_db();
+        let pulls = [team_pull("t1", true, &[]), team_pull("t2", true, &[])];
+        purge_unlisted_issues(&conn, &pulls, false);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM issues WHERE remote_id IS NOT NULL"), 3);
     }
 
     #[test]
@@ -7667,22 +7683,6 @@ mod tests {
         let back = detail_dto(2, "two", "2026-06-01T00:00:00.000Z");
         assert_eq!(apply_pulled_issues(&conn, "t1", vec![back]), 0);
         assert_eq!(crate::db::recurring_issues::origin_id(&conn, &i.id).unwrap(), None);
-    }
-
-    #[test]
-    fn archived_at_on_pulled_rows_archives_and_unarchives() {
-        let conn = setup_dependency_db();
-        conn.execute("UPDATE lanes SET remote_id = 10", []).unwrap();
-        let mut dto = detail_dto(2, "two", "2026-05-01T00:00:00.000Z");
-        dto.archived_at = Some("2026-05-01T00:00:00.000Z".into());
-        assert_eq!(apply_pulled_issues(&conn, "t1", vec![dto]), 0);
-        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
-        assert_eq!(i.archived_at.as_deref(), Some("2026-05-01T00:00:00.000Z"));
-
-        let back = detail_dto(2, "two", "2026-06-01T00:00:00.000Z");
-        assert_eq!(apply_pulled_issues(&conn, "t1", vec![back]), 0);
-        let i = queries::find_issue_by_remote_id(&conn, 2).unwrap().unwrap();
-        assert_eq!(i.archived_at, None);
     }
 
     #[test]
@@ -8559,5 +8559,53 @@ mod group_order_live {
             return Err(format!("want {want:?}, web {web_order:?}, local {local:?}"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod issue_pull_live {
+    use super::*;
+
+    /// Live check of the issue pull against local Rails (:3005), run with
+    /// `--ignored` and MTASKS_TEST_DATA_DIR pointed at an empty scratch dir.
+    /// Pulls only, so nothing is written to Rails. A full pull mirrors the
+    /// listing with no duplicates, an incremental pull keeps it stable, and a
+    /// synced issue the server doesn't list is purged on the next full pull.
+    #[tokio::test]
+    #[ignore]
+    async fn full_and_incremental_pulls_match_the_server() {
+        let (cfg, _) = crate::config::load();
+        let client = ApiClient::new(cfg.api_base_url.trim(), cfg.api_token.unwrap_or_default()).unwrap();
+        let count = |sql: &str| -> i64 {
+            open().unwrap().query_row(sql, [], |r| r.get(0)).unwrap()
+        };
+        const DUPLICATES: &str = "SELECT COUNT(*) FROM (SELECT remote_id FROM issues
+            WHERE remote_id IS NOT NULL GROUP BY remote_id HAVING COUNT(*) > 1)";
+
+        let report = SyncEngine::full_cycle(&client).await;
+        assert_eq!(report.pull.last_error, None);
+        let full = count("SELECT COUNT(*) FROM issues");
+        assert!(full > 0, "the local server should have issues to pull");
+        assert_eq!(count(DUPLICATES), 0);
+        eprintln!("full pull: {full} issues");
+
+        let report = SyncEngine::full_cycle(&client).await;
+        assert_eq!(report.pull.last_error, None);
+        assert_eq!(count("SELECT COUNT(*) FROM issues"), full);
+        assert_eq!(count(DUPLICATES), 0);
+
+        let conn = open().unwrap();
+        let now = crate::db::now_iso();
+        conn.execute(
+            "INSERT INTO issues (id, title, priority, lane_id, team_id, remote_id, created_at, updated_at)
+             SELECT 'ghost', 'ghost', 0, lane_id, team_id, 2147483647, ?1, ?1 FROM issues LIMIT 1",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM pull_cursors WHERE resource = 'issues'", []).unwrap();
+        let report = SyncEngine::full_cycle(&client).await;
+        assert_eq!(report.pull.last_error, None);
+        assert_eq!(count("SELECT COUNT(*) FROM issues WHERE id = 'ghost'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM issues"), full);
     }
 }

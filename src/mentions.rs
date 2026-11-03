@@ -472,7 +472,7 @@ pub fn member_suggestions(members: &[Member], query: &str) -> Vec<Suggestion> {
 
 /// Issues of the team matching `query` via the shared matcher
 /// (`issue_match`), newest number first. `exclude_id` is the open issue (no
-/// self-reference); archived issues are left out.
+/// self-reference).
 pub fn issue_suggestions(
     issues: &[Issue],
     team_identifier: &str,
@@ -482,7 +482,7 @@ pub fn issue_suggestions(
     let q = IssueQuery::parse(query);
     let mut hits: Vec<(i32, Suggestion)> = issues
         .iter()
-        .filter(|i| i.id != exclude_id && i.archived_at.is_none())
+        .filter(|i| i.id != exclude_id)
         .filter(|i| q.matches(i, team_identifier))
         .filter_map(|i| {
             let n = i.team_number?;
@@ -754,7 +754,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -958,10 +957,6 @@ mod tests {
         assert!(issue_suggestions(&is, "JAIT", "", "ENG-12").is_empty());
         // Title search.
         assert_eq!(issue_suggestions(&is, "JAIT", "", "title 2").len(), 1);
-        // Archived issues are left out.
-        let mut arch = issue("z", 9, None);
-        arch.archived_at = Some("2026-01-01".into());
-        assert!(issue_suggestions(&[arch], "JAIT", "", "9").is_empty());
         // Blank query matches nothing.
         assert!(issue_suggestions(&is, "JAIT", "", "  ").is_empty());
     }

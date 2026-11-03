@@ -721,6 +721,58 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 34,
+        name: "remove_issue_archiving",
+        up: "
+            -- Rails has no issue archive action, so issues no longer have an
+            -- archive state. Archived rows are deleted with everything attached,
+            -- and their pending sync entries are retired.
+            DELETE FROM issue_events WHERE sync_queue_id IN (
+                SELECT id FROM sync_queue WHERE synced_at IS NULL AND (
+                    (entity_type = 'issue' AND entity_id IN
+                        (SELECT id FROM issues WHERE archived_at IS NOT NULL))
+                    OR (entity_type = 'comment' AND entity_id IN
+                        (SELECT id FROM comments WHERE issue_id IN
+                            (SELECT id FROM issues WHERE archived_at IS NOT NULL)))));
+            UPDATE sync_queue SET synced_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE synced_at IS NULL AND (
+                (entity_type = 'issue' AND entity_id IN
+                    (SELECT id FROM issues WHERE archived_at IS NOT NULL))
+                OR (entity_type = 'comment' AND entity_id IN
+                    (SELECT id FROM comments WHERE issue_id IN
+                        (SELECT id FROM issues WHERE archived_at IS NOT NULL))));
+            DELETE FROM attachments WHERE
+                (owner_kind = 'issue' AND owner_id IN
+                    (SELECT id FROM issues WHERE archived_at IS NOT NULL))
+                OR (owner_kind = 'comment' AND owner_id IN
+                    (SELECT id FROM comments WHERE issue_id IN
+                        (SELECT id FROM issues WHERE archived_at IS NOT NULL)));
+            DELETE FROM notifications WHERE issue_remote_id IN
+                (SELECT remote_id FROM issues
+                  WHERE archived_at IS NOT NULL AND remote_id IS NOT NULL);
+            UPDATE issues SET parent_issue_id = NULL WHERE parent_issue_id IN
+                (SELECT id FROM issues WHERE archived_at IS NOT NULL);
+            DELETE FROM comments WHERE issue_id IN
+                (SELECT id FROM issues WHERE archived_at IS NOT NULL);
+            DELETE FROM issue_labels WHERE issue_id IN
+                (SELECT id FROM issues WHERE archived_at IS NOT NULL);
+            DELETE FROM issue_dependencies WHERE
+                blocking_issue_id IN (SELECT id FROM issues WHERE archived_at IS NOT NULL)
+                OR blocked_issue_id IN (SELECT id FROM issues WHERE archived_at IS NOT NULL);
+            DELETE FROM issue_events WHERE issue_id IN
+                (SELECT id FROM issues WHERE archived_at IS NOT NULL);
+            DELETE FROM issue_activity_entries WHERE issue_id IN
+                (SELECT id FROM issues WHERE archived_at IS NOT NULL);
+            DELETE FROM issue_activity_state WHERE issue_id IN
+                (SELECT id FROM issues WHERE archived_at IS NOT NULL);
+            DELETE FROM issues WHERE archived_at IS NOT NULL;
+            ALTER TABLE issues DROP COLUMN archived_at;
+            -- The next pull lists each team in full, so a deleted row the server
+            -- still has comes back. Incremental pulls wouldn't return it.
+            DELETE FROM pull_cursors WHERE resource = 'issues';
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1099,6 +1151,70 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_from_v33_deletes_archived_issues_and_drops_the_column() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 34) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute_batch(&format!(
+            "INSERT INTO teams (id, name, identifier, archived_at, created_at, updated_at)
+               VALUES ('t1', 'T', 'T', '{now}', '{now}', '{now}');
+             INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+               VALUES ('l1', 'L', 0, 't1', '{now}', '{now}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, remote_id, archived_at, created_at, updated_at)
+               VALUES ('synced', 'a', 0, 'l1', 't1', 7, '{now}', '{now}', '{now}'),
+                      ('local', 'b', 0, 'l1', 't1', NULL, '{now}', '{now}', '{now}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, parent_issue_id, created_at, updated_at)
+               VALUES ('live', 'c', 0, 'l1', 't1', 'synced', '{now}', '{now}');
+             INSERT INTO comments (id, issue_id, body, created_at, updated_at)
+               VALUES ('c1', 'synced', 'x', '{now}', '{now}'), ('c2', 'live', 'y', '{now}', '{now}');
+             INSERT INTO issue_dependencies (id, blocking_issue_id, blocked_issue_id, created_at, updated_at)
+               VALUES ('d1', 'synced', 'live', '{now}', '{now}');
+             INSERT INTO sync_queue (entity_type, entity_id, action, created_at)
+               VALUES ('issue', 'local', 'create', '{now}'), ('comment', 'c1', 'create', '{now}'),
+                      ('issue', 'live', 'update', '{now}');
+             INSERT INTO pull_cursors (team_id, resource, cursor)
+               VALUES ('t1', 'issues', 'A'), ('t1', 'deleted', 'B');"
+        ))
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM issues")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, ["live"]);
+        assert_eq!(count("SELECT COUNT(*) FROM issues WHERE parent_issue_id IS NOT NULL"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM comments"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM issue_dependencies"), 0);
+        // Only the surviving issue's queued edit is still pending.
+        let pending: String = conn
+            .query_row("SELECT entity_id FROM sync_queue WHERE synced_at IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pending, "live");
+        // Issue cursors reset; other resources keep theirs.
+        assert_eq!(count("SELECT COUNT(*) FROM pull_cursors WHERE resource = 'issues'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM pull_cursors WHERE resource = 'deleted'"), 1);
+        // The team's archive state is untouched and the issue column is gone.
+        assert_eq!(count("SELECT COUNT(*) FROM teams WHERE archived_at IS NOT NULL"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name = 'archived_at'"),
+            0
+        );
+    }
+
+    #[test]
     fn idempotent_when_run_twice() {
         let conn = open_mem();
         run(&conn).unwrap();
@@ -1175,14 +1291,7 @@ mod tests {
             .unwrap();
         assert_eq!(events, 0);
 
-        // New columns exist and default to NULL on legacy rows.
-        let archived: Option<String> = conn
-            .query_row("SELECT archived_at FROM issues WHERE id='i1'", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert!(archived.is_none());
-
+        // New columns exist on legacy rows.
         let counter: i64 = conn
             .query_row("SELECT issue_counter FROM teams WHERE id='t1'", [], |row| {
                 row.get(0)

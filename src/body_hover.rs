@@ -259,7 +259,7 @@ pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
 }
 
 /// Issues assigned to `member` on the member's team that are still open:
-/// not completed, canceled or archived. Counted from the loaded issues, so
+/// not completed or canceled. Counted from the loaded issues, so
 /// it needs no query and works offline; run only when a card is drawn.
 fn open_issue_count(member: &Member, issues: &[Issue]) -> usize {
     issues
@@ -269,7 +269,6 @@ fn open_issue_count(member: &Member, issues: &[Issue]) -> usize {
                 && i.team_id == member.team_id
                 && i.completed_at.is_none()
                 && i.canceled_at.is_none()
-                && i.archived_at.is_none()
         })
         .count()
 }
@@ -432,7 +431,6 @@ mod tests {
             parent_issue_id: None,
             assignee_id: None,
             creator_id: None,
-            archived_at: None,
             remote_id: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -659,8 +657,6 @@ mod tests {
         done.completed_at = Some("x".into());
         let mut canceled = mine(issue("3", "t", Some(3), "canceled"));
         canceled.canceled_at = Some("x".into());
-        let mut archived = mine(issue("4", "t", Some(4), "archived"));
-        archived.archived_at = Some("x".into());
         let mut bobs = issue("6", "t", Some(6), "bobs");
         bobs.assignee_id = Some("m-Bob".into());
         let issues = [
@@ -668,7 +664,6 @@ mod tests {
             mine(issue("1b", "t", Some(8), "open too")),
             done,
             canceled,
-            archived,
             mine(issue("5", "other", Some(5), "other team")),
             bobs,
             issue("7", "t", Some(7), "unassigned"),
