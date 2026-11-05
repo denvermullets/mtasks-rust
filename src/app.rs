@@ -3559,6 +3559,15 @@ impl App {
         }
         match message {
             Message::KeyPressed(key, modifiers) => {
+                // Esc in the strip's rename field cancels the rename.
+                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                    && self.modal == Modal::None
+                    && self.terminals.is_renaming()
+                {
+                    return self.update(Message::Terminal(
+                        crate::terminal::TerminalMessage::RenameCancel,
+                    ));
+                }
                 // Esc with a hover card open only closes the card.
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
                     && self.body_hover.is_open()

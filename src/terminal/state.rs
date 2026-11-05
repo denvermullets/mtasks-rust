@@ -81,6 +81,8 @@ pub enum TerminalMessage {
     RenameInput(String),
     /// Enter: an empty name is refused and the old one kept.
     RenameSubmit,
+    /// Escape: leave the field and keep the old name.
+    RenameCancel,
     /// The strip's close button. The app asks first when the Terminal is busy
     /// (`close_needs_confirm`), then sends `CloseConfirmed`.
     Close(TerminalId),
@@ -328,6 +330,11 @@ impl TerminalState {
             TerminalMessage::RenameSubmit => {
                 if let Some((id, draft)) = self.renaming.take() {
                     self.roster.rename(id, &draft);
+                    self.focused = true;
+                }
+            }
+            TerminalMessage::RenameCancel => {
+                if self.renaming.take().is_some() {
                     self.focused = true;
                 }
             }
@@ -660,6 +667,11 @@ impl TerminalState {
         self.roster.take_changes()
     }
 
+    /// A strip name is being edited.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
     pub fn set_team_dirs(&mut self, dirs: HashMap<String, std::path::PathBuf>) {
         self.team_dirs = dirs;
     }
@@ -941,6 +953,31 @@ mod tests {
         t.roster.replace_id(old, TerminalId(42));
         t.restore_panel(&parked);
         assert_eq!(t.panel.panes[0], Some(TerminalId(42)));
+    }
+
+    #[test]
+    fn cancelling_a_rename_keeps_the_old_name_and_closes_the_field() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let id = t.roster.id_of_key("k1").unwrap();
+        let _ = t.update(TerminalMessage::RenameStart(id), Some("a"));
+        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some("a"));
+        assert!(t.is_renaming());
+        let _ = t.update(TerminalMessage::RenameCancel, Some("a"));
+        assert!(!t.is_renaming());
+        assert_eq!(t.roster.get(id).unwrap().name, "k1");
+        assert!(t.focused, "the keyboard goes back to the shell");
+    }
+
+    #[test]
+    fn submitting_a_rename_still_changes_the_name() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let id = t.roster.id_of_key("k1").unwrap();
+        let _ = t.update(TerminalMessage::RenameStart(id), Some("a"));
+        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some("a"));
+        let _ = t.update(TerminalMessage::RenameSubmit, Some("a"));
+        assert_eq!(t.roster.get(id).unwrap().name, "changed");
     }
 
     #[test]
