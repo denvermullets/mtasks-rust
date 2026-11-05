@@ -5,6 +5,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};
+use crate::scroll::{track, ScrollKey};
 use crate::db::attachments::Attachment;
 use crate::files::images::ImageStore;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
@@ -421,7 +422,13 @@ pub fn view<'a>(
     row![]
         .width(Length::Fill)
         .height(Length::Fill)
-        .push(container(scrollable(left)).width(Length::Fill).height(Length::Fill))
+        .push(
+            container(
+                track(scrollable(left), ScrollKey::IssueDetail),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
         .push(divider)
         .push(sidebar_panel)
         .into()

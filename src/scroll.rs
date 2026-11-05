@@ -246,3 +246,117 @@ mod tests {
         }
     }
 }
+
+/// Names one tracked scrollable. It keys `App::scroll_state` and, through
+/// `id`, the widget, so the two cannot drift apart. Board lanes are a variant
+/// of their own rather than bare indices sharing a number space with the views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScrollKey {
+    /// One board lane's vertical scroll.
+    Lane(usize),
+    /// The board's sideways scroll across its lanes.
+    Board,
+    IssueList,
+    Dashboard,
+    Inbox,
+    Projects,
+    Roadmap,
+    RecurringIssues,
+    IssueDetail,
+    ProjectDetail,
+}
+
+impl ScrollKey {
+    /// The scrollable widget this key names.
+    pub fn id(self) -> iced::widget::scrollable::Id {
+        use iced::widget::scrollable::Id;
+        match self {
+            ScrollKey::Lane(i) => Id::new(format!("board-lane-{i}")),
+            ScrollKey::Board => Id::new("board-columns"),
+            ScrollKey::IssueList => Id::new("issue-list"),
+            ScrollKey::Dashboard => Id::new("dashboard-list"),
+            ScrollKey::Inbox => Id::new("inbox-list"),
+            ScrollKey::Projects => Id::new("project-list"),
+            ScrollKey::Roadmap => Id::new("roadmap"),
+            ScrollKey::RecurringIssues => Id::new("recurring-issues"),
+            ScrollKey::IssueDetail => Id::new("issue-detail"),
+            ScrollKey::ProjectDetail => Id::new("project-detail"),
+        }
+    }
+
+    /// Whether the scrollable moves sideways (`x`, width) rather than down.
+    pub fn horizontal(self) -> bool {
+        matches!(self, ScrollKey::Board)
+    }
+
+    /// The offset to hand `scrollable::scroll_to` for a stored `offset`.
+    pub fn absolute(self, offset: f32) -> iced::widget::scrollable::AbsoluteOffset {
+        if self.horizontal() {
+            iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 }
+        } else {
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset }
+        }
+    }
+
+    /// `scrollable::scroll_to` for a stored `offset`.
+    pub fn scroll_to<T: 'static>(self, offset: f32) -> iced::Task<T> {
+        iced::widget::scrollable::scroll_to(self.id(), self.absolute(offset))
+    }
+
+    /// The `(offset, viewport)` pair the scrollable reports for this key.
+    fn reading(self, vp: iced::widget::scrollable::Viewport) -> (f32, f32) {
+        if self.horizontal() {
+            (vp.absolute_offset().x, vp.bounds().width)
+        } else {
+            (vp.absolute_offset().y, vp.bounds().height)
+        }
+    }
+}
+
+/// Give `scrollable` its id and make it report its offset as
+/// `Message::Scrolled(key, ..)`: the one place a view wires scroll tracking.
+pub fn track<'a>(
+    scrollable: iced::widget::Scrollable<'a, crate::app::Message>,
+    key: ScrollKey,
+) -> iced::widget::Scrollable<'a, crate::app::Message> {
+    scrollable.id(key.id()).on_scroll(move |vp| {
+        let (offset, viewport) = key.reading(vp);
+        crate::app::Message::Scrolled(key, offset, viewport)
+    })
+}
+
+#[cfg(test)]
+mod scroll_key_tests {
+    use super::ScrollKey;
+
+    #[test]
+    fn lanes_and_views_never_share_a_key_or_an_id() {
+        let keys = [
+            ScrollKey::Lane(0),
+            ScrollKey::Lane(1),
+            ScrollKey::Board,
+            ScrollKey::IssueList,
+            ScrollKey::Dashboard,
+            ScrollKey::Inbox,
+            ScrollKey::Projects,
+            ScrollKey::Roadmap,
+            ScrollKey::RecurringIssues,
+            ScrollKey::IssueDetail,
+            ScrollKey::ProjectDetail,
+        ];
+        for (i, a) in keys.iter().enumerate() {
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b);
+                assert_ne!(a.id(), b.id());
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_board_scrolls_sideways() {
+        assert!(ScrollKey::Board.horizontal());
+        assert!(!ScrollKey::Lane(3).horizontal());
+        assert_eq!(ScrollKey::Board.absolute(7.0).x, 7.0);
+        assert_eq!(ScrollKey::Lane(3).absolute(7.0).y, 7.0);
+    }
+}

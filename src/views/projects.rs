@@ -7,6 +7,7 @@ use iced::{Alignment, Border, Color, Element, Length, Theme};
 use chrono::Datelike;
 
 use crate::app::{Message, ProjectSort, SortDir};
+use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Member, Priority, Project, ProjectStatus, RoadmapCommitment};
 use crate::theme as t;
 use crate::theme::{radius, space, type_scale};
@@ -431,7 +432,9 @@ pub fn list_view<'a>(
                     ..Default::default()
                 }),
             )
-            .push(scrollable(rows).height(Length::Fill))
+            .push(
+                track(scrollable(rows), ScrollKey::Projects).height(Length::Fill),
+            )
             .into()
     });
 

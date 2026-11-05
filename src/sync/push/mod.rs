@@ -190,7 +190,7 @@ const READ_ONLY_REASON: &str = "read-only token; push skipped";
 
 const PAUSED_REASON: &str = "pushes paused earlier in this drain";
 
-fn entry_scope(entry_id: i64, entry: &SyncQueueEntry) -> String {
+pub(super) fn entry_scope(entry_id: i64, entry: &SyncQueueEntry) -> String {
     format!(
         "entry_id={entry_id} type={} action={}",
         entry.entity_type, entry.action

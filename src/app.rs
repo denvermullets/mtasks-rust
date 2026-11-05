@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use iced::keyboard;
-use iced::widget::{column, container, row, scrollable, text_input};
+use iced::widget::{column, container, row, text_input};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
@@ -20,7 +20,7 @@ use crate::display::{
 };
 use crate::fonts;
 use crate::keys;
-use crate::scroll;
+use crate::scroll::{self, ScrollKey};
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::sync::notif_poll::{self, PollOutcome, PollReport};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Run, Scheduler};
@@ -31,24 +31,26 @@ use crate::views::{
     board, command_palette, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
-    team_list, team_members, team_picker, toast,
+    tab_bar, team_list, team_members, team_picker, toast,
 };
 
-/// Where an issue detail opened from a dashboard returns to.
-#[derive(Debug, Clone, PartialEq)]
-struct DashboardOrigin {
-    dashboard_id: String,
-    /// The team selected before the detail switched to the issue's own team.
-    prev_team_id: Option<String>,
-}
+mod tab_update;
+pub use tab_update::TabMessage;
 
 #[derive(Debug, Clone)]
 pub enum Message {
     // Navigation
     /// Toggle a team's sidebar expansion (chevron / team-header click).
     ToggleTeamExpanded(String),
+    /// Click on a sidebar team row outside its chevron.
+    SelectTeamRow(String),
     /// Select a team and switch the right pane to `view` (team sub-row click).
     SelectTeamView(String, View),
+    /// Tab bar actions; handled in `app/tab_update.rs`.
+    Tab(TabMessage),
+    WindowResized(f32),
+    /// Terminal panel and keys; handled in `terminal/state.rs`.
+    Terminal(crate::terminal::TerminalMessage),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
     /// Pause (false) or resume (true) a recurring issue (local id); local
@@ -294,6 +296,8 @@ pub enum Message {
     // UI
     CloseModal,
     ToggleHelp,
+    /// `/` or the palette command on the project page: show or hide Properties.
+    ToggleProjectProperties,
     /// Cmd+K: open the command palette.
     OpenCommandPalette,
     /// The palette's text field changed.
@@ -359,7 +363,7 @@ pub enum Message {
     /// List mode `c`: collapse/expand the focused section.
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
-    Scrolled(usize, f32, f32),
+    Scrolled(ScrollKey, f32, f32),
     SetGroupBy(GroupBy),
     SetSubGroup(SubGroup),
     SetOrderBy(OrderBy),
@@ -378,6 +382,8 @@ pub enum Message {
     SettingsThemeChanged(t::ThemeChoice),
     /// Font picked in Settings: saves to config; applies after restart.
     SettingsFontChanged(fonts::FontChoice),
+    SettingsTerminalFontChanged(fonts::FontChoice),
+    SettingsTerminalSizeChanged(u16),
     SettingsNativeNotificationsToggled(bool),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
@@ -392,6 +398,14 @@ pub enum Message {
     UserInput,
     WindowFocused,
     WindowUnfocused,
+    /// The one entry to quitting: the window's close button and Cmd+Q both send it.
+    QuitRequested,
+    /// The quit ask was confirmed: close every Terminal, then exit.
+    QuitConfirmed,
+    /// Every Terminal has closed (or the wait ran out): exit.
+    QuitReady,
+    /// Once, at startup: send the native Quit menu item to `QuitRequested`.
+    RouteMenuQuit,
     SyncCompleted(FullSyncReport),
     /// A Notification poll finished.
     NotifPollCompleted(PollOutcome),
@@ -517,11 +531,19 @@ struct CommentDrafts<'a> {
     files: &'a mut crate::views::issue_detail::ComposerFiles,
 }
 
+/// Longest the app waits for Terminals to close on quit: the 2 second
+/// grace, the 5 second kill wait, and some slack.
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
     None,
     IssueForm,
     DeleteConfirm(String),
+    /// Ask before closing a busy Terminal.
+    TerminalCloseConfirm(crate::terminal::TerminalId),
+    /// Ask before quitting with a busy Terminal.
+    QuitConfirm,
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -779,6 +801,27 @@ pub struct App {
     collapsed_dashboard_groups: crate::views::dashboard::CollapsedGroups,
     /// Header state and focus parked per dashboard (session only).
     dashboard_sessions: crate::dashboard_session::Sessions,
+    /// Open Tabs (ADR 0001). The active Tab's state is this struct's live
+    /// fields; the others are in `parked_tabs`. None until a team exists.
+    tab_set: Option<crate::tabs::TabSet>,
+    /// The Tabs last written to the local database, so a change is saved once.
+    saved_tabs: Option<(crate::tabs::TabSet, Vec<crate::tabs::Page>)>,
+    /// Pages restored at launch for Tabs not focused yet; a Tab takes its
+    /// entry the first time it becomes live.
+    restored_pages: HashMap<crate::tabs::TabKey, crate::tabs::Page>,
+    /// The panels last written to the local database, so a change is saved once.
+    saved_panels: Option<Vec<(Option<crate::tabs::TabKey>, crate::db::panel_states::StoredPanel)>>,
+    /// Panels stored for Tabs restored at launch, until each is first focused.
+    restored_panels: HashMap<crate::tabs::TabKey, crate::db::panel_states::StoredPanel>,
+    /// Window width and the tab bar's sideways scroll, for keeping the active
+    /// Tab in view. Neither is per Tab.
+    window_width: f32,
+    tab_bar_offset: f32,
+    parked_tabs: crate::tab_state::Parked,
+    /// Project id to (name, team id) for each open project Tab, for its label.
+    tab_projects: HashMap<String, (String, String)>,
+    /// Terminals, their panel and its canvas. Outside every Tab.
+    terminals: crate::terminal::TerminalState,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -823,7 +866,9 @@ pub struct App {
     /// The open issue detail was reached from the Inbox (Back returns there).
     detail_from_inbox: bool,
     /// The open issue detail was reached from a dashboard (Back returns there).
-    detail_from_dashboard: Option<DashboardOrigin>,
+    detail_from_dashboard: Option<String>,
+    /// The team-level page a team Tab's open issue was opened from (Back).
+    detail_from_page: Option<View>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -857,14 +902,16 @@ pub struct App {
     focused_issue: usize,
     /// List-mode sections (by title) whose rows are hidden.
     collapsed_sections: HashSet<String>,
-    /// Last reported (offset, viewport height) per scrollable: board lane
-    /// index, or `issue_list::SCROLL_KEY`. Drives scroll-to-focus.
-    scroll_state: HashMap<usize, (f32, f32)>,
+    /// Last reported (offset, viewport size) per scrollable. Drives
+    /// scroll-to-focus.
+    scroll_state: HashMap<ScrollKey, (f32, f32)>,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
     /// Buffered edit state while the right pane shows `View::IssueDetail`.
     issue_detail: Option<issue_detail::IssueDetailState>,
     /// Buffered edit state while the right pane shows `View::ProjectDetail`.
+    /// Lanes and labels of the team a new issue from My Issues goes to.
+    new_issue_scope: Option<(Vec<Lane>, Vec<Label>)>,
     project_detail: Option<project_detail::ProjectDetailState>,
     /// Projects table sort key + direction (session-only).
     project_sort: ProjectSort,
@@ -949,6 +996,14 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
+            on_project_detail: matches!(self.view, View::ProjectDetail(_)),
+            terminal_focus: self.terminals.palette_focus(self.panel_team()),
+            terminal_panel_showing: self.terminals.panel_showing(self.panel_team()),
+            tabs: self
+                .tab_labels()
+                .into_iter()
+                .map(|(label, active)| crate::palette_results::SearchableTab { label, active })
+                .collect(),
         }
     }
 
@@ -970,17 +1025,6 @@ impl App {
                     })
             })
             .collect()
-    }
-
-    /// Before opening an issue or project from the palette: when it belongs to
-    /// another team (or we are on My Issues, whose data is mixed), select its
-    /// team like a sidebar click, so the sidebar follows and its data is loaded.
-    fn select_team_for_palette(&mut self, team_id: &str) -> Task<Message> {
-        if self.selected_team_id.as_deref() == Some(team_id) && !self.view.is_cross_team() {
-            return Task::none();
-        }
-        self.expanded_teams.insert(team_id.to_string());
-        self.update(Message::SelectTeamView(team_id.to_string(), View::Board))
     }
 
     fn db(&self) -> rusqlite::Connection {
@@ -1054,6 +1098,8 @@ impl App {
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
         }
+        self.ensure_tab_set();
+        self.reload_tab_projects(&conn);
 
         if self.view.is_cross_team() {
             self.load_cross_team(&conn);
@@ -1076,15 +1122,11 @@ impl App {
         self.reload_detail_origin(&conn);
         self.refresh_open_view();
 
-        // Filters are global but hold per-team ids; drop the ones this data
-        // doesn't contain (My Issues loads every team, so its ids all stay).
-        // Skipped while a dashboard-opened detail is up: the selected team is
-        // temporarily the issue's, and pruning would drop the board filters of
-        // the team that was selected before.
-        if self.selected_team_id.is_some()
-            && self.detail_from_dashboard.is_none()
-            && self.prune_board_filters()
-        {
+        // Filters hold per-team ids; drop the ones this data doesn't contain
+        // from the scope's own set (My Issues loads every team, so its ids
+        // all stay). An issue opened from a cross-team Tab selects the
+        // issue's team, whose set is pruned against that team's data.
+        if self.selected_team_id.is_some() && self.prune_board_filters() {
             if let Err(e) = config::save(&self.config) {
                 self.config_error = Some(e);
             }
@@ -1594,28 +1636,42 @@ impl App {
     fn board_display(&self) -> &DisplayOptions {
         match &self.open_view {
             Some(v) => &v.state.display,
-            None => &self.config.display,
+            None => self.config.display_for(&self.board_scope()),
         }
     }
 
     fn board_display_mut(&mut self) -> &mut DisplayOptions {
+        let scope = self.board_scope();
         match &mut self.open_view {
             Some(v) => &mut v.state.display,
-            None => &mut self.config.display,
+            None => self.config.display_for_mut(&scope),
+        }
+    }
+
+    /// Whose display options and filters the active board uses: My Issues' own,
+    /// the selected team's, or the global set on other cross-team pages.
+    fn board_scope(&self) -> config::BoardScope {
+        if self.view == View::MyIssues {
+            return config::BoardScope::MyIssues;
+        }
+        match &self.selected_team_id {
+            Some(id) if !self.view.is_cross_team() => config::BoardScope::Team(id.clone()),
+            _ => config::BoardScope::Global,
         }
     }
 
     fn board_filters(&self) -> &Filters {
         match &self.open_view {
             Some(v) => &v.state.filters,
-            None => &self.config.filters,
+            None => self.config.filters_for(&self.board_scope()),
         }
     }
 
     fn board_filters_mut(&mut self) -> &mut Filters {
+        let scope = self.board_scope();
         match &mut self.open_view {
             Some(v) => &mut v.state.filters,
-            None => &mut self.config.filters,
+            None => self.config.filters_for_mut(&scope),
         }
     }
 
@@ -1650,9 +1706,13 @@ impl App {
                     labels: &self.labels,
                     projects: &self.projects,
                 };
+                let scope = match &self.selected_team_id {
+                    Some(id) => config::BoardScope::Team(id.clone()),
+                    None => config::BoardScope::Global,
+                };
                 let local = crate::saved_view::BoardState {
-                    display: self.config.display.clone(),
-                    filters: self.config.filters.clone(),
+                    display: self.config.display_for(&scope).clone(),
+                    filters: self.config.filters_for(&scope).clone(),
                     search: String::new(),
                 };
                 v.refresh(sv, &mirror, &local);
@@ -1682,7 +1742,9 @@ impl App {
                 .prune(&self.members, &self.labels, &self.lanes, &self.projects);
             return false;
         }
-        self.config.filters.prune(
+        let scope = self.board_scope();
+        self.config.prune_filters_for(
+            &scope,
             &self.members,
             &self.labels,
             &self.lanes,
@@ -1736,7 +1798,7 @@ impl App {
             crumbs.insert(0, "My Issues".into());
         }
         if let (Some(o), View::IssueDetail(_)) = (&self.detail_from_dashboard, &self.view) {
-            if let Some(d) = self.dashboards.iter().find(|d| d.id == o.dashboard_id) {
+            if let Some(d) = self.dashboards.iter().find(|d| d.id == *o) {
                 crumbs.insert(0, d.name.clone());
             }
         }
@@ -1762,6 +1824,27 @@ impl App {
         crumbs
     }
 
+    /// The header's Back for an open issue (`tab_state::back_target`).
+    fn back_message(&self) -> Option<Message> {
+        use crate::tab_state::{back_target, Back, DetailFrom};
+        if !matches!(self.view, View::IssueDetail(_)) {
+            return None;
+        }
+        let from = DetailFrom {
+            my_issues: self.detail_from_my_issues,
+            inbox: self.detail_from_inbox,
+            dashboard: self.detail_from_dashboard.clone(),
+            page: self.detail_from_page.clone(),
+        };
+        Some(match back_target(self.active_tab_key()?, &from)? {
+            Back::MyIssues => Message::BackToMyIssues,
+            Back::Inbox => Message::BackToInbox,
+            Back::Dashboard(_) => Message::BackToDashboard,
+            Back::TabRoot => Message::Tab(TabMessage::BackToRoot),
+            Back::Page(view) => Message::Tab(TabMessage::BackToPage(view)),
+        })
+    }
+
     /// Empty-state text for My Issues, when there's something to explain.
     fn my_issues_empty(&self) -> Option<&'static str> {
         let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
@@ -1784,11 +1867,38 @@ impl App {
         )
     }
 
+    /// The team a new issue goes to from My Issues: the most recently active
+    /// team Tab's team, else the first team. An archived team (its Tab stays
+    /// open, but its data isn't loaded on My Issues) falls back to the first.
+    fn cross_team_new_issue_team(&self) -> Option<String> {
+        let first = default_team_id(&self.teams);
+        let team = self
+            .tab_set
+            .as_ref()
+            .and_then(|set| set.new_issue_team(first.as_deref()))
+            .or(first.as_deref())?;
+        let archived = self
+            .teams
+            .iter()
+            .any(|t| t.id == team && t.archived_at.is_some());
+        if archived { first } else { Some(team.to_string()) }
+    }
+
+    /// The lanes and labels a new issue's form offers when My Issues loaded
+    /// every team's: only the selected team's.
+    fn new_issue_scope(&self) -> Option<(Vec<Lane>, Vec<Label>)> {
+        let team = self.selected_team_id.as_deref()?;
+        Some((
+            self.lanes.iter().filter(|l| l.team_id == team).cloned().collect(),
+            self.labels.iter().filter(|l| l.team_id == team).cloned().collect(),
+        ))
+    }
+
     /// What the header "+ New" button creates on the current view, if anything.
     fn new_action(&self) -> Option<Message> {
         self.selected_team()?;
         match self.view {
-            View::Board => Some(Message::CreateIssue),
+            View::Board | View::MyIssues => Some(Message::CreateIssue),
             View::ProjectList => Some(Message::CreateProject),
             View::Roadmap => Some(Message::OpenRoadmapAdd(RoadmapCommitment::Now)),
             _ => None,
@@ -1923,7 +2033,7 @@ impl App {
         }
         let (offset, viewport) = self
             .scroll_state
-            .get(&board::BOARD_SCROLL_KEY)
+            .get(&ScrollKey::Board)
             .copied()
             .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
         let left = scroll::board_column_left(self.focused_lane);
@@ -1931,12 +2041,8 @@ impl App {
         if (new - offset).abs() < 0.5 {
             return Task::none();
         }
-        self.scroll_state
-            .insert(board::BOARD_SCROLL_KEY, (new, viewport));
-        scrollable::scroll_to(
-            board::board_scroll_id(),
-            scrollable::AbsoluteOffset { x: new, y: 0.0 },
-        )
+        self.scroll_state.insert(ScrollKey::Board, (new, viewport));
+        ScrollKey::Board.scroll_to(new)
     }
 
     /// Scroll the board lane / list so the focused card or row is fully in
@@ -1962,7 +2068,7 @@ impl App {
             }
             let (top, height) =
                 crate::views::dashboard::focused_span(&groups, self.focused_lane, self.focused_issue);
-            let key = issue_list::SCROLL_KEY;
+            let key = ScrollKey::Dashboard;
             let (offset, viewport) = self
                 .scroll_state
                 .get(&key)
@@ -1973,16 +2079,13 @@ impl App {
                 return Task::none();
             }
             self.scroll_state.insert(key, (new, viewport));
-            return scrollable::scroll_to(
-                crate::views::dashboard::scroll_id(),
-                scrollable::AbsoluteOffset { x: 0.0, y: new },
-            );
+            return key.scroll_to(new);
         }
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
         let list = self.board_display().view_mode == ViewMode::List;
-        let (key, id, top, height) = {
+        let (key, top, height) = {
             let columns = self.board_columns();
             let Some(col) = columns.get(self.focused_lane) else {
                 return Task::none();
@@ -2000,7 +2103,7 @@ impl App {
                     self.focused_lane,
                     self.focused_issue,
                 );
-                (issue_list::SCROLL_KEY, issue_list::scroll_id(), top, h)
+                (ScrollKey::IssueList, top, h)
             } else {
                 let data = board::CardData {
                     teams: &self.teams,
@@ -2011,12 +2114,7 @@ impl App {
                     display: self.board_display(),
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
-                (
-                    self.focused_lane,
-                    board::lane_scroll_id(self.focused_lane),
-                    top,
-                    h,
-                )
+                (ScrollKey::Lane(self.focused_lane), top, h)
             }
         };
         let (offset, viewport) = self
@@ -2029,7 +2127,7 @@ impl App {
             return Task::none();
         }
         self.scroll_state.insert(key, (new, viewport));
-        scrollable::scroll_to(id, scrollable::AbsoluteOffset { x: 0.0, y: new })
+        key.scroll_to(new)
     }
 
     /// Keep the selected Inbox row in view. Rows are fixed-height and sit in
@@ -2040,18 +2138,15 @@ impl App {
         let top = self.inbox.selected as f32 * inbox_view::ROW_HEIGHT;
         let (offset, viewport) = self
             .scroll_state
-            .get(&inbox_view::SCROLL_KEY)
+            .get(&ScrollKey::Inbox)
             .copied()
             .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
         let new = scroll::offset_to_reveal(top, inbox_view::ROW_HEIGHT, offset, viewport);
         if (new - offset).abs() < 0.5 {
             return Task::none();
         }
-        self.scroll_state.insert(inbox_view::SCROLL_KEY, (new, viewport));
-        scrollable::scroll_to(
-            inbox_view::scroll_id(),
-            scrollable::AbsoluteOffset { x: 0.0, y: new },
-        )
+        self.scroll_state.insert(ScrollKey::Inbox, (new, viewport));
+        ScrollKey::Inbox.scroll_to(new)
     }
 
     fn focused_issue(&self) -> Option<&Issue> {
@@ -2140,8 +2235,23 @@ impl App {
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
+        // A team or project Tab only shows its own team: another team's
+        // issue opens in that team's Tab (`tabs::issue_open_target`).
+        let target = self.active_tab_key().and_then(|active| {
+            crate::tabs::issue_open_target(active, self.active_tab_team().as_deref(), &issue.team_id)
+        });
+        if let Some(key) = target {
+            if let crate::tabs::TabKey::Team(id) = &key {
+                self.expanded_teams.insert(id.clone());
+            }
+            let focus = self.focus_tab(key);
+            return Task::batch([focus, self.open_issue_detail(&issue)]);
+        }
         if let View::Dashboard(dashboard_id) = self.view.clone() {
             return self.open_issue_from_dashboard(dashboard_id, issue);
+        }
+        if self.view == View::Inbox {
+            return self.open_issue_from_inbox(issue);
         }
         if self.view == View::MyIssues {
             self.selected_team_id = Some(issue.team_id.clone());
@@ -2149,38 +2259,45 @@ impl App {
             self.reload_data();
             self.detail_from_my_issues = true;
         }
+        // Issue to issue inside a cross-team Tab (a link, a dependency): the
+        // Tab stays, and loads the next issue's team for the detail. Back
+        // keeps the origin flags, so it still returns to the page.
+        let cross_team_tab = self.active_tab_key().is_some_and(crate::tabs::TabKey::is_cross_team);
+        if cross_team_tab
+            && matches!(self.view, View::IssueDetail(_))
+            && self.selected_team_id.as_deref() != Some(issue.team_id.as_str())
+        {
+            self.selected_team_id = Some(issue.team_id.clone());
+            self.reload_data();
+        }
         self.open_issue_detail(&issue)
     }
 
     /// Open `issue` from a dashboard: select its own team (like My Issues) so
-    /// the detail is that team's, remembering the dashboard and the team that
-    /// was selected before, so Back restores both.
+    /// the detail is that team's, remembering the dashboard for Back.
     fn open_issue_from_dashboard(&mut self, dashboard_id: String, issue: Issue) -> Task<Message> {
         // The view is about to stop being a dashboard, which skips the stash
         // `update` does afterwards: park the focus now (a click sets it and
         // opens the issue in the same message).
         self.stash_dashboard_session();
-        self.detail_from_dashboard = Some(DashboardOrigin {
-            dashboard_id,
-            prev_team_id: self.selected_team_id.clone(),
-        });
+        self.detail_from_dashboard = Some(dashboard_id);
         self.selected_team_id = Some(issue.team_id.clone());
         self.view = View::Board;
         self.reload_data();
         self.open_issue_detail(&issue)
     }
 
-    /// Leave an issue detail opened from a dashboard: put the previously
-    /// selected team back and return to the dashboard. False when the detail
-    /// didn't come from one.
+    /// Leave an issue detail opened from a dashboard and return to it. False
+    /// when the detail didn't come from one. The selected team stays the
+    /// issue's: the Dashboard's Tab is cross-team, and its data and display
+    /// options don't depend on it.
     fn back_to_dashboard(&mut self) -> bool {
-        let Some(origin) = self.detail_from_dashboard.take() else {
+        let Some(dashboard_id) = self.detail_from_dashboard.take() else {
             return false;
         };
         self.commit_issue_detail();
         self.issue_detail = None;
-        self.selected_team_id = origin.prev_team_id;
-        self.switch_view(View::Dashboard(origin.dashboard_id));
+        self.switch_view(View::Dashboard(dashboard_id));
         true
     }
 
@@ -2209,6 +2326,11 @@ impl App {
     }
 
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
+        // The page Back returns a team Tab to: set when leaving a page, kept
+        // when going from issue A to issue B.
+        if !matches!(self.view, View::IssueDetail(_)) {
+            self.detail_from_page = Some(self.view.clone());
+        }
         self.commit_issue_detail();
         self.commit_project_detail();
         if let Some(old) = self.issue_detail.take() {
@@ -2987,6 +3109,7 @@ impl App {
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_from_dashboard: None,
+            detail_from_page: None,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
@@ -3005,6 +3128,7 @@ impl App {
             modal: Modal::None,
             issue_form: None,
             issue_detail: None,
+            new_issue_scope: None,
             project_detail: None,
             project_sort: ProjectSort::Created,
             project_sort_dir: SortDir::Asc,
@@ -3033,6 +3157,26 @@ impl App {
             dashboard_header: Default::default(),
             collapsed_dashboard_groups: Default::default(),
             dashboard_sessions: Default::default(),
+            tab_set: None,
+            saved_tabs: None,
+            restored_pages: HashMap::new(),
+            saved_panels: None,
+            restored_panels: HashMap::new(),
+            window_width: 1100.0,
+            tab_bar_offset: 0.0,
+            tab_projects: HashMap::new(),
+            terminals: {
+                let mut terminals = crate::terminal::TerminalState::new();
+                if let Ok(dirs) = connection::open().and_then(|c| crate::db::terminal_dirs::all(&c)) {
+                    terminals.set_team_dirs(dirs);
+                }
+                match connection::open().and_then(|c| crate::db::terminal_records::all(&c)) {
+                    Ok(stored) => terminals.restore_records(stored),
+                    Err(e) => eprintln!("could not load Terminal records: {e}"),
+                }
+                terminals
+            },
+            parked_tabs: Default::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -3051,18 +3195,65 @@ impl App {
             sync_paused_auth: false,
         };
 
-        let task = match (launch_view, launch_dashboard) {
+        app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
+
+        // Restore the stored Tabs and focus the Home page's. Doing this before
+        // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
+        let restored = app.launch_tabs();
+        if let Some(id) = app.selected_team_id.clone() {
+            app.expanded_teams.insert(id);
+        }
+        let opened = match (launch_view, launch_dashboard) {
             (Some(view_id), _) => app.update_inner(Message::OpenSavedView(view_id)),
             (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
             _ => Task::none(),
         };
+        let task = Task::batch([restored, opened]);
         // A release build does nothing without a token, so ask for one up front.
         if !cfg!(debug_assertions) && app.config.api_token.is_none() {
             app.settings_form = Some(settings::SettingsFormState::from_config(&app.config));
             app.modal = Modal::Settings;
         }
 
+        // The menu exists once the event loop is up; reroute Cmd+Q then.
+        let task = Task::batch([task, Task::done(Message::RouteMenuQuit)]);
+
         (app, task)
+    }
+
+    /// The single quit path for the close button and Cmd+Q. Today it just
+    /// exits, as exit-on-close did. This is the hook for asking before quitting
+    /// (JRST-410): return `Task::none()` to stay open, and send `iced::exit()`
+    /// once the user confirms.
+    fn quit(&mut self) -> Task<Message> {
+        self.quit_with(false)
+    }
+
+    /// Quit: ask first if any Terminal is busy (any team, shown or hidden),
+    /// then close every Terminal and exit as soon as they have all gone,
+    /// waiting at most `QUIT_WAIT` so a stuck process can't keep the app open.
+    fn quit_with(&mut self, confirmed: bool) -> Task<Message> {
+        use crate::terminal::panel::QuitPlan;
+        match self.terminals.quit_plan(confirmed) {
+            QuitPlan::Ignore => Task::none(),
+            QuitPlan::Ask => {
+                self.modal = Modal::QuitConfirm;
+                Task::none()
+            }
+            QuitPlan::Shutdown => {
+                self.modal = Modal::None;
+                let closings = self.terminals.begin_shutdown();
+                if closings.is_empty() {
+                    return iced::exit();
+                }
+                let (tx, rx) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    crate::terminal::wait_all(closings, QUIT_WAIT);
+                    let _ = tx.send(());
+                });
+                Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady)
+            }
+        }
     }
 
     pub fn title(&self) -> String {
@@ -3126,8 +3317,24 @@ impl App {
         });
 
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
+        let resizes = iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width));
+        let close_requests = iced::window::close_requests().map(|_| Message::QuitRequested);
 
-        let mut subs = vec![keys, activity, banner_clicks];
+        // While a Terminal has focus its key listener replaces the shortcuts.
+        let modal_open = self.modal != Modal::None;
+        let keys = if self.terminals.takes_keys(modal_open) {
+            Subscription::none()
+        } else {
+            keys
+        };
+        let mut subs = vec![
+            keys,
+            activity,
+            banner_clicks,
+            close_requests,
+            resizes,
+            self.terminals.subscription(modal_open),
+        ];
         // Only listen for wheel events while a card is pending or showing.
         if self.body_hover.is_active() {
             subs.push(scrolls);
@@ -3276,7 +3483,9 @@ impl App {
         sync_queue::take_local_write();
         let view_before = self.view.clone();
         let editing_before = self.editing_description();
+        let tabs_before = self.tab_position();
         let mut task = self.update_inner(message);
+        task = Task::batch([task, self.reveal_active_tab(tabs_before)]);
         // The one place that closes hover cards on a view change, modal open
         // or description editor toggle, whatever message caused it (keyboard
         // included).
@@ -3290,6 +3499,12 @@ impl App {
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
+        self.save_tabs();
+        self.save_terminal_records();
+        self.save_panel();
+        let panel_team = self.panel_team().map(str::to_string);
+        self.terminals.set_pinned(self.removed_team_tab());
+        self.terminals.sync(panel_team.as_deref());
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
@@ -3297,20 +3512,70 @@ impl App {
         task
     }
 
+    /// Store the panel when it changed since the last message. Local only.
+    fn save_panel(&mut self) {
+        let Some(set) = &self.tab_set else {
+            return;
+        };
+        if self.terminals.dragging() {
+            return;
+        }
+        let rows = crate::tab_state::panel_rows(
+            set,
+            &self.terminals.stored_panel(),
+            &self.parked_tabs,
+            &self.restored_panels,
+        );
+        if self.saved_panels.as_ref() == Some(&rows) {
+            return;
+        }
+        match crate::db::panel_states::save(&self.db(), &rows) {
+            Ok(()) => self.saved_panels = Some(rows),
+            Err(e) => eprintln!("could not save panel state: {e}"),
+        }
+    }
+
+    /// Store what changed in the Terminal strips since the last message.
+    fn save_terminal_records(&mut self) {
+        let changes = self.terminals.take_record_changes();
+        if changes.is_empty() {
+            return;
+        }
+        if let Err(e) = crate::db::terminal_records::apply(&self.db(), &changes) {
+            eprintln!("could not save Terminal records: {e}");
+        }
+    }
+
     fn update_inner(&mut self, message: Message) -> Task<Message> {
-        // My Issues spans several teams: create and lane moves need a single
-        // team's lanes, so they're no-ops here. Priority and delete act on the
-        // issue's own row/team, so they work cross-team.
+        // Cross-team pages span several teams: lane moves need a single team's
+        // lanes, so they're no-ops here, and so is create on a Dashboard. My
+        // Issues creates in the most recently active team Tab's team.
+        // Priority and delete act on the issue's own row/team, so they work
+        // cross-team.
         if self.view.is_cross_team()
-            && matches!(
+            && (matches!(
                 message,
-                Message::CreateIssue | Message::MoveIssueNextLane | Message::MoveIssuePrevLane
-            )
+                Message::MoveIssueNextLane | Message::MoveIssuePrevLane
+            ) || (matches!(message, Message::CreateIssue) && self.view != View::MyIssues))
         {
+            return Task::none();
+        }
+        // A removed team's Tab holds only its Terminals: no board or issue
+        // action may act on the team that is gone.
+        if tab_update::blocked_on_removed_team(&message) && self.removed_team_tab() {
             return Task::none();
         }
         match message {
             Message::KeyPressed(key, modifiers) => {
+                // Esc in the strip's rename field cancels the rename.
+                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                    && self.modal == Modal::None
+                    && self.terminals.is_renaming()
+                {
+                    return self.update(Message::Terminal(
+                        crate::terminal::TerminalMessage::RenameCancel,
+                    ));
+                }
                 // Esc with a hover card open only closes the card.
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
                     && self.body_hover.is_open()
@@ -3386,6 +3651,18 @@ impl App {
                 }
             }
 
+            Message::SelectTeamRow(team_id) => {
+                self.expanded_teams.insert(team_id.clone());
+                // Focus the Tab as it was left. A team's Tab never shows a
+                // cross-team page (those are Tabs of their own), so there is
+                // always something of the team's to return to.
+                let task = self.focus_team_tab(&team_id);
+                // Open Terminals are why a click may need to show the panel:
+                // this row is the way back to shells with no Tab open.
+                self.terminals.reveal_for_click(&team_id);
+                return task;
+            }
+
             Message::OpenSavedView(view_id) => {
                 let found = self
                     .saved_views
@@ -3396,14 +3673,9 @@ impl App {
                 let Some(sv) = found else {
                     return Task::none();
                 };
-                // The board's own search, read before the team switch may clear it.
-                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
-                    self.search_query.clone()
-                } else {
-                    String::new()
-                };
-                // Switch team first when needed (this drops any open view).
-                let task =if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
+                // Switch to the view's team Tab first when needed (this
+                // replaces any view open there).
+                let task = if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
                     || self.view != View::Board
                 {
                     self.expanded_teams.insert(sv.team_id.clone());
@@ -3411,9 +3683,22 @@ impl App {
                 } else {
                     Task::none()
                 };
+                // The team Tab's own board search, read once that Tab is live
+                // (the Tab that was active may be another team's).
+                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
+                    self.search_query.clone()
+                } else {
+                    String::new()
+                };
                 let local = crate::saved_view::BoardState {
-                    display: self.config.display.clone(),
-                    filters: self.config.filters.clone(),
+                    display: self
+                        .config
+                        .display_for(&config::BoardScope::Team(sv.team_id.clone()))
+                        .clone(),
+                    filters: self
+                        .config
+                        .filters_for(&config::BoardScope::Team(sv.team_id.clone()))
+                        .clone(),
                     search: board_search,
                 };
                 let mirror = crate::saved_view::Mirror {
@@ -3909,16 +4194,65 @@ impl App {
                 }
             }
 
+            Message::Tab(m) => return self.update_tab(m),
+            Message::Terminal(crate::terminal::TerminalMessage::Close(id))
+                if self.terminals.close_needs_confirm(id) =>
+            {
+                self.modal = Modal::TerminalCloseConfirm(id);
+            }
+            Message::Terminal(crate::terminal::TerminalMessage::DirPicked(Some(dir))) => {
+                if let Some(team) = self.panel_team().map(str::to_string) {
+                    match crate::db::terminal_dirs::set(&self.db(), &team, &dir) {
+                        Ok(()) => self.terminals.set_team_dir(&team, Some(dir)),
+                        Err(e) => self.push_toast(format!("Could not save the folder: {e}"), ToastKind::Error, false),
+                    }
+                }
+            }
+            Message::Terminal(crate::terminal::TerminalMessage::ClearDir) => {
+                if let Some(team) = self.panel_team().map(str::to_string) {
+                    match crate::db::terminal_dirs::clear(&self.db(), &team) {
+                        Ok(()) => self.terminals.set_team_dir(&team, None),
+                        Err(e) => self.push_toast(format!("Could not clear the folder: {e}"), ToastKind::Error, false),
+                    }
+                }
+            }
+            Message::Terminal(m) => {
+                if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {
+                    self.modal = Modal::None;
+                }
+                let team = self.panel_team().map(str::to_string);
+                // Closing a removed team's last Terminal closes its Tab.
+                let closes = matches!(
+                    m,
+                    crate::terminal::TerminalMessage::Close(_)
+                        | crate::terminal::TerminalMessage::CloseConfirmed(_)
+                );
+                let task = self.terminals.update(m, team.as_deref());
+                return if closes {
+                    Task::batch([task, self.close_removed_tabs()])
+                } else {
+                    task
+                };
+            }
+
             Message::SelectTeamView(team_id, view) => {
-                // Going to a team's own pages leaves any open Saved view.
-                self.open_view = None;
+                let before = self.tab_set.as_ref().map(|s| s.active().clone());
+                let scroll = self.focus_team_tab(&team_id);
+                let moved = before != self.tab_set.as_ref().map(|s| s.active().clone());
+                // Going to a team's own pages leaves any open Saved view. A
+                // switch of Tab doesn't: the Tab's Modified view came back
+                // with it, and `retain_open_view` below drops it if the
+                // page asked for isn't its board.
+                if !moved {
+                    self.open_view = None;
+                }
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
-                let from_my = self.view == View::MyIssues;
-                if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
+                let from_cross = self.view.is_cross_team();
+                if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_cross {
                     self.selected_team_id = Some(team_id);
                     self.focused_lane = 0;
                     self.focused_issue = 0;
@@ -3926,10 +4260,12 @@ impl App {
                     self.reload_data();
                 }
                 self.view = view;
+                self.retain_open_view();
                 if self.view == View::RecurringIssues {
                     let conn = self.db();
                     self.reload_recurring(&conn);
                 }
+                return scroll;
             }
 
             Message::InboxMove(delta) => {
@@ -4003,6 +4339,7 @@ impl App {
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
+                let focus = Task::batch([focus, self.focus_tab(crate::tabs::TabKey::Inbox)]);
                 self.switch_view(View::Inbox);
                 let crate::db::notifications::BannerTarget::Notification(remote_id) = target else {
                     return Task::batch([focus, self.scroll_inbox_to_selection()]);
@@ -4073,12 +4410,15 @@ impl App {
             }
 
             Message::OpenDashboard(id) => {
+                // Each Dashboard has its own Tab.
+                let scroll = self.focus_tab(crate::tabs::TabKey::Dashboard(id.clone()));
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
                 self.switch_view(View::Dashboard(id));
+                return scroll;
             }
 
             Message::ResetDashboard => {
@@ -4140,12 +4480,23 @@ impl App {
             }
 
             Message::NavigateToView(view) => {
+                // A team page asked for from a Tab that isn't a team's goes
+                // to that team's Tab, so a Tab never leaves its own root.
+                if let Some(team_id) = self.team_tab_for_navigation(&view) {
+                    return self.update_inner(Message::SelectTeamView(team_id, view));
+                }
+                // Cross-team pages each have their own Tab.
+                let scroll = match crate::tab_state::cross_team_key(&view) {
+                    Some(key) => self.focus_tab(key),
+                    None => Task::none(),
+                };
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
                 self.switch_view(view);
+                return scroll;
             }
 
             Message::ToggleTeamMenu(team_id) => {
@@ -4259,7 +4610,21 @@ impl App {
             }
 
             Message::CreateIssue => {
-                let default_lane = self.lanes.first().map(|l| l.id.clone()).unwrap_or_default();
+                if self.view == View::MyIssues {
+                    // My Issues spans teams: create in the most recently active
+                    // team Tab's team (see `TabSet::new_issue_team`).
+                    let Some(team_id) = self.cross_team_new_issue_team() else {
+                        return Task::none();
+                    };
+                    self.selected_team_id = Some(team_id);
+                }
+                self.new_issue_scope = if self.view == View::MyIssues {
+                    self.new_issue_scope()
+                } else {
+                    None
+                };
+                let lanes = self.new_issue_scope.as_ref().map_or(&self.lanes, |(l, _)| l);
+                let default_lane = lanes.first().map(|l| l.id.clone()).unwrap_or_default();
                 self.issue_form = Some(issue_form::IssueFormState::new(default_lane));
                 self.modal = Modal::IssueForm;
             }
@@ -4748,8 +5113,13 @@ impl App {
             Message::OpenIssueDetail(issue_id) => {
                 // A click on a row ends its hover (the view may not change).
                 self.body_hover.event(crate::hover_card::Event::Clicked);
-                if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
-                    return self.open_issue_detail(&issue);
+                // A link can name another team's issue, which isn't loaded.
+                let issue = match self.issues.iter().find(|i| i.id == issue_id).cloned() {
+                    Some(issue) => Some(issue),
+                    None => queries::get_issue(&self.db(), &issue_id).ok().flatten(),
+                };
+                if let Some(issue) = issue {
+                    return self.open_focused_issue(issue);
                 }
             }
             Message::OpenDependencyPicker(direction) => {
@@ -5149,28 +5519,45 @@ impl App {
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
+                    PaletteNav::ToggleProjectProperties => {
+                        return self.update(Message::ToggleProjectProperties)
+                    }
+                    PaletteNav::FocusTerminal => {
+                        return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusTerminal))
+                    }
+                    PaletteNav::HidePanel => {
+                        return self.update(Message::Terminal(crate::terminal::TerminalMessage::Hide))
+                    }
+                    PaletteNav::FocusApp => {
+                        return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusApp))
+                    }
+                    PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
                         };
-                        let select = self.select_team_for_palette(&issue.team_id);
-                        // open_issue_detail commits any open detail edits first.
-                        return Task::batch([select, self.open_issue_detail(&issue)]);
+                        // The same rule as every other open path: the issue's
+                        // team Tab from a team or project Tab, the current
+                        // Tab from a cross-team one. Commits open edits first.
+                        return self.open_focused_issue(issue);
                     }
-                    PaletteNav::Project { project_id, team_id } => {
-                        // The switch reloads the team's data, so the project is
-                        // in memory when its detail opens.
-                        let select = self.select_team_for_palette(&team_id);
-                        return Task::batch([
-                            select,
-                            self.update(Message::OpenProjectDetail(project_id)),
-                        ]);
+                    PaletteNav::Project { project_id, .. } => {
+                        // The project's Tab loads its own team's data.
+                        return self.update(Message::OpenProjectDetail(project_id));
                     }
                 }
             }
 
             Message::ToggleHelp => {
                 self.show_help = !self.show_help;
+            }
+
+            Message::ToggleProjectProperties => {
+                if matches!(self.view, View::ProjectDetail(_)) {
+                    let mut new_cfg = self.config.clone();
+                    new_cfg.project_properties_open = !new_cfg.project_properties_open;
+                    self.save_config_change(new_cfg);
+                }
             }
 
             Message::OpenSettings => {
@@ -5210,6 +5597,27 @@ impl App {
                     form.font = choice;
                 }
                 // No live apply: Iced fixes the default font at launch.
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SettingsTerminalFontChanged(choice) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.terminal_font = choice.key.to_string();
+                if let Some(ref mut form) = self.settings_form {
+                    form.terminal_font = choice;
+                }
+                // Applied live: the Terminals re-measure and resize on the next sync.
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&choice.key, self.config.terminal_font_size));
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SettingsTerminalSizeChanged(size) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.terminal_font_size = size as f32;
+                if let Some(ref mut form) = self.settings_form {
+                    form.terminal_size = size;
+                }
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&new_cfg.terminal_font, new_cfg.terminal_font_size));
                 self.save_config_change(new_cfg);
             }
 
@@ -5666,8 +6074,13 @@ impl App {
 
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
             Message::UserInput => return self.drive_sync(SchedEvent::Input),
+            Message::WindowResized(width) => self.window_width = width,
             Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
             Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
+            Message::QuitRequested => return self.quit(),
+            Message::QuitConfirmed => return self.quit_with(true),
+            Message::QuitReady => return iced::exit(),
+            Message::RouteMenuQuit => crate::quit::route_menu_quit_to_close(),
             Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
             Message::SyncCompleted(report) => {
@@ -5684,6 +6097,11 @@ impl App {
                     queries::inaccessible_team_identifiers(&self.db()).unwrap_or_default();
 
                 self.leave_deleted_teams(&report.deleted_teams);
+                // Error kind so it stays until dismissed: losing a team can happen
+                // in a background sync, and an Info toast would be gone in seconds.
+                for notice in &report.pull.notices {
+                    self.push_toast(notice.clone(), ToastKind::Error, false);
+                }
 
                 // Classify failures before touching UI state (ends the borrow of
                 // `report` before we mutate `self`). A 401 outranks everything:
@@ -5745,6 +6163,8 @@ impl App {
                 }
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
                 self.reload_data();
+                // Tabs whose team, project or Dashboard the pull removed.
+                let removed_tabs = self.close_removed_tabs();
 
                 if auth_failed {
                     self.pause_for_auth();
@@ -5784,9 +6204,10 @@ impl App {
                         finish,
                         self.drive_sync(SchedEvent::AuthPaused(true)),
                         refetch,
+                        removed_tabs,
                     ]);
                 }
-                return Task::batch([finish, refetch]);
+                return Task::batch([finish, refetch, removed_tabs]);
             }
 
             Message::NotifPollCompleted(outcome) => {
@@ -5884,9 +6305,12 @@ impl App {
 
             // --- Projects table (list view) ---
             Message::OpenProjectDetail(project_id) => {
-                if let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() {
-                    return self.open_project_detail(&project);
-                }
+                // The project's own Tab: focused if open, else opened.
+                let Ok(Some(project)) = queries::get_project(&self.db(), &project_id) else {
+                    return Task::none();
+                };
+                let scroll = self.focus_tab(crate::tabs::TabKey::Project(project_id));
+                return Task::batch([scroll, self.open_project_detail(&project)]);
             }
             Message::ProjectSortChanged(sort) => {
                 if self.project_sort == sort {
@@ -6463,7 +6887,14 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let open_terminals: HashMap<String, usize> = self
+            .teams
+            .iter()
+            .map(|t| (t.id.clone(), self.terminals.open_count(&t.id)))
+            .filter(|(_, n)| *n > 0)
+            .collect();
         let team_sidebar = team_list::view(team_list::SidebarState {
+            open_terminals,
             teams: &self.teams,
             selected_team_id: self.selected_team_id.as_deref(),
             expanded_teams: &self.expanded_teams,
@@ -6512,17 +6943,7 @@ impl App {
             )
             .then(|| self.active_filter_count()),
             self.new_action(),
-            (self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)))
-                .then_some(Message::BackToMyIssues)
-                .or_else(|| {
-                    (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
-                        .then_some(Message::BackToInbox)
-                })
-                .or_else(|| {
-                    (self.detail_from_dashboard.is_some()
-                        && matches!(self.view, View::IssueDetail(_)))
-                    .then_some(Message::BackToDashboard)
-                }),
+            self.back_message(),
             self.update_view_action(),
             )
         };
@@ -6607,6 +7028,8 @@ impl App {
                     (Some(project), Some(detail)) if detail.project_id == *project_id => {
                         project_detail::view(
                             project,
+                            // A project Tab's root is the project: no Back.
+                            !matches!(self.active_tab_key(), Some(crate::tabs::TabKey::Project(_))),
                             detail,
                             self.detail_team(),
                             &self.detail_members,
@@ -6621,6 +7044,8 @@ impl App {
                             &self.images,
                             &self.config.api_base_url,
                             &self.detail_pending_paths,
+                            self.window_width,
+                            self.config.project_properties_open,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -6726,11 +7151,29 @@ impl App {
             &self.inaccessible_teams,
             self.sync_read_only,
             self.view == View::Inbox,
+            matches!(self.view, View::ProjectDetail(_)),
         );
 
+        let main_pane = if self.removed_team_tab() {
+            iced::widget::container(
+                iced::widget::text(
+                    "This team is no longer available. Its Terminals keep running below until you close them.",
+                )
+                .size(14)
+                .color(t::text_muted()),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+        } else {
+            main_pane
+        };
+
         let main_content = column![]
-            .push(header)
+            .push(tab_bar::view(&self.tab_labels(), self.window_width))
+            .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
+            .push_maybe(self.terminals.panel_view(self.panel_team()))
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);
@@ -6788,7 +7231,14 @@ impl App {
             }
             Modal::IssueForm => {
                 if let Some(ref form) = self.issue_form {
-                    let modal = issue_form::view(form, &self.lanes, &self.labels);
+                    let modal = match &self.new_issue_scope {
+                        Some((lanes, labels))
+                            if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
+                        {
+                            issue_form::view(form, lanes, labels)
+                        }
+                        _ => issue_form::view(form, &self.lanes, &self.labels),
+                    };
                     iced::widget::stack![base, modal].into()
                 } else {
                     base
@@ -6815,6 +7265,25 @@ impl App {
                     .unwrap_or("this issue");
 
                 let confirm = delete_confirm_modal(issue_title);
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::QuitConfirm => {
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Quit JAIT?",
+                    "A program is still running in a Terminal. Quitting will stop it.".to_string(),
+                    "Quit",
+                    Message::QuitConfirmed,
+                );
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::TerminalCloseConfirm(id) => {
+                let name = self.terminals.name_of(*id).unwrap_or_else(|| "this Terminal".into());
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Close Terminal?",
+                    format!("A program is still running in \"{name}\". Closing it will stop the program."),
+                    "Close",
+                    Message::Terminal(crate::terminal::TerminalMessage::CloseConfirmed(*id)),
+                );
                 iced::widget::stack![base, confirm].into()
             }
             Modal::Settings => {

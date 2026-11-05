@@ -15,6 +15,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 
 use crate::app::Message;
+use crate::scroll::{track, ScrollKey};
 use crate::dashboard_eval::{self, AssigneeFilter, Evaluation, Filter, GroupResult, Header, Sort};
 use crate::db::dashboards::{Dashboard, MoveDirection};
 use crate::db::models::Issue;
@@ -82,11 +83,6 @@ fn svg_icon<'a>(source: &'static str, size: f32, color: Color) -> Element<'a, Me
         .height(Length::Fixed(size))
         .style(move |_theme: &Theme, _status| svg::Style { color: Some(color) })
         .into()
-}
-
-/// Scrollable id of the dashboard page.
-pub fn scroll_id() -> scrollable::Id {
-    scrollable::Id::new("dashboard-list")
 }
 
 /// What the scroll math needs to know about one group.
@@ -162,16 +158,11 @@ pub fn view<'a>(
         .push(groups);
 
     container(
-        scrollable(container(page).center_x(Length::Fill).padding(PAGE_PAD))
-            .id(scroll_id())
-            .on_scroll(|vp| {
-                Message::Scrolled(
-                    crate::views::issue_list::SCROLL_KEY,
-                    vp.absolute_offset().y,
-                    vp.bounds().height,
-                )
-            })
-            .height(Length::Fill),
+        track(
+            scrollable(container(page).center_x(Length::Fill).padding(PAGE_PAD)),
+            ScrollKey::Dashboard,
+        )
+        .height(Length::Fill),
     )
     .width(Length::Fill)
     .height(Length::Fill)

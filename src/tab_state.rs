@@ -1,0 +1,1124 @@
+//! Parked per-Tab state and the pure switching rules (ADR 0001). `App` keeps
+//! the active Tab's state in its own fields; every other Tab's state sits here
+//! until that Tab is focused again. No Iced types and no database.
+//!
+//! To add a per-Tab field: add it to [`ParkedTab`], then fill it in
+//! `App::stash_active_tab` and apply it in `App::restore_tab`
+//! (`src/app/tab_update.rs`). Those two functions are the only places.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::app::View;
+use crate::db::attachments::Attachment;
+use crate::db::panel_states::StoredPanel;
+use crate::saved_view::OpenView;
+use crate::scroll::ScrollKey;
+use crate::tabs::{Page, TabKey, TabSet};
+
+/// The comment or reply being typed on an issue or project detail, and its
+/// staged files. Parked with the Tab; closing the Tab discards it, and it isn't
+/// restored on relaunch (the spec's "comment draft" rule).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentDraft {
+    /// The detail page the draft belongs to.
+    pub owner: View,
+    pub comment: String,
+    pub reply_to: Option<String>,
+    pub reply: String,
+    /// Ids the comment and the open reply will be inserted with; they own the
+    /// staged files and pasted images.
+    pub comment_id: String,
+    pub reply_id: String,
+    pub files: Vec<Attachment>,
+}
+
+impl CommentDraft {
+    /// Whether there's anything worth parking.
+    pub fn has_content(&self) -> bool {
+        !self.comment.is_empty()
+            || !self.reply.is_empty()
+            || self.reply_to.is_some()
+            || !self.files.is_empty()
+    }
+
+    /// The ids whose unsent staged files go when the draft is discarded.
+    pub fn owner_ids(&self) -> [String; 2] {
+        [self.comment_id.clone(), self.reply_id.clone()]
+    }
+}
+
+/// The page an open issue was opened from, which Back returns to. One level
+/// per Tab, no history: issue A to issue B keeps the page, not A. A team
+/// Tab's issue has no origin (Back is the breadcrumb, as before), and a
+/// project Tab's Back always goes to the project, its root.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DetailFrom {
+    pub my_issues: bool,
+    pub inbox: bool,
+    /// The Dashboard's local id.
+    pub dashboard: Option<String>,
+    /// The team-level page (Board, Roadmap, ...) a team Tab's issue was
+    /// opened from. Never an issue page.
+    pub page: Option<View>,
+}
+
+/// Where Back from an open issue goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Back {
+    MyIssues,
+    Inbox,
+    Dashboard(String),
+    /// The Tab's root page: the project, in a project Tab.
+    TabRoot,
+    /// The page a team Tab's issue was opened from.
+    Page(View),
+}
+
+/// The one level of Back for an open issue in the Tab `key`, or `None` when
+/// the Tab has none to give (a team Tab that never recorded a page). It reads only the
+/// origin, not which issue is open, so issue A to issue B then Back returns
+/// to the page, not to A.
+pub fn back_target(key: &TabKey, from: &DetailFrom) -> Option<Back> {
+    if from.my_issues {
+        Some(Back::MyIssues)
+    } else if from.inbox {
+        Some(Back::Inbox)
+    } else if let Some(id) = &from.dashboard {
+        Some(Back::Dashboard(id.clone()))
+    } else if matches!(key, TabKey::Project(_)) {
+        Some(Back::TabRoot)
+    } else if matches!(key, TabKey::Team(_)) {
+        from.page
+            .clone()
+            .filter(|v| !matches!(v, View::IssueDetail(_)))
+            .map(Back::Page)
+    } else {
+        None
+    }
+}
+
+/// Everything remembered about one parked Tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParkedTab {
+    pub view: View,
+    pub selected_team_id: Option<String>,
+    pub comment_draft: Option<CommentDraft>,
+    /// Last reported (offset, viewport) per scrollable, see `scroll_keys`.
+    pub scroll_state: HashMap<ScrollKey, (f32, f32)>,
+    /// View search text and the view it was typed in.
+    pub search_query: String,
+    pub search_view: View,
+    pub focused_lane: usize,
+    pub focused_issue: usize,
+    pub collapsed_sections: HashSet<String>,
+    /// The Saved view open in this Tab with any unsaved changes (a Modified
+    /// view). Switching Tabs keeps it; leaving the view inside the Tab drops
+    /// it as before.
+    pub open_view: Option<OpenView>,
+    /// Where Back from the open issue returns to.
+    pub detail_from: DetailFrom,
+    /// The Tab's Terminal panel, panes by Terminal record key: ids change when
+    /// a Terminal restarts, keys don't. `None` for a cross-team Tab, which has
+    /// no panel, and for one never shown (the default, hidden panel).
+    pub panel: Option<StoredPanel>,
+}
+
+impl ParkedTab {
+    /// Park `view` and the selected team. The caller maps the view through
+    /// [`parked_view`] first. An open issue parks as itself and is rebuilt
+    /// from the local database on return (its edits commit when leaving).
+    pub fn new(view: View, selected_team_id: Option<String>) -> Self {
+        Self {
+            view,
+            selected_team_id,
+            comment_draft: None,
+            scroll_state: HashMap::new(),
+            search_query: String::new(),
+            search_view: View::Board,
+            focused_lane: 0,
+            focused_issue: 0,
+            collapsed_sections: HashSet::new(),
+            open_view: None,
+            detail_from: DetailFrom::default(),
+            panel: None,
+        }
+    }
+
+    /// Park a comment draft with the Tab. Its detail page parks too (`live_view`
+    /// is the view the draft was typed on), so the draft has somewhere to
+    /// return to. An empty draft isn't parked.
+    pub fn with_comment_draft(mut self, live_view: View, draft: Option<CommentDraft>) -> Self {
+        if let Some(draft) = draft.filter(|d| d.has_content() && d.owner == live_view) {
+            self.view = live_view;
+            self.comment_draft = Some(draft);
+        }
+        self
+    }
+}
+
+/// The team whose Terminals the Tab `key` shows. A team Tab shows its own
+/// team's; a project Tab its project's team (`project_team`), so both Tabs list
+/// the same Terminals and a new one belongs to the team. A cross-team Tab
+/// shows none, whatever page it is on: an issue opened there from another
+/// team switches the selected team, and must not bring that team's panel.
+pub fn panel_team<'a>(key: &'a TabKey, project_team: Option<&'a str>) -> Option<&'a str> {
+    match key {
+        TabKey::Team(id) => Some(id.as_str()),
+        TabKey::Project(_) => project_team,
+        TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_) => None,
+    }
+}
+
+/// Whether a Tab whose team was removed stays open: a team Tab does while the
+/// team still has Terminals (`team_has_terminals`), since the sidebar row that
+/// reached them is gone. Any other Tab closes with its subject.
+pub fn keeps_removed_team(key: &TabKey, team_has_terminals: impl Fn(&str) -> bool) -> bool {
+    matches!(key, TabKey::Team(id) if team_has_terminals(id))
+}
+
+/// The panel of every open team or project Tab, for storing. The active Tab's
+/// is `live`; a parked Tab's is in `parked`; a Tab restored at launch and not
+/// focused yet keeps the one it was stored with (`restored`). A cross-team Tab
+/// has none.
+pub fn panel_rows(
+    set: &TabSet,
+    live: &StoredPanel,
+    parked: &Parked,
+    restored: &HashMap<TabKey, StoredPanel>,
+) -> Vec<(Option<TabKey>, StoredPanel)> {
+    set.tabs()
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| !key.is_cross_team())
+        .filter_map(|(i, key)| {
+            let panel = if i == set.active_index() {
+                Some(live.clone())
+            } else {
+                parked
+                    .get(key)
+                    .and_then(|p| p.panel.clone())
+                    .or_else(|| restored.get(key).cloned())
+            };
+            panel.map(|p| (Some(key.clone()), p))
+        })
+        .collect()
+}
+
+/// The panels a launch gives back to its Tabs. `rows` is what was stored:
+/// each Tab's own, and the one implicit panel saved before Tabs had their
+/// own. A row for a Tab that isn't open, or for a cross-team Tab (no panel),
+/// is dropped. The implicit panel moves onto `active` when that is a team or
+/// project Tab with no panel of its own; otherwise it is dropped.
+pub fn launch_panels(
+    rows: Vec<(Option<TabKey>, StoredPanel)>,
+    open: &[TabKey],
+    active: &TabKey,
+) -> HashMap<TabKey, StoredPanel> {
+    let mut out = HashMap::new();
+    let mut implicit = None;
+    for (tab, panel) in rows {
+        match tab {
+            Some(key) if open.contains(&key) && !key.is_cross_team() => {
+                out.entry(key).or_insert(panel);
+            }
+            None => implicit = implicit.or(Some(panel)),
+            Some(_) => {}
+        }
+    }
+    if let Some(panel) = implicit {
+        if !active.is_cross_team() && open.contains(active) {
+            out.entry(active.clone()).or_insert(panel);
+        }
+    }
+    out
+}
+
+/// The `scroll_state` keys of the scrollables `view` shows. Widgets keep
+/// their scroll offset across Tabs when the tree shape matches, so a switch
+/// must scroll every one of them explicitly, to the parked offset or to 0.
+/// `list_mode` is the board's List/Board display; `lanes` the column count.
+pub fn scroll_keys(view: &View, list_mode: bool, lanes: usize) -> Vec<ScrollKey> {
+    match view {
+        View::Board | View::MyIssues if list_mode => vec![ScrollKey::IssueList],
+        View::Board | View::MyIssues => std::iter::once(ScrollKey::Board)
+            .chain((0..lanes).map(ScrollKey::Lane))
+            .collect(),
+        View::Dashboard(_) => vec![ScrollKey::Dashboard],
+        View::Inbox => vec![ScrollKey::Inbox],
+        View::ProjectList => vec![ScrollKey::Projects],
+        View::Roadmap => vec![ScrollKey::Roadmap],
+        View::RecurringIssues => vec![ScrollKey::RecurringIssues],
+        View::IssueDetail(_) => vec![ScrollKey::IssueDetail],
+        View::ProjectDetail(_) => vec![ScrollKey::ProjectDetail],
+    }
+}
+
+/// The offset to scroll each key to: the parked one, or the top.
+pub fn restore_offsets(
+    keys: &[ScrollKey],
+    state: &HashMap<ScrollKey, (f32, f32)>,
+) -> Vec<(ScrollKey, f32)> {
+    keys.iter()
+        .map(|k| (*k, state.get(k).map_or(0.0, |(offset, _)| *offset)))
+        .collect()
+}
+
+#[derive(Debug, Default)]
+pub struct Parked(HashMap<TabKey, ParkedTab>);
+
+impl Parked {
+    pub fn save(&mut self, key: TabKey, tab: ParkedTab) {
+        self.0.insert(key, tab);
+    }
+
+    /// Take a Tab's parked state out: it becomes the live state. `None` on a
+    /// Tab's first focus.
+    pub fn take(&mut self, key: &TabKey) -> Option<ParkedTab> {
+        self.0.remove(key)
+    }
+
+    /// A parked Tab's state, without taking it.
+    pub fn get(&self, key: &TabKey) -> Option<&ParkedTab> {
+        self.0.get(key)
+    }
+
+    /// Forget a closed Tab's state. Returns it so the caller can discard what
+    /// it owned, such as a comment draft's staged files.
+    pub fn forget(&mut self, key: &TabKey) -> Option<ParkedTab> {
+        self.0.remove(key)
+    }
+}
+
+/// The outcome of asking the set to change focus. On `Moved` the caller
+/// stashes the live state under `from` and restores `to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Switch {
+    Stay,
+    Moved { from: TabKey, to: TabKey },
+}
+
+/// Focus the Tab for `to`, opening it if needed. No key ever gets a second Tab.
+/// This is how every Tab kind is opened.
+pub fn focus_key(set: &mut TabSet, to: TabKey) -> Switch {
+    let from = set.active().clone();
+    if from == to {
+        return Switch::Stay;
+    }
+    set.open(to.clone());
+    Switch::Moved { from, to }
+}
+
+/// Focus the team's Tab, opening it if needed. A team never gets a second Tab.
+pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
+    focus_key(set, TabKey::Team(team_id.to_string()))
+}
+
+/// The view a Tab parks under `key`. An open issue parks as itself in any
+/// Tab (a cross-team Tab keeps it as the Tab's page, ADR 0001). A team Tab's
+/// project detail parks as the Board; a project or cross-team Tab's other
+/// views park as that Tab's own page.
+pub fn parked_view(key: &TabKey, view: View) -> View {
+    match (key, view) {
+        (_, view @ View::IssueDetail(_)) => view,
+        (TabKey::Team(_), View::ProjectDetail(_)) => View::Board,
+        (TabKey::Team(_), other) => other,
+        // Project and cross-team Tabs have one page of their own. Whatever
+        // else the live view is parks as that page.
+        (key, _) => root_view(key),
+    }
+}
+
+/// The view to restore for a parked Tab: an issue deleted while the Tab was
+/// parked falls back to the Tab's root page (`exists` says whether an issue
+/// is still there). The bool is true on that fallback, so the caller drops
+/// what belonged to the issue: its Back origin and any comment draft.
+pub fn resolve_parked(
+    key: &TabKey,
+    view: View,
+    exists: impl Fn(&str) -> bool,
+) -> (View, bool) {
+    match view {
+        View::IssueDetail(id) if !exists(&id) => (root_view(key), true),
+        view => (view, false),
+    }
+}
+
+/// The text a Tab shows in the bar. A team reads "IDENT Name"; a project
+/// reads "Name · IDENT" with its team's identifier last, so a team and a
+/// project with similar names differ at a glance; a page is its name.
+/// Lookups return `(identifier, name)` for a team, `(name, team id)` for a
+/// project and the name for a Dashboard; a missing row gives a plain kind
+/// word, never an empty label.
+pub fn label(
+    key: &TabKey,
+    team: impl Fn(&str) -> Option<(String, String)>,
+    project: impl Fn(&str) -> Option<(String, String)>,
+    dashboard: impl Fn(&str) -> Option<String>,
+) -> String {
+    match key {
+        TabKey::Team(id) => team(id)
+            .map(|(identifier, name)| format!("{identifier} {name}"))
+            .unwrap_or_else(|| "Team".to_string()),
+        TabKey::Project(id) => match project(id) {
+            Some((name, team_id)) => match team(&team_id) {
+                Some((identifier, _)) => format!("{name} \u{b7} {identifier}"),
+                None => name,
+            },
+            None => "Project".to_string(),
+        },
+        TabKey::MyIssues => "My Issues".to_string(),
+        TabKey::Inbox => "Inbox".to_string(),
+        TabKey::Dashboard(id) => dashboard(id).unwrap_or_else(|| "Dashboard".to_string()),
+    }
+}
+
+/// The Tab a view opens in when it is a cross-team page; `None` for views
+/// that stay inside the current team or project Tab.
+pub fn cross_team_key(view: &View) -> Option<TabKey> {
+    match view {
+        View::MyIssues => Some(TabKey::MyIssues),
+        View::Inbox => Some(TabKey::Inbox),
+        View::Dashboard(id) => Some(TabKey::Dashboard(id.clone())),
+        _ => None,
+    }
+}
+
+/// The view a Tab starts on, and returns to when it has nothing better.
+pub fn root_view(key: &TabKey) -> View {
+    match key {
+        TabKey::Team(_) => View::Board,
+        TabKey::Project(id) => View::ProjectDetail(id.clone()),
+        TabKey::MyIssues => View::MyIssues,
+        TabKey::Inbox => View::Inbox,
+        TabKey::Dashboard(id) => View::Dashboard(id.clone()),
+    }
+}
+
+/// The page to store for a Tab so a relaunch can return to it: a team-level
+/// page, or the Tab's open Saved view on its board. An issue or project
+/// detail, and every page of a project or cross-team Tab, is the root (a
+/// team's Board, or the project or page itself).
+pub fn stored_page(key: &TabKey, view: &View, open_view: Option<&OpenView>) -> Page {
+    if !matches!(key, TabKey::Team(_)) {
+        return Page::Root;
+    }
+    match view {
+        View::Board => open_view.map_or(Page::Board, |v| Page::SavedView(v.view_id.clone())),
+        View::ProjectList => Page::Projects,
+        View::Roadmap => Page::Roadmap,
+        View::RecurringIssues => Page::Recurring,
+        _ => Page::Board,
+    }
+}
+
+/// The view a relaunched Tab opens on for its stored `page`. A Saved view
+/// opens on the board; the caller opens the view itself.
+pub fn page_view(key: &TabKey, page: &Page) -> View {
+    if !matches!(key, TabKey::Team(_)) {
+        return root_view(key);
+    }
+    match page {
+        Page::Projects => View::ProjectList,
+        Page::Roadmap => View::Roadmap,
+        Page::Recurring => View::RecurringIssues,
+        Page::Root | Page::Board | Page::SavedView(_) => View::Board,
+    }
+}
+
+/// Focus the Tab at `index`. Out of range, or already active, stays.
+pub fn focus_index(set: &mut TabSet, index: usize) -> Switch {
+    let from = set.active().clone();
+    if !set.focus(index) {
+        return Switch::Stay;
+    }
+    Switch::Moved { from, to: set.active().clone() }
+}
+
+/// The outcome of closing a Tab. `closed` is the key that went away (its
+/// parked state is to be forgotten, and a comment draft with it); `to` is the
+/// Tab to make live when the active Tab was the one closed, or when closing
+/// the last Tab opened the Home page. `None` when the active Tab is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closed {
+    pub closed: TabKey,
+    pub to: Option<TabKey>,
+}
+
+/// Close the Tab at `index`. Out of range does nothing (`None`). The last Tab
+/// is replaced by the Home page's Tab, so there's always one open.
+pub fn close_index(set: &mut TabSet, index: usize, home: &TabKey) -> Option<Closed> {
+    let closed = set.tabs().get(index)?.clone();
+    let changed = set.close(index, home);
+    let to = changed.then(|| set.active().clone());
+    Some(Closed { closed, to })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn team(id: &str) -> TabKey {
+        TabKey::Team(id.into())
+    }
+
+    #[test]
+    fn focusing_the_active_team_stays() {
+        let mut set = TabSet::new(team("a"));
+        assert_eq!(focus_team(&mut set, "a"), Switch::Stay);
+        assert_eq!(set.tabs().len(), 1);
+    }
+
+    #[test]
+    fn a_team_never_gets_two_tabs() {
+        let mut set = TabSet::new(team("a"));
+        assert_eq!(
+            focus_team(&mut set, "b"),
+            Switch::Moved { from: team("a"), to: team("b") }
+        );
+        focus_team(&mut set, "a");
+        focus_team(&mut set, "b");
+        assert_eq!(set.tabs(), &[team("a"), team("b")]);
+        assert_eq!(set.active(), &team("b"));
+    }
+
+    #[test]
+    fn focus_index_moves_or_stays() {
+        let mut set = TabSet::new(team("a"));
+        focus_team(&mut set, "b");
+        assert_eq!(
+            focus_index(&mut set, 0),
+            Switch::Moved { from: team("b"), to: team("a") }
+        );
+        assert_eq!(focus_index(&mut set, 0), Switch::Stay);
+        assert_eq!(focus_index(&mut set, 9), Switch::Stay);
+    }
+
+    #[test]
+    fn parked_tabs_stay_separate_and_come_back_once() {
+        let mut parked = Parked::default();
+        parked.save(team("a"), ParkedTab::new(View::Roadmap, Some("a".into())));
+        parked.save(team("b"), ParkedTab::new(View::ProjectList, Some("b".into())));
+        let a = parked.take(&team("a")).unwrap();
+        assert_eq!(a.view, View::Roadmap);
+        assert_eq!(a.selected_team_id.as_deref(), Some("a"));
+        assert!(parked.take(&team("a")).is_none());
+        assert_eq!(parked.take(&team("b")).unwrap().view, View::ProjectList);
+    }
+
+    fn stored(layout: &str, key: &str) -> StoredPanel {
+        let mut p = StoredPanel { visible: true, layout: layout.into(), ..StoredPanel::default() };
+        p.panes[0] = Some(key.into());
+        p
+    }
+
+    #[test]
+    fn panel_state_parks_per_tab_and_a_shared_terminal_keeps_its_key() {
+        let mut parked = Parked::default();
+        // Two team Tabs, different layouts; the project Tab shares "k" with its team's.
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.panel = Some(stored("grid", "k"));
+        let mut proj = ParkedTab::new(View::ProjectDetail("p".into()), Some("a".into()));
+        proj.panel = Some(stored("single", "k"));
+        let mut b = ParkedTab::new(View::Board, Some("b".into()));
+        b.panel = Some(StoredPanel { height: Some(400.0), ..stored("columns", "kb") });
+        parked.save(team("a"), a);
+        parked.save(TabKey::Project("p".into()), proj);
+        parked.save(team("b"), b);
+        let a = parked.take(&team("a")).unwrap().panel.unwrap();
+        let proj = parked.take(&TabKey::Project("p".into())).unwrap().panel.unwrap();
+        let b = parked.take(&team("b")).unwrap().panel.unwrap();
+        assert_eq!((a.layout.as_str(), proj.layout.as_str(), b.layout.as_str()), ("grid", "single", "columns"));
+        assert_eq!(a.panes[0], proj.panes[0], "one Terminal in two Tabs");
+        assert_eq!((a.height, b.height), (None, Some(400.0)));
+    }
+
+    #[test]
+    fn closing_a_parked_tab_returns_its_panel_state_and_nothing_else_is_stopped() {
+        // `forget` only hands back the Tab's own state; Terminals aren't in it.
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.panel = Some(stored("columns", "k"));
+        parked.save(team("a"), a);
+        let forgotten = parked.forget(&team("a")).unwrap();
+        assert_eq!(forgotten.panel.unwrap().panes[0].as_deref(), Some("k"));
+        assert!(parked.take(&team("a")).is_none());
+    }
+
+    #[test]
+    fn only_team_and_project_tabs_show_a_panel() {
+        assert_eq!(panel_team(&team("a"), Some("a")), Some("a"));
+        assert_eq!(panel_team(&TabKey::Project("p".into()), Some("a")), Some("a"));
+        // Even with another team's issue open in the Tab.
+        for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            assert_eq!(panel_team(&key, Some("other")), None);
+        }
+    }
+
+    #[test]
+    fn only_a_team_tab_with_terminals_survives_its_teams_removal() {
+        let has = |id: &str| id == "a";
+        assert!(keeps_removed_team(&team("a"), has));
+        assert!(!keeps_removed_team(&team("b"), has));
+        assert!(!keeps_removed_team(&TabKey::Project("a".into()), has));
+        assert!(!keeps_removed_team(&TabKey::Dashboard("a".into()), has));
+    }
+
+    #[test]
+    fn two_tabs_with_different_layouts_survive_store_and_launch() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let project = TabKey::Project("p".into());
+        let mut set = TabSet::new(team("a"));
+        set.open(project.clone());
+        set.open(TabKey::Inbox);
+        set.open(team("never-focused"));
+        set.focus(0);
+        // Team a is live; the project Tab is parked; the last was restored
+        // at an earlier launch and never focused since.
+        let mut parked = Parked::default();
+        let mut p = ParkedTab::new(View::ProjectDetail("p".into()), Some("a".into()));
+        p.panel = Some(stored("columns", "k2"));
+        parked.save(project.clone(), p);
+        let mut restored = HashMap::new();
+        restored.insert(team("never-focused"), stored("single", "k3"));
+        let rows = panel_rows(&set, &stored("grid", "k1"), &parked, &restored);
+        assert_eq!(rows.len(), 3, "the Inbox Tab has no panel");
+
+        crate::db::panel_states::save(&conn, &rows).unwrap();
+        let loaded = crate::db::panel_states::load(&conn).unwrap();
+        let got = launch_panels(loaded, set.tabs(), &team("a"));
+        assert_eq!(got[&team("a")], stored("grid", "k1"));
+        assert_eq!(got[&project], stored("columns", "k2"));
+        assert_eq!(got[&team("never-focused")], stored("single", "k3"));
+    }
+
+    #[test]
+    fn launch_gives_each_open_team_or_project_tab_its_own_panel() {
+        let open = [team("a"), TabKey::Project("p".into()), TabKey::MyIssues];
+        let rows = vec![
+            (Some(team("a")), stored("grid", "k1")),
+            (Some(TabKey::Project("p".into())), stored("columns", "k2")),
+            (Some(team("gone")), stored("single", "k3")),
+            (Some(TabKey::MyIssues), stored("single", "k4")),
+        ];
+        let got = launch_panels(rows, &open, &team("a"));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[&team("a")].layout, "grid");
+        assert_eq!(got[&TabKey::Project("p".into())].layout, "columns");
+    }
+
+    #[test]
+    fn the_implicit_panel_moves_onto_the_active_tab_unless_it_has_its_own() {
+        let open = [team("a"), team("b")];
+        let implicit = vec![(None, stored("grid", "k"))];
+        let got = launch_panels(implicit.clone(), &open, &team("b"));
+        assert_eq!(got.keys().collect::<Vec<_>>(), vec![&team("b")]);
+        let mut rows = implicit.clone();
+        rows.push((Some(team("b")), stored("columns", "kb")));
+        assert_eq!(launch_panels(rows, &open, &team("b"))[&team("b")].layout, "columns");
+        // Dropped cleanly on a cross-team Tab or one that isn't open.
+        assert!(launch_panels(implicit.clone(), &[TabKey::MyIssues], &TabKey::MyIssues).is_empty());
+        assert!(launch_panels(implicit, &open, &team("z")).is_empty());
+    }
+
+    #[test]
+    fn an_open_issue_parks_as_itself_in_every_tab() {
+        let detail = View::IssueDetail("i".into());
+        let project = TabKey::Project("p".into());
+        assert_eq!(parked_view(&team("a"), detail.clone()), detail);
+        assert_eq!(parked_view(&project, detail.clone()), detail);
+        assert_eq!(parked_view(&TabKey::MyIssues, detail.clone()), detail);
+        assert_eq!(parked_view(&TabKey::Inbox, detail.clone()), detail);
+        assert_eq!(parked_view(&TabKey::Dashboard("d".into()), detail.clone()), detail);
+    }
+
+    #[test]
+    fn a_deleted_parked_issue_falls_back_to_the_tabs_root() {
+        let gone = View::IssueDetail("i".into());
+        let none = |_: &str| false;
+        let all = |_: &str| true;
+        assert_eq!(resolve_parked(&team("a"), gone.clone(), none), (View::Board, true));
+        assert_eq!(
+            resolve_parked(&TabKey::Project("p".into()), gone.clone(), none),
+            (View::ProjectDetail("p".into()), true)
+        );
+        assert_eq!(resolve_parked(&TabKey::MyIssues, gone.clone(), none), (View::MyIssues, true));
+        assert_eq!(resolve_parked(&TabKey::Inbox, gone.clone(), none), (View::Inbox, true));
+        assert_eq!(
+            resolve_parked(&TabKey::Dashboard("d".into()), gone.clone(), none),
+            (View::Dashboard("d".into()), true)
+        );
+        // Still there, or not an issue: unchanged.
+        assert_eq!(resolve_parked(&team("a"), gone.clone(), all), (gone, false));
+        assert_eq!(resolve_parked(&team("a"), View::Roadmap, none), (View::Roadmap, false));
+    }
+
+    #[test]
+    fn back_origin_is_parked_per_tab() {
+        let mut parked = Parked::default();
+        let from = DetailFrom { inbox: true, ..DetailFrom::default() };
+        parked.save(
+            TabKey::Inbox,
+            ParkedTab { detail_from: from.clone(), ..ParkedTab::new(View::IssueDetail("i".into()), None) },
+        );
+        parked.save(TabKey::MyIssues, ParkedTab::new(View::MyIssues, None));
+        assert_eq!(parked.take(&TabKey::MyIssues).unwrap().detail_from, DetailFrom::default());
+        assert_eq!(parked.take(&TabKey::Inbox).unwrap().detail_from, from);
+    }
+
+    #[test]
+    fn back_goes_to_the_page_the_issue_came_from() {
+        let none = DetailFrom::default();
+        let dash = DetailFrom { dashboard: Some("d".into()), ..none.clone() };
+        let mine = DetailFrom { my_issues: true, ..none.clone() };
+        let inbox = DetailFrom { inbox: true, ..none.clone() };
+        assert_eq!(back_target(&TabKey::MyIssues, &mine), Some(Back::MyIssues));
+        assert_eq!(back_target(&TabKey::Inbox, &inbox), Some(Back::Inbox));
+        assert_eq!(
+            back_target(&TabKey::Dashboard("d".into()), &dash),
+            Some(Back::Dashboard("d".into()))
+        );
+        assert_eq!(back_target(&TabKey::Project("p".into()), &none), Some(Back::TabRoot));
+        assert_eq!(back_target(&team("a"), &none), None);
+        let from_roadmap = DetailFrom { page: Some(View::Roadmap), ..none };
+        assert_eq!(back_target(&team("a"), &from_roadmap), Some(Back::Page(View::Roadmap)));
+    }
+
+    #[test]
+    fn a_team_tab_goes_back_to_the_page_not_to_issue_a() {
+        // The origin is a page, never an issue: opening B from A keeps it.
+        let from = DetailFrom { page: Some(View::Board), ..DetailFrom::default() };
+        assert_eq!(back_target(&team("a"), &from), Some(Back::Page(View::Board)));
+        let bad = DetailFrom { page: Some(View::IssueDetail("a".into())), ..DetailFrom::default() };
+        assert_eq!(back_target(&team("a"), &bad), None);
+    }
+
+    #[test]
+    fn issue_a_to_issue_b_keeps_back_on_the_page() {
+        // The origin doesn't name an issue, so opening B from A changes nothing.
+        let from = DetailFrom { inbox: true, ..DetailFrom::default() };
+        let on_a = back_target(&TabKey::Inbox, &from);
+        let on_b = back_target(&TabKey::Inbox, &from.clone());
+        assert_eq!(on_a, on_b);
+        assert_eq!(on_b, Some(Back::Inbox));
+    }
+
+    #[test]
+    fn back_survives_a_stash_and_restore() {
+        let mut parked = Parked::default();
+        let from = DetailFrom { my_issues: true, ..DetailFrom::default() };
+        parked.save(
+            TabKey::MyIssues,
+            ParkedTab { detail_from: from, ..ParkedTab::new(View::IssueDetail("i".into()), None) },
+        );
+        let back = parked.take(&TabKey::MyIssues).unwrap();
+        assert_eq!(back_target(&TabKey::MyIssues, &back.detail_from), Some(Back::MyIssues));
+    }
+
+    #[test]
+    fn detail_views_report_their_scroll() {
+        assert_eq!(
+            scroll_keys(&View::IssueDetail("i".into()), false, 0),
+            vec![ScrollKey::IssueDetail]
+        );
+        assert_eq!(
+            scroll_keys(&View::ProjectDetail("p".into()), false, 0),
+            vec![ScrollKey::ProjectDetail]
+        );
+    }
+
+    #[test]
+    fn other_views_park_as_their_tabs_page() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(parked_view(&team("a"), View::ProjectDetail("p".into())), View::Board);
+        // Team-level pages and a project Tab's own page park as they are.
+        assert_eq!(parked_view(&team("a"), View::RecurringIssues), View::RecurringIssues);
+        assert_eq!(
+            parked_view(&project, View::ProjectDetail("p".into())),
+            View::ProjectDetail("p".into())
+        );
+    }
+
+    #[test]
+    fn a_cross_team_tab_parks_as_its_page_even_when_the_live_view_moved_to_a_team() {
+        // Opening an issue from My Issues switches the live view to that
+        // issue's team; the Tab still parks as My Issues.
+        assert_eq!(parked_view(&TabKey::MyIssues, View::Board), View::MyIssues);
+        assert_eq!(
+            parked_view(&TabKey::Dashboard("d".into()), View::Board),
+            View::Dashboard("d".into())
+        );
+    }
+
+    #[test]
+    fn cross_team_views_open_their_own_tab_and_team_views_do_not() {
+        assert_eq!(cross_team_key(&View::MyIssues), Some(TabKey::MyIssues));
+        assert_eq!(cross_team_key(&View::Inbox), Some(TabKey::Inbox));
+        assert_eq!(
+            cross_team_key(&View::Dashboard("d".into())),
+            Some(TabKey::Dashboard("d".into()))
+        );
+        for view in [View::Board, View::ProjectList, View::Roadmap, View::RecurringIssues] {
+            assert_eq!(cross_team_key(&view), None);
+        }
+    }
+
+    fn label_of(key: &TabKey) -> String {
+        label(
+            key,
+            |id| (id == "t").then(|| ("JAIT".to_string(), "Desktop".to_string())),
+            |id| (id == "p").then(|| ("Desktop".to_string(), "t".to_string())),
+            |id| (id == "d").then(|| "Weekly".to_string()),
+        )
+    }
+
+    #[test]
+    fn labels_say_what_each_tab_is() {
+        assert_eq!(label_of(&team("t")), "JAIT Desktop");
+        assert_eq!(label_of(&TabKey::Project("p".into())), "Desktop \u{b7} JAIT");
+        assert_eq!(label_of(&TabKey::MyIssues), "My Issues");
+        assert_eq!(label_of(&TabKey::Inbox), "Inbox");
+        assert_eq!(label_of(&TabKey::Dashboard("d".into())), "Weekly");
+    }
+
+    #[test]
+    fn a_team_and_a_project_with_similar_names_get_different_labels() {
+        assert_ne!(label_of(&team("t")), label_of(&TabKey::Project("p".into())));
+    }
+
+    #[test]
+    fn a_missing_row_still_gets_a_label() {
+        assert_eq!(label_of(&team("gone")), "Team");
+        assert_eq!(label_of(&TabKey::Project("gone".into())), "Project");
+        assert_eq!(label_of(&TabKey::Dashboard("gone".into())), "Dashboard");
+    }
+
+    #[test]
+    fn focus_key_opens_each_kind_once_and_reports_the_move() {
+        let mut set = TabSet::new(team("a"));
+        for key in [TabKey::Project("p".into()), TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            let from = set.active().clone();
+            assert_eq!(focus_key(&mut set, key.clone()), Switch::Moved { from, to: key.clone() });
+            assert_eq!(focus_key(&mut set, key), Switch::Stay);
+        }
+        assert_eq!(set.tabs().len(), 5);
+        assert_eq!(
+            focus_key(&mut set, TabKey::MyIssues),
+            Switch::Moved { from: TabKey::Dashboard("d".into()), to: TabKey::MyIssues }
+        );
+        assert_eq!(set.tabs().len(), 5);
+    }
+
+    #[test]
+    fn scroll_keys_cover_every_view_a_tab_can_show() {
+        let board = scroll_keys(&View::Board, false, 3);
+        assert_eq!(
+            board,
+            vec![ScrollKey::Board, ScrollKey::Lane(0), ScrollKey::Lane(1), ScrollKey::Lane(2)]
+        );
+        assert_eq!(scroll_keys(&View::Board, true, 3), vec![ScrollKey::IssueList]);
+        assert_eq!(scroll_keys(&View::MyIssues, true, 3), vec![ScrollKey::IssueList]);
+        assert_eq!(scroll_keys(&View::ProjectList, false, 3), vec![ScrollKey::Projects]);
+        assert_eq!(scroll_keys(&View::Roadmap, false, 3), vec![ScrollKey::Roadmap]);
+        assert_eq!(
+            scroll_keys(&View::RecurringIssues, false, 3),
+            vec![ScrollKey::RecurringIssues]
+        );
+        assert_eq!(scroll_keys(&View::Inbox, false, 3), vec![ScrollKey::Inbox]);
+        assert_eq!(
+            scroll_keys(&View::Dashboard("d".into()), false, 3),
+            vec![ScrollKey::Dashboard]
+        );
+    }
+
+    #[test]
+    fn restore_offsets_use_the_parked_offset_or_the_top() {
+        let mut state = HashMap::new();
+        state.insert(ScrollKey::Lane(1), (120.0, 500.0));
+        assert_eq!(
+            restore_offsets(&[ScrollKey::Lane(0), ScrollKey::Lane(1)], &state),
+            vec![(ScrollKey::Lane(0), 0.0), (ScrollKey::Lane(1), 120.0)]
+        );
+    }
+
+    #[test]
+    fn scroll_state_stays_separate_between_tabs() {
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.scroll_state.insert(ScrollKey::Lane(0), (300.0, 500.0));
+        parked.save(team("a"), a);
+        parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
+        assert!(parked.take(&team("b")).unwrap().scroll_state.is_empty());
+        assert_eq!(parked.take(&team("a")).unwrap().scroll_state[&ScrollKey::Lane(0)], (300.0, 500.0));
+    }
+
+    #[test]
+    fn view_search_stays_with_its_tab() {
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.search_query = "login".into();
+        parked.save(team("a"), a);
+        parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
+        assert_eq!(parked.take(&team("b")).unwrap().search_query, "");
+        let a = parked.take(&team("a")).unwrap();
+        assert_eq!((a.search_query.as_str(), a.search_view), ("login", View::Board));
+    }
+
+    #[test]
+    fn focus_and_collapsed_sections_stay_with_their_tab() {
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.focused_lane = 2;
+        a.focused_issue = 5;
+        a.collapsed_sections.insert("Done".into());
+        parked.save(team("a"), a);
+        parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
+        let b = parked.take(&team("b")).unwrap();
+        assert_eq!((b.focused_lane, b.focused_issue), (0, 0));
+        assert!(b.collapsed_sections.is_empty());
+        let a = parked.take(&team("a")).unwrap();
+        assert_eq!((a.focused_lane, a.focused_issue), (2, 5));
+        assert!(a.collapsed_sections.contains("Done"));
+    }
+
+    #[test]
+    fn a_modified_view_parks_with_its_tab() {
+        use crate::saved_view::{BoardState, OpenView, RawQuery};
+        let mut modified = BoardState::default();
+        modified.search = "changed".into();
+        let open = OpenView {
+            view_id: "v".into(),
+            team_id: "a".into(),
+            name: "Mine".into(),
+            state: modified,
+            raw: RawQuery::new(),
+            baseline: BoardState::default(),
+        };
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.open_view = Some(open.clone());
+        parked.save(team("a"), a);
+        parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
+        assert!(parked.take(&team("b")).unwrap().open_view.is_none());
+        assert_eq!(parked.take(&team("a")).unwrap().open_view, Some(open));
+    }
+
+    #[test]
+    fn closing_a_background_tab_keeps_the_active_one() {
+        let mut set = TabSet::new(team("a"));
+        focus_team(&mut set, "b");
+        focus_team(&mut set, "c");
+        let out = close_index(&mut set, 0, &team("a")).unwrap();
+        assert_eq!(out, Closed { closed: team("a"), to: None });
+        assert_eq!(set.tabs(), &[team("b"), team("c")]);
+        assert_eq!(set.active(), &team("c"));
+    }
+
+    #[test]
+    fn closing_the_active_tab_focuses_a_neighbour() {
+        let mut set = TabSet::new(team("a"));
+        focus_team(&mut set, "b");
+        focus_team(&mut set, "c");
+        focus_index(&mut set, 1);
+        let out = close_index(&mut set, 1, &team("a")).unwrap();
+        assert_eq!(out, Closed { closed: team("b"), to: Some(team("c")) });
+        let out = close_index(&mut set, 1, &team("a")).unwrap();
+        assert_eq!(out.to, Some(team("a")));
+    }
+
+    #[test]
+    fn closing_the_last_tab_opens_home() {
+        let mut set = TabSet::new(team("a"));
+        let out = close_index(&mut set, 0, &team("h")).unwrap();
+        assert_eq!(out, Closed { closed: team("a"), to: Some(team("h")) });
+        assert_eq!(set.tabs(), &[team("h")]);
+    }
+
+    #[test]
+    fn closing_out_of_range_does_nothing() {
+        let mut set = TabSet::new(team("a"));
+        assert_eq!(close_index(&mut set, 3, &team("h")), None);
+        assert_eq!(set.tabs(), &[team("a")]);
+    }
+
+    #[test]
+    fn a_team_row_click_returns_to_the_page_the_tab_was_left_on() {
+        let mut set = TabSet::new(team("a"));
+        let mut parked = Parked::default();
+        // Leave team a on Roadmap for team b, as a sidebar row click does.
+        let Switch::Moved { from, to } = focus_team(&mut set, "b") else { panic!() };
+        parked.save(from, ParkedTab::new(View::Roadmap, Some("a".into())));
+        assert!(parked.take(&to).is_none()); // b opens fresh, on its Board
+        // Click a's row again: a's Tab is focused, not duplicated.
+        let Switch::Moved { from, to } = focus_team(&mut set, "a") else { panic!() };
+        parked.save(from, ParkedTab::new(View::Board, Some("b".into())));
+        assert_eq!(parked.take(&to).unwrap().view, View::Roadmap);
+        assert_eq!(set.tabs().len(), 2);
+    }
+
+    #[test]
+    fn a_sub_row_of_the_current_team_adds_no_tab() {
+        let mut set = TabSet::new(team("a"));
+        assert_eq!(focus_team(&mut set, "a"), Switch::Stay);
+        assert_eq!(set.tabs().len(), 1);
+        // A sub-row of another team switches to (or opens) that team's Tab.
+        assert_eq!(
+            focus_team(&mut set, "b"),
+            Switch::Moved { from: team("a"), to: team("b") }
+        );
+    }
+
+    fn draft(owner: View, comment: &str) -> CommentDraft {
+        CommentDraft {
+            owner,
+            comment: comment.into(),
+            reply_to: None,
+            reply: String::new(),
+            comment_id: "c".into(),
+            reply_id: "r".into(),
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_comment_draft_parks_with_its_detail_page() {
+        let view = View::IssueDetail("i".into());
+        let tab = ParkedTab::new(view.clone(), Some("a".into()))
+            .with_comment_draft(view.clone(), Some(draft(view.clone(), "half a thought")));
+        assert_eq!(tab.view, view);
+        assert_eq!(tab.comment_draft.unwrap().comment, "half a thought");
+    }
+
+    #[test]
+    fn a_draft_beats_parked_view_for_every_tab_kind() {
+        let detail = View::IssueDetail("i".into());
+        for key in [team("a"), TabKey::Project("p".into()), TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            let tab = ParkedTab::new(parked_view(&key, detail.clone()), None)
+                .with_comment_draft(detail.clone(), Some(draft(detail.clone(), "x")));
+            assert_eq!(tab.view, detail);
+            assert!(tab.comment_draft.is_some());
+        }
+    }
+
+    #[test]
+    fn an_empty_draft_is_not_parked() {
+        let view = View::IssueDetail("i".into());
+        let tab = ParkedTab::new(parked_view(&team("a"), view.clone()), None)
+            .with_comment_draft(view.clone(), Some(draft(view.clone(), "")));
+        // The issue still parks as itself, with nothing to restore into it.
+        assert_eq!(tab.view, view);
+        assert!(tab.comment_draft.is_none());
+    }
+
+    #[test]
+    fn staged_files_alone_or_an_open_reply_make_a_draft() {
+        let view = View::ProjectDetail("p".into());
+        let mut d = draft(view.clone(), "");
+        d.reply_to = Some("x".into());
+        assert!(d.has_content());
+        let mut d = draft(view, "");
+        d.reply = "re".into();
+        assert!(d.has_content());
+    }
+
+    #[test]
+    fn a_draft_for_another_page_is_not_parked() {
+        let tab = ParkedTab::new(View::Board, None).with_comment_draft(
+            View::Board,
+            Some(draft(View::IssueDetail("i".into()), "x")),
+        );
+        assert!(tab.comment_draft.is_none());
+    }
+
+    #[test]
+    fn drafts_stay_in_their_own_tab_and_closing_hands_back_its_ids() {
+        let view = View::IssueDetail("i".into());
+        let mut parked = Parked::default();
+        parked.save(
+            team("a"),
+            ParkedTab::new(view.clone(), None).with_comment_draft(view.clone(), Some(draft(view, "x"))),
+        );
+        parked.save(team("b"), ParkedTab::new(View::Board, None));
+        assert!(parked.take(&team("b")).unwrap().comment_draft.is_none());
+        let gone = parked.forget(&team("a")).unwrap().comment_draft.unwrap();
+        assert_eq!(gone.owner_ids(), ["c".to_string(), "r".to_string()]);
+        assert!(parked.take(&team("a")).is_none());
+    }
+
+    fn saved_view(id: &str) -> crate::saved_view::OpenView {
+        use crate::saved_view::{BoardState, OpenView, RawQuery};
+        OpenView {
+            view_id: id.into(),
+            team_id: "a".into(),
+            name: "Mine".into(),
+            state: BoardState::default(),
+            raw: RawQuery::new(),
+            baseline: BoardState::default(),
+        }
+    }
+
+    #[test]
+    fn each_team_level_page_is_stored_and_comes_back() {
+        for (view, page) in [
+            (View::Board, Page::Board),
+            (View::ProjectList, Page::Projects),
+            (View::Roadmap, Page::Roadmap),
+            (View::RecurringIssues, Page::Recurring),
+        ] {
+            assert_eq!(stored_page(&team("a"), &view, None), page);
+            assert_eq!(page_view(&team("a"), &page), view);
+        }
+    }
+
+    #[test]
+    fn an_open_saved_view_is_stored_and_comes_back_on_the_board() {
+        let open = saved_view("v1");
+        let page = stored_page(&team("a"), &View::Board, Some(&open));
+        assert_eq!(page, Page::SavedView("v1".into()));
+        assert_eq!(page_view(&team("a"), &page), View::Board);
+    }
+
+    #[test]
+    fn an_issue_or_project_detail_in_a_team_tab_reopens_as_the_board() {
+        for view in [View::IssueDetail("i".into()), View::ProjectDetail("p".into())] {
+            assert_eq!(stored_page(&team("a"), &view, None), Page::Board);
+        }
+        let open = saved_view("v1");
+        assert_eq!(
+            stored_page(&team("a"), &View::IssueDetail("i".into()), Some(&open)),
+            Page::Board
+        );
+    }
+
+    #[test]
+    fn project_and_cross_team_tabs_always_return_to_their_root() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(stored_page(&project, &View::IssueDetail("i".into()), None), Page::Root);
+        assert_eq!(page_view(&project, &Page::Roadmap), View::ProjectDetail("p".into()));
+        for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            assert_eq!(stored_page(&key, &View::Board, None), Page::Root);
+            assert_eq!(page_view(&key, &Page::Board), root_view(&key));
+        }
+    }
+
+    #[test]
+    fn a_team_tab_stored_as_the_root_opens_on_the_board() {
+        assert_eq!(page_view(&team("a"), &Page::Root), View::Board);
+    }
+
+    #[test]
+    fn pages_survive_their_stored_text_and_unknown_text_is_the_root() {
+        for page in [
+            Page::Root,
+            Page::Board,
+            Page::Projects,
+            Page::Roadmap,
+            Page::Recurring,
+            Page::SavedView("v:1".into()),
+        ] {
+            assert_eq!(Page::decode(page.encode().as_deref()), page);
+        }
+        assert_eq!(Page::decode(Some("hologram")), Page::Root);
+        assert_eq!(Page::decode(Some("view:")), Page::Root);
+    }
+}

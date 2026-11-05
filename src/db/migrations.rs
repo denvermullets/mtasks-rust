@@ -773,6 +773,90 @@ const MIGRATIONS: &[Migration] = &[
             DELETE FROM pull_cursors WHERE resource = 'issues';
         ",
     },
+    Migration {
+        version: 35,
+        name: "issues_team_deleted_index",
+        up: "
+            -- Cross-team pages (My Issues, dashboards) and Tab switches load
+            -- every active team's live issues; see ADR 0001.
+            CREATE INDEX IF NOT EXISTS idx_issues_team_deleted
+                ON issues(team_id, deleted_at);
+            ANALYZE;
+        ",
+    },
+    Migration {
+        version: 36,
+        name: "open_tabs",
+        up: "
+            -- The open Tabs, in order. Local only: never queued for Data sync.
+            CREATE TABLE open_tabs (
+                position INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                ref_id TEXT,
+                is_active INTEGER NOT NULL DEFAULT 0
+            );
+        ",
+    },
+    Migration {
+        version: 37,
+        name: "open_tabs_page",
+        up: "
+            -- The page a Tab returns to on relaunch: NULL is the Tab's root,
+            -- else board, projects, roadmap, recurring or view:<saved view id>.
+            ALTER TABLE open_tabs ADD COLUMN page TEXT;
+        ",
+    },
+    Migration {
+        version: 38,
+        name: "team_terminal_dirs",
+        up: "
+            -- Where a team's new Terminals start. Local only: never queued for
+            -- Data sync. Removed with the team.
+            CREATE TABLE team_terminal_dirs (
+                team_id TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+                path TEXT NOT NULL
+            );
+        ",
+    },
+    Migration {
+        version: 39,
+        name: "terminal_records",
+        up: "
+            -- One row per Terminal in a team's strip: its name and working
+            -- directory, not its process or scrollback. Local only: never queued
+            -- for Data sync. Removed with the team.
+            CREATE TABLE terminal_records (
+                id TEXT PRIMARY KEY,
+                team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                cwd TEXT,
+                position INTEGER NOT NULL
+            );
+            CREATE INDEX idx_terminal_records_team ON terminal_records(team_id, position);
+        ",
+    },
+    Migration {
+        version: 40,
+        name: "panel_states",
+        up: "
+            -- A Tab's Terminal panel: visibility, height, layout and which
+            -- Terminal fills each pane. `panes` is a JSON array of Terminal
+            -- record ids (terminal_records.id), never engine ids. Local only:
+            -- never queued for Data sync. tab_kind is a Tab's kind as in
+            -- open_tabs, or 'implicit' for the panel state saved before Tabs
+            -- had their own.
+            CREATE TABLE panel_states (
+                tab_kind TEXT NOT NULL,
+                tab_ref TEXT NOT NULL DEFAULT '',
+                visible INTEGER NOT NULL,
+                height REAL,
+                layout TEXT NOT NULL,
+                panes TEXT NOT NULL,
+                focused_pane INTEGER NOT NULL,
+                PRIMARY KEY (tab_kind, tab_ref)
+            );
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1212,6 +1296,176 @@ mod tests {
             count("SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name = 'archived_at'"),
             0
         );
+    }
+
+    #[test]
+    fn upgrade_from_v34_adds_the_issues_team_index_and_analyzes_it() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 35) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute_batch(&format!(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+               VALUES ('t1', 'T', 'T', '{now}', '{now}');
+             INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+               VALUES ('l1', 'L', 0, 't1', '{now}', '{now}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+               VALUES ('i1', 'a', 0, 'l1', 't1', '{now}', '{now}'),
+                      ('i2', 'b', 0, 'l1', 't1', '{now}', '{now}');"
+        ))
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let index_columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_info('idx_issues_team_deleted') ORDER BY seqno")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(index_columns, ["team_id", "deleted_at"]);
+        // ANALYZE ran: the planner has statistics for the new index.
+        let stats: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_stat1 WHERE idx = 'idx_issues_team_deleted'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v35_adds_the_open_tabs_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 36) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "open_tabs"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "open_tabs"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v36_adds_the_page_column_and_keeps_stored_tabs() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 37) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO open_tabs (position, kind, ref_id, is_active) VALUES (0, 'team', 't1', 1)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let page: Option<String> = conn
+            .query_row("SELECT page FROM open_tabs WHERE position = 0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(page, None);
+    }
+
+    #[test]
+    fn upgrade_from_v37_adds_the_terminal_dirs_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 38) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "team_terminal_dirs"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "team_terminal_dirs"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v38_adds_the_terminal_records_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 39) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "terminal_records"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "terminal_records"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v39_adds_the_panel_states_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 40) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "panel_states"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "panel_states"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
     }
 
     #[test]

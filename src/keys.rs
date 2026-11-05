@@ -1,6 +1,6 @@
 use iced::keyboard::{self, Key, Modifiers};
 
-use crate::app::{Message, View};
+use crate::app::{Message, TabMessage, View};
 
 pub fn handle_key_press(
     key: Key,
@@ -27,12 +27,24 @@ pub fn handle_key_press(
             // Global shortcuts — active on any view.
             "f" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
+            "j" | "J" if modifiers.command() && modifiers.shift() => Some(Message::Terminal(
+                crate::terminal::TerminalMessage::Hide,
+            )),
+            "j" if modifiers.command() => Some(Message::Terminal(
+                crate::terminal::TerminalMessage::ToggleFocus,
+            )),
             "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
             "I" | "i" if modifiers.shift() => Some(Message::NavigateToView(View::Inbox)),
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
             "s" if modifiers.is_empty() => Some(Message::SyncNow),
             "," if modifiers.is_empty() => Some(Message::OpenSettings),
             "?" | "/" if modifiers.shift() || modifiers.is_empty() => Some(Message::ToggleHelp),
+
+            // Cmd+1-9 focuses the Nth Tab (a missing one does nothing; the
+            // modal case already returned above).
+            d if modifiers.command() && tab_position(d).is_some() => {
+                tab_position(d).map(|i| Message::Tab(TabMessage::Focus(i)))
+            }
 
             // Board-only shortcuts — ignored on other views.
             "v" if on_board && modifiers.is_empty() => Some(Message::ToggleViewMode),
@@ -64,6 +76,12 @@ pub fn handle_key_press(
         },
         _ => None,
     }
+}
+
+/// "1".."9" as a zero-based Tab position.
+fn tab_position(c: &str) -> Option<usize> {
+    let n: usize = c.parse().ok()?;
+    (1..=9).contains(&n).then(|| n - 1)
 }
 
 /// Keys bound only while a dashboard is showing: j/k and the arrows walk rows
@@ -157,8 +175,9 @@ pub fn handle_issue_detail_key(
     })
 }
 
-/// Keys bound only while a project detail is showing; same description keys
-/// as the issue detail handler.
+/// Keys bound only while a project detail is showing: the same description keys
+/// as the issue detail handler, plus `/` to toggle the properties sidebar. It
+/// only sees keys no text field or Terminal took.
 pub fn handle_project_detail_key(
     key: &Key,
     modifiers: Modifiers,
@@ -171,6 +190,12 @@ pub fn handle_project_detail_key(
         Message::StopEditingProjectDescription,
         Message::EditProjectDescription,
     )
+    .or_else(|| match key {
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "/" => {
+            Some(Message::ToggleProjectProperties)
+        }
+        _ => None,
+    })
 }
 
 /// Keys bound only while the lightbox modal is open. Checked before the
@@ -269,6 +294,23 @@ mod tests {
     }
 
     #[test]
+    fn slash_toggles_properties_on_the_project_page_and_opens_help_elsewhere() {
+        let slash = Key::Character("/".into());
+        assert!(matches!(
+            handle_project_detail_key(&slash, Modifiers::empty(), false),
+            Some(Message::ToggleProjectProperties)
+        ));
+        // `?` is shift+/ and stays help: the project handler leaves it alone.
+        let q = Key::Character("?".into());
+        assert!(handle_project_detail_key(&q, Modifiers::SHIFT, false).is_none());
+        assert!(matches!(press_with("?", Modifiers::SHIFT, false), Some(Message::ToggleHelp)));
+        // With a command modifier it is not the shortcut.
+        assert!(handle_project_detail_key(&slash, Modifiers::COMMAND, false).is_none());
+        // Off the project page the global handler still opens help on `/`.
+        assert!(matches!(press("/", false, false), Some(Message::ToggleHelp)));
+    }
+
+    #[test]
     fn e_edits_the_project_description_with_no_modifiers() {
         let e = Key::Character("e".into());
         assert!(matches!(
@@ -277,6 +319,22 @@ mod tests {
         ));
         assert!(handle_project_detail_key(&e, Modifiers::COMMAND, false).is_none());
         assert!(handle_project_detail_key(&e, Modifiers::SHIFT, false).is_none());
+    }
+
+    #[test]
+    fn cmd_shift_j_hides_the_panel_and_cmd_j_still_toggles_focus() {
+        use crate::terminal::TerminalMessage;
+        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        for c in ["J", "j"] {
+            assert!(matches!(
+                handle_key_press(Key::Character(c.into()), cmd_shift, false, false, true),
+                Some(Message::Terminal(TerminalMessage::Hide))
+            ));
+        }
+        assert!(matches!(
+            handle_key_press(Key::Character("j".into()), Modifiers::COMMAND, false, false, true),
+            Some(Message::Terminal(TerminalMessage::ToggleFocus))
+        ));
     }
 
     #[test]
@@ -347,6 +405,36 @@ mod tests {
             false,
             on_board,
         )
+    }
+
+    fn press_with(c: &str, modifiers: Modifiers, modal_open: bool) -> Option<Message> {
+        handle_key_press(Key::Character(c.into()), modifiers, modal_open, false, true)
+    }
+
+    #[test]
+    fn cmd_digit_focuses_that_tab() {
+        for (c, i) in [("1", 0), ("5", 4), ("9", 8)] {
+            assert!(matches!(
+                press_with(c, Modifiers::COMMAND, false),
+                Some(Message::Tab(TabMessage::Focus(n))) if n == i
+            ));
+        }
+        assert!(press_with("0", Modifiers::COMMAND, false).is_none());
+    }
+
+    #[test]
+    fn cmd_digit_does_nothing_while_a_modal_is_open() {
+        assert!(press_with("1", Modifiers::COMMAND, true).is_none());
+        assert!(press_with("9", Modifiers::COMMAND, true).is_none());
+    }
+
+    #[test]
+    fn bare_digits_still_set_priority() {
+        assert!(matches!(press("1", false, true), Some(Message::SetFocusedPriority(0))));
+        assert!(matches!(press("4", false, true), Some(Message::SetFocusedPriority(3))));
+        assert!(press("5", false, true).is_none());
+        // Off the board a bare digit is still inert.
+        assert!(press("1", false, false).is_none());
     }
 
     #[test]
