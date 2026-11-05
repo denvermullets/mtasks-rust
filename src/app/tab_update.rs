@@ -5,13 +5,16 @@
 use iced::Task;
 
 use super::{App, Message, View};
-use crate::tab_state::{self, ParkedTab, Switch};
+use crate::db::queries;
+use crate::tab_state::{self, CommentDraft, ParkedTab, Switch};
 use crate::tabs::{TabKey, TabSet};
 
 #[derive(Debug, Clone)]
 pub enum TabMessage {
     /// Click a Tab in the bar, by position.
     Focus(usize),
+    /// Close a Tab from the bar, by position.
+    Close(usize),
 }
 
 impl App {
@@ -21,11 +24,72 @@ impl App {
                 self.ensure_tab_set();
                 if let Some(set) = self.tab_set.as_mut() {
                     let switch = tab_state::focus_index(set, index);
-                    self.apply_switch(switch);
+                    return self.apply_switch(switch);
                 }
             }
+            TabMessage::Close(index) => return self.close_tab(index),
         }
         Task::none()
+    }
+
+    /// Close the Tab at `index`. Closing the active Tab (or the last Tab,
+    /// which becomes the Home page) restores the Tab that takes over;
+    /// closing a background Tab only forgets its parked state, comment draft
+    /// included (ADR 0001).
+    fn close_tab(&mut self, index: usize) -> Task<Message> {
+        self.ensure_tab_set();
+        let home = self.home_tab_key();
+        let Some(set) = self.tab_set.as_mut() else {
+            return Task::none();
+        };
+        let from = set.active().clone();
+        let Some(closed) = tab_state::close_index(set, index, &home) else {
+            return Task::none();
+        };
+        // The closed Tab's comment draft goes with it, staged files included.
+        if let Some(draft) = self.parked_tabs.forget(&closed.closed).and_then(|p| p.comment_draft) {
+            self.drop_drafts(&draft.owner_ids());
+        }
+        if closed.closed == from {
+            self.discard_live_composers();
+        }
+        if let Some(to) = closed.to {
+            // The closed Tab is gone, so its live state is dropped, not
+            // stashed. Edits still commit, as on any switch.
+            self.commit_issue_detail();
+            self.commit_project_detail();
+            self.stash_dashboard_session();
+            if closed.closed != from {
+                self.stash_active_tab(from);
+            }
+            return self.restore_tab(&to);
+        }
+        Task::none()
+    }
+
+    /// The Tab the Home page opens, falling back to the first team's.
+    fn home_tab_key(&self) -> TabKey {
+        use crate::db::home_page::{launch_target, LaunchTarget};
+        let launch = launch_target(
+            self.home_page.as_ref(),
+            &self.teams,
+            &self.saved_views,
+            &self.dashboards,
+        );
+        let team = match launch {
+            LaunchTarget::Team(id) => Some(id),
+            LaunchTarget::View { team_id, .. } => Some(team_id),
+            LaunchTarget::Dashboard(id) => return TabKey::Dashboard(id),
+            LaunchTarget::Default => None,
+        };
+        team.or_else(|| {
+            self.teams
+                .iter()
+                .find(|t| t.archived_at.is_none())
+                .or_else(|| self.teams.first())
+                .map(|t| t.id.clone())
+        })
+        .map_or(TabKey::MyIssues, TabKey::Team)
     }
 
     /// The set starts with the selected team's Tab once a team exists.
@@ -38,51 +102,175 @@ impl App {
     }
 
     /// Focus (or open) a team's Tab, for navigation into that team.
-    pub(super) fn focus_team_tab(&mut self, team_id: &str) {
+    /// The task scrolls the restored Tab's views back into place.
+    pub(super) fn focus_team_tab(&mut self, team_id: &str) -> Task<Message> {
         self.ensure_tab_set();
         if let Some(set) = self.tab_set.as_mut() {
             let switch = tab_state::focus_team(set, team_id);
-            self.apply_switch(switch);
+            return self.apply_switch(switch);
         }
+        Task::none()
     }
 
-    fn apply_switch(&mut self, switch: Switch) {
+    fn apply_switch(&mut self, switch: Switch) -> Task<Message> {
         let Switch::Moved { from, to } = switch else {
-            return;
+            return Task::none();
         };
         // Edits commit when leaving, as they do when navigating today.
         self.commit_issue_detail();
         self.commit_project_detail();
         self.stash_dashboard_session();
         self.stash_active_tab(from);
-        self.restore_tab(&to);
+        self.restore_tab(&to)
     }
 
     /// Park the live per-Tab fields under `key`. Add new per-Tab fields here.
     pub(super) fn stash_active_tab(&mut self, key: TabKey) {
+        let draft = self.take_comment_draft();
         self.parked_tabs.save(
             key,
-            ParkedTab::new(self.view.clone(), self.selected_team_id.clone()),
+            ParkedTab {
+                scroll_state: self.scroll_state.clone(),
+                search_query: self.search_query.clone(),
+                search_view: self.search_view.clone(),
+                focused_lane: self.focused_lane,
+                focused_issue: self.focused_issue,
+                collapsed_sections: self.collapsed_sections.clone(),
+                open_view: self.open_view.clone(),
+                ..ParkedTab::new(self.view.clone(), self.selected_team_id.clone())
+                    .with_comment_draft(self.view.clone(), draft)
+            },
         );
+    }
+
+    /// Lift the open detail's comment draft out of the live state, dropping the
+    /// detail so its staged files aren't cancelled with it. `None` (and nothing
+    /// touched) when there's no draft worth parking.
+    fn take_comment_draft(&mut self) -> Option<CommentDraft> {
+        let draft = match &self.view {
+            View::IssueDetail(id) => self.issue_detail.as_ref().filter(|d| d.issue_id == *id).map(|d| {
+                (&d.comment_composer, d.reply_to.clone(), &d.reply_composer, &d.composer_files)
+            }),
+            View::ProjectDetail(id) => {
+                self.project_detail.as_ref().filter(|d| d.project_id == *id).map(|d| {
+                    (&d.comment_composer, d.reply_to.clone(), &d.reply_composer, &d.composer_files)
+                })
+            }
+            _ => None,
+        }
+        .map(|(comment, reply_to, reply, files)| CommentDraft {
+            owner: self.view.clone(),
+            comment: comment.text().trim_end_matches('\n').to_string(),
+            reply_to,
+            reply: reply.text().trim_end_matches('\n').to_string(),
+            comment_id: files.comment_id.clone(),
+            reply_id: files.reply_id.clone(),
+            files: files.files.clone(),
+        })
+        .filter(CommentDraft::has_content)?;
+        self.issue_detail = None;
+        self.project_detail = None;
+        Some(draft)
+    }
+
+    /// Cancel the live detail's unsent staged files and drop it: used when its
+    /// Tab closes, so nothing is parked.
+    fn discard_live_composers(&mut self) {
+        let mut ids = Vec::new();
+        if let Some(d) = self.issue_detail.take() {
+            ids.extend([d.composer_files.comment_id, d.composer_files.reply_id]);
+        }
+        if let Some(d) = self.project_detail.take() {
+            ids.extend([d.composer_files.comment_id, d.composer_files.reply_id]);
+        }
+        if !ids.is_empty() {
+            self.drop_drafts(&ids);
+        }
+    }
+
+    /// Rebuild the detail page a parked draft was typed on and put the draft
+    /// back. When the issue or project is gone the draft is discarded and the
+    /// Tab falls back to its Board.
+    fn restore_comment_draft(&mut self, draft: CommentDraft) {
+        use iced::widget::text_editor::Content;
+        let conn = self.db();
+        let files = crate::views::issue_detail::ComposerFiles {
+            comment_id: draft.comment_id.clone(),
+            files: draft.files.clone(),
+            reply_id: draft.reply_id.clone(),
+        };
+        match draft.owner.clone() {
+            View::IssueDetail(id) => match queries::get_issue(&conn, &id) {
+                Ok(Some(issue)) => {
+                    let mut d = crate::views::issue_detail::IssueDetailState::from_issue(&issue);
+                    d.comment_composer = Content::with_text(&draft.comment);
+                    d.reply_to = draft.reply_to;
+                    d.reply_composer = Content::with_text(&draft.reply);
+                    d.composer_files = files;
+                    self.issue_detail = Some(d);
+                    self.load_detail_dependencies(&conn);
+                    self.reload_detail_origin(&conn);
+                    return;
+                }
+                _ => {}
+            },
+            View::ProjectDetail(id) => match queries::get_project(&conn, &id) {
+                Ok(Some(project)) => {
+                    let mut d = crate::views::project_detail::ProjectDetailState::from_project(&project);
+                    d.comment_composer = Content::with_text(&draft.comment);
+                    d.reply_to = draft.reply_to;
+                    d.reply_composer = Content::with_text(&draft.reply);
+                    d.composer_files = files;
+                    self.project_detail = Some(d);
+                    self.view = View::ProjectDetail(id);
+                    self.load_detail_dependencies(&conn);
+                    return;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        self.view = View::Board;
+        self.drop_drafts(&draft.owner_ids());
     }
 
     /// Make `key`'s Tab live: apply its parked fields (or defaults on first
     /// focus), then reload data from the local database. Per-Tab fields that
     /// aren't parked yet are reset so they can't leak between Tabs. Add new
     /// per-Tab fields here.
-    pub(super) fn restore_tab(&mut self, key: &TabKey) {
+    ///
+    /// The returned task scrolls every scrollable the restored view shows to
+    /// the Tab's offset (see `tab_state::scroll_keys`).
+    pub(super) fn restore_tab(&mut self, key: &TabKey) -> Task<Message> {
         let parked = self.parked_tabs.take(key);
-        let (view, team) = match parked {
-            Some(p) => (p.view, p.selected_team_id),
+        let (view, team, scroll_state, search, focus, collapsed, open_view, draft) = match parked {
+            Some(p) => (
+                p.view,
+                p.selected_team_id,
+                p.scroll_state,
+                (p.search_query, p.search_view),
+                (p.focused_lane, p.focused_issue),
+                p.collapsed_sections,
+                p.open_view,
+                p.comment_draft,
+            ),
             None => (
                 View::Board,
                 match key {
                     TabKey::Team(id) => Some(id.clone()),
                     _ => self.selected_team_id.clone(),
                 },
+                Default::default(),
+                (String::new(), View::Board),
+                (0, 0),
+                Default::default(),
+                None,
+                None,
             ),
         };
-        self.open_view = None;
+        self.scroll_state = scroll_state;
+        (self.search_query, self.search_view) = search;
+        self.open_view = open_view;
         self.detail_from_my_issues = false;
         self.detail_from_inbox = false;
         self.detail_from_dashboard = None;
@@ -90,8 +278,8 @@ impl App {
         self.project_detail = None;
         self.dashboard_menu = None;
         self.composer_focused = false;
-        self.focused_lane = 0;
-        self.focused_issue = 0;
+        (self.focused_lane, self.focused_issue) = focus;
+        self.collapsed_sections = collapsed;
         self.selected_team_id = team;
         self.view = view;
         self.reload_data();
@@ -102,7 +290,51 @@ impl App {
             let conn = self.db();
             self.reload_recurring(&conn);
         }
+        if let Some(draft) = draft {
+            self.restore_comment_draft(draft);
+        }
+        // Parked focus may point past rows that went away.
+        if matches!(self.view, View::Board | View::MyIssues) {
+            self.clamp_focus();
+        }
         self.restore_dashboard_session();
+        self.restore_scroll()
+    }
+
+    /// Scroll the live view's scrollables to `scroll_state`. Widgets keep
+    /// their offset across Tabs, so this runs on every switch, back to 0 for a
+    /// view the Tab never scrolled.
+    fn restore_scroll(&self) -> Task<Message> {
+        use crate::views::{board, dashboard, inbox, issue_list, projects, recurring_issues, roadmap};
+        use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
+        let (list_mode, lanes) = match self.view {
+            View::Board | View::MyIssues => (
+                self.board_display().view_mode == crate::display::ViewMode::List,
+                self.board_columns().len(),
+            ),
+            _ => (false, 0),
+        };
+        let keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
+        let tasks = tab_state::restore_offsets(&keys, &self.scroll_state)
+            .into_iter()
+            .map(|(k, offset)| {
+                let y = AbsoluteOffset { x: 0.0, y: offset };
+                match k {
+                    board::BOARD_SCROLL_KEY => {
+                        scroll_to(board::board_scroll_id(), AbsoluteOffset { x: offset, y: 0.0 })
+                    }
+                    inbox::SCROLL_KEY => scroll_to(inbox::scroll_id(), y),
+                    projects::SCROLL_KEY => scroll_to(projects::scroll_id(), y),
+                    roadmap::SCROLL_KEY => scroll_to(roadmap::scroll_id(), y),
+                    recurring_issues::SCROLL_KEY => scroll_to(recurring_issues::scroll_id(), y),
+                    issue_list::SCROLL_KEY if matches!(self.view, View::Dashboard(_)) => {
+                        scroll_to(dashboard::scroll_id(), y)
+                    }
+                    issue_list::SCROLL_KEY => scroll_to(issue_list::scroll_id(), y),
+                    lane => scroll_to(board::lane_scroll_id(lane), y),
+                }
+            });
+        Task::batch(tasks)
     }
 
     /// Bar labels in order, with whether each is the active Tab.

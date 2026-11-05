@@ -19,8 +19,7 @@ use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
 use super::panel::{self, PanelState, Toggle};
-use super::palette;
-use super::{SpawnConfig, TerminalId, Terminals};
+use super::{active_term_theme, SpawnConfig, TerminalId, Terminals};
 use crate::app::Message;
 use crate::theme as t;
 use crate::views::terminal_panel::{self, Pane, PanelView};
@@ -175,7 +174,7 @@ impl TerminalState {
         let key = t::tok().key;
         if key != self.theme_key {
             self.theme_key = key;
-            let theme = palette::term_theme(t::tok());
+            let theme = active_term_theme();
             for id in self.terminals.ids() {
                 self.terminals.set_theme(id, theme.clone());
             }
@@ -276,7 +275,7 @@ impl TerminalState {
             team: team.to_string(),
             cols,
             rows,
-            theme: palette::term_theme(t::tok()),
+            theme: active_term_theme(),
             cwd: None,
             program: None,
         };

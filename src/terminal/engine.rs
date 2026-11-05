@@ -10,12 +10,12 @@ use super::*;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{PaletteIndex, RgbColor};
-use libghostty_vt::terminal::{Mode, ScrollViewport};
+use libghostty_vt::terminal::{ColorScheme, Mode, ScrollViewport};
 use libghostty_vt::{key, paste, RenderState, Terminal};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicU64, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -366,6 +366,7 @@ fn owner(
     wake: Arc<Wake>,
 ) {
     let size = Arc::new(Mutex::new((cols, rows, 8u32, 16u32)));
+    let light = Arc::new(AtomicBool::new(theme.light));
     let mut term: Terminal<'static, 'static> = Terminal::new(cols, rows).unwrap();
     term.set_scrollback_max_lines(Some(10_000)).unwrap();
     // Both limits apply; the default byte limit otherwise caps history at about 1,100 rows.
@@ -404,6 +405,12 @@ fn owner(
         })
         .unwrap();
         term.on_xtversion(|_t| Some("jait")).unwrap();
+        // `CSI ?996n`: answered from the current theme, which `Cmd::Theme` updates.
+        let l = light.clone();
+        term.on_color_scheme(move |_t| {
+            Some(if l.load(Relaxed) { ColorScheme::Light } else { ColorScheme::Dark })
+        })
+        .unwrap();
     }
     apply_theme(&mut term, &theme);
 
@@ -509,6 +516,15 @@ fn owner(
                 }
                 Cmd::Theme(t) => {
                     apply_theme(&mut term, &t);
+                    light.store(t.light, Relaxed);
+                    // Mode 2031: a program that asked is told when the scheme changes.
+                    if term.mode(Mode::COLOR_SCHEME_REPORT).unwrap_or(false) {
+                        let scheme = if t.light { ColorScheme::Light } else { ColorScheme::Dark };
+                        let mut buf = [0u8; 16];
+                        if let Ok(n) = scheme.encode_report(&mut buf) {
+                            let _ = wtx.send(buf[..n].to_vec());
+                        }
+                    }
                     force_full = true;
                 }
                 Cmd::Visible(v) => {

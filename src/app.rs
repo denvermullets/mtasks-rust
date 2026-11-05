@@ -50,6 +50,8 @@ pub enum Message {
     // Navigation
     /// Toggle a team's sidebar expansion (chevron / team-header click).
     ToggleTeamExpanded(String),
+    /// Click on a sidebar team row outside its chevron.
+    SelectTeamRow(String),
     /// Select a team and switch the right pane to `view` (team sub-row click).
     SelectTeamView(String, View),
     /// Tab bar actions; handled in `app/tab_update.rs`.
@@ -966,6 +968,11 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
+            tabs: self
+                .tab_labels()
+                .into_iter()
+                .map(|(label, active)| crate::palette_results::SearchableTab { label, active })
+                .collect(),
         }
     }
 
@@ -3454,6 +3461,19 @@ impl App {
                 }
             }
 
+            Message::SelectTeamRow(team_id) => {
+                self.expanded_teams.insert(team_id.clone());
+                // Focus the Tab as it was left. A team Tab that is showing a
+                // cross-team page has nothing of the team's to return to, so
+                // that case goes to the team's Board.
+                if self.selected_team_id.as_deref() == Some(team_id.as_str())
+                    && self.view.is_cross_team()
+                {
+                    return self.update_inner(Message::SelectTeamView(team_id, View::Board));
+                }
+                return self.focus_team_tab(&team_id);
+            }
+
             Message::OpenSavedView(view_id) => {
                 let found = self
                     .saved_views
@@ -3464,20 +3484,22 @@ impl App {
                 let Some(sv) = found else {
                     return Task::none();
                 };
-                // The board's own search, read before the team switch may clear it.
-                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
-                    self.search_query.clone()
-                } else {
-                    String::new()
-                };
-                // Switch team first when needed (this drops any open view).
-                let task =if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
+                // Switch to the view's team Tab first when needed (this
+                // replaces any view open there).
+                let task = if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
                     || self.view != View::Board
                 {
                     self.expanded_teams.insert(sv.team_id.clone());
                     self.update_inner(Message::SelectTeamView(sv.team_id.clone(), View::Board))
                 } else {
                     Task::none()
+                };
+                // The team Tab's own board search, read once that Tab is live
+                // (the Tab that was active may be another team's).
+                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
+                    self.search_query.clone()
+                } else {
+                    String::new()
                 };
                 let local = crate::saved_view::BoardState {
                     display: self
@@ -3991,9 +4013,16 @@ impl App {
             }
 
             Message::SelectTeamView(team_id, view) => {
-                self.focus_team_tab(&team_id);
-                // Going to a team's own pages leaves any open Saved view.
-                self.open_view = None;
+                let before = self.tab_set.as_ref().map(|s| s.active().clone());
+                let scroll = self.focus_team_tab(&team_id);
+                let moved = before != self.tab_set.as_ref().map(|s| s.active().clone());
+                // Going to a team's own pages leaves any open Saved view. A
+                // switch of Tab doesn't: the Tab's Modified view came back
+                // with it, and `retain_open_view` below drops it if the
+                // page asked for isn't its board.
+                if !moved {
+                    self.open_view = None;
+                }
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
@@ -4008,10 +4037,12 @@ impl App {
                     self.reload_data();
                 }
                 self.view = view;
+                self.retain_open_view();
                 if self.view == View::RecurringIssues {
                     let conn = self.db();
                     self.reload_recurring(&conn);
                 }
+                return scroll;
             }
 
             Message::InboxMove(delta) => {
@@ -5231,6 +5262,7 @@ impl App {
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
+                    PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
