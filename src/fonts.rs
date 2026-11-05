@@ -225,6 +225,22 @@ fn code_for(ui: Font) -> Font {
 /// Default Terminal font: a config key from the catalog.
 pub const DEFAULT_TERMINAL_FONT_KEY: &str = "jetbrains-mono";
 
+/// Default Terminal font size, in points.
+pub const DEFAULT_TERMINAL_SIZE: f32 = 13.0;
+
+/// Sizes the picker offers.
+pub const TERMINAL_SIZES: [u16; 12] = [9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24];
+
+/// A Terminal font size from config, kept inside the picker's range so a
+/// hand-edited file can't ask for a zero-sized or absurd grid.
+pub fn clamp_terminal_size(size: f32) -> f32 {
+    if size.is_finite() {
+        size.clamp(TERMINAL_SIZES[0] as f32, TERMINAL_SIZES[TERMINAL_SIZES.len() - 1] as f32)
+    } else {
+        DEFAULT_TERMINAL_SIZE
+    }
+}
+
 /// A monospace catalog entry, which is all the Terminal font can be.
 fn terminal_def(key: &str) -> &'static FontDef {
     FONTS
@@ -414,6 +430,15 @@ mod tests {
             ["IBM Plex Mono", "JetBrains Mono", "Fira Code", "SUSE Mono", "Roboto Mono", "Atkinson Hyperlegible Mono"]
         );
         assert_eq!(terminal_choice_for_key("fira-code").key, "fira-code");
+    }
+
+    #[test]
+    fn terminal_size_is_clamped_to_the_pickers_range() {
+        assert_eq!(clamp_terminal_size(13.0), 13.0);
+        assert_eq!(clamp_terminal_size(0.0), 9.0);
+        assert_eq!(clamp_terminal_size(400.0), 24.0);
+        assert_eq!(clamp_terminal_size(f32::NAN), DEFAULT_TERMINAL_SIZE);
+        assert!(TERMINAL_SIZES.contains(&(DEFAULT_TERMINAL_SIZE as u16)));
     }
 
     #[test]

@@ -41,7 +41,7 @@ impl Default for TermFont {
 impl TermFont {
     /// The font a config key names, at `size`. An unknown key gives the default family.
     pub fn from_key(key: &str, size: f32) -> Self {
-        TermFont { family: crate::fonts::terminal_family(key), size }
+        TermFont { family: crate::fonts::terminal_family(key), size: crate::fonts::clamp_terminal_size(size) }
     }
 
     /// Height of one cell: 1.25 em, rounded up.

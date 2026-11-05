@@ -381,6 +381,7 @@ pub enum Message {
     /// Font picked in Settings: saves to config; applies after restart.
     SettingsFontChanged(fonts::FontChoice),
     SettingsTerminalFontChanged(fonts::FontChoice),
+    SettingsTerminalSizeChanged(u16),
     SettingsNativeNotificationsToggled(bool),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
@@ -3176,7 +3177,7 @@ impl App {
             sync_paused_auth: false,
         };
 
-        app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, crate::views::terminal_panel::FONT_SIZE));
+        app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
 
         // Restore the stored Tabs and focus the Home page's. Doing this before
         // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
@@ -5457,7 +5458,17 @@ impl App {
                     form.terminal_font = choice;
                 }
                 // Applied live: the Terminals re-measure and resize on the next sync.
-                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&choice.key, crate::views::terminal_panel::FONT_SIZE));
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&choice.key, self.config.terminal_font_size));
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SettingsTerminalSizeChanged(size) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.terminal_font_size = size as f32;
+                if let Some(ref mut form) = self.settings_form {
+                    form.terminal_size = size;
+                }
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&new_cfg.terminal_font, new_cfg.terminal_font_size));
                 self.save_config_change(new_cfg);
             }
 
