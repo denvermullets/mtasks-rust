@@ -266,6 +266,94 @@ fn closing_a_dead_terminal_works() {
     assert!(!process_exists(pid));
 }
 
+/// Process-wide counts straight from the OS, so nothing the engine does can hide a leak.
+struct OsCounts {
+    threads: i32,
+    fds: i32,
+    children: i32,
+}
+
+fn os_counts() -> OsCounts {
+    let pid = std::process::id() as libc::pid_t;
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    let got = unsafe {
+        libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&mut info as *mut libc::proc_taskinfo).cast(), size)
+    };
+    assert_eq!(got, size, "proc_pidinfo(TASKINFO) failed");
+    // Each proc_fdinfo is 8 bytes. A null buffer only estimates (with headroom), so list for real.
+    let mut fdbuf = vec![0u8; 8 * 16384];
+    let fd_bytes = unsafe {
+        libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fdbuf.as_mut_ptr().cast(), fdbuf.len() as libc::c_int)
+    };
+    let mut kids = vec![0 as libc::pid_t; 4096];
+    // Returns the number of child pids, not bytes.
+    let kid_count = unsafe { libc::proc_listchildpids(pid, kids.as_mut_ptr().cast(), (kids.len() * 4) as libc::c_int) };
+    OsCounts { threads: info.pti_threadnum, fds: fd_bytes / 8, children: kid_count.max(0) }
+}
+
+/// Runs in its own process (see `fifty_spawns_and_closes_leave_nothing_behind`), where nothing
+/// else is spawning threads or opening files, so the OS counts mean something.
+#[test]
+#[ignore = "run by fifty_spawns_and_closes_leave_nothing_behind in a fresh process"]
+fn leak_probe() {
+    let mut t = terminals();
+    // Warm up so one-time process state (allocator threads, lazy statics) isn't counted.
+    let warm = t.spawn(sh_config("warm")).unwrap();
+    type_line(&t, warm, "echo warm$((1+1))");
+    wait_for(&t, warm, "warm2", |f| f.contains_line("warm2"));
+    t.close(warm).unwrap().wait();
+    std::thread::sleep(Duration::from_millis(200));
+
+    let start = os_counts();
+    let ids: Vec<_> = (0..50).map(|_| t.spawn(sh_config("leak")).unwrap()).collect();
+    for (n, id) in ids.iter().enumerate() {
+        let want = format!("n{}", 1000 + n);
+        type_line(&t, *id, &format!("echo n$((1000+{n}))"));
+        wait_for(&t, *id, &want, |f| f.contains_line(&want));
+    }
+    let busy = os_counts();
+    assert!(busy.children >= start.children + 50, "50 real shells should be running, saw {}", busy.children);
+    assert!(busy.threads >= start.threads + 150, "three threads each");
+
+    let closings: Vec<_> = ids.into_iter().map(|id| t.close(id).unwrap()).collect();
+    for c in closings {
+        let report = c.wait();
+        assert_eq!(report.threads_exited, 3);
+        assert!(!report.escalated_to_sigkill);
+    }
+    assert_eq!(t.ids().len(), 0);
+
+    // Thread exit is final once joined, but the OS may take a moment to reflect it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let end = loop {
+        let now = os_counts();
+        if (now.threads, now.fds, now.children) == (start.threads, start.fds, start.children)
+            || Instant::now() > deadline
+        {
+            break now;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(end.threads, start.threads, "threads leaked");
+    assert_eq!(end.children, start.children, "child processes leaked");
+    assert_eq!(end.fds, start.fds, "file descriptors leaked");
+}
+
+#[test]
+fn fifty_spawns_and_closes_leave_nothing_behind() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["terminal::tests::leak_probe", "--exact", "--ignored", "--test-threads=1"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Only `engine.rs` may name the engine crates, so an unstable API stays in one file.
 #[test]
 fn only_the_engine_file_touches_the_engine_crates() {
