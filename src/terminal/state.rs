@@ -34,6 +34,10 @@ pub enum TerminalMessage {
     ToggleFocus,
     /// A click on the pane.
     Focus,
+    /// Palette: show the panel if needed and give the Terminal the keyboard.
+    FocusTerminal,
+    /// Palette: give the keyboard back to the app.
+    FocusApp,
     /// "New Terminal" on an empty panel.
     New,
     Key(Physical, keyboard::Modifiers, Option<String>),
@@ -104,6 +108,12 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Focus => self.focused = true,
+            TerminalMessage::FocusTerminal => {
+                if !self.focused {
+                    return self.update(TerminalMessage::ToggleFocus, team);
+                }
+            }
+            TerminalMessage::FocusApp => self.focused = false,
             TerminalMessage::New => {
                 if let Some(team) = team {
                     self.panel.visible = true;
@@ -188,6 +198,16 @@ impl TerminalState {
     /// Whether key presses go to the Terminal instead of the app's shortcuts.
     pub fn takes_keys(&self, modal_open: bool) -> bool {
         panel::keys_go_to_terminal(self.focused, self.panel.visible, modal_open)
+    }
+
+    /// Which focus commands the palette offers on this page.
+    pub fn palette_focus(&self, team: Option<&str>) -> crate::palette_results::TerminalFocus {
+        use crate::palette_results::TerminalFocus as F;
+        match (team, self.focused && self.panel.visible) {
+            (None, _) => F::Unavailable,
+            (Some(_), true) => F::Terminal,
+            (Some(_), false) => F::App,
+        }
     }
 
     /// The panel for the current team, if it is showing.
