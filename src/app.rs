@@ -962,6 +962,11 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
+            tabs: self
+                .tab_labels()
+                .into_iter()
+                .map(|(label, active)| crate::palette_results::SearchableTab { label, active })
+                .collect(),
         }
     }
 
@@ -5206,6 +5211,7 @@ impl App {
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
+                    PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();

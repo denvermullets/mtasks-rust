@@ -27,6 +27,8 @@ pub enum PaletteNav {
     Dashboard(String),
     /// Attach files to the open issue (`Message::PickAttachmentFiles`).
     AttachFiles,
+    /// Focus the open Tab at this position (`TabMessage::Focus`).
+    Tab(usize),
 }
 
 impl PaletteNav {
@@ -40,6 +42,7 @@ impl PaletteNav {
             PaletteNav::SavedView(_) => "View",
             PaletteNav::Dashboard(_) => "Dashboard",
             PaletteNav::AttachFiles => "Command",
+            PaletteNav::Tab(_) => "Tab",
         }
     }
 }
@@ -67,6 +70,13 @@ pub struct SearchableDashboard {
     pub name: String,
 }
 
+/// An open Tab as the palette searches it: its bar label, in bar order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchableTab {
+    pub label: String,
+    pub active: bool,
+}
+
 /// Local data the palette searches, owned so `PaletteState` can keep it and
 /// recompute rows on every keystroke. Issues and projects of archived teams,
 /// and those teams themselves, are already left out when this is loaded.
@@ -79,6 +89,8 @@ pub struct PaletteData {
     pub projects: Vec<SearchableProject>,
     pub saved_views: Vec<SearchableSavedView>,
     pub dashboards: Vec<SearchableDashboard>,
+    /// Open Tabs in bar order; the position is what choosing a row focuses.
+    pub tabs: Vec<SearchableTab>,
     /// An issue detail is open, so issue-only commands are offered.
     pub on_issue_detail: bool,
 }
@@ -93,6 +105,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let mut rows = Vec::new();
     push_issues(query, data, &mut rows);
     push_commands(&needle, data, &mut rows);
+    push_tabs(&needle, data, &mut rows);
     push_views(&needle, &mut rows);
     push_teams(&needle, data, &mut rows);
     push_projects(&needle, data, &mut rows);
@@ -186,6 +199,19 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             secondary: "Shortcut: a".to_string(),
             nav: PaletteNav::AttachFiles,
         });
+    }
+}
+
+/// Switch-Tab commands: every open Tab but the active one, by label.
+fn push_tabs(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    for (i, tab) in data.tabs.iter().enumerate() {
+        if !tab.active && name_matches(needle, &tab.label) {
+            rows.push(PaletteRow {
+                primary: tab.label.clone(),
+                secondary: "Switch to this Tab".to_string(),
+                nav: PaletteNav::Tab(i),
+            });
+        }
     }
 }
 
@@ -688,5 +714,37 @@ mod tests {
         let mut state = PaletteState::new(dashboard_data());
         state.set_query("hot".into());
         assert_eq!(state.chosen(), Some(PaletteNav::Dashboard("d2".into())));
+    }
+
+    fn tab(label: &str, active: bool) -> SearchableTab {
+        SearchableTab { label: label.into(), active }
+    }
+
+    #[test]
+    fn open_tabs_appear_by_name_with_their_bar_position() {
+        let data = PaletteData {
+            tabs: vec![tab("JRST JAIT App", true), tab("RAIL Rails API", false)],
+            ..PaletteData::default()
+        };
+        let rows = palette_results("rails", &data);
+        let tabs: Vec<_> = rows.iter().filter(|r| r.nav.label() == "Tab").collect();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].nav, PaletteNav::Tab(1));
+        assert_eq!(tabs[0].primary, "RAIL Rails API");
+    }
+
+    #[test]
+    fn the_active_tab_is_not_offered_and_empty_query_lists_the_rest() {
+        let data = PaletteData {
+            tabs: vec![tab("A", false), tab("B", true), tab("C", false)],
+            ..PaletteData::default()
+        };
+        let navs: Vec<_> = palette_results("", &data)
+            .into_iter()
+            .map(|r| r.nav)
+            .filter(|n| matches!(n, PaletteNav::Tab(_)))
+            .collect();
+        assert_eq!(navs, vec![PaletteNav::Tab(0), PaletteNav::Tab(2)]);
+        assert!(palette_results("zzz", &data).is_empty());
     }
 }
