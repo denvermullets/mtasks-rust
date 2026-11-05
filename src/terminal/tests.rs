@@ -377,3 +377,5 @@ fn only_the_engine_file_touches_the_engine_crates() {
     assert_eq!(hits.len(), 1, "files naming the engine crates: {hits:?}");
     assert!(hits[0].ends_with("src/terminal/engine.rs"), "{hits:?}");
 }
+
+mod wake;

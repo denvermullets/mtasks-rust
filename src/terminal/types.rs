@@ -138,7 +138,7 @@ pub struct KeyMods {
     pub logo: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KeyInput {
     pub key: TermKey,
     pub mods: KeyMods,
