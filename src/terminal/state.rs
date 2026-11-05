@@ -92,6 +92,8 @@ pub enum TerminalMessage {
     DirPicked(Option<std::path::PathBuf>),
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
+    /// The selected text, back from the Terminal (JRST-386); `None` copies nothing.
+    Copied(Option<String>),
 }
 
 static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new();
@@ -336,6 +338,20 @@ impl TerminalState {
                     // The app's own Tab switch. Focus follows `sync`: it stays
                     // with the Terminal while the new Tab shows a panel, and
                     // falls to the app on a page without one.
+                    // The answer comes from the Terminal's owner thread, which
+                    // can take up to 500 ms if it is stuck: wait on a blocking
+                    // thread so `update` returns at once. No selection copies
+                    // nothing, and nothing is sent to the program either way.
+                    Route::Copy => {
+                        let Some(req) = self.focused_terminal().and_then(|id| self.terminals.selection_request(id))
+                        else {
+                            return Task::none();
+                        };
+                        return Task::perform(
+                            async move { tokio::task::spawn_blocking(move || req.wait()).await.ok().flatten() },
+                            |text| Message::Terminal(TerminalMessage::Copied(text)),
+                        );
+                    }
                     Route::Tab(i) => {
                         return Task::done(Message::Tab(crate::app::TabMessage::Focus(i)))
                     }
@@ -354,6 +370,10 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Pasted(None) => {}
+            TerminalMessage::Copied(Some(text)) if !text.is_empty() => {
+                return iced::clipboard::write(text);
+            }
+            TerminalMessage::Copied(_) => {}
         }
         Task::none()
     }

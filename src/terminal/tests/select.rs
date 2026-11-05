@@ -154,3 +154,50 @@ fn selecting_and_leaving_it_alone_costs_no_wakes() {
     assert_eq!(wakes.load(Ordering::SeqCst), before, "an idle selection must not wake the UI");
     close_all(t);
 }
+
+/// The whole pane from the start of `from` to the end of `to`.
+fn drag_rows(t: &Terminals, id: TerminalId, from: i32, to: i32) {
+    drag(t, id, (0, from), (199, to));
+}
+
+#[test]
+fn wide_characters_copy_once_each_without_padding() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    type_line(&t, id, "printf '\\xe6\\x97\\xa5\\xe6\\x9c\\xac\\xe8\\xaa\\x9e ok\\n'");
+    let f = wait_for(&t, id, "wide text", |f| f.lines().iter().any(|l| l.trim() == "日本語 ok"));
+    let r = row_of(&f, "日本語 ok");
+    drag_rows(&t, id, r, r);
+    wait_for(&t, id, "a selection", |f| f.rows.iter().any(|r| r.selected.is_some()));
+    assert_eq!(t.selected_text(id).as_deref(), Some("日本語 ok"));
+    close_all(t);
+}
+
+#[test]
+fn a_wrapped_line_copies_as_one_line() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    // 250 characters on a 200-column grid: one logical line over two rows.
+    type_line(&t, id, "printf 'a%.0s' $(seq 1 120); printf 'b%.0s' $(seq 1 130); printf '\\nend\\n'");
+    let f = wait_for(&t, id, "end", |f| f.contains_line("end"));
+    let end = row_of(&f, "end");
+    drag_rows(&t, id, end - 2, end - 1);
+    wait_for(&t, id, "a selection", |f| f.rows.iter().any(|r| r.selected.is_some()));
+    let want = format!("{}{}", "a".repeat(120), "b".repeat(130));
+    assert_eq!(t.selected_text(id), Some(want), "soft wraps are not newlines");
+    close_all(t);
+}
+
+#[test]
+fn a_wrapped_line_of_wide_characters_keeps_every_character() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    // 150 wide characters take 300 cells: the wrap falls between two of them.
+    type_line(&t, id, "printf '\\xe6\\x97\\xa5%.0s' $(seq 1 150); printf '\\nend\\n'");
+    let f = wait_for(&t, id, "end", |f| f.contains_line("end"));
+    let end = row_of(&f, "end");
+    drag_rows(&t, id, end - 2, end - 1);
+    wait_for(&t, id, "a selection", |f| f.rows.iter().any(|r| r.selected.is_some()));
+    assert_eq!(t.selected_text(id), Some("日".repeat(150)));
+    close_all(t);
+}

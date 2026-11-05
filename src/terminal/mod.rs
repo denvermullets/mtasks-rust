@@ -93,6 +93,16 @@ pub struct Terminals {
     wake: Arc<Wake>,
 }
 
+/// A pending `selected_text` answer from a Terminal's owner thread.
+pub struct SelectionRequest(std::sync::mpsc::Receiver<Option<String>>);
+
+impl SelectionRequest {
+    /// The selected text; `None` for no selection, or no answer within 500 ms.
+    pub fn wait(self) -> Option<String> {
+        self.0.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten()
+    }
+}
+
 impl Terminals {
     /// `notify` is called from an owner thread when a frame is ready and no
     /// earlier wake is still pending. It must be cheap and must not block.
@@ -137,13 +147,19 @@ impl Terminals {
 
     /// The text under the current selection, or `None` when nothing is selected.
     /// Soft-wrapped lines are joined and trailing blanks trimmed, as when copying
-    /// from any terminal. This is what Cmd+C (JRST-386) copies. It asks the
-    /// Terminal's owner thread, so it waits briefly (at most half a second).
+    /// from any terminal. It asks the Terminal's owner thread, so it waits
+    /// briefly (at most half a second): off the UI thread, use `selection_request`.
     pub fn selected_text(&self, id: TerminalId) -> Option<String> {
+        self.selection_request(id)?.wait()
+    }
+
+    /// Ask for the selected text without waiting. Cmd+C (JRST-386) takes the
+    /// answer on a blocking thread, so a stuck Terminal never stalls `update`.
+    pub fn selection_request(&self, id: TerminalId) -> Option<SelectionRequest> {
         let e = self.entries.get(&id)?;
         let (tx, rx) = std::sync::mpsc::channel();
         e.engine.send(engine::Cmd::SelectedText(tx));
-        rx.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten()
+        Some(SelectionRequest(rx))
     }
 
     /// Wheel or trackpad movement: goes to a program that tracks the mouse, as
