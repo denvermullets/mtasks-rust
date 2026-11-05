@@ -13,7 +13,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::keyboard;
 use iced::mouse::{self, Cursor};
 use iced::widget::canvas::{self, Cache, Canvas, Geometry, Text};
-use iced::widget::{button, column, container, row, text, text_input, Space};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
@@ -723,13 +723,16 @@ fn pane_body<'a>(pv: PaneView<'a>) -> Element<'a, Message> {
 }
 
 pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
-    let mut strip = row![].spacing(6).align_y(iced::Alignment::Center);
+    // The Terminals (and the note) scroll sideways when they don't fit; the
+    // controls after them stay put. A press on empty strip still starts the
+    // height drag below, and the buttons capture their own presses.
+    let mut names = row![].spacing(6).align_y(iced::Alignment::Center);
     for item in p.items {
         let id = item.id;
         let editing = item.editing.is_some();
-        strip = strip.push(strip_button(item));
+        names = names.push(strip_button(item));
         if !editing {
-            strip = strip.push(
+            names = names.push(
                 button(text("\u{00d7}").size(13))
                     .padding([0, 4])
                     .on_press(Message::Terminal(TerminalMessage::Close(id)))
@@ -737,6 +740,17 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             );
         }
     }
+    if let Some(note) = p.note {
+        names = names.push(text(note).size(12).color(t::text_muted()));
+    }
+    let names = scrollable::Scrollable::with_direction(
+        names,
+        scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new().width(3).scroller_width(3).margin(0),
+        ),
+    )
+    .width(Length::Fill);
+    let mut strip = row![names].spacing(6).align_y(iced::Alignment::Center);
     strip = strip.push(
         button(text("+").size(13))
             .padding([0, 8])
@@ -757,12 +771,8 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
                 }),
         );
     }
-    if let Some(note) = p.note {
-        strip = strip.push(text(note).size(12).color(t::text_muted()));
-    }
     let has_dir = p.dir_label.is_some();
     strip = strip
-        .push(Space::with_width(Length::Fill))
         .push(
             button(
                 text(match p.dir_label {
