@@ -16,6 +16,7 @@ mod engine;
 mod input;
 mod palette;
 pub mod panel;
+pub mod pointer;
 mod state;
 mod types;
 
@@ -110,6 +111,13 @@ impl Terminals {
     pub fn send_key(&self, id: TerminalId, key: KeyInput) {
         if let Some(e) = self.entries.get(&id) {
             e.engine.send(engine::Cmd::Key(key));
+        }
+    }
+
+    /// A pointer event. It goes to the program only while the program tracks the mouse.
+    pub fn mouse(&self, id: TerminalId, event: MouseInput) {
+        if let Some(e) = self.entries.get(&id) {
+            e.engine.send(engine::Cmd::Mouse(event));
         }
     }
 

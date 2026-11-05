@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use iced::advanced::text::{self as adv_text, Paragraph as _};
 use iced::alignment::{Horizontal, Vertical};
+use iced::keyboard;
 use iced::mouse::{self, Cursor};
 use iced::widget::canvas::{self, Cache, Canvas, Geometry, Text};
 use iced::widget::{button, column, container, row, text, Space};
@@ -17,7 +18,10 @@ use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Rendere
 
 use crate::app::Message;
 use crate::terminal::panel::STRIP_HEIGHT;
-use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalMessage};
+use crate::terminal::{
+    pointer, CursorShape, Frame, KeyMods, MouseAction, MouseButton, MouseInput, Rgb, RowData, Run,
+    TerminalMessage,
+};
 use crate::theme as t;
 
 /// Family name inside the bundled JetBrains Mono files.
@@ -37,6 +41,28 @@ pub fn changed_rows(prev: &[Arc<RowData>], next: &[Arc<RowData>]) -> Vec<usize> 
     (0..next.len())
         .filter(|&y| !Arc::ptr_eq(&prev[y], &next[y]))
         .collect()
+}
+
+/// What the canvas remembers between events: modifiers, whether a button is held
+/// over the pane, and the last cell it reported a move for.
+#[derive(Default)]
+pub struct PaneState {
+    mods: keyboard::Modifiers,
+    pressed: bool,
+    last_cell: (i32, i32),
+}
+
+fn map_button(b: mouse::Button) -> Option<MouseButton> {
+    match b {
+        mouse::Button::Left => Some(MouseButton::Left),
+        mouse::Button::Middle => Some(MouseButton::Middle),
+        mouse::Button::Right => Some(MouseButton::Right),
+        _ => None,
+    }
+}
+
+fn key_mods(m: keyboard::Modifiers) -> KeyMods {
+    KeyMods { shift: m.shift(), alt: m.alt(), ctrl: m.control(), logo: m.logo() }
 }
 
 /// What the canvas draws: the latest frame plus a cache per row.
@@ -117,29 +143,79 @@ impl Default for Pane {
 }
 
 impl canvas::Program<Message> for Pane {
-    type State = ();
+    type State = PaneState;
 
     fn update(
         &self,
-        _state: &mut (),
+        state: &mut PaneState,
         event: canvas::Event,
         bounds: Rectangle,
         cursor: Cursor,
     ) -> (canvas::event::Status, Option<Message>) {
-        if cursor.position_in(bounds).is_some() {
-            if let canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
-                return (
-                    canvas::event::Status::Captured,
-                    Some(Message::Terminal(TerminalMessage::Focus)),
-                );
-            }
+        use canvas::event::Status::{Captured, Ignored};
+        if let canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
+            state.mods = m;
+            return (Ignored, None);
         }
-        (canvas::event::Status::Ignored, None)
+        let canvas::Event::Mouse(ev) = event else {
+            return (Ignored, None);
+        };
+        let send = |input: MouseInput| Some(Message::Terminal(TerminalMessage::Mouse(input)));
+        let at = |p: Point| {
+            let (c, r) = pointer::cell_at(p.x - bounds.x, p.y - bounds.y, self.cell.0, self.cell.1);
+            (c, r)
+        };
+        let mods = key_mods(state.mods);
+        match ev {
+            mouse::Event::ButtonPressed(b) => {
+                let Some(p) = cursor.position_in(bounds) else {
+                    return (Ignored, None);
+                };
+                let Some(button) = map_button(b) else {
+                    return (Ignored, None);
+                };
+                state.pressed = true;
+                let (col, row) = at(bounds.position() + iced::Vector::new(p.x, p.y));
+                (
+                    Captured,
+                    send(MouseInput { action: MouseAction::Press(button), col, row, mods }),
+                )
+            }
+            mouse::Event::ButtonReleased(b) => {
+                let Some(button) = map_button(b) else {
+                    return (Ignored, None);
+                };
+                if !std::mem::take(&mut state.pressed) {
+                    return (Ignored, None);
+                }
+                let (col, row) = cursor.position().map(at).unwrap_or(state.last_cell);
+                (
+                    Captured,
+                    send(MouseInput { action: MouseAction::Release(button), col, row, mods }),
+                )
+            }
+            mouse::Event::CursorMoved { position } => {
+                // Moves matter only to a program tracking the mouse; send one per cell.
+                if !self.frame.tracking || !(state.pressed || cursor.is_over(bounds)) {
+                    return (Ignored, None);
+                }
+                let cell = at(position);
+                if cell == state.last_cell {
+                    return (Ignored, None);
+                }
+                state.last_cell = cell;
+                (
+                    Ignored,
+                    send(MouseInput { action: MouseAction::Move, col: cell.0, row: cell.1, mods }),
+                )
+            }
+            _ => (Ignored, None),
+        }
     }
 
     fn draw(
         &self,
-        _state: &(),
+        _state: &PaneState,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -222,7 +298,7 @@ impl canvas::Program<Message> for Pane {
         out
     }
 
-    fn mouse_interaction(&self, _s: &(), bounds: Rectangle, cursor: Cursor) -> mouse::Interaction {
+    fn mouse_interaction(&self, _s: &PaneState, bounds: Rectangle, cursor: Cursor) -> mouse::Interaction {
         if cursor.is_over(bounds) {
             mouse::Interaction::Text
         } else {

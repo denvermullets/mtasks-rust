@@ -19,7 +19,7 @@ use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
 use super::panel::{self, PanelState, Toggle};
-use super::{active_term_theme, SpawnConfig, TerminalId, Terminals};
+use super::{active_term_theme, MouseAction, MouseInput, SpawnConfig, TerminalId, Terminals};
 use crate::app::Message;
 use crate::theme as t;
 use crate::views::terminal_panel::{self, Pane, PanelView};
@@ -34,6 +34,8 @@ pub enum TerminalMessage {
     ToggleFocus,
     /// A click on the pane.
     Focus,
+    /// A pointer event over the pane.
+    Mouse(MouseInput),
     /// "New Terminal" on an empty panel.
     New,
     Key(Physical, keyboard::Modifiers, Option<String>),
@@ -104,6 +106,14 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Focus => self.focused = true,
+            TerminalMessage::Mouse(m) => {
+                if matches!(m.action, MouseAction::Press(_)) {
+                    self.focused = true;
+                }
+                if let Some(id) = self.shown {
+                    self.terminals.mouse(id, m);
+                }
+            }
             TerminalMessage::New => {
                 if let Some(team) = team {
                     self.panel.visible = true;

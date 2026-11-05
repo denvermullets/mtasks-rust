@@ -11,7 +11,7 @@ use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator}
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{ColorScheme, Mode, ScrollViewport};
-use libghostty_vt::{key, paste, RenderState, Terminal};
+use libghostty_vt::{key, mouse, paste, RenderState, Terminal};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -29,6 +29,7 @@ pub(super) enum Cmd {
     Exited,
     Key(KeyInput),
     Paste(String),
+    Mouse(MouseInput),
     Resize { cols: u16, rows: u16, cell_w: f32, cell_h: f32 },
     Theme(TermTheme),
     Visible(bool),
@@ -382,6 +383,37 @@ fn map_key(k: TermKey) -> (key::Key, char) {
     }
 }
 
+/// Encoder options from the terminal's current mouse modes and cell size.
+fn sync_mouse(
+    e: &mut mouse::Encoder<'_>,
+    term: &Terminal<'_, '_>,
+    size: (u16, u16, u32, u32),
+    any_pressed: bool,
+) {
+    let (cols, rows, cw, ch) = size;
+    e.set_options_from_terminal(term)
+        .set_size(mouse::EncoderSize {
+            screen_width: cols as u32 * cw,
+            screen_height: rows as u32 * ch,
+            cell_width: cw,
+            cell_height: ch,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_left: 0,
+            padding_right: 0,
+        })
+        .set_any_button_pressed(any_pressed)
+        .set_track_last_cell(true);
+}
+
+fn map_button(b: MouseButton) -> mouse::Button {
+    match b {
+        MouseButton::Left => mouse::Button::Left,
+        MouseButton::Middle => mouse::Button::Middle,
+        MouseButton::Right => mouse::Button::Right,
+    }
+}
+
 fn map_mods(m: KeyMods) -> key::Mods {
     let mut out = key::Mods::empty();
     if m.shift {
@@ -465,6 +497,9 @@ fn owner(
     let mut cell_it = CellIterator::new().unwrap();
     let mut key_enc = key::Encoder::new().unwrap();
     let mut key_ev = key::Event::new().unwrap();
+    let mut mouse_enc = mouse::Encoder::new().unwrap();
+    let mut mouse_ev = mouse::Event::new().unwrap();
+    let mut held: Option<MouseButton> = None;
 
     let mut prev: Vec<Arc<RowData>> = vec![];
     let mut exited = false;
@@ -534,6 +569,38 @@ fn owner(
                     let mut out = Vec::with_capacity(32);
                     if key_enc.encode_to_vec(&key_ev, &mut out).is_ok() && !out.is_empty() {
                         let _ = wtx.send(out);
+                    }
+                }
+                Cmd::Mouse(m) => {
+                    let (action, button) = match m.action {
+                        MouseAction::Press(b) => {
+                            held = Some(b);
+                            (mouse::Action::Press, Some(b))
+                        }
+                        MouseAction::Release(b) => {
+                            held = None;
+                            (mouse::Action::Release, Some(b))
+                        }
+                        MouseAction::Move => (mouse::Action::Motion, held),
+                    };
+                    if term.is_mouse_tracking().unwrap_or(false) {
+                        let sz = *size.lock().unwrap();
+                        // Report the middle of the cell, clamped to the grid.
+                        let col = m.col.clamp(0, sz.0 as i32 - 1) as f32;
+                        let row = m.row.clamp(0, sz.1 as i32 - 1) as f32;
+                        mouse_ev
+                            .set_action(action)
+                            .set_button(button.map(map_button))
+                            .set_mods(map_mods(m.mods))
+                            .set_position(mouse::Position {
+                                x: (col + 0.5) * sz.2 as f32,
+                                y: (row + 0.5) * sz.3 as f32,
+                            });
+                        sync_mouse(&mut mouse_enc, &term, sz, held.is_some());
+                        let mut out = Vec::new();
+                        if mouse_enc.encode_to_vec(&mouse_ev, &mut out).is_ok() && !out.is_empty() {
+                            let _ = wtx.send(out);
+                        }
                     }
                 }
                 Cmd::Paste(s) => {

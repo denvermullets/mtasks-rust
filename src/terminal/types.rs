@@ -152,6 +152,30 @@ pub struct KeyInput {
     pub option_as_alt: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    Press(MouseButton),
+    Release(MouseButton),
+    Move,
+}
+
+/// A pointer event over a pane, in cells. `col` and `row` are signed because a
+/// drag can leave the pane; reporting clamps them to the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseInput {
+    pub action: MouseAction,
+    pub col: i32,
+    pub row: i32,
+    pub mods: KeyMods,
+}
+
 /// What `close` did, once it finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseReport {
