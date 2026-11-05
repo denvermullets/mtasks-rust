@@ -147,6 +147,19 @@ impl App {
         }
     }
 
+    /// The team a team or project Tab shows; `None` on a cross-team Tab.
+    pub(super) fn active_tab_team(&self) -> Option<String> {
+        match self.active_tab_key()? {
+            TabKey::Team(id) => Some(id.clone()),
+            TabKey::Project(id) => self
+                .tab_projects
+                .get(id)
+                .map(|(_, team_id)| team_id.clone())
+                .or_else(|| self.selected_team_id.clone()),
+            _ => None,
+        }
+    }
+
     /// The active Tab's key, once the set exists.
     pub(super) fn active_tab_key(&self) -> Option<&TabKey> {
         self.tab_set.as_ref().map(|set| set.active())

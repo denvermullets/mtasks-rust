@@ -2217,6 +2217,15 @@ impl App {
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
+        // A team or project Tab only shows its own team: another team's
+        // issue opens in that team's Tab (`tabs::issue_open_target`).
+        let target = self.active_tab_key().and_then(|active| {
+            crate::tabs::issue_open_target(active, self.active_tab_team().as_deref(), &issue.team_id)
+        });
+        if let Some(key) = target {
+            let focus = self.focus_tab(key);
+            return Task::batch([focus, self.open_issue_detail(&issue)]);
+        }
         if let View::Dashboard(dashboard_id) = self.view.clone() {
             return self.open_issue_from_dashboard(dashboard_id, issue);
         }
@@ -4926,8 +4935,13 @@ impl App {
             Message::OpenIssueDetail(issue_id) => {
                 // A click on a row ends its hover (the view may not change).
                 self.body_hover.event(crate::hover_card::Event::Clicked);
-                if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
-                    return self.open_issue_detail(&issue);
+                // A link can name another team's issue, which isn't loaded.
+                let issue = match self.issues.iter().find(|i| i.id == issue_id).cloned() {
+                    Some(issue) => Some(issue),
+                    None => queries::get_issue(&self.db(), &issue_id).ok().flatten(),
+                };
+                if let Some(issue) = issue {
+                    return self.open_focused_issue(issue);
                 }
             }
             Message::OpenDependencyPicker(direction) => {
