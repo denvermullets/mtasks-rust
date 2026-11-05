@@ -172,8 +172,9 @@ pub fn handle_issue_detail_key(
     })
 }
 
-/// Keys bound only while a project detail is showing; same description keys
-/// as the issue detail handler.
+/// Keys bound only while a project detail is showing: the same description keys
+/// as the issue detail handler, plus `/` to toggle the properties sidebar. It
+/// only sees keys no text field or Terminal took.
 pub fn handle_project_detail_key(
     key: &Key,
     modifiers: Modifiers,
@@ -186,6 +187,12 @@ pub fn handle_project_detail_key(
         Message::StopEditingProjectDescription,
         Message::EditProjectDescription,
     )
+    .or_else(|| match key {
+        Key::Character(c) if modifiers.is_empty() && c.as_str() == "/" => {
+            Some(Message::ToggleProjectProperties)
+        }
+        _ => None,
+    })
 }
 
 /// Keys bound only while the lightbox modal is open. Checked before the
@@ -281,6 +288,23 @@ mod tests {
             Some(Message::StopEditingProjectDescription)
         ));
         assert!(handle_project_detail_key(&esc, Modifiers::empty(), false).is_none());
+    }
+
+    #[test]
+    fn slash_toggles_properties_on_the_project_page_and_opens_help_elsewhere() {
+        let slash = Key::Character("/".into());
+        assert!(matches!(
+            handle_project_detail_key(&slash, Modifiers::empty(), false),
+            Some(Message::ToggleProjectProperties)
+        ));
+        // `?` is shift+/ and stays help: the project handler leaves it alone.
+        let q = Key::Character("?".into());
+        assert!(handle_project_detail_key(&q, Modifiers::SHIFT, false).is_none());
+        assert!(matches!(press_with("?", Modifiers::SHIFT, false), Some(Message::ToggleHelp)));
+        // With a command modifier it is not the shortcut.
+        assert!(handle_project_detail_key(&slash, Modifiers::COMMAND, false).is_none());
+        // Off the project page the global handler still opens help on `/`.
+        assert!(matches!(press("/", false, false), Some(Message::ToggleHelp)));
     }
 
     #[test]

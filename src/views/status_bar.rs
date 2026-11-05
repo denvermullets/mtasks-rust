@@ -6,6 +6,42 @@ use crate::app::Message;
 use crate::theme as t;
 use crate::views::util::format_age;
 
+/// The shortcut hint on the left of the bar.
+fn shortcuts(show_help: bool, in_inbox: bool, on_project: bool) -> &'static str {
+    if show_help {
+        "[n]ew  [e]dit  [m]ove  [M]ove back  [t]eam move  [d]elete  [L]abels  [I]nbox  [j/k]\u{2195}  [h/l]\u{2194}  [v]iew board/list  [c]ollapse section  [1-4]priority  [s]ync  [\u{2318}K]command palette  Issue detail: [a]ttach file  [e] edit description  Project detail: [e] edit description  [/] properties  Inbox: [j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]close help"
+    } else if in_inbox {
+        "[j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]help"
+    } else if on_project {
+        "[e]dit description [/]properties [s]ync [?]help"
+    } else {
+        "[n]ew [e]dit [m]ove [d]elete [L]abels [v]iew [s]ync [?]help"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_page_hint_shows_the_properties_key_and_keeps_help() {
+        let hint = shortcuts(false, false, true);
+        assert!(hint.contains("[/]properties"));
+        assert!(hint.contains("[?]help"));
+    }
+
+    #[test]
+    fn other_pages_do_not_advertise_properties() {
+        assert!(!shortcuts(false, false, false).contains("[/]properties"));
+        assert!(!shortcuts(false, true, false).contains("[/]properties"));
+    }
+
+    #[test]
+    fn help_text_lists_the_project_shortcut() {
+        assert!(shortcuts(true, false, true).contains("[/] properties"));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     pending_sync_count: i32,
@@ -18,6 +54,7 @@ pub fn view<'a>(
     inaccessible_teams: &[String],
     read_only: bool,
     in_inbox: bool,
+    on_project: bool,
 ) -> Element<'a, Message> {
     let (sync_text, sync_color) = if let Some(err) = last_sync_error {
         // Transient network failures are non-fatal (sync retries) — surface them
@@ -51,16 +88,8 @@ pub fn view<'a>(
         ("Not synced yet".to_string(), t::text_muted())
     };
 
-    let shortcuts = if show_help {
-        "[n]ew  [e]dit  [m]ove  [M]ove back  [t]eam move  [d]elete  [L]abels  [I]nbox  [j/k]\u{2195}  [h/l]\u{2194}  [v]iew board/list  [c]ollapse section  [1-4]priority  [s]ync  [\u{2318}K]command palette  Issue detail: [a]ttach file  [e] edit description  Project detail: [e] edit description  Inbox: [j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]close help"
-    } else if in_inbox {
-        "[j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]help"
-    } else {
-        "[n]ew [e]dit [m]ove [d]elete [L]abels [v]iew [s]ync [?]help"
-    };
-
     let mut bar = row![].spacing(16).push(
-        text(shortcuts)
+        text(shortcuts(show_help, in_inbox, on_project))
             .size(12)
             .color(t::text_muted())
             .width(Length::Fill),

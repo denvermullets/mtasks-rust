@@ -91,6 +91,10 @@ pub struct Config {
     /// is unfocused. Local-only, never synced.
     #[serde(default = "default_true")]
     pub native_notifications: bool,
+    /// Whether the project page shows its properties sidebar (`/` toggles it).
+    /// Device-wide and local-only, hidden by default.
+    #[serde(default)]
+    pub project_properties_open: bool,
 }
 
 fn default_true() -> bool {
@@ -136,6 +140,7 @@ impl Default for Config {
             terminal_font: default_terminal_font(),
             terminal_font_size: default_terminal_font_size(),
             native_notifications: true,
+            project_properties_open: false,
         }
     }
 }
@@ -329,6 +334,17 @@ mod tests {
         cfg.native_notifications = false;
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert!(!back.native_notifications);
+    }
+
+    #[test]
+    fn project_properties_default_hidden_and_round_trip() {
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert!(!old.project_properties_open);
+        let mut cfg = Config::default();
+        assert!(!cfg.project_properties_open);
+        cfg.project_properties_open = true;
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(back.project_properties_open);
     }
 
     #[test]
