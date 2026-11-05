@@ -3444,20 +3444,22 @@ impl App {
                 let Some(sv) = found else {
                     return Task::none();
                 };
-                // The board's own search, read before the team switch may clear it.
-                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
-                    self.search_query.clone()
-                } else {
-                    String::new()
-                };
-                // Switch team first when needed (this drops any open view).
-                let task =if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
+                // Switch to the view's team Tab first when needed (this
+                // replaces any view open there).
+                let task = if self.selected_team_id.as_deref() != Some(sv.team_id.as_str())
                     || self.view != View::Board
                 {
                     self.expanded_teams.insert(sv.team_id.clone());
                     self.update_inner(Message::SelectTeamView(sv.team_id.clone(), View::Board))
                 } else {
                     Task::none()
+                };
+                // The team Tab's own board search, read once that Tab is live
+                // (the Tab that was active may be another team's).
+                let board_search = if self.open_view.is_none() && self.search_view == View::Board {
+                    self.search_query.clone()
+                } else {
+                    String::new()
                 };
                 let local = crate::saved_view::BoardState {
                     display: self
