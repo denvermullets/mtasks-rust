@@ -103,6 +103,10 @@ pub struct TermTheme {
     pub fg: Rgb,
     pub bg: Rgb,
     pub cursor: Rgb,
+    /// Selection highlight; drawn by the pane once selection exists.
+    pub selection: Rgb,
+    /// A light theme: answers `CSI ?996n`.
+    pub light: bool,
     pub ansi: [Rgb; 16],
 }
 

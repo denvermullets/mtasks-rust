@@ -13,8 +13,10 @@
 #![allow(dead_code)]
 
 mod engine;
+mod palette;
 mod types;
 
+pub use palette::{active_term_theme, term_theme};
 pub use types::*;
 
 use std::collections::HashMap;

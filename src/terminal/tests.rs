@@ -8,6 +8,8 @@ fn theme() -> TermTheme {
         fg: [200; 3],
         bg: [20; 3],
         cursor: [200; 3],
+        selection: [60; 3],
+        light: false,
         ansi: [[128; 3]; 16],
     }
 }
