@@ -9,14 +9,30 @@ use std::path::PathBuf;
 
 use rusqlite::{params, Connection, Result, Transaction, TransactionBehavior};
 
+use super::models::SyncQueueEntry;
 use super::{queries, sync_queue};
 
 /// A team removed from the local database.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct PurgedTeam {
     pub team_id: String,
+    pub team_name: String,
+    /// Unsynced edits dropped with the team, for the caller to log.
+    pub dropped_edits: Vec<SyncQueueEntry>,
     /// Staged upload copies the caller should delete now the rows are gone.
     pub outbox_paths: Vec<PathBuf>,
+}
+
+impl PurgedTeam {
+    /// What to tell the user, since their data and edits just went away.
+    pub fn notice(&self) -> String {
+        let removed = match self.dropped_edits.len() {
+            0 => "Its local data was removed".to_string(),
+            1 => "Its local data and 1 unsynced edit were removed".to_string(),
+            n => format!("Its local data and {n} unsynced edits were removed"),
+        };
+        format!("You no longer have access to {}. {removed}.", self.team_name)
+    }
 }
 
 /// What [`reconcile_listed_teams`] did with the teams `/teams` left out.
@@ -25,6 +41,23 @@ pub struct Reconciled {
     pub purged: Vec<PurgedTeam>,
     /// Teams whose purge failed, with the reason. They are retried next pull.
     pub failed: Vec<(String, String)>,
+    /// An empty list just archived teams that were still active. Only true on
+    /// that first response, so repeats of it don't tell the user again.
+    pub archived_all: bool,
+}
+
+impl Reconciled {
+    /// One message for each thing the user needs to hear about.
+    pub fn notices(&self) -> Vec<String> {
+        let mut notices: Vec<String> = self.purged.iter().map(PurgedTeam::notice).collect();
+        if self.archived_all {
+            notices.push(
+                "Your token no longer lists any teams. Local data is kept in case access returns."
+                    .to_string(),
+            );
+        }
+        notices
+    }
 }
 
 /// Bring local teams in line with a successful `/teams` response.
@@ -36,11 +69,12 @@ pub fn reconcile_listed_teams(conn: &Connection, listed: &[i64]) -> Result<Recon
     let mut reconciled = Reconciled::default();
     let now = crate::db::now_iso();
     if listed.is_empty() {
-        conn.execute(
+        let archived = conn.execute(
             "UPDATE teams SET archived_at = ?1
              WHERE remote_id IS NOT NULL AND archived_at IS NULL",
             params![now],
         )?;
+        reconciled.archived_all = archived > 0;
         return Ok(reconciled);
     }
     for remote_id in listed {
@@ -56,7 +90,7 @@ pub fn reconcile_listed_teams(conn: &Connection, listed: &[i64]) -> Result<Recon
         if listed.contains(&remote_id) {
             continue;
         }
-        match purge_team(conn, &team.id, remote_id) {
+        match purge_team(conn, &team.id, &team.name, remote_id) {
             Ok(purged) => reconciled.purged.push(purged),
             Err(e) => reconciled.failed.push((team.id, e.to_string())),
         }
@@ -65,23 +99,28 @@ pub fn reconcile_listed_teams(conn: &Connection, listed: &[i64]) -> Result<Recon
 }
 
 /// Immediate, so an edit made during the purge waits and can't be half-applied.
-fn purge_team(conn: &Connection, team_id: &str, remote_id: i64) -> Result<PurgedTeam> {
+fn purge_team(conn: &Connection, team_id: &str, team_name: &str, remote_id: i64) -> Result<PurgedTeam> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     // Before the rows go: resolving an entry's team reads them.
-    for entry_id in pending_entries_for_team(&tx, remote_id)? {
+    let dropped_edits = pending_entries_for_team(&tx, remote_id)?;
+    for entry_id in dropped_edits.iter().filter_map(|e| e.id) {
         crate::db::activity::discard_pending_for_entry(&tx, entry_id)?;
         tx.execute("DELETE FROM sync_queue WHERE id = ?1", params![entry_id])?;
     }
-    let purged = purge(&tx, team_id, remote_id)?;
+    let outbox_paths = purge(&tx, team_id, remote_id)?;
     tx.commit()?;
-    Ok(purged)
+    Ok(PurgedTeam {
+        team_id: team_id.to_string(),
+        team_name: team_name.to_string(),
+        dropped_edits,
+        outbox_paths,
+    })
 }
 
-fn pending_entries_for_team(conn: &Connection, remote_id: i64) -> Result<Vec<i64>> {
+fn pending_entries_for_team(conn: &Connection, remote_id: i64) -> Result<Vec<SyncQueueEntry>> {
     Ok(sync_queue::pending_entries(conn)?
-        .iter()
+        .into_iter()
         .filter(|e| sync_queue::entry_team_remote_id(conn, e) == Some(remote_id))
-        .filter_map(|e| e.id)
         .collect())
 }
 
@@ -90,7 +129,8 @@ const OWNED_COMMENTS: &str = "SELECT id FROM comments
     WHERE issue_id IN (SELECT id FROM issues WHERE team_id = ?1)
        OR project_id IN (SELECT id FROM projects WHERE team_id = ?1)";
 
-fn purge(conn: &Connection, team_id: &str, remote_id: i64) -> Result<PurgedTeam> {
+/// Delete the team's rows. Returns the staged upload copies they leave behind.
+fn purge(conn: &Connection, team_id: &str, remote_id: i64) -> Result<Vec<PathBuf>> {
     let outbox_paths = delete_attachments(conn, team_id)?;
     delete_synced_queue_rows(conn, team_id, remote_id)?;
 
@@ -122,7 +162,7 @@ fn purge(conn: &Connection, team_id: &str, remote_id: i64) -> Result<PurgedTeam>
     conn.execute("DELETE FROM list_etags WHERE team_id = ?1", params![team_id])?;
     conn.execute("DELETE FROM teams WHERE id = ?1", params![team_id])?;
 
-    Ok(PurgedTeam { team_id: team_id.to_string(), outbox_paths })
+    Ok(outbox_paths)
 }
 
 fn delete_attachments(conn: &Connection, team_id: &str) -> Result<Vec<PathBuf>> {
@@ -315,7 +355,54 @@ mod tests {
         let r = reconcile_listed_teams(&c, &[2]).unwrap();
 
         assert_eq!(r.purged.len(), 1);
+        assert!(r.purged[0].dropped_edits.is_empty());
         assert_eq!(count(&c, "sync_queue WHERE synced_at IS NULL"), 1);
+    }
+
+    #[test]
+    fn the_purge_reports_each_edit_it_dropped() {
+        let c = mem();
+        team(&c, "gone", 1);
+        team(&c, "kept", 2);
+        enqueue(&c, "issue", "gone-i", "update");
+        enqueue(&c, "issue", "gone-i", "move");
+        enqueue(&c, "issue", "kept-i", "update");
+
+        let r = reconcile_listed_teams(&c, &[2]).unwrap();
+
+        let dropped: Vec<_> = r.purged[0]
+            .dropped_edits
+            .iter()
+            .map(|e| (e.entity_id.as_str(), e.action.as_str()))
+            .collect();
+        assert_eq!(dropped, vec![("gone-i", "update"), ("gone-i", "move")]);
+    }
+
+    #[test]
+    fn the_notice_names_the_team_and_counts_the_lost_edits() {
+        let c = mem();
+        team(&c, "none", 1);
+        team(&c, "one", 2);
+        team(&c, "two", 3);
+        team(&c, "kept", 4);
+        enqueue(&c, "issue", "one-i", "update");
+        enqueue(&c, "issue", "two-i", "update");
+        enqueue(&c, "issue", "two-i", "move");
+
+        let r = reconcile_listed_teams(&c, &[4]).unwrap();
+
+        let notice = |name: &str| {
+            r.purged.iter().find(|t| t.team_id == name).unwrap().notice()
+        };
+        assert_eq!(notice("none"), "You no longer have access to none. Its local data was removed.");
+        assert_eq!(
+            notice("one"),
+            "You no longer have access to one. Its local data and 1 unsynced edit were removed."
+        );
+        assert_eq!(
+            notice("two"),
+            "You no longer have access to two. Its local data and 2 unsynced edits were removed."
+        );
     }
 
     #[test]
@@ -328,6 +415,49 @@ mod tests {
         assert!(r.purged.is_empty());
         assert_eq!(count(&c, "issues WHERE team_id = 'a'"), 1);
         assert_eq!(count(&c, "teams WHERE archived_at IS NOT NULL"), 1);
+    }
+
+    #[test]
+    fn an_empty_list_gives_one_notice_until_teams_return() {
+        let c = mem();
+        team(&c, "a", 1);
+
+        let first = reconcile_listed_teams(&c, &[]).unwrap();
+        assert_eq!(
+            first.notices(),
+            vec!["Your token no longer lists any teams. Local data is kept in case access returns."]
+        );
+
+        let repeat = reconcile_listed_teams(&c, &[]).unwrap();
+        assert!(repeat.notices().is_empty());
+
+        assert!(reconcile_listed_teams(&c, &[1]).unwrap().notices().is_empty());
+        assert_eq!(reconcile_listed_teams(&c, &[]).unwrap().notices().len(), 1);
+    }
+
+    #[test]
+    fn an_archived_team_is_not_reported_as_inaccessible() {
+        let c = mem();
+        team(&c, "a", 1);
+        queries::set_team_access_lost(&c, 1, true).unwrap();
+        assert_eq!(queries::inaccessible_team_identifiers(&c).unwrap(), vec!["a"]);
+
+        reconcile_listed_teams(&c, &[]).unwrap();
+
+        assert!(queries::inaccessible_team_identifiers(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_empty_list_with_only_local_teams_gives_no_notice() {
+        let c = mem();
+        c.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('local', 'Local', 'LOC', ?1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+
+        assert!(reconcile_listed_teams(&c, &[]).unwrap().notices().is_empty());
     }
 
     #[test]

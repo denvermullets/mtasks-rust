@@ -1916,10 +1916,14 @@ pub fn team_access_lost(conn: &Connection, remote_id: i64) -> Result<bool> {
     Ok(n > 0)
 }
 
-/// Identifiers (e.g. "PROJ") of teams currently flagged inaccessible.
+/// Identifiers (e.g. "PROJ") of teams flagged inaccessible, awaiting the next
+/// `/teams` to settle them. An archived team is already settled: an empty
+/// `/teams` hid it and the user was told, so it isn't listed.
 pub fn inaccessible_team_identifiers(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT identifier FROM teams WHERE access_lost_at IS NOT NULL ORDER BY identifier",
+        "SELECT identifier FROM teams
+         WHERE access_lost_at IS NOT NULL AND archived_at IS NULL
+         ORDER BY identifier",
     )?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     rows.collect()

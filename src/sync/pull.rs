@@ -12,6 +12,7 @@ use crate::api::dto::{CommentDto, IssueDto, ProjectDto, PulledDependency};
 use crate::db::{queries, sync_queue, team_purge};
 use crate::db::models::{CommentOwner, Issue, Project};
 use crate::sync::cursor;
+use crate::sync::push::entry_scope;
 use crate::sync::engine::{
     CycleCtx, SyncEngine, SyncErrorKind, SyncFailure, SyncReport, open, phase_scope, sync_log,
 };
@@ -137,8 +138,9 @@ impl SyncEngine {
 
         // Phase 2: refresh teams (and discover any new ones the token can see).
         match pull_teams(client).await {
-            Ok(deleted) => {
-                deleted_teams = deleted;
+            Ok(pulled) => {
+                deleted_teams = pulled.deleted;
+                report.notices = pulled.notices;
                 report.processed += 1;
             }
             Err(msg) => {
@@ -323,8 +325,16 @@ fn select_pull_targets(
         .collect())
 }
 
-/// Returns the local UUIDs of the teams this pull removed.
-async fn pull_teams(client: &ApiClient) -> Result<Vec<String>, String> {
+/// What refreshing the team list changed locally.
+#[derive(Default)]
+struct TeamsPulled {
+    /// Local UUIDs of the teams this pull removed.
+    deleted: Vec<String>,
+    /// What the user needs to hear about it.
+    notices: Vec<String>,
+}
+
+async fn pull_teams(client: &ApiClient) -> Result<TeamsPulled, String> {
     let dtos = teams::list(client)
         .await
         .map_err(|e| format!("teams: {e}"))?;
@@ -371,37 +381,43 @@ async fn pull_teams(client: &ApiClient) -> Result<Vec<String>, String> {
     drop(conn);
 
     let conn = open()?;
-    let mut deleted = reconcile_teams(&conn, &active_ids);
+    let mut pulled = reconcile_teams(&conn, &active_ids);
 
     // Once we've confirmed Rails has at least one team for this token, the
     // locally-seeded "My Project" placeholder is redundant. Cleanup is gated
     // on "no issues attached" so we never destroy real local-only work.
     if inserted_any_remote_team {
         match queries::cleanup_orphan_seed_team(&conn) {
-            Ok(orphan) => deleted.extend(orphan),
+            Ok(orphan) => pulled.deleted.extend(orphan),
             Err(e) => {
                 sync_log("phase=pull_teams", "cleanup_orphan_failed", &format!("db: {e}"));
             }
         }
     }
 
-    Ok(deleted)
+    Ok(pulled)
 }
 
 /// Apply a successful `/teams` response: restore listed teams, purge unlisted
-/// ones and clear the files they leave behind. Returns the purged local ids.
-fn reconcile_teams(conn: &Connection, listed: &[i64]) -> Vec<String> {
+/// ones and clear the files they leave behind.
+fn reconcile_teams(conn: &Connection, listed: &[i64]) -> TeamsPulled {
     let reconciled = match team_purge::reconcile_listed_teams(conn, listed) {
         Ok(r) => r,
         Err(e) => {
             sync_log("phase=pull_teams", "reconcile_failed", &format!("db: {e}"));
-            return Vec::new();
+            return TeamsPulled::default();
         }
     };
     for (team_id, reason) in &reconciled.failed {
         sync_log("phase=pull_teams", "purge_failed", &format!("team={team_id} db: {reason}"));
     }
-    remove_purged_files(conn, reconciled.purged)
+    for edit in reconciled.purged.iter().flat_map(|team| &team.dropped_edits) {
+        if let Some(entry_id) = edit.id {
+            sync_log(&entry_scope(entry_id, edit), "dropped", "team gone");
+        }
+    }
+    let notices = reconciled.notices();
+    TeamsPulled { deleted: remove_purged_files(conn, reconciled.purged), notices }
 }
 
 /// Delete what a purge leaves on disk: staged uploads, and the file cache so

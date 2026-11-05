@@ -89,7 +89,7 @@ pub fn view<'a>(
     } else {
         bar.push(
             text(format!(
-                "\u{26A0} No access to team: {} (edits kept pending)",
+                "\u{26A0} No access to team: {} (checking\u{2026})",
                 inaccessible_teams.join(", ")
             ))
             .size(12)

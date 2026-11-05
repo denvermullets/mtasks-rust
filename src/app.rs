@@ -5684,6 +5684,11 @@ impl App {
                     queries::inaccessible_team_identifiers(&self.db()).unwrap_or_default();
 
                 self.leave_deleted_teams(&report.deleted_teams);
+                // Error kind so it stays until dismissed: losing a team can happen
+                // in a background sync, and an Info toast would be gone in seconds.
+                for notice in &report.pull.notices {
+                    self.push_toast(notice.clone(), ToastKind::Error, false);
+                }
 
                 // Classify failures before touching UI state (ends the borrow of
                 // `report` before we mutate `self`). A 401 outranks everything:

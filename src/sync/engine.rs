@@ -31,6 +31,9 @@ pub struct SyncReport {
     /// drain (e.g. a 403). The offending entry and every unattempted entry stay
     /// pending; pulls are unaffected. The UI can read this to show a banner.
     pub push_paused: Option<PushPause>,
+    /// Messages the user must see even though nothing failed, such as losing
+    /// access to a team.
+    pub notices: Vec<String>,
 }
 
 /// Why pushes were paused for the rest of a drain. Extend with new variants
@@ -275,7 +278,8 @@ pub(super) fn read_only_report() -> SyncReport {
 //   pending - will be retried on the next drain
 //   parked  - kept pending without being retried (paused pushes, read-only
 //             token, lost team access)
-//   dropped - permanently rejected; marked synced so it is not retried
+//   dropped - permanently rejected, so marked synced and not retried; or
+//             deleted with its team when `/teams` stopped listing that team
 
 pub(super) fn log_line(scope: &str, outcome: &str, reason: &str) -> String {
     format!(
