@@ -784,6 +784,19 @@ const MIGRATIONS: &[Migration] = &[
             ANALYZE;
         ",
     },
+    Migration {
+        version: 36,
+        name: "open_tabs",
+        up: "
+            -- The open Tabs, in order. Local only: never queued for Data sync.
+            CREATE TABLE open_tabs (
+                position INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                ref_id TEXT,
+                is_active INTEGER NOT NULL DEFAULT 0
+            );
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1267,6 +1280,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stats, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v35_adds_the_open_tabs_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 36) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "open_tabs"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "open_tabs"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
     }
 
     #[test]
