@@ -27,6 +27,14 @@ pub enum PaletteNav {
     Dashboard(String),
     /// Attach files to the open issue (`Message::PickAttachmentFiles`).
     AttachFiles,
+    /// Give the keyboard to the Terminal (`TerminalMessage::FocusTerminal`).
+    FocusTerminal,
+    /// Give the keyboard back to the app (`TerminalMessage::FocusApp`).
+    FocusApp,
+    /// Hide the Terminal panel (`TerminalMessage::Hide`).
+    HidePanel,
+    /// Focus the open Tab at this position (`TabMessage::Focus`).
+    Tab(usize),
 }
 
 impl PaletteNav {
@@ -39,7 +47,11 @@ impl PaletteNav {
             PaletteNav::Project { .. } => "Project",
             PaletteNav::SavedView(_) => "View",
             PaletteNav::Dashboard(_) => "Dashboard",
-            PaletteNav::AttachFiles => "Command",
+            PaletteNav::AttachFiles
+            | PaletteNav::FocusTerminal
+            | PaletteNav::FocusApp
+            | PaletteNav::HidePanel => "Command",
+            PaletteNav::Tab(_) => "Tab",
         }
     }
 }
@@ -67,6 +79,25 @@ pub struct SearchableDashboard {
     pub name: String,
 }
 
+/// An open Tab as the palette searches it: its bar label, in bar order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchableTab {
+    pub label: String,
+    pub active: bool,
+}
+
+/// Where the keyboard is, as far as the focus commands care.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TerminalFocus {
+    /// This page has no panel (a cross-team page): no focus commands.
+    #[default]
+    Unavailable,
+    /// The app has the keyboard; a Terminal can take it.
+    App,
+    /// A Terminal has the keyboard (the palette opened over it).
+    Terminal,
+}
+
 /// Local data the palette searches, owned so `PaletteState` can keep it and
 /// recompute rows on every keystroke. Issues and projects of archived teams,
 /// and those teams themselves, are already left out when this is loaded.
@@ -79,8 +110,13 @@ pub struct PaletteData {
     pub projects: Vec<SearchableProject>,
     pub saved_views: Vec<SearchableSavedView>,
     pub dashboards: Vec<SearchableDashboard>,
+    /// Open Tabs in bar order; the position is what choosing a row focuses.
+    pub tabs: Vec<SearchableTab>,
     /// An issue detail is open, so issue-only commands are offered.
     pub on_issue_detail: bool,
+    pub terminal_focus: TerminalFocus,
+    /// The Terminal panel is on screen, so it can be hidden.
+    pub terminal_panel_showing: bool,
 }
 
 /// Most rows the palette ever shows.
@@ -93,6 +129,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let mut rows = Vec::new();
     push_issues(query, data, &mut rows);
     push_commands(&needle, data, &mut rows);
+    push_tabs(&needle, data, &mut rows);
     push_views(&needle, &mut rows);
     push_teams(&needle, data, &mut rows);
     push_projects(&needle, data, &mut rows);
@@ -186,6 +223,43 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             secondary: "Shortcut: a".to_string(),
             nav: PaletteNav::AttachFiles,
         });
+    }
+    match data.terminal_focus {
+        TerminalFocus::App if name_matches(needle, "Focus Terminal") => {
+            rows.push(PaletteRow {
+                primary: "Focus Terminal".to_string(),
+                secondary: "Shortcut: Cmd+J".to_string(),
+                nav: PaletteNav::FocusTerminal,
+            });
+        }
+        TerminalFocus::Terminal if name_matches(needle, "Focus app") => {
+            rows.push(PaletteRow {
+                primary: "Focus app".to_string(),
+                secondary: "Shortcut: Cmd+J".to_string(),
+                nav: PaletteNav::FocusApp,
+            });
+        }
+        _ => {}
+    }
+    if data.terminal_panel_showing && name_matches(needle, "Hide Terminal panel") {
+        rows.push(PaletteRow {
+            primary: "Hide Terminal panel".to_string(),
+            secondary: "Terminals keep running".to_string(),
+            nav: PaletteNav::HidePanel,
+        });
+    }
+}
+
+/// Switch-Tab commands: every open Tab but the active one, by label.
+fn push_tabs(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    for (i, tab) in data.tabs.iter().enumerate() {
+        if !tab.active && name_matches(needle, &tab.label) {
+            rows.push(PaletteRow {
+                primary: tab.label.clone(),
+                secondary: "Switch to this Tab".to_string(),
+                nav: PaletteNav::Tab(i),
+            });
+        }
     }
 }
 
@@ -626,6 +700,30 @@ mod tests {
     }
 
     #[test]
+    fn focus_commands_appear_only_where_they_apply() {
+        let with = |terminal_focus| PaletteData { terminal_focus, ..PaletteData::default() };
+        let navs = |d: &PaletteData| -> Vec<PaletteNav> {
+            palette_results("focus", d).into_iter().map(|r| r.nav).collect()
+        };
+        assert!(navs(&with(TerminalFocus::Unavailable)).is_empty());
+        assert_eq!(navs(&with(TerminalFocus::App)), vec![PaletteNav::FocusTerminal]);
+        assert_eq!(navs(&with(TerminalFocus::Terminal)), vec![PaletteNav::FocusApp]);
+        // Unfiltered, the commands are listed too.
+        let all = palette_results("", &with(TerminalFocus::App));
+        assert!(all.iter().any(|r| r.nav == PaletteNav::FocusTerminal));
+    }
+
+    #[test]
+    fn hide_panel_is_offered_only_while_the_panel_shows() {
+        let hide = |terminal_panel_showing| {
+            let d = PaletteData { terminal_panel_showing, ..PaletteData::default() };
+            palette_results("hide", &d).into_iter().any(|r| r.nav == PaletteNav::HidePanel)
+        };
+        assert!(hide(true));
+        assert!(!hide(false));
+    }
+
+    #[test]
     fn move_with_no_rows_stays_put() {
         let mut state = PaletteState::new(PaletteData::default());
         state.set_query("zzz".into());
@@ -688,5 +786,37 @@ mod tests {
         let mut state = PaletteState::new(dashboard_data());
         state.set_query("hot".into());
         assert_eq!(state.chosen(), Some(PaletteNav::Dashboard("d2".into())));
+    }
+
+    fn tab(label: &str, active: bool) -> SearchableTab {
+        SearchableTab { label: label.into(), active }
+    }
+
+    #[test]
+    fn open_tabs_appear_by_name_with_their_bar_position() {
+        let data = PaletteData {
+            tabs: vec![tab("JRST JAIT App", true), tab("RAIL Rails API", false)],
+            ..PaletteData::default()
+        };
+        let rows = palette_results("rails", &data);
+        let tabs: Vec<_> = rows.iter().filter(|r| r.nav.label() == "Tab").collect();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].nav, PaletteNav::Tab(1));
+        assert_eq!(tabs[0].primary, "RAIL Rails API");
+    }
+
+    #[test]
+    fn the_active_tab_is_not_offered_and_empty_query_lists_the_rest() {
+        let data = PaletteData {
+            tabs: vec![tab("A", false), tab("B", true), tab("C", false)],
+            ..PaletteData::default()
+        };
+        let navs: Vec<_> = palette_results("", &data)
+            .into_iter()
+            .map(|r| r.nav)
+            .filter(|n| matches!(n, PaletteNav::Tab(_)))
+            .collect();
+        assert_eq!(navs, vec![PaletteNav::Tab(0), PaletteNav::Tab(2)]);
+        assert!(palette_results("zzz", &data).is_empty());
     }
 }

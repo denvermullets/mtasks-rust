@@ -2,6 +2,7 @@ use iced::widget::{button, column, container, mouse_area, row, scrollable, text}
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Project, ProjectStatus, RoadmapCommitment, Team};
 use crate::theme as t;
 use crate::views::header;
@@ -116,7 +117,10 @@ pub fn view<'a>(
         .width(Length::Fill)
         .push(container(header).padding([12, 16]))
         .push(divider())
-        .push(scrollable(container(lanes).padding(16)).height(Length::Fill));
+        .push(
+            track(scrollable(container(lanes).padding(16)), ScrollKey::Roadmap)
+                .height(Length::Fill),
+        );
 
     container(body)
         .width(Length::Fill)

@@ -7,6 +7,7 @@ use iced::widget::text::LineHeight;
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::scroll::{track, ScrollKey};
 use crate::db::notifications::{Filter, Notification};
 use crate::inbox::{empty_message, InboxState};
 use crate::fonts;
@@ -17,14 +18,6 @@ use crate::views::util::relative_time;
 /// line (16) and `space::S3` padding above and below. Keyboard navigation and
 /// scroll-to-selected multiply by it; `row_height_matches_its_parts` pins it.
 pub const ROW_HEIGHT: f32 = 64.0;
-
-/// Key for the Inbox list in `App::scroll_state` (distinct from the board
-/// lane indices and `issue_list::SCROLL_KEY`).
-pub const SCROLL_KEY: usize = usize::MAX - 1;
-
-pub fn scroll_id() -> scrollable::Id {
-    scrollable::Id::new("inbox-list")
-}
 
 fn filter_tab<'a>(label: &'a str, filter: Filter, active: Filter) -> Element<'a, Message> {
     let on = filter == active;
@@ -73,10 +66,11 @@ fn list<'a>(state: &'a InboxState) -> Element<'a, Message> {
         .enumerate()
         .map(|(i, n)| notification_row(i, n, i == state.selected))
         .collect();
-    scrollable(Column::with_children(rows).width(Length::Fill))
-        .id(scroll_id())
-        .on_scroll(|vp| Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height))
-        .height(Length::Fill)
+    track(
+        scrollable(Column::with_children(rows).width(Length::Fill)),
+        ScrollKey::Inbox,
+    )
+    .height(Length::Fill)
         .into()
 }
 

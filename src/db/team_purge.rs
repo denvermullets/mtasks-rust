@@ -160,6 +160,8 @@ fn purge(conn: &Connection, team_id: &str, remote_id: i64) -> Result<Vec<PathBuf
     )?;
     conn.execute("DELETE FROM pull_cursors WHERE team_id = ?1", params![team_id])?;
     conn.execute("DELETE FROM list_etags WHERE team_id = ?1", params![team_id])?;
+    conn.execute("DELETE FROM team_terminal_dirs WHERE team_id = ?1", params![team_id])?;
+    conn.execute("DELETE FROM terminal_records WHERE team_id = ?1", params![team_id])?;
     conn.execute("DELETE FROM teams WHERE id = ?1", params![team_id])?;
 
     Ok(outbox_paths)
@@ -318,6 +320,36 @@ mod tests {
         assert_eq!(count(&c, "pull_cursors WHERE team_id = 'gone'"), 0);
         assert_eq!(count(&c, "list_etags WHERE team_id = 'gone'"), 0);
         assert_eq!(count(&c, "issues WHERE team_id = 'kept'"), 1);
+    }
+
+    #[test]
+    fn purging_a_team_removes_its_terminal_directory_and_only_its_own() {
+        let c = mem();
+        team(&c, "gone", 1);
+        team(&c, "kept", 2);
+        crate::db::terminal_dirs::set(&c, "gone", std::path::Path::new("/a")).unwrap();
+        crate::db::terminal_dirs::set(&c, "kept", std::path::Path::new("/b")).unwrap();
+
+        reconcile_listed_teams(&c, &[2]).unwrap();
+
+        let dirs = crate::db::terminal_dirs::all(&c).unwrap();
+        assert_eq!(dirs.keys().collect::<Vec<_>>(), vec!["kept"]);
+    }
+
+    #[test]
+    fn purging_a_team_removes_its_terminal_records_and_enqueues_nothing() {
+        use crate::db::terminal_records::{all, apply, Change, Stored};
+        let c = mem();
+        team(&c, "gone", 1);
+        team(&c, "kept", 2);
+        let rec = |k: &str, t: &str| Stored { key: k.into(), team_id: t.into(), name: k.into(), cwd: None };
+        apply(&c, &[Change::Added(rec("a", "gone")), Change::Added(rec("b", "kept"))]).unwrap();
+        let before = count(&c, "sync_queue");
+
+        reconcile_listed_teams(&c, &[2]).unwrap();
+
+        assert_eq!(all(&c).unwrap(), vec![rec("b", "kept")]);
+        assert_eq!(count(&c, "sync_queue"), before);
     }
 
     #[test]

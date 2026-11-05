@@ -11,6 +11,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::scroll::{track, ScrollKey};
 use crate::db::recurring_issues::RecurringIssueRow;
 use crate::theme as t;
 
@@ -74,7 +75,9 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
             .push(divider())
             .push(header)
             .push(divider())
-            .push(scrollable(body).height(Length::Fill)),
+            .push(
+                track(scrollable(body), ScrollKey::RecurringIssues).height(Length::Fill),
+            ),
     )
     .width(Length::Fill)
     .height(Length::Fill)

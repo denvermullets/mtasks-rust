@@ -44,7 +44,7 @@ if [[ -z "$PACKAGE_VERSION" || "$PACKAGE_VERSION" != "$BUNDLE_VERSION" ]]; then
 fi
 
 if ! cargo bundle --version >/dev/null 2>&1; then
-    echo "cargo-bundle not found. Install it: cargo install cargo-bundle --locked" >&2
+    echo "cargo-bundle not found. Run mise install, and run this script as: mise exec -- $0" >&2
     exit 1
 fi
 

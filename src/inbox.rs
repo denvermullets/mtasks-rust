@@ -126,6 +126,18 @@ mod tests {
     }
 
     #[test]
+    fn reloading_on_a_tab_switch_keeps_filter_and_selection_and_shows_new_rows() {
+        // Inbox has one Tab, so its state stays live across switches; the
+        // switch only reloads the rows.
+        let mut s = state(&[5, 4, 3], 1);
+        s.filter = Filter::All;
+        s.set_items(vec![n(6), n(5), n(4), n(3)]);
+        assert_eq!(s.filter, Filter::All);
+        assert_eq!(s.selected_item().map(|i| i.remote_id), Some(4));
+        assert_eq!(s.items.len(), 4);
+    }
+
+    #[test]
     fn index_of_finds_listed_remote_id() {
         let s = state(&[7, 8, 9], 0);
         assert_eq!(s.index_of(8), Some(1));

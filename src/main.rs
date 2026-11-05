@@ -20,11 +20,15 @@ mod keys;
 mod lane_icon;
 mod mentions;
 mod palette_results;
+mod quit;
 mod saved_view;
 mod schedule_summary;
 mod scroll;
 mod search_match;
 mod sync;
+mod tab_state;
+mod tabs;
+mod terminal;
 mod theme;
 mod views;
 
@@ -41,6 +45,8 @@ fn main() -> iced::Result {
     }
     fonts::set_active(fonts::font_for_key(&font_key));
     app.default_font(fonts::active())
+        // The app owns quitting: see `quit.rs` and `App::quit`.
+        .exit_on_close_request(false)
         .subscription(app::App::subscription)
         .theme(app::App::theme)
         .window(window::Settings {

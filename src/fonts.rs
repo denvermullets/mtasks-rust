@@ -222,6 +222,54 @@ fn code_for(ui: Font) -> Font {
     }
 }
 
+/// Default Terminal font: a config key from the catalog.
+pub const DEFAULT_TERMINAL_FONT_KEY: &str = "jetbrains-mono";
+
+/// Default Terminal font size, in points.
+pub const DEFAULT_TERMINAL_SIZE: f32 = 13.0;
+
+/// Sizes the picker offers.
+pub const TERMINAL_SIZES: [u16; 12] = [9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24];
+
+/// A Terminal font size from config, kept inside the picker's range so a
+/// hand-edited file can't ask for a zero-sized or absurd grid.
+pub fn clamp_terminal_size(size: f32) -> f32 {
+    if size.is_finite() {
+        size.clamp(TERMINAL_SIZES[0] as f32, TERMINAL_SIZES[TERMINAL_SIZES.len() - 1] as f32)
+    } else {
+        DEFAULT_TERMINAL_SIZE
+    }
+}
+
+/// A monospace catalog entry, which is all the Terminal font can be.
+fn terminal_def(key: &str) -> &'static FontDef {
+    FONTS
+        .iter()
+        .find(|f| f.key == key && f.family.is_some_and(|n| MONO_FAMILIES.contains(&n)))
+        .unwrap_or_else(|| lookup(DEFAULT_TERMINAL_FONT_KEY))
+}
+
+/// Family name for a Terminal font key. A key that is unknown or not
+/// monospace resolves to JetBrains Mono.
+pub fn terminal_family(key: &str) -> &'static str {
+    terminal_def(key).family.unwrap_or(FALLBACK_MONO)
+}
+
+/// The monospace fonts a Terminal can use, in catalog order, for a picker.
+pub fn terminal_choices() -> Vec<FontChoice> {
+    FONTS
+        .iter()
+        .filter(|f| f.family.is_some_and(|n| MONO_FAMILIES.contains(&n)))
+        .map(|f| FontChoice { key: f.key, name: f.name })
+        .collect()
+}
+
+/// The picker choice for a Terminal font key.
+pub fn terminal_choice_for_key(key: &str) -> FontChoice {
+    let f = terminal_def(key);
+    FontChoice { key: f.key, name: f.name }
+}
+
 /// A catalog entry for pick lists: displays as the font name, carries the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontChoice {
@@ -372,6 +420,34 @@ mod tests {
             let mono = MONO_FAMILIES.iter().any(|m| Some(*m) == f.family);
             assert_eq!(n, if mono { f.family.unwrap() } else { FALLBACK_MONO }, "{}", f.key);
         }
+    }
+
+    #[test]
+    fn terminal_choices_are_the_six_monospace_fonts() {
+        let names: Vec<_> = terminal_choices().iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            ["IBM Plex Mono", "JetBrains Mono", "Fira Code", "SUSE Mono", "Roboto Mono", "Atkinson Hyperlegible Mono"]
+        );
+        assert_eq!(terminal_choice_for_key("fira-code").key, "fira-code");
+    }
+
+    #[test]
+    fn terminal_size_is_clamped_to_the_pickers_range() {
+        assert_eq!(clamp_terminal_size(13.0), 13.0);
+        assert_eq!(clamp_terminal_size(0.0), 9.0);
+        assert_eq!(clamp_terminal_size(400.0), 24.0);
+        assert_eq!(clamp_terminal_size(f32::NAN), DEFAULT_TERMINAL_SIZE);
+        assert!(TERMINAL_SIZES.contains(&(DEFAULT_TERMINAL_SIZE as u16)));
+    }
+
+    #[test]
+    fn terminal_font_falls_back_to_jetbrains_mono() {
+        for key in ["inter", "system", "nope", ""] {
+            assert_eq!(terminal_family(key), "JetBrains Mono", "{key}");
+            assert_eq!(terminal_choice_for_key(key).key, DEFAULT_TERMINAL_FONT_KEY, "{key}");
+        }
+        assert_eq!(terminal_family("roboto-mono"), "Roboto Mono");
     }
 
     #[test]
