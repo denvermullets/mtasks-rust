@@ -9,14 +9,18 @@
 //! The UI learns about new frames through one shared "wake pending" flag: the
 //! notify callback fires once, and fires again only after `ack_wake`, so a slow
 //! UI drops frames instead of queueing messages.
-// The panel and App wiring land in later tickets.
+// Parts of the API (paste, close, pid, ...) wait for later tickets.
 #![allow(dead_code)]
 
 mod engine;
+mod input;
 mod palette;
+pub mod panel;
+mod state;
 mod types;
 
 pub use palette::{active_term_theme, term_theme};
+pub use state::{panel_team, TerminalMessage, TerminalState};
 pub use types::*;
 
 use std::collections::HashMap;

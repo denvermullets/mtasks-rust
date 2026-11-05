@@ -56,6 +56,8 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Tab bar actions; handled in `app/tab_update.rs`.
     Tab(TabMessage),
+    /// Terminal panel and keys; handled in `terminal/state.rs`.
+    Terminal(crate::terminal::TerminalMessage),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
     /// Pause (false) or resume (true) a recurring issue (local id); local
@@ -796,6 +798,8 @@ pub struct App {
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
     tab_projects: HashMap<String, (String, String)>,
+    /// Terminals, their panel and its canvas. Outside every Tab.
+    terminals: crate::terminal::TerminalState,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -3109,6 +3113,7 @@ impl App {
             dashboard_sessions: Default::default(),
             tab_set: None,
             tab_projects: HashMap::new(),
+            terminals: crate::terminal::TerminalState::new(),
             parked_tabs: Default::default(),
             open_view: None,
             save_view_name: String::new(),
@@ -3216,7 +3221,20 @@ impl App {
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
         let close_requests = iced::window::close_requests().map(|_| Message::QuitRequested);
 
-        let mut subs = vec![keys, activity, banner_clicks, close_requests];
+        // While a Terminal has focus its key listener replaces the shortcuts.
+        let modal_open = self.modal != Modal::None;
+        let keys = if self.terminals.takes_keys(modal_open) {
+            Subscription::none()
+        } else {
+            keys
+        };
+        let mut subs = vec![
+            keys,
+            activity,
+            banner_clicks,
+            close_requests,
+            self.terminals.subscription(modal_open),
+        ];
         // Only listen for wheel events while a card is pending or showing.
         if self.body_hover.is_active() {
             subs.push(scrolls);
@@ -3379,6 +3397,8 @@ impl App {
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
+        self.terminals
+            .sync(crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()));
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
@@ -4022,6 +4042,11 @@ impl App {
             }
 
             Message::Tab(m) => return self.update_tab(m),
+            Message::Terminal(m) => {
+                let team =
+                    crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref());
+                return self.terminals.update(m, team);
+            }
 
             Message::SelectTeamView(team_id, view) => {
                 let before = self.tab_set.as_ref().map(|s| s.active().clone());
@@ -6893,6 +6918,10 @@ impl App {
             .push(tab_bar::view(&self.tab_labels()))
             .push(header)
             .push(main_pane)
+            .push_maybe(self.terminals.panel_view(crate::terminal::panel_team(
+                &self.view,
+                self.selected_team_id.as_deref(),
+            )))
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);

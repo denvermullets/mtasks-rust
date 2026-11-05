@@ -29,6 +29,7 @@ pub mod roadmap;
 pub mod settings;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod terminal_panel;
 pub mod team_list;
 pub mod team_members;
 pub mod team_picker;

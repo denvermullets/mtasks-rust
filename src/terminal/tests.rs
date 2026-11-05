@@ -422,3 +422,8 @@ fn mode_2031_pushes_a_report_when_the_theme_changes() {
     wait_for(&t, id, "pushed light report", |f| f.contains_line("push=033[?997;2n"));
     close_all(t);
 }
+
+mod hidden;
+mod load;
+mod resize;
+mod wake;

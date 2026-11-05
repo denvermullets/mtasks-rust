@@ -27,6 +27,9 @@ pub fn handle_key_press(
             // Global shortcuts — active on any view.
             "f" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
+            "j" if modifiers.command() => Some(Message::Terminal(
+                crate::terminal::TerminalMessage::ToggleFocus,
+            )),
             "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
             "I" | "i" if modifiers.shift() => Some(Message::NavigateToView(View::Inbox)),
             "p" if modifiers.is_empty() => Some(Message::CreateProject),
