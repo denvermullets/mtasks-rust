@@ -12,6 +12,15 @@ use crate::theme as t;
 use crate::theme::{radius, space, type_scale};
 use crate::views::progress_chart;
 
+/// Key of the Projects table in `App::scroll_state` (distinct from the lane
+/// indices and the other views' keys).
+pub const SCROLL_KEY: usize = usize::MAX - 3;
+
+/// Scrollable id of the Projects table.
+pub fn scroll_id() -> scrollable::Id {
+    scrollable::Id::new("project-list")
+}
+
 pub struct ProjectFormState {
     pub name: String,
     pub description: text_editor::Content,
@@ -431,7 +440,14 @@ pub fn list_view<'a>(
                     ..Default::default()
                 }),
             )
-            .push(scrollable(rows).height(Length::Fill))
+            .push(
+                scrollable(rows)
+                    .id(scroll_id())
+                    .on_scroll(|vp| {
+                        Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height)
+                    })
+                    .height(Length::Fill),
+            )
             .into()
     });
 

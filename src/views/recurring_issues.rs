@@ -25,6 +25,15 @@ const COL_ACTION: f32 = 150.0;
 
 /// Full-pane table: column header, then one row per recurring issue, or an
 /// empty state when the team has none.
+/// Key of the table in `App::scroll_state` (distinct from the lane indices
+/// and the other views' keys).
+pub const SCROLL_KEY: usize = usize::MAX - 5;
+
+/// Scrollable id of the table.
+pub fn scroll_id() -> scrollable::Id {
+    scrollable::Id::new("recurring-issues")
+}
+
 pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
     let header = row![]
         .spacing(12)
@@ -74,7 +83,14 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
             .push(divider())
             .push(header)
             .push(divider())
-            .push(scrollable(body).height(Length::Fill)),
+            .push(
+                scrollable(body)
+                    .id(scroll_id())
+                    .on_scroll(|vp| {
+                        Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height)
+                    })
+                    .height(Length::Fill),
+            ),
     )
     .width(Length::Fill)
     .height(Length::Fill)
