@@ -17,6 +17,8 @@ pub enum TabMessage {
     Close(usize),
     /// Back from an issue opened in a project Tab to the project, its root.
     BackToRoot,
+    /// Back from a team Tab's issue to the page it was opened from.
+    BackToPage(View),
     /// The tab bar scrolled sideways to this offset.
     BarScrolled(f32),
 }
@@ -33,6 +35,7 @@ impl App {
             }
             TabMessage::Close(index) => return self.close_tab(index),
             TabMessage::BackToRoot => return self.back_to_tab_root(),
+            TabMessage::BackToPage(view) => return self.back_to_page(view),
             TabMessage::BarScrolled(x) => self.tab_bar_offset = x,
         }
         Task::none()
@@ -80,9 +83,14 @@ impl App {
         let Some(key) = self.active_tab_key().cloned() else {
             return Task::none();
         };
+        self.back_to_page(tab_state::root_view(&key))
+    }
+
+    /// Leave the open issue for `view`, the page it was opened from.
+    fn back_to_page(&mut self, view: View) -> Task<Message> {
         self.commit_issue_detail();
         self.issue_detail = None;
-        self.switch_view(tab_state::root_view(&key));
+        self.switch_view(view);
         self.restore_project_detail();
         self.restore_scroll()
     }
@@ -215,6 +223,7 @@ impl App {
                     my_issues: self.detail_from_my_issues,
                     inbox: self.detail_from_inbox,
                     dashboard: self.detail_from_dashboard.clone(),
+                    page: self.detail_from_page.clone(),
                 },
                 ..ParkedTab::new(view, self.selected_team_id.clone())
                     .with_comment_draft(self.view.clone(), draft)
@@ -377,6 +386,7 @@ impl App {
         self.detail_from_my_issues = detail_from.my_issues;
         self.detail_from_inbox = detail_from.inbox;
         self.detail_from_dashboard = detail_from.dashboard;
+        self.detail_from_page = detail_from.page;
         self.issue_detail = None;
         self.project_detail = None;
         self.dashboard_menu = None;

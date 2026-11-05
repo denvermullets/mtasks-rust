@@ -52,26 +52,31 @@ impl CommentDraft {
 /// per Tab, no history: issue A to issue B keeps the page, not A. A team
 /// Tab's issue has no origin (Back is the breadcrumb, as before), and a
 /// project Tab's Back always goes to the project, its root.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DetailFrom {
     pub my_issues: bool,
     pub inbox: bool,
     /// The Dashboard's local id.
     pub dashboard: Option<String>,
+    /// The team-level page (Board, Roadmap, ...) a team Tab's issue was
+    /// opened from. Never an issue page.
+    pub page: Option<View>,
 }
 
 /// Where Back from an open issue goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Back {
     MyIssues,
     Inbox,
     Dashboard(String),
     /// The Tab's root page: the project, in a project Tab.
     TabRoot,
+    /// The page a team Tab's issue was opened from.
+    Page(View),
 }
 
 /// The one level of Back for an open issue in the Tab `key`, or `None` when
-/// the Tab has none (a team Tab uses the breadcrumb). It reads only the
+/// the Tab has none to give (a team Tab that never recorded a page). It reads only the
 /// origin, not which issue is open, so issue A to issue B then Back returns
 /// to the page, not to A.
 pub fn back_target(key: &TabKey, from: &DetailFrom) -> Option<Back> {
@@ -83,6 +88,11 @@ pub fn back_target(key: &TabKey, from: &DetailFrom) -> Option<Back> {
         Some(Back::Dashboard(id.clone()))
     } else if matches!(key, TabKey::Project(_)) {
         Some(Back::TabRoot)
+    } else if matches!(key, TabKey::Team(_)) {
+        from.page
+            .clone()
+            .filter(|v| !matches!(v, View::IssueDetail(_)))
+            .map(Back::Page)
     } else {
         None
     }
@@ -437,6 +447,17 @@ mod tests {
         );
         assert_eq!(back_target(&TabKey::Project("p".into()), &none), Some(Back::TabRoot));
         assert_eq!(back_target(&team("a"), &none), None);
+        let from_roadmap = DetailFrom { page: Some(View::Roadmap), ..none };
+        assert_eq!(back_target(&team("a"), &from_roadmap), Some(Back::Page(View::Roadmap)));
+    }
+
+    #[test]
+    fn a_team_tab_goes_back_to_the_page_not_to_issue_a() {
+        // The origin is a page, never an issue: opening B from A keeps it.
+        let from = DetailFrom { page: Some(View::Board), ..DetailFrom::default() };
+        assert_eq!(back_target(&team("a"), &from), Some(Back::Page(View::Board)));
+        let bad = DetailFrom { page: Some(View::IssueDetail("a".into())), ..DetailFrom::default() };
+        assert_eq!(back_target(&team("a"), &bad), None);
     }
 
     #[test]

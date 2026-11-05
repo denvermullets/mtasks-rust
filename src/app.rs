@@ -842,6 +842,8 @@ pub struct App {
     detail_from_inbox: bool,
     /// The open issue detail was reached from a dashboard (Back returns there).
     detail_from_dashboard: Option<String>,
+    /// The team-level page a team Tab's open issue was opened from (Back).
+    detail_from_page: Option<View>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -995,17 +997,6 @@ impl App {
                     })
             })
             .collect()
-    }
-
-    /// Before opening an issue or project from the palette: when it belongs to
-    /// another team (or we are on My Issues, whose data is mixed), select its
-    /// team like a sidebar click, so the sidebar follows and its data is loaded.
-    fn select_team_for_palette(&mut self, team_id: &str) -> Task<Message> {
-        if self.selected_team_id.as_deref() == Some(team_id) && !self.view.is_cross_team() {
-            return Task::none();
-        }
-        self.expanded_teams.insert(team_id.to_string());
-        self.update(Message::SelectTeamView(team_id.to_string(), View::Board))
     }
 
     fn db(&self) -> rusqlite::Connection {
@@ -1815,12 +1806,14 @@ impl App {
             my_issues: self.detail_from_my_issues,
             inbox: self.detail_from_inbox,
             dashboard: self.detail_from_dashboard.clone(),
+            page: self.detail_from_page.clone(),
         };
         Some(match back_target(self.active_tab_key()?, &from)? {
             Back::MyIssues => Message::BackToMyIssues,
             Back::Inbox => Message::BackToInbox,
             Back::Dashboard(_) => Message::BackToDashboard,
             Back::TabRoot => Message::Tab(TabMessage::BackToRoot),
+            Back::Page(view) => Message::Tab(TabMessage::BackToPage(view)),
         })
     }
 
@@ -2235,11 +2228,17 @@ impl App {
             crate::tabs::issue_open_target(active, self.active_tab_team().as_deref(), &issue.team_id)
         });
         if let Some(key) = target {
+            if let crate::tabs::TabKey::Team(id) = &key {
+                self.expanded_teams.insert(id.clone());
+            }
             let focus = self.focus_tab(key);
             return Task::batch([focus, self.open_issue_detail(&issue)]);
         }
         if let View::Dashboard(dashboard_id) = self.view.clone() {
             return self.open_issue_from_dashboard(dashboard_id, issue);
+        }
+        if self.view == View::Inbox {
+            return self.open_issue_from_inbox(issue);
         }
         if self.view == View::MyIssues {
             self.selected_team_id = Some(issue.team_id.clone());
@@ -2314,6 +2313,11 @@ impl App {
     }
 
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
+        // The page Back returns a team Tab to: set when leaving a page, kept
+        // when going from issue A to issue B.
+        if !matches!(self.view, View::IssueDetail(_)) {
+            self.detail_from_page = Some(self.view.clone());
+        }
         self.commit_issue_detail();
         self.commit_project_detail();
         if let Some(old) = self.issue_detail.take() {
@@ -3092,6 +3096,7 @@ impl App {
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_from_dashboard: None,
+            detail_from_page: None,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
@@ -5371,9 +5376,10 @@ impl App {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
                         };
-                        let select = self.select_team_for_palette(&issue.team_id);
-                        // open_issue_detail commits any open detail edits first.
-                        return Task::batch([select, self.open_issue_detail(&issue)]);
+                        // The same rule as every other open path: the issue's
+                        // team Tab from a team or project Tab, the current
+                        // Tab from a cross-team one. Commits open edits first.
+                        return self.open_focused_issue(issue);
                     }
                     PaletteNav::Project { project_id, .. } => {
                         // The project's Tab loads its own team's data.
