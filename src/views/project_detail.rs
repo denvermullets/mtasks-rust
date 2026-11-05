@@ -99,6 +99,11 @@ pub fn view<'a>(
     pending_paths: &'a crate::views::body::PendingInlineMap,
     window_width: f32,
     properties_open: bool,
+    stack_cards: bool,
+    // Width a right-docked Terminal panel takes from the page (0 when none).
+    terminal_width: f32,
+    // The right-docked Terminal panel, placed between the page and Properties.
+    terminal: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let mut breadcrumb = row![].spacing(space::S2).align_y(Alignment::Center);
@@ -184,7 +189,11 @@ pub fn view<'a>(
         .push(description)
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push(cards(
-            card_layout(page_width(window_width, properties_open)),
+            if stack_cards {
+                CardLayout::Stacked
+            } else {
+                card_layout(page_width(window_width - terminal_width, properties_open))
+            },
             burndown(project, issues),
             issues_section(visible, display, team, lanes, members),
         ))
@@ -313,7 +322,8 @@ pub fn view<'a>(
             )
                 .width(Length::Fill)
                 .height(Length::Fill),
-        );
+        )
+        .push_maybe(terminal);
     // Properties are hidden until `/` (or the palette) shows them.
     if properties_open {
         page.push(divider).push(sidebar_panel).into()

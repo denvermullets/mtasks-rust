@@ -8,6 +8,7 @@ pub mod group_form;
 pub mod display_panel;
 pub mod dropdown;
 pub mod equal_row;
+pub mod measure;
 pub mod header;
 pub mod hover_card_view;
 pub mod hover_rich;

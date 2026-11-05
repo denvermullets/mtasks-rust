@@ -298,6 +298,10 @@ pub enum Message {
     ToggleHelp,
     /// `/` or the palette command on the project page: show or hide Properties.
     ToggleProjectProperties,
+    /// Palette, project page: always stack Burndown above Issues, or not.
+    ToggleProjectCardsStacked,
+    /// Palette: dock the Terminal panel at the bottom or down the right.
+    ToggleTerminalDock,
     /// Cmd+K: open the command palette.
     OpenCommandPalette,
     /// The palette's text field changed.
@@ -999,6 +1003,8 @@ impl App {
             on_project_detail: matches!(self.view, View::ProjectDetail(_)),
             terminal_focus: self.terminals.palette_focus(self.panel_scope().as_ref()),
             terminal_panel_showing: self.terminals.panel_showing(self.panel_scope().as_ref()),
+            project_cards_stacked: self.config.project_cards_stacked,
+            terminal_dock_right: self.terminals.dock() == crate::terminal::panel::Dock::Right,
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -3199,6 +3205,8 @@ impl App {
         };
 
         app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
+        app.terminals.set_dock(crate::terminal::panel::Dock::from_name(&app.config.terminal_dock));
+        app.terminals.set_width(app.config.terminal_panel_width);
 
         // Restore the stored Tabs and focus the Home page's. Doing this before
         // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
@@ -3505,7 +3513,9 @@ impl App {
         self.save_tabs();
         self.save_terminal_records();
         self.save_panel();
+        self.save_panel_width();
         let panel_scope = self.panel_scope();
+        self.terminals.set_right_inset(self.terminal_right_inset());
         self.terminals.set_pinned(self.removed_team_tab());
         self.terminals.sync(panel_scope.as_ref());
         let task = Task::batch([task, self.request_visible_images()]);
@@ -3513,6 +3523,30 @@ impl App {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
         task
+    }
+
+    /// Store the right-docked panel's width once a drag ends. Device-wide.
+    fn save_panel_width(&mut self) {
+        let width = self.terminals.width();
+        if self.terminals.dragging() || width == self.config.terminal_panel_width {
+            return;
+        }
+        let mut new_cfg = self.config.clone();
+        new_cfg.terminal_panel_width = width;
+        self.save_config_change(new_cfg);
+    }
+
+    /// Room right of a right-docked Terminal panel: the project page's
+    /// Properties when open (the panel sits between the page and them).
+    fn terminal_right_inset(&self) -> f32 {
+        let props = matches!(self.view, View::ProjectDetail(_))
+            && self.config.project_properties_open
+            && !self.removed_team_tab();
+        if props {
+            crate::views::util::SIDEBAR_WIDTH + 1.0
+        } else {
+            0.0
+        }
     }
 
     /// Store the panel when it changed since the last message. Local only.
@@ -5533,6 +5567,10 @@ impl App {
                     PaletteNav::ToggleProjectProperties => {
                         return self.update(Message::ToggleProjectProperties)
                     }
+                    PaletteNav::ToggleProjectCardsStacked => {
+                        return self.update(Message::ToggleProjectCardsStacked)
+                    }
+                    PaletteNav::ToggleTerminalDock => return self.update(Message::ToggleTerminalDock),
                     PaletteNav::FocusTerminal => {
                         return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusTerminal))
                     }
@@ -5569,6 +5607,24 @@ impl App {
                     new_cfg.project_properties_open = !new_cfg.project_properties_open;
                     self.save_config_change(new_cfg);
                 }
+            }
+
+            Message::ToggleProjectCardsStacked => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.project_cards_stacked = !new_cfg.project_cards_stacked;
+                self.save_config_change(new_cfg);
+            }
+
+            Message::ToggleTerminalDock => {
+                use crate::terminal::panel::Dock;
+                let dock = match self.terminals.dock() {
+                    Dock::Bottom => Dock::Right,
+                    Dock::Right => Dock::Bottom,
+                };
+                self.terminals.set_dock(dock);
+                let mut new_cfg = self.config.clone();
+                new_cfg.terminal_dock = dock.name().to_string();
+                self.save_config_change(new_cfg);
             }
 
             Message::OpenSettings => {
@@ -6970,6 +7026,15 @@ impl App {
         } else {
             None
         };
+        // The Terminal panel: under the page, or down its right side. On the
+        // project page a right-docked panel sits between the page and its
+        // Properties, so the page view takes it.
+        let panel_scope = self.panel_scope();
+        let dock_right = self.terminals.dock() == crate::terminal::panel::Dock::Right;
+        let mut terminal_panel = self.terminals.panel_view(panel_scope.as_ref());
+        let terminal_width = self.terminals.right_width(panel_scope.as_ref());
+        let mut right_panel = if dock_right { terminal_panel.take() } else { None };
+
         let main_pane: Element<'_, Message> = match self.view {
             View::MyIssues if my_empty.is_some() => iced::widget::container(
                 iced::widget::text(my_empty.unwrap_or_default())
@@ -7057,6 +7122,9 @@ impl App {
                             &self.detail_pending_paths,
                             self.window_width,
                             self.config.project_properties_open,
+                            self.config.project_cards_stacked,
+                            terminal_width,
+                            right_panel.take(),
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -7180,11 +7248,16 @@ impl App {
             main_pane
         };
 
+        let main_pane: Element<'_, Message> = match right_panel {
+            Some(panel) => row![main_pane, panel].width(Length::Fill).height(Length::Fill).into(),
+            None => main_pane,
+        };
+
         let main_content = column![]
             .push(tab_bar::view(&self.tab_labels(), self.window_width))
             .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
-            .push_maybe(self.terminals.panel_view(self.panel_scope().as_ref()))
+            .push_maybe(terminal_panel)
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);

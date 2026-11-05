@@ -22,7 +22,7 @@ use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
 use super::links::Link;
-use super::panel::{self, Layout, PanelState, Toggle, MAX_PANES};
+use super::panel::{self, Dock, Layout, PanelState, Toggle, MAX_PANES};
 use super::roster::Roster;
 use crate::db::panel_states::StoredPanel;
 use super::{
@@ -60,10 +60,14 @@ pub enum TerminalMessage {
     /// A left press anywhere, sent only while a Terminal has focus. One
     /// outside the panel, at the last pointer position, moves focus to the app.
     PressedAt,
-    /// The pointer pressed the strip.
+    /// The pointer pressed the strip (docked at the bottom) or the left edge
+    /// (docked right).
     DragStart,
-    /// The pointer moved (window y) while dragging.
-    DragMove(f32),
+    /// The pointer moved (window x, y) while dragging.
+    DragMove(f32, f32),
+    /// The right-docked panel's body (every pane, strip excluded) was laid
+    /// out at this size.
+    BodySize(Size),
     DragEnd,
     /// Hide the panel. Every Terminal keeps running; the keyboard goes to the app.
     Hide,
@@ -109,11 +113,12 @@ pub enum TerminalMessage {
 
 static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new();
 
-/// A strip drag in progress. The first pointer move after the press fixes
-/// where the drag started.
+/// A resize drag in progress: the panel's height docked at the bottom, its
+/// width docked right. The first pointer move after the press fixes where the
+/// drag started (y or x).
 struct Drag {
-    start_y: Option<f32>,
-    start_height: f32,
+    start: Option<f32>,
+    start_size: f32,
 }
 
 pub struct TerminalState {
@@ -130,6 +135,15 @@ pub struct TerminalState {
     /// Each project's starting directory; unset means its team's.
     project_dirs: HashMap<String, std::path::PathBuf>,
     panel: PanelState,
+    /// Where the panel sits. Device-wide, set by the app from its config.
+    dock: Dock,
+    /// Docked right: the requested width (`None` is the default). Device-wide.
+    width: Option<f32>,
+    /// Docked right: room taken right of the panel (the project page's
+    /// Properties), set by the app every message.
+    right_inset: f32,
+    /// Docked right: the panel body's laid-out size, once measured.
+    body: Option<Size>,
     /// The page is a removed team's: its panel stays shown (the Terminals have
     /// no other way in) and can't be hidden or add Terminals.
     pinned: bool,
@@ -166,6 +180,10 @@ impl TerminalState {
             team_dirs: HashMap::new(),
             project_dirs: HashMap::new(),
             panel: PanelState::default(),
+            dock: Dock::Bottom,
+            width: None,
+            right_inset: 0.0,
+            body: None,
             pinned: false,
             focused: false,
             window: Size::new(1100.0, 700.0),
@@ -265,23 +283,35 @@ impl TerminalState {
             TerminalMessage::Moved(x, y) => self.pointer = Some((x, y)),
             TerminalMessage::PressedAt => {
                 // Unknown until the pointer moves after focus was taken.
-                let leaves = self.pointer.is_some_and(|(x, y)| {
-                    panel::press_leaves_panel(self.window.height, self.panel.height, x, y)
-                });
+                let leaves = self.pointer.is_some_and(|(x, y)| self.press_leaves(x, y));
                 if leaves {
                     self.focused = false;
                 }
             }
             TerminalMessage::DragStart => {
-                self.drag = Some(Drag { start_y: None, start_height: self.height() });
+                let start_size = match self.dock {
+                    Dock::Bottom => self.height(),
+                    Dock::Right => self.panel_width(),
+                };
+                self.drag = Some(Drag { start: None, start_size });
             }
-            TerminalMessage::DragMove(y) => {
+            TerminalMessage::DragMove(x, y) => {
+                let (window, inset) = (self.window, self.right_inset);
                 if let Some(drag) = &mut self.drag {
-                    let start_y = *drag.start_y.get_or_insert(y);
-                    self.panel.height =
-                        Some(panel::drag_height(self.window.height, drag.start_height, start_y, y));
+                    match self.dock {
+                        Dock::Bottom => {
+                            let start = *drag.start.get_or_insert(y);
+                            self.panel.height =
+                                Some(panel::drag_height(window.height, drag.start_size, start, y));
+                        }
+                        Dock::Right => {
+                            let start = *drag.start.get_or_insert(x);
+                            self.width = Some(panel::drag_width(window.width, inset, drag.start_size, start, x));
+                        }
+                    }
                 }
             }
+            TerminalMessage::BodySize(size) => self.body = Some(size),
             TerminalMessage::DragEnd => self.drag = None,
             TerminalMessage::Hide if self.pinned => {}
             TerminalMessage::New | TerminalMessage::NewIn(_) if self.pinned => {}
@@ -603,7 +633,9 @@ impl TerminalState {
                 d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned())
             }),
             note,
+            dock: self.dock,
             height: panel::panel_height(self.window.height, self.panel.height),
+            width: self.panel_width(),
         }))
     }
 
@@ -630,7 +662,7 @@ impl TerminalState {
         if self.drag.is_some() {
             subs.push(event::listen_with(|e, _status, _id| match e {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                    Some(Message::Terminal(TerminalMessage::DragMove(position.y)))
+                    Some(Message::Terminal(TerminalMessage::DragMove(position.x, position.y)))
                 }
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
                     Some(Message::Terminal(TerminalMessage::DragEnd))
@@ -668,6 +700,78 @@ impl TerminalState {
 
     fn height(&self) -> f32 {
         panel::panel_height(self.window.height, self.panel.height)
+    }
+
+    /// Width of the panel docked right.
+    fn panel_width(&self) -> f32 {
+        panel::panel_width(self.window.width, self.right_inset, self.width)
+    }
+
+    /// Whether a left press at window point (`x`, `y`) is outside the panel.
+    fn press_leaves(&self, x: f32, y: f32) -> bool {
+        match self.dock {
+            Dock::Bottom => panel::press_leaves_panel(self.window.height, self.panel.height, x, y),
+            Dock::Right => panel::press_leaves_right_panel(
+                self.window.width,
+                self.window.height,
+                self.right_inset,
+                self.panel_width(),
+                self.body_size().1,
+                x,
+                y,
+            ),
+        }
+    }
+
+    /// Docked right: the panel body (w, h), measured once laid out. Before
+    /// that, a guess: the panel's width less its handle, and the window less
+    /// the title, tab and header bars, the strip and the status bar.
+    fn body_size(&self) -> (f32, f32) {
+        match self.body {
+            Some(b) => (b.width, b.height),
+            None => (
+                self.panel_width() - panel::HANDLE_WIDTH,
+                (self.window.height - 110.0 - panel::STRIP_HEIGHT - panel::STATUS_HEIGHT).max(0.0),
+            ),
+        }
+    }
+
+    pub fn dock(&self) -> Dock {
+        self.dock
+    }
+
+    /// Dock the panel. Every pane changes size, so each Terminal is resized.
+    pub fn set_dock(&mut self, dock: Dock) {
+        if self.dock != dock {
+            self.dock = dock;
+            self.body = None;
+            self.drag = None;
+            self.sent_size.clear();
+        }
+    }
+
+    /// The requested right-docked width, for the app to store.
+    pub fn width(&self) -> Option<f32> {
+        self.width
+    }
+
+    pub fn set_width(&mut self, width: Option<f32>) {
+        self.width = width;
+    }
+
+    /// Room right of a right-docked panel, which moves its left edge.
+    pub fn set_right_inset(&mut self, inset: f32) {
+        self.right_inset = inset;
+    }
+
+    /// Width a right-docked panel takes from the page now (its edge handle
+    /// included), or 0 when it isn't showing there.
+    pub fn right_width(&self, scope: Option<&Scope>) -> f32 {
+        if self.dock == Dock::Right && self.panel_showing(scope) {
+            self.panel_width()
+        } else {
+            0.0
+        }
     }
 
     /// The records the strip of `scope` lists. A removed team's pinned panel
@@ -824,12 +928,15 @@ impl TerminalState {
 
     /// Size in cells of one pane; every pane of a layout is the same size.
     fn grid(&self, cell: (f32, f32)) -> (u16, u16) {
-        let (w, h) = panel::pane_size(
-            self.window.width,
-            self.window.height,
-            self.panel.height,
-            self.panel.layout,
-        );
+        let (w, h) = match self.dock {
+            Dock::Bottom => panel::pane_size(
+                self.window.width,
+                self.window.height,
+                self.panel.height,
+                self.panel.layout,
+            ),
+            Dock::Right => panel::split_body(self.body_size(), self.panel.layout, Dock::Right),
+        };
         panel::grid_for(w, h, cell.0, cell.1)
     }
 
