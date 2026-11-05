@@ -67,6 +67,7 @@ impl Closing {
         self.handle.join().unwrap_or(CloseReport {
             escalated_to_sigkill: false,
             threads_exited: 0,
+            reaped: false,
         })
     }
 }

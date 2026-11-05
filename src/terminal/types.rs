@@ -159,6 +159,9 @@ pub struct CloseReport {
     pub escalated_to_sigkill: bool,
     /// How many of the Terminal's three threads were joined (3 when all exited).
     pub threads_exited: usize,
+    /// The shell was reaped. False only when it was still in the kernel 5 seconds
+    /// after SIGKILL; `close` gives up rather than block.
+    pub reaped: bool,
 }
 
 pub struct SpawnConfig {

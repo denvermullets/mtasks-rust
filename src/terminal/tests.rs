@@ -268,6 +268,36 @@ fn closing_a_dead_terminal_works() {
     assert!(!process_exists(pid));
 }
 
+/// A shell that ignores SIGHUP and writes after the owner died. macOS holds a process in
+/// exit until the PTY's output queue drains into the master, so a close that stops
+/// reading the master hangs in `wait`, even after SIGKILL.
+#[test]
+fn closing_after_the_owner_died_still_drains_the_pty() {
+    let mut t = terminals();
+    let mut cfg = sh_config("t1");
+    cfg.program = Some((
+        "/bin/sh".into(),
+        vec!["-c".into(), "trap '' HUP TERM; printf a; sleep 0.5; printf b; sleep 0.5; printf c; sleep 30".into()],
+    ));
+    let id = t.spawn(cfg).unwrap();
+    t.crash_owner(id);
+    wait_for(&t, id, "dead", |f| f.dead);
+    // The first byte after the crash makes the reader stop; later bytes sit unread.
+    std::thread::sleep(Duration::from_millis(1800));
+    let pid = t.pid(id).unwrap();
+    let closing = t.close(id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !closing.is_done() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(closing.is_done(), "close hung with unread PTY output");
+    let report = closing.wait();
+    assert!(report.escalated_to_sigkill);
+    assert!(report.reaped);
+    assert_eq!(report.threads_exited, 3);
+    assert!(!process_exists(pid));
+}
+
 /// Process-wide counts straight from the OS, so nothing the engine does can hide a leak.
 struct OsCounts {
     threads: i32,
