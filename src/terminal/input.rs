@@ -12,6 +12,8 @@ pub enum Route {
     Palette,
     /// Cmd+V.
     Paste,
+    /// Cmd+C: copy the selection. Ctrl+C is not this; it goes to the program.
+    Copy,
     /// Cmd+1 to Cmd+9: the Tab at this zero-based position.
     Tab(usize),
     Send(KeyInput),
@@ -19,7 +21,7 @@ pub enum Route {
 }
 
 /// What a key does while a Terminal has focus. Command keys never reach the
-/// shell: Cmd+J, K, V and 1 to 9 are the app's, and Cmd+Q, Cmd+[ and Cmd+]
+/// shell: Cmd+J, K, C, V and 1 to 9 are the app's, and Cmd+Q, Cmd+[ and Cmd+]
 /// are reserved (Quit is the native menu item; the others do nothing here, so
 /// no program ever sees a Command chord).
 pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
@@ -31,6 +33,7 @@ pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
             Code::KeyJ => Route::ToggleFocus,
             Code::KeyK => Route::Palette,
             Code::KeyV => Route::Paste,
+            Code::KeyC => Route::Copy,
             c => tab_position(c).map_or(Route::Ignore, Route::Tab),
         };
     }
@@ -212,6 +215,14 @@ mod tests {
         assert_eq!(route(Code::KeyK, Modifiers::LOGO, None), Route::Palette);
         assert_eq!(route(Code::KeyV, Modifiers::LOGO, None), Route::Paste);
         assert_eq!(route(Code::KeyX, Modifiers::LOGO, Some("x")), Route::Ignore);
+    }
+
+    #[test]
+    fn cmd_c_copies_and_is_never_sent_while_ctrl_c_still_is() {
+        assert_eq!(route(Code::KeyC, Modifiers::LOGO, Some("c")), Route::Copy);
+        assert!(matches!(route(Code::KeyC, Modifiers::CTRL, None), Route::Send(_)));
+        let other = route(Code::KeyC, Modifiers::LOGO | Modifiers::SHIFT, None);
+        assert!(!matches!(other, Route::Send(_)), "no Command chord reaches the shell");
     }
 
     #[test]
