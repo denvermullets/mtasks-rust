@@ -56,6 +56,7 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Tab bar actions; handled in `app/tab_update.rs`.
     Tab(TabMessage),
+    WindowResized(f32),
     /// Terminal panel and keys; handled in `terminal/state.rs`.
     Terminal(crate::terminal::TerminalMessage),
     /// Open a Saved view (local id) on its team's board.
@@ -795,6 +796,10 @@ pub struct App {
     /// Open Tabs (ADR 0001). The active Tab's state is this struct's live
     /// fields; the others are in `parked_tabs`. None until a team exists.
     tab_set: Option<crate::tabs::TabSet>,
+    /// Window width and the tab bar's sideways scroll, for keeping the active
+    /// Tab in view. Neither is per Tab.
+    window_width: f32,
+    tab_bar_offset: f32,
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
     tab_projects: HashMap<String, (String, String)>,
@@ -3112,6 +3117,8 @@ impl App {
             collapsed_dashboard_groups: Default::default(),
             dashboard_sessions: Default::default(),
             tab_set: None,
+            window_width: 1100.0,
+            tab_bar_offset: 0.0,
             tab_projects: HashMap::new(),
             terminals: crate::terminal::TerminalState::new(),
             parked_tabs: Default::default(),
@@ -3219,6 +3226,7 @@ impl App {
         });
 
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
+        let resizes = iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width));
         let close_requests = iced::window::close_requests().map(|_| Message::QuitRequested);
 
         // While a Terminal has focus its key listener replaces the shortcuts.
@@ -3233,6 +3241,7 @@ impl App {
             activity,
             banner_clicks,
             close_requests,
+            resizes,
             self.terminals.subscription(modal_open),
         ];
         // Only listen for wheel events while a card is pending or showing.
@@ -3383,7 +3392,9 @@ impl App {
         sync_queue::take_local_write();
         let view_before = self.view.clone();
         let editing_before = self.editing_description();
+        let tabs_before = self.tab_position();
         let mut task = self.update_inner(message);
+        task = Task::batch([task, self.reveal_active_tab(tabs_before)]);
         // The one place that closes hover cards on a view change, modal open
         // or description editor toggle, whatever message caused it (keyboard
         // included).
@@ -5840,6 +5851,7 @@ impl App {
 
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
             Message::UserInput => return self.drive_sync(SchedEvent::Input),
+            Message::WindowResized(width) => self.window_width = width,
             Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
             Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
             Message::QuitRequested => return self.quit(),
@@ -6915,7 +6927,7 @@ impl App {
         );
 
         let main_content = column![]
-            .push(tab_bar::view(&self.tab_labels()))
+            .push(tab_bar::view(&self.tab_labels(), self.window_width))
             .push(header)
             .push(main_pane)
             .push_maybe(self.terminals.panel_view(crate::terminal::panel_team(
