@@ -67,6 +67,46 @@ impl App {
         Task::none()
     }
 
+    /// Close the Tabs whose team, project or Dashboard a pull removed. An
+    /// archived team still exists, so it keeps its Tab. Run after the mirror
+    /// is reloaded. When the active Tab goes, a neighbour (or the Home page)
+    /// takes over and its parked state is restored.
+    pub(super) fn close_removed_tabs(&mut self) -> Task<Message> {
+        let home = self.home_tab_key();
+        let conn = self.db();
+        let Some(set) = self.tab_set.as_mut() else {
+            return Task::none();
+        };
+        let (teams, dashboards) = (&self.teams, &self.dashboards);
+        let pruned = set.prune(
+            |key| match key {
+                TabKey::Team(id) => teams.iter().any(|t| t.id == *id),
+                TabKey::Project(id) => matches!(queries::get_project(&conn, id), Ok(Some(_))),
+                TabKey::Dashboard(id) => dashboards.iter().any(|d| d.id == *id),
+                TabKey::MyIssues | TabKey::Inbox => true,
+            },
+            // A removed team with running Terminals keeps its Tab (JRST-421).
+            |_| false,
+            &home,
+        );
+        if pruned.closed.is_empty() {
+            return Task::none();
+        }
+        let active = set.active().clone();
+        for key in &pruned.closed {
+            if let Some(draft) = self.parked_tabs.forget(key).and_then(|p| p.comment_draft) {
+                self.drop_drafts(&draft.owner_ids());
+            }
+        }
+        if !pruned.active_changed {
+            return Task::none();
+        }
+        // The removed Tab's live state goes with it; edits can't commit to a
+        // row that no longer exists.
+        self.discard_live_composers();
+        self.restore_tab(&active)
+    }
+
     /// The Tab the Home page opens, falling back to the first team's.
     fn home_tab_key(&self) -> TabKey {
         use crate::db::home_page::{launch_target, LaunchTarget};

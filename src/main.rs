@@ -27,7 +27,6 @@ mod scroll;
 mod search_match;
 mod sync;
 mod tab_state;
-#[allow(dead_code)] // close, from_parts and friends are wired by later Tab tickets
 mod tabs;
 mod terminal;
 mod theme;

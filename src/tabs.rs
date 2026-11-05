@@ -159,6 +159,43 @@ impl TabSet {
             false
         }
     }
+
+    /// Close every Tab whose subject a pull removed. `exists` says whether a
+    /// Tab's team, project or Dashboard is still in the local mirror: an
+    /// archived team still exists, so it keeps its Tab. `keep` is the escape
+    /// hatch for a removed team that still has running Terminals (JRST-421):
+    /// a Tab it returns true for stays open although `exists` is false.
+    /// Closing follows `close`: a neighbour takes over from the active Tab,
+    /// and the Home page's Tab replaces the last one.
+    pub fn prune(
+        &mut self,
+        exists: impl Fn(&TabKey) -> bool,
+        keep: impl Fn(&TabKey) -> bool,
+        home: &TabKey,
+    ) -> Pruned {
+        let before = self.active().clone();
+        let gone: Vec<TabKey> = self
+            .tabs
+            .iter()
+            .filter(|k| !exists(k) && !keep(k))
+            .cloned()
+            .collect();
+        for key in &gone {
+            if let Some(index) = self.tabs.iter().position(|k| k == key) {
+                self.close(index, home);
+            }
+        }
+        Pruned { active_changed: !gone.is_empty() && *self.active() != before, closed: gone }
+    }
+}
+
+/// What `TabSet::prune` closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pruned {
+    /// The Tabs that closed, in bar order.
+    pub closed: Vec<TabKey>,
+    /// The active Tab is now a different one: the caller restores it.
+    pub active_changed: bool,
 }
 
 #[cfg(test)]
@@ -344,6 +381,88 @@ mod tests {
         let a = tabs.tabs().iter().position(|k| *k == team("a")).unwrap();
         tabs.close(a, &TabKey::MyIssues);
         assert_eq!(tabs.new_issue_team(Some("first")), Some("first"));
+    }
+
+    fn exists_except(gone: &[TabKey]) -> impl Fn(&TabKey) -> bool + '_ {
+        move |k| !gone.contains(k)
+    }
+
+    fn never(_: &TabKey) -> bool {
+        false
+    }
+
+    #[test]
+    fn a_removed_team_project_or_dashboard_closes_its_tab() {
+        for gone in [team("b"), project("p"), TabKey::Dashboard("d".into())] {
+            let mut tabs = set(&[team("a"), gone.clone(), team("c")], 0);
+            let pruned = tabs.prune(exists_except(&[gone.clone()]), never, &home());
+            assert_eq!(tabs.tabs(), [team("a"), team("c")]);
+            assert_eq!(pruned.closed, [gone]);
+            assert!(!pruned.active_changed);
+            assert_eq!(tabs.active(), &team("a"));
+        }
+    }
+
+    #[test]
+    fn a_removed_parked_tab_closes_while_the_active_one_stays() {
+        let mut tabs = set(&[team("a"), project("p"), team("c")], 2);
+        let pruned = tabs.prune(exists_except(&[project("p")]), never, &home());
+        assert!(!pruned.active_changed);
+        assert_eq!(tabs.active(), &team("c"));
+    }
+
+    #[test]
+    fn removing_the_active_tab_focuses_a_neighbour_and_reports_the_change() {
+        let mut tabs = set(&[team("a"), team("b"), team("c")], 1);
+        let pruned = tabs.prune(exists_except(&[team("b")]), never, &home());
+        assert!(pruned.active_changed);
+        assert_eq!(tabs.active(), &team("c"));
+        let mut tabs = set(&[team("a"), team("b")], 1);
+        tabs.prune(exists_except(&[team("b")]), never, &home());
+        assert_eq!(tabs.active(), &team("a"));
+    }
+
+    #[test]
+    fn removing_a_tab_before_the_active_one_keeps_the_active_tab() {
+        let mut tabs = set(&[team("a"), team("b"), team("c")], 2);
+        let pruned = tabs.prune(exists_except(&[team("a")]), never, &home());
+        assert!(!pruned.active_changed);
+        assert_eq!(tabs.active(), &team("c"));
+    }
+
+    #[test]
+    fn removing_every_tab_leaves_the_home_page() {
+        let mut tabs = set(&[team("a"), project("p")], 0);
+        let pruned = tabs.prune(exists_except(&[team("a"), project("p")]), never, &home());
+        assert!(pruned.active_changed);
+        assert_eq!(tabs.tabs(), [home()]);
+        assert_eq!(tabs.active(), &home());
+    }
+
+    #[test]
+    fn an_archived_team_still_exists_so_it_keeps_its_tab() {
+        // Archiving doesn't remove the row, so `exists` stays true.
+        let mut tabs = set(&[team("a"), team("b")], 1);
+        let pruned = tabs.prune(|_| true, never, &home());
+        assert!(pruned.closed.is_empty());
+        assert!(!pruned.active_changed);
+        assert_eq!(tabs.tabs().len(), 2);
+    }
+
+    #[test]
+    fn a_tab_the_keep_rule_names_stays_although_its_team_is_gone() {
+        let mut tabs = set(&[team("a"), team("b")], 1);
+        let pruned = tabs.prune(exists_except(&[team("b")]), |k| *k == team("b"), &home());
+        assert!(pruned.closed.is_empty());
+        assert_eq!(tabs.tabs().len(), 2);
+        assert_eq!(tabs.active(), &team("b"));
+    }
+
+    #[test]
+    fn my_issues_and_inbox_are_untouched_by_a_prune() {
+        let mut tabs = set(&[TabKey::MyIssues, TabKey::Inbox, team("a")], 0);
+        tabs.prune(exists_except(&[team("a")]), never, &home());
+        assert_eq!(tabs.tabs(), [TabKey::MyIssues, TabKey::Inbox]);
     }
 
     #[test]

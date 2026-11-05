@@ -5926,6 +5926,8 @@ impl App {
                 }
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
                 self.reload_data();
+                // Tabs whose team, project or Dashboard the pull removed.
+                let removed_tabs = self.close_removed_tabs();
 
                 if auth_failed {
                     self.pause_for_auth();
@@ -5965,9 +5967,10 @@ impl App {
                         finish,
                         self.drive_sync(SchedEvent::AuthPaused(true)),
                         refetch,
+                        removed_tabs,
                     ]);
                 }
-                return Task::batch([finish, refetch]);
+                return Task::batch([finish, refetch, removed_tabs]);
             }
 
             Message::NotifPollCompleted(outcome) => {
