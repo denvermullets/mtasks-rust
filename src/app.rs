@@ -392,6 +392,10 @@ pub enum Message {
     UserInput,
     WindowFocused,
     WindowUnfocused,
+    /// The one entry to quitting: the window's close button and Cmd+Q both send it.
+    QuitRequested,
+    /// Once, at startup: send the native Quit menu item to `QuitRequested`.
+    RouteMenuQuit,
     SyncCompleted(FullSyncReport),
     /// A Notification poll finished.
     NotifPollCompleted(PollOutcome),
@@ -3062,7 +3066,18 @@ impl App {
             app.modal = Modal::Settings;
         }
 
+        // The menu exists once the event loop is up; reroute Cmd+Q then.
+        let task = Task::batch([task, Task::done(Message::RouteMenuQuit)]);
+
         (app, task)
+    }
+
+    /// The single quit path for the close button and Cmd+Q. Today it just
+    /// exits, as exit-on-close did. This is the hook for asking before quitting
+    /// (JRST-410): return `Task::none()` to stay open, and send `iced::exit()`
+    /// once the user confirms.
+    fn quit(&mut self) -> Task<Message> {
+        iced::exit()
     }
 
     pub fn title(&self) -> String {
@@ -3126,8 +3141,9 @@ impl App {
         });
 
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
+        let close_requests = iced::window::close_requests().map(|_| Message::QuitRequested);
 
-        let mut subs = vec![keys, activity, banner_clicks];
+        let mut subs = vec![keys, activity, banner_clicks, close_requests];
         // Only listen for wheel events while a card is pending or showing.
         if self.body_hover.is_active() {
             subs.push(scrolls);
@@ -5668,6 +5684,8 @@ impl App {
             Message::UserInput => return self.drive_sync(SchedEvent::Input),
             Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
             Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
+            Message::QuitRequested => return self.quit(),
+            Message::RouteMenuQuit => crate::quit::route_menu_quit_to_close(),
             Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
             Message::SyncCompleted(report) => {
