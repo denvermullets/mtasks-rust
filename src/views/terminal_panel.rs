@@ -16,7 +16,7 @@ use iced::widget::{button, column, container, row, text, text_input, Space};
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
-use crate::terminal::panel::{PaneNotice, STRIP_HEIGHT};
+use crate::terminal::panel::{Layout, PaneNotice, PANE_GAP, STRIP_HEIGHT};
 use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalId, TerminalMessage};
 use crate::theme as t;
 
@@ -75,11 +75,18 @@ pub struct Pane {
     cell: (f32, f32),
     font: TermFont,
     focused: bool,
+    /// The panel slot this pane draws, sent with its focus click.
+    slot: usize,
 }
 
 impl Pane {
     pub fn new() -> Self {
+        Self::for_slot(0)
+    }
+
+    pub fn for_slot(slot: usize) -> Self {
         Pane {
+            slot,
             frame: Arc::new(Frame::default()),
             caches: Vec::new(),
             last: Vec::new(),
@@ -167,7 +174,7 @@ impl canvas::Program<Message> for Pane {
             if let canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
                 return (
                     canvas::event::Status::Captured,
-                    Some(Message::Terminal(TerminalMessage::Focus)),
+                    Some(Message::Terminal(TerminalMessage::Focus(self.slot))),
                 );
             }
         }
@@ -340,17 +347,31 @@ pub fn measure_cell(font: TermFont) -> (f32, f32) {
 
 /// Everything the panel view needs, as plain borrowed data.
 pub struct PanelView<'a> {
-    /// The pane to draw, or `None` for a team with no Terminal yet.
-    pub pane: Option<&'a Pane>,
+    pub layout: Layout,
+    /// One entry per pane of the layout, in slot order.
+    pub slots: Vec<PaneView<'a>>,
     /// The team's Terminals, in strip order.
     pub items: Vec<StripItem>,
     /// A line for the strip, such as an exited notice or a spawn error.
     pub note: Option<String>,
-    /// The Terminal whose shell exited, to say so over its last screen.
-    pub notice: Option<(TerminalId, PaneNotice)>,
     /// Name of the team's starting folder, if one is set.
     pub dir_label: Option<String>,
     pub height: f32,
+}
+
+/// One pane of the panel.
+pub struct PaneView<'a> {
+    pub slot: usize,
+    /// The canvas to draw, or `None` for an empty pane.
+    pub pane: Option<&'a Pane>,
+    /// The pane that takes keys.
+    pub focused: bool,
+    /// Under 20x4 cells: say so instead of drawing.
+    pub too_small: bool,
+    /// For an empty pane: the team's Terminals no pane shows.
+    pub offer: Vec<(TerminalId, String)>,
+    /// The Terminal whose shell exited, to say so over its last screen.
+    pub notice: Option<(TerminalId, PaneNotice)>,
 }
 
 /// One Terminal in the strip.
@@ -481,6 +502,55 @@ fn exited_bar<'a>(id: TerminalId, kind: PaneNotice) -> Element<'a, Message> {
     container(bar).align_bottom(Length::Fill).width(Length::Fill).height(Length::Fill).into()
 }
 
+/// One pane: its canvas (with the exited bar over it), or the picker for an
+/// empty pane. A focused pane in a multi-pane layout has an accent outline.
+fn pane_body<'a>(pv: PaneView<'a>) -> Element<'a, Message> {
+    let slot = pv.slot;
+    let inner: Element<'a, Message> = match pv.pane {
+        Some(_) if pv.too_small => container(text("Too small").size(12).color(t::text_muted()))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into(),
+        Some(pane) => {
+            let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
+            match pv.notice {
+                Some((id, kind)) => iced::widget::stack![canvas, exited_bar(id, kind)].into(),
+                None => canvas.into(),
+            }
+        }
+        None => {
+            let mut picks = column![].spacing(6).align_x(iced::Alignment::Center);
+            for (id, name) in pv.offer {
+                picks = picks.push(
+                    button(text(name).size(13))
+                        .padding([6, 14])
+                        .on_press(Message::Terminal(TerminalMessage::Pick(slot, id)))
+                        .style(button::secondary),
+                );
+            }
+            picks = picks.push(
+                button(text("New Terminal").size(13))
+                    .padding([6, 14])
+                    .on_press(Message::Terminal(TerminalMessage::NewIn(slot))),
+            );
+            container(picks).center_x(Length::Fill).center_y(Length::Fill).into()
+        }
+    };
+    let focused = pv.focused;
+    container(inner)
+        .width(Length::FillPortion(1))
+        .height(Length::Fill)
+        .style(move |_theme: &Theme| container::Style {
+            border: iced::Border {
+                color: if focused { t::accent() } else { iced::Color::TRANSPARENT },
+                width: if focused { 1.0 } else { 0.0 },
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
     let mut strip = row![].spacing(6).align_y(iced::Alignment::Center);
     for item in p.items {
@@ -502,6 +572,20 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             .on_press(Message::Terminal(TerminalMessage::New))
             .style(button::text),
     );
+    for (layout, label) in [(Layout::Single, "1"), (Layout::Columns, "1\u{00d7}2"), (Layout::Grid, "2\u{00d7}2")] {
+        let on = layout == p.layout;
+        strip = strip.push(
+            button(text(label).size(11))
+                .padding([2, 6])
+                .on_press(Message::Terminal(TerminalMessage::SetLayout(layout)))
+                .style(move |_theme: &Theme, _status| button::Style {
+                    background: on.then(|| iced::Background::Color(t::bg_card_focused())),
+                    text_color: if on { t::text_primary() } else { t::text_secondary() },
+                    border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                    ..Default::default()
+                }),
+        );
+    }
     if let Some(note) = p.note {
         strip = strip.push(text(note).size(12).color(t::text_muted()));
     }
@@ -536,23 +620,22 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         .on_press(Message::Terminal(TerminalMessage::DragStart))
         .interaction(mouse::Interaction::ResizingVertically);
 
-    let body: Element<'a, Message> = match p.pane {
-        Some(pane) => {
-            let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
-            match p.notice {
-                Some((id, kind)) => iced::widget::stack![canvas, exited_bar(id, kind)].into(),
-                None => canvas.into(),
-            }
+    let (cols, _) = p.layout.grid();
+    let mut slots = p.slots.into_iter();
+    let mut grid = column![].spacing(PANE_GAP).width(Length::Fill).height(Length::Fill);
+    loop {
+        let mut line = row![].spacing(PANE_GAP).width(Length::Fill).height(Length::FillPortion(1));
+        let mut any = false;
+        for pv in slots.by_ref().take(cols) {
+            line = line.push(pane_body(pv));
+            any = true;
         }
-        None => container(
-            button(text("New Terminal").size(13))
-                .padding([6, 14])
-                .on_press(Message::Terminal(TerminalMessage::New)),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into(),
-    };
+        if !any {
+            break;
+        }
+        grid = grid.push(line);
+    }
+    let body: Element<'a, Message> = grid.into();
     column![strip, body]
         .width(Length::Fill)
         .height(Length::Fixed(p.height))
