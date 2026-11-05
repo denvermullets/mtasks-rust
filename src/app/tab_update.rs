@@ -5,7 +5,8 @@
 use iced::Task;
 
 use super::{App, Message, View};
-use crate::tab_state::{self, ParkedTab, Switch};
+use crate::db::queries;
+use crate::tab_state::{self, CommentDraft, ParkedTab, Switch};
 use crate::tabs::{TabKey, TabSet};
 
 #[derive(Debug, Clone)]
@@ -45,7 +46,13 @@ impl App {
         let Some(closed) = tab_state::close_index(set, index, &home) else {
             return;
         };
-        self.parked_tabs.forget(&closed.closed);
+        // The closed Tab's comment draft goes with it, staged files included.
+        if let Some(draft) = self.parked_tabs.forget(&closed.closed).and_then(|p| p.comment_draft) {
+            self.drop_drafts(&draft.owner_ids());
+        }
+        if closed.closed == from {
+            self.discard_live_composers();
+        }
         if let Some(to) = closed.to {
             // The closed Tab is gone, so its live state is dropped, not
             // stashed. Edits still commit, as on any switch.
@@ -116,10 +123,103 @@ impl App {
 
     /// Park the live per-Tab fields under `key`. Add new per-Tab fields here.
     pub(super) fn stash_active_tab(&mut self, key: TabKey) {
+        let draft = self.take_comment_draft();
         self.parked_tabs.save(
             key,
-            ParkedTab::new(self.view.clone(), self.selected_team_id.clone()),
+            ParkedTab::new(self.view.clone(), self.selected_team_id.clone())
+                .with_comment_draft(self.view.clone(), draft),
         );
+    }
+
+    /// Lift the open detail's comment draft out of the live state, dropping the
+    /// detail so its staged files aren't cancelled with it. `None` (and nothing
+    /// touched) when there's no draft worth parking.
+    fn take_comment_draft(&mut self) -> Option<CommentDraft> {
+        let draft = match &self.view {
+            View::IssueDetail(id) => self.issue_detail.as_ref().filter(|d| d.issue_id == *id).map(|d| {
+                (&d.comment_composer, d.reply_to.clone(), &d.reply_composer, &d.composer_files)
+            }),
+            View::ProjectDetail(id) => {
+                self.project_detail.as_ref().filter(|d| d.project_id == *id).map(|d| {
+                    (&d.comment_composer, d.reply_to.clone(), &d.reply_composer, &d.composer_files)
+                })
+            }
+            _ => None,
+        }
+        .map(|(comment, reply_to, reply, files)| CommentDraft {
+            owner: self.view.clone(),
+            comment: comment.text().trim_end_matches('\n').to_string(),
+            reply_to,
+            reply: reply.text().trim_end_matches('\n').to_string(),
+            comment_id: files.comment_id.clone(),
+            reply_id: files.reply_id.clone(),
+            files: files.files.clone(),
+        })
+        .filter(CommentDraft::has_content)?;
+        self.issue_detail = None;
+        self.project_detail = None;
+        Some(draft)
+    }
+
+    /// Cancel the live detail's unsent staged files and drop it: used when its
+    /// Tab closes, so nothing is parked.
+    fn discard_live_composers(&mut self) {
+        let mut ids = Vec::new();
+        if let Some(d) = self.issue_detail.take() {
+            ids.extend([d.composer_files.comment_id, d.composer_files.reply_id]);
+        }
+        if let Some(d) = self.project_detail.take() {
+            ids.extend([d.composer_files.comment_id, d.composer_files.reply_id]);
+        }
+        if !ids.is_empty() {
+            self.drop_drafts(&ids);
+        }
+    }
+
+    /// Rebuild the detail page a parked draft was typed on and put the draft
+    /// back. When the issue or project is gone the draft is discarded and the
+    /// Tab falls back to its Board.
+    fn restore_comment_draft(&mut self, draft: CommentDraft) {
+        use iced::widget::text_editor::Content;
+        let conn = self.db();
+        let files = crate::views::issue_detail::ComposerFiles {
+            comment_id: draft.comment_id.clone(),
+            files: draft.files.clone(),
+            reply_id: draft.reply_id.clone(),
+        };
+        match draft.owner.clone() {
+            View::IssueDetail(id) => match queries::get_issue(&conn, &id) {
+                Ok(Some(issue)) => {
+                    let mut d = crate::views::issue_detail::IssueDetailState::from_issue(&issue);
+                    d.comment_composer = Content::with_text(&draft.comment);
+                    d.reply_to = draft.reply_to;
+                    d.reply_composer = Content::with_text(&draft.reply);
+                    d.composer_files = files;
+                    self.issue_detail = Some(d);
+                    self.load_detail_dependencies(&conn);
+                    self.reload_detail_origin(&conn);
+                    return;
+                }
+                _ => {}
+            },
+            View::ProjectDetail(id) => match queries::get_project(&conn, &id) {
+                Ok(Some(project)) => {
+                    let mut d = crate::views::project_detail::ProjectDetailState::from_project(&project);
+                    d.comment_composer = Content::with_text(&draft.comment);
+                    d.reply_to = draft.reply_to;
+                    d.reply_composer = Content::with_text(&draft.reply);
+                    d.composer_files = files;
+                    self.project_detail = Some(d);
+                    self.view = View::ProjectDetail(id);
+                    self.load_detail_dependencies(&conn);
+                    return;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        self.view = View::Board;
+        self.drop_drafts(&draft.owner_ids());
     }
 
     /// Make `key`'s Tab live: apply its parked fields (or defaults on first
@@ -128,14 +228,15 @@ impl App {
     /// per-Tab fields here.
     pub(super) fn restore_tab(&mut self, key: &TabKey) {
         let parked = self.parked_tabs.take(key);
-        let (view, team) = match parked {
-            Some(p) => (p.view, p.selected_team_id),
+        let (view, team, draft) = match parked {
+            Some(p) => (p.view, p.selected_team_id, p.comment_draft),
             None => (
                 View::Board,
                 match key {
                     TabKey::Team(id) => Some(id.clone()),
                     _ => self.selected_team_id.clone(),
                 },
+                None,
             ),
         };
         self.open_view = None;
@@ -157,6 +258,9 @@ impl App {
         if self.view == View::RecurringIssues {
             let conn = self.db();
             self.reload_recurring(&conn);
+        }
+        if let Some(draft) = draft {
+            self.restore_comment_draft(draft);
         }
         self.restore_dashboard_session();
     }

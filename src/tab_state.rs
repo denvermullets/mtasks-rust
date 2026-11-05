@@ -9,13 +9,47 @@
 use std::collections::HashMap;
 
 use crate::app::View;
+use crate::db::attachments::Attachment;
 use crate::tabs::{TabKey, TabSet};
+
+/// The comment or reply being typed on an issue or project detail, and its
+/// staged files. Parked with the Tab; closing the Tab discards it, and it isn't
+/// restored on relaunch (the spec's "comment draft" rule).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentDraft {
+    /// The detail page the draft belongs to.
+    pub owner: View,
+    pub comment: String,
+    pub reply_to: Option<String>,
+    pub reply: String,
+    /// Ids the comment and the open reply will be inserted with; they own the
+    /// staged files and pasted images.
+    pub comment_id: String,
+    pub reply_id: String,
+    pub files: Vec<Attachment>,
+}
+
+impl CommentDraft {
+    /// Whether there's anything worth parking.
+    pub fn has_content(&self) -> bool {
+        !self.comment.is_empty()
+            || !self.reply.is_empty()
+            || self.reply_to.is_some()
+            || !self.files.is_empty()
+    }
+
+    /// The ids whose unsent staged files go when the draft is discarded.
+    pub fn owner_ids(&self) -> [String; 2] {
+        [self.comment_id.clone(), self.reply_id.clone()]
+    }
+}
 
 /// Everything remembered about one parked Tab.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParkedTab {
     pub view: View,
     pub selected_team_id: Option<String>,
+    pub comment_draft: Option<CommentDraft>,
 }
 
 impl ParkedTab {
@@ -28,7 +62,18 @@ impl ParkedTab {
             View::IssueDetail(_) | View::ProjectDetail(_) => View::Board,
             other => other,
         };
-        Self { view, selected_team_id }
+        Self { view, selected_team_id, comment_draft: None }
+    }
+
+    /// Park a comment draft with the Tab. Its detail page parks too (`live_view`
+    /// is the view the draft was typed on), so the draft has somewhere to
+    /// return to. An empty draft isn't parked.
+    pub fn with_comment_draft(mut self, live_view: View, draft: Option<CommentDraft>) -> Self {
+        if let Some(draft) = draft.filter(|d| d.has_content() && d.owner == live_view) {
+            self.view = live_view;
+            self.comment_draft = Some(draft);
+        }
+        self
     }
 }
 
@@ -46,9 +91,10 @@ impl Parked {
         self.0.remove(key)
     }
 
-    /// Forget a closed Tab's state.
-    pub fn forget(&mut self, key: &TabKey) {
-        self.0.remove(key);
+    /// Forget a closed Tab's state. Returns it so the caller can discard what
+    /// it owned, such as a comment draft's staged files.
+    pub fn forget(&mut self, key: &TabKey) -> Option<ParkedTab> {
+        self.0.remove(key)
     }
 }
 
@@ -223,5 +269,70 @@ mod tests {
             focus_team(&mut set, "b"),
             Switch::Moved { from: team("a"), to: team("b") }
         );
+    }
+
+    fn draft(owner: View, comment: &str) -> CommentDraft {
+        CommentDraft {
+            owner,
+            comment: comment.into(),
+            reply_to: None,
+            reply: String::new(),
+            comment_id: "c".into(),
+            reply_id: "r".into(),
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_comment_draft_parks_with_its_detail_page() {
+        let view = View::IssueDetail("i".into());
+        let tab = ParkedTab::new(view.clone(), Some("a".into()))
+            .with_comment_draft(view.clone(), Some(draft(view.clone(), "half a thought")));
+        assert_eq!(tab.view, view);
+        assert_eq!(tab.comment_draft.unwrap().comment, "half a thought");
+    }
+
+    #[test]
+    fn an_empty_draft_is_not_parked() {
+        let view = View::IssueDetail("i".into());
+        let tab = ParkedTab::new(view.clone(), None)
+            .with_comment_draft(view.clone(), Some(draft(view, "")));
+        assert_eq!(tab.view, View::Board);
+        assert!(tab.comment_draft.is_none());
+    }
+
+    #[test]
+    fn staged_files_alone_or_an_open_reply_make_a_draft() {
+        let view = View::ProjectDetail("p".into());
+        let mut d = draft(view.clone(), "");
+        d.reply_to = Some("x".into());
+        assert!(d.has_content());
+        let mut d = draft(view, "");
+        d.reply = "re".into();
+        assert!(d.has_content());
+    }
+
+    #[test]
+    fn a_draft_for_another_page_is_not_parked() {
+        let tab = ParkedTab::new(View::Board, None).with_comment_draft(
+            View::Board,
+            Some(draft(View::IssueDetail("i".into()), "x")),
+        );
+        assert!(tab.comment_draft.is_none());
+    }
+
+    #[test]
+    fn drafts_stay_in_their_own_tab_and_closing_hands_back_its_ids() {
+        let view = View::IssueDetail("i".into());
+        let mut parked = Parked::default();
+        parked.save(
+            team("a"),
+            ParkedTab::new(view.clone(), None).with_comment_draft(view.clone(), Some(draft(view, "x"))),
+        );
+        parked.save(team("b"), ParkedTab::new(View::Board, None));
+        assert!(parked.take(&team("b")).unwrap().comment_draft.is_none());
+        let gone = parked.forget(&team("a")).unwrap().comment_draft.unwrap();
+        assert_eq!(gone.owner_ids(), ["c".to_string(), "r".to_string()]);
+        assert!(parked.take(&team("a")).is_none());
     }
 }
