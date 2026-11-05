@@ -25,6 +25,51 @@ impl TabKey {
     }
 }
 
+/// The page a relaunched Tab returns to. Only a team-level page or the Tab's
+/// open Saved view comes back; anything else is the Tab's root. Scroll
+/// position, View search, Modified view changes, comment drafts, focus and
+/// selection are never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Page {
+    /// The Tab's root: a team's Board, a project, or a cross-team page.
+    Root,
+    Board,
+    Projects,
+    Roadmap,
+    Recurring,
+    /// A Saved view, by local id.
+    SavedView(String),
+}
+
+impl Page {
+    /// The stored text; `None` for the root.
+    pub fn encode(&self) -> Option<String> {
+        match self {
+            Page::Root => None,
+            Page::Board => Some("board".into()),
+            Page::Projects => Some("projects".into()),
+            Page::Roadmap => Some("roadmap".into()),
+            Page::Recurring => Some("recurring".into()),
+            Page::SavedView(id) => Some(format!("view:{id}")),
+        }
+    }
+
+    /// Read stored text back; anything unknown is the root.
+    pub fn decode(text: Option<&str>) -> Page {
+        match text {
+            Some("board") => Page::Board,
+            Some("projects") => Page::Projects,
+            Some("roadmap") => Page::Roadmap,
+            Some("recurring") => Page::Recurring,
+            Some(t) => t
+                .strip_prefix("view:")
+                .filter(|id| !id.is_empty())
+                .map_or(Page::Root, |id| Page::SavedView(id.to_string())),
+            None => Page::Root,
+        }
+    }
+}
+
 /// The open Tabs in display order, and which one is active. There is always
 /// at least one Tab and the active index always points at one.
 #[derive(Debug, Clone, PartialEq, Eq)]

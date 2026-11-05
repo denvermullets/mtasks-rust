@@ -796,7 +796,10 @@ pub struct App {
     /// fields; the others are in `parked_tabs`. None until a team exists.
     tab_set: Option<crate::tabs::TabSet>,
     /// The Tabs last written to the local database, so a change is saved once.
-    saved_tabs: Option<crate::tabs::TabSet>,
+    saved_tabs: Option<(crate::tabs::TabSet, Vec<crate::tabs::Page>)>,
+    /// Pages restored at launch for Tabs not focused yet; a Tab takes its
+    /// entry the first time it becomes live.
+    restored_pages: HashMap<crate::tabs::TabKey, crate::tabs::Page>,
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
     tab_projects: HashMap<String, (String, String)>,
@@ -3115,6 +3118,7 @@ impl App {
             dashboard_sessions: Default::default(),
             tab_set: None,
             saved_tabs: None,
+            restored_pages: HashMap::new(),
             tab_projects: HashMap::new(),
             terminals: crate::terminal::TerminalState::new(),
             parked_tabs: Default::default(),
