@@ -104,7 +104,16 @@ pub fn view<'a>(tabs: &[(String, bool)], window_width: f32) -> Element<'a, Messa
         ))
         .on_scroll(|v| Message::Tab(TabMessage::BarScrolled(v.absolute_offset().x)))
         .width(Length::Fill);
-    container(scroller)
+    let plus = button(text("+").size(16).color(t::text_muted()))
+        .padding([3, 12])
+        .on_press(Message::OpenCommandPalette)
+        .style(|_theme: &Theme, status| button::Style {
+            background: matches!(status, button::Status::Hovered)
+                .then(|| iced::Background::Color(t::bg_card_focused())),
+            border: Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        });
+    container(row![scroller, plus].align_y(iced::Alignment::Center))
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::bg_menu())),
@@ -139,6 +148,17 @@ mod tests {
         let w = tab_width(20, viewport);
         assert_eq!(w, MIN_TAB_WIDTH);
         assert!(content_width(20, w) > viewport);
+    }
+
+    #[test]
+    fn plus_button_has_room_beside_the_tabs_at_every_width() {
+        for window in [800.0, 1100.0, 1920.0] {
+            let used = crate::terminal::panel::SIDEBAR_WIDTH
+                + 2.0 * BAR_PADDING
+                + tab_viewport(window)
+                + PLUS_WIDTH;
+            assert!(used <= window + 0.01, "{used} > {window}");
+        }
     }
 
     #[test]
