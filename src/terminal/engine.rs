@@ -35,6 +35,8 @@ pub(super) enum Cmd {
     Shutdown,
     #[cfg(test)]
     Panic,
+    #[cfg(test)]
+    ScrollTop,
 }
 
 /// What the owner thread shares with the API side.
@@ -496,6 +498,10 @@ fn owner(
                 Cmd::Shutdown => return,
                 #[cfg(test)]
                 Cmd::Panic => panic!("test: owner thread panic"),
+                #[cfg(test)]
+                Cmd::ScrollTop => {
+                    term.scroll_viewport(ScrollViewport::Top);
+                }
                 Cmd::Output(b) => {
                     term.vt_write(&b);
                     inflight.fetch_sub(b.len() as u64, Relaxed);
