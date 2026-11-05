@@ -635,8 +635,6 @@ impl App {
     /// their offset across Tabs, so this runs on every switch, back to 0 for a
     /// view the Tab never scrolled.
     fn restore_scroll(&self) -> Task<Message> {
-        use crate::views::{board, dashboard, inbox, issue_list, projects, recurring_issues, roadmap};
-        use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
         let (list_mode, lanes) = match self.view {
             View::Board | View::MyIssues => (
                 self.board_display().view_mode == crate::display::ViewMode::List,
@@ -647,23 +645,7 @@ impl App {
         let keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
         let tasks = tab_state::restore_offsets(&keys, &self.scroll_state)
             .into_iter()
-            .map(|(k, offset)| {
-                let y = AbsoluteOffset { x: 0.0, y: offset };
-                match k {
-                    board::BOARD_SCROLL_KEY => {
-                        scroll_to(board::board_scroll_id(), AbsoluteOffset { x: offset, y: 0.0 })
-                    }
-                    inbox::SCROLL_KEY => scroll_to(inbox::scroll_id(), y),
-                    projects::SCROLL_KEY => scroll_to(projects::scroll_id(), y),
-                    roadmap::SCROLL_KEY => scroll_to(roadmap::scroll_id(), y),
-                    recurring_issues::SCROLL_KEY => scroll_to(recurring_issues::scroll_id(), y),
-                    issue_list::SCROLL_KEY if matches!(self.view, View::Dashboard(_)) => {
-                        scroll_to(dashboard::scroll_id(), y)
-                    }
-                    issue_list::SCROLL_KEY => scroll_to(issue_list::scroll_id(), y),
-                    lane => scroll_to(board::lane_scroll_id(lane), y),
-                }
-            });
+            .map(|(k, offset)| k.scroll_to(offset));
         Task::batch(tasks)
     }
 

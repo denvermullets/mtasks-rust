@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use iced::keyboard;
-use iced::widget::{column, container, row, scrollable, text_input};
+use iced::widget::{column, container, row, text_input};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
@@ -20,7 +20,7 @@ use crate::display::{
 };
 use crate::fonts;
 use crate::keys;
-use crate::scroll;
+use crate::scroll::{self, ScrollKey};
 use crate::sync::engine::{FullSyncReport, SyncEngine, SyncErrorKind};
 use crate::sync::notif_poll::{self, PollOutcome, PollReport};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Run, Scheduler};
@@ -361,7 +361,7 @@ pub enum Message {
     /// List mode `c`: collapse/expand the focused section.
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
-    Scrolled(usize, f32, f32),
+    Scrolled(ScrollKey, f32, f32),
     SetGroupBy(GroupBy),
     SetSubGroup(SubGroup),
     SetOrderBy(OrderBy),
@@ -900,9 +900,9 @@ pub struct App {
     focused_issue: usize,
     /// List-mode sections (by title) whose rows are hidden.
     collapsed_sections: HashSet<String>,
-    /// Last reported (offset, viewport height) per scrollable: board lane
-    /// index, or `issue_list::SCROLL_KEY`. Drives scroll-to-focus.
-    scroll_state: HashMap<usize, (f32, f32)>,
+    /// Last reported (offset, viewport size) per scrollable. Drives
+    /// scroll-to-focus.
+    scroll_state: HashMap<ScrollKey, (f32, f32)>,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
     /// Buffered edit state while the right pane shows `View::IssueDetail`.
@@ -2030,7 +2030,7 @@ impl App {
         }
         let (offset, viewport) = self
             .scroll_state
-            .get(&board::BOARD_SCROLL_KEY)
+            .get(&ScrollKey::Board)
             .copied()
             .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
         let left = scroll::board_column_left(self.focused_lane);
@@ -2038,12 +2038,8 @@ impl App {
         if (new - offset).abs() < 0.5 {
             return Task::none();
         }
-        self.scroll_state
-            .insert(board::BOARD_SCROLL_KEY, (new, viewport));
-        scrollable::scroll_to(
-            board::board_scroll_id(),
-            scrollable::AbsoluteOffset { x: new, y: 0.0 },
-        )
+        self.scroll_state.insert(ScrollKey::Board, (new, viewport));
+        ScrollKey::Board.scroll_to(new)
     }
 
     /// Scroll the board lane / list so the focused card or row is fully in
@@ -2069,7 +2065,7 @@ impl App {
             }
             let (top, height) =
                 crate::views::dashboard::focused_span(&groups, self.focused_lane, self.focused_issue);
-            let key = issue_list::SCROLL_KEY;
+            let key = ScrollKey::Dashboard;
             let (offset, viewport) = self
                 .scroll_state
                 .get(&key)
@@ -2080,16 +2076,13 @@ impl App {
                 return Task::none();
             }
             self.scroll_state.insert(key, (new, viewport));
-            return scrollable::scroll_to(
-                crate::views::dashboard::scroll_id(),
-                scrollable::AbsoluteOffset { x: 0.0, y: new },
-            );
+            return key.scroll_to(new);
         }
         if !matches!(self.view, View::Board | View::MyIssues) {
             return Task::none();
         }
         let list = self.board_display().view_mode == ViewMode::List;
-        let (key, id, top, height) = {
+        let (key, top, height) = {
             let columns = self.board_columns();
             let Some(col) = columns.get(self.focused_lane) else {
                 return Task::none();
@@ -2107,7 +2100,7 @@ impl App {
                     self.focused_lane,
                     self.focused_issue,
                 );
-                (issue_list::SCROLL_KEY, issue_list::scroll_id(), top, h)
+                (ScrollKey::IssueList, top, h)
             } else {
                 let data = board::CardData {
                     teams: &self.teams,
@@ -2118,12 +2111,7 @@ impl App {
                     display: self.board_display(),
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
-                (
-                    self.focused_lane,
-                    board::lane_scroll_id(self.focused_lane),
-                    top,
-                    h,
-                )
+                (ScrollKey::Lane(self.focused_lane), top, h)
             }
         };
         let (offset, viewport) = self
@@ -2136,7 +2124,7 @@ impl App {
             return Task::none();
         }
         self.scroll_state.insert(key, (new, viewport));
-        scrollable::scroll_to(id, scrollable::AbsoluteOffset { x: 0.0, y: new })
+        key.scroll_to(new)
     }
 
     /// Keep the selected Inbox row in view. Rows are fixed-height and sit in
@@ -2147,18 +2135,15 @@ impl App {
         let top = self.inbox.selected as f32 * inbox_view::ROW_HEIGHT;
         let (offset, viewport) = self
             .scroll_state
-            .get(&inbox_view::SCROLL_KEY)
+            .get(&ScrollKey::Inbox)
             .copied()
             .unwrap_or((0.0, scroll::FALLBACK_VIEWPORT_H));
         let new = scroll::offset_to_reveal(top, inbox_view::ROW_HEIGHT, offset, viewport);
         if (new - offset).abs() < 0.5 {
             return Task::none();
         }
-        self.scroll_state.insert(inbox_view::SCROLL_KEY, (new, viewport));
-        scrollable::scroll_to(
-            inbox_view::scroll_id(),
-            scrollable::AbsoluteOffset { x: 0.0, y: new },
-        )
+        self.scroll_state.insert(ScrollKey::Inbox, (new, viewport));
+        ScrollKey::Inbox.scroll_to(new)
     }
 
     fn focused_issue(&self) -> Option<&Issue> {
