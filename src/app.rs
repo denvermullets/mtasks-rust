@@ -3186,6 +3186,15 @@ impl App {
                     Ok(stored) => terminals.restore_records(stored),
                     Err(e) => eprintln!("could not load Terminal records: {e}"),
                 }
+                match connection::open().and_then(|c| crate::db::panel_states::load(&c)) {
+                    Ok(rows) => {
+                        if let Some((_, panel)) = rows.into_iter().find(|(tab, _)| tab.is_none()) {
+                            terminals.restore_panel(&panel);
+                            terminals.mark_panel_saved(panel);
+                        }
+                    }
+                    Err(e) => eprintln!("could not load panel state: {e}"),
+                }
                 terminals
             },
             parked_tabs: Default::default(),
@@ -3513,6 +3522,7 @@ impl App {
         self.discard_dead_composers();
         self.save_tabs();
         self.save_terminal_records();
+        self.save_panel();
         self.terminals
             .sync(crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()));
         let task = Task::batch([task, self.request_visible_images()]);
@@ -3520,6 +3530,16 @@ impl App {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
         task
+    }
+
+    /// Store the panel when it changed since the last message. Local only.
+    fn save_panel(&mut self) {
+        let Some(panel) = self.terminals.take_panel_change() else {
+            return;
+        };
+        if let Err(e) = crate::db::panel_states::save(&self.db(), &[(None, panel)]) {
+            eprintln!("could not save panel state: {e}");
+        }
     }
 
     /// Store what changed in the Terminal strips since the last message.

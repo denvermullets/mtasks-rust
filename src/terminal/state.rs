@@ -3,8 +3,8 @@
 //! panel, the canvas caches) is inside.
 //!
 //! Terminals are outside every Tab (ADR 0001 doesn't apply to them). The
-//! panel state is per Tab; until Tabs wire it (JRST-417) one `PanelState`
-//! stands in as the implicit Tab.
+//! panel state is per Tab: `panel` is the active Tab's, and the app parks and
+//! restores it on a switch with `stored_panel` and `restore_panel`.
 //!
 //! The app calls `sync` after every message. It reconciles what the engine is
 //! told (visible, size, theme) with what is on screen, sending only changes.
@@ -20,6 +20,7 @@ use iced::{event, window, Element, Size, Subscription, Task};
 use super::input::{self, Route};
 use super::panel::{self, Layout, PanelState, Toggle, MAX_PANES};
 use super::roster::Roster;
+use crate::db::panel_states::StoredPanel;
 use super::{active_term_theme, Closing, SpawnConfig, TerminalId, Terminals};
 use crate::app::Message;
 use crate::theme as t;
@@ -103,6 +104,9 @@ pub struct TerminalState {
     /// Each team's starting directory; unset means home.
     team_dirs: HashMap<String, std::path::PathBuf>,
     panel: PanelState,
+    /// The panel as last handed out by `take_panel_change`, so only changes
+    /// are written.
+    saved_panel: Option<StoredPanel>,
     focused: bool,
     window: Size,
     cell: Option<(f32, f32)>,
@@ -135,6 +139,7 @@ impl TerminalState {
             shutting_down: false,
             team_dirs: HashMap::new(),
             panel: PanelState::default(),
+            saved_panel: None,
             focused: false,
             window: Size::new(1100.0, 700.0),
             cell: None,
@@ -153,6 +158,40 @@ impl TerminalState {
     /// each starts when a pane first shows it.
     pub fn restore_records(&mut self, stored: Vec<crate::db::terminal_records::Stored>) {
         self.roster.restore(stored);
+    }
+
+    /// The live panel as stored, panes by record key.
+    pub fn stored_panel(&self) -> StoredPanel {
+        self.panel.to_stored(|id| self.roster.key_of(id))
+    }
+
+    /// Make `stored` the live panel: a Tab was focused, or the app launched.
+    /// A pane whose Terminal is gone comes back empty. The size each Terminal
+    /// was last sent is kept: `sync` resizes any that the new panel shows at
+    /// another size.
+    pub fn restore_panel(&mut self, stored: &StoredPanel) {
+        self.panel = PanelState::from_stored(stored, |key| self.roster.id_of_key(key));
+        self.renaming = None;
+        self.drag = None;
+    }
+
+    /// Mark `stored` as already on disk, so a launch doesn't rewrite it.
+    pub fn mark_panel_saved(&mut self, stored: StoredPanel) {
+        self.saved_panel = Some(stored);
+    }
+
+    /// The panel if it changed since the last call, for the app to store.
+    /// Nothing while the strip is being dragged: it is stored on release.
+    pub fn take_panel_change(&mut self) -> Option<StoredPanel> {
+        if self.drag.is_some() {
+            return None;
+        }
+        let now = self.stored_panel();
+        if self.saved_panel.as_ref() == Some(&now) {
+            return None;
+        }
+        self.saved_panel = Some(now.clone());
+        Some(now)
     }
 
     pub fn update(&mut self, message: TerminalMessage, team: Option<&str>) -> Task<Message> {
@@ -778,5 +817,48 @@ pub fn panel_team<'a>(
     match view {
         View::MyIssues | View::Inbox | View::Dashboard(_) => None,
         _ => selected_team_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::terminal_records::Stored;
+
+    fn record(key: &str, team: &str) -> Stored {
+        Stored { key: key.into(), team_id: team.into(), name: key.into(), cwd: None }
+    }
+
+    fn panel(layout: &str, panes: [Option<&str>; 4]) -> StoredPanel {
+        StoredPanel {
+            visible: true,
+            height: Some(250.0),
+            layout: layout.into(),
+            panes: panes.map(|k| k.map(str::to_string)),
+            focused_pane: 0,
+        }
+    }
+
+    #[test]
+    fn a_stored_panel_comes_back_by_key_and_drops_terminals_that_are_gone() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a"), record("k2", "a")]);
+        t.restore_panel(&panel("columns", [Some("k2"), Some("closed"), None, None]));
+        let back = t.stored_panel();
+        assert_eq!(back.panes, [Some("k2".to_string()), None, None, None]);
+        assert_eq!((back.visible, back.height, back.layout.as_str()), (true, Some(250.0), "columns"));
+    }
+
+    #[test]
+    fn a_change_is_reported_once_and_a_restored_panel_is_not_a_change() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let stored = panel("single", [Some("k1"), None, None, None]);
+        t.restore_panel(&stored);
+        t.mark_panel_saved(stored);
+        assert_eq!(t.take_panel_change(), None);
+        t.restore_panel(&panel("grid", [Some("k1"), None, None, None]));
+        assert_eq!(t.take_panel_change().map(|p| p.layout), Some("grid".to_string()));
+        assert_eq!(t.take_panel_change(), None);
     }
 }

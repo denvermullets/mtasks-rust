@@ -1,7 +1,8 @@
 //! Panel rules with no Iced and no engine: sizes, which Terminal a pane
-//! shows, and what Cmd+J does. `PanelState` is the per-Tab panel state; until
-//! Tabs wire it (JRST-417) `TerminalState` holds one as the implicit Tab.
+//! shows, and what Cmd+J does. `PanelState` is the active Tab's panel state;
+//! other Tabs park theirs as a `StoredPanel` (keys, not ids).
 use super::TerminalId;
+use crate::db::panel_states::StoredPanel;
 
 pub const MIN_HEIGHT: f32 = 120.0;
 /// The main area keeps at least this much.
@@ -47,13 +48,33 @@ impl Layout {
     }
 }
 
+impl Layout {
+    /// The name stored for this layout.
+    pub fn name(self) -> &'static str {
+        match self {
+            Layout::Single => "single",
+            Layout::Columns => "columns",
+            Layout::Grid => "grid",
+        }
+    }
+
+    /// The layout stored under `name`; an unknown name is `Single`.
+    pub fn from_name(name: &str) -> Layout {
+        match name {
+            "columns" => Layout::Columns,
+            "grid" => Layout::Grid,
+            _ => Layout::Single,
+        }
+    }
+}
+
 /// The Terminal in each pane, by slot. Slots past the layout are hidden: they
 /// keep their Terminal so growing the layout again brings it back.
 pub type Panes = [Option<TerminalId>; MAX_PANES];
 
 /// What one Tab remembers about its panel: whether it shows, how tall, the
 /// layout, which Terminal fills each pane and which pane has focus. Terminals
-/// themselves live outside. JRST-417 parks this per Tab.
+/// themselves live outside. Each Tab parks its own.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PanelState {
     pub visible: bool,
@@ -69,6 +90,40 @@ impl PanelState {
     /// The Terminal in the focused pane.
     pub fn focused_terminal(&self) -> Option<TerminalId> {
         self.panes[self.focused_pane.min(self.layout.slots() - 1)]
+    }
+
+    /// The state with each pane's Terminal as its record `key`, which outlives
+    /// a restart or a relaunch (a `TerminalId` doesn't). `key_of` is `None` for
+    /// a Terminal that no longer exists.
+    pub fn to_stored(&self, key_of: impl Fn(TerminalId) -> Option<String>) -> StoredPanel {
+        StoredPanel {
+            visible: self.visible,
+            height: self.height,
+            layout: self.layout.name().to_string(),
+            panes: std::array::from_fn(|i| self.panes[i].and_then(&key_of)),
+            focused_pane: self.focused_pane,
+        }
+    }
+
+    /// The state stored panel `p` describes. A pane whose key `id_of` can't
+    /// find (the Terminal was closed) comes back empty, and a key in two
+    /// panes keeps only the first.
+    pub fn from_stored(p: &StoredPanel, id_of: impl Fn(&str) -> Option<TerminalId>) -> PanelState {
+        let layout = Layout::from_name(&p.layout);
+        let mut panes: Panes = [None; MAX_PANES];
+        for (slot, key) in p.panes.iter().enumerate() {
+            let id = key.as_deref().and_then(&id_of);
+            if id.is_some() && !panes.contains(&id) {
+                panes[slot] = id;
+            }
+        }
+        PanelState {
+            visible: p.visible,
+            height: p.height,
+            layout,
+            panes,
+            focused_pane: p.focused_pane.min(layout.slots() - 1),
+        }
     }
 
     /// Move focus to the next (`1`) or previous (`-1`) pane, wrapping.
@@ -370,6 +425,59 @@ mod tests {
 
     fn full() -> Panes {
         [Some(TerminalId(1)), Some(TerminalId(2)), Some(TerminalId(3)), Some(TerminalId(4))]
+    }
+
+    fn key_of(id: TerminalId) -> Option<String> {
+        Some(format!("key{}", id.0))
+    }
+
+    fn id_of(key: &str) -> Option<TerminalId> {
+        key.strip_prefix("key")?.parse().ok().map(TerminalId)
+    }
+
+    #[test]
+    fn panel_state_round_trips_through_keys() {
+        let state = PanelState {
+            visible: true,
+            height: Some(333.0),
+            layout: Layout::Grid,
+            panes: [Some(TerminalId(7)), None, Some(TerminalId(3)), None],
+            focused_pane: 2,
+        };
+        let stored = state.to_stored(key_of);
+        assert_eq!(stored.layout, "grid");
+        assert_eq!(stored.panes[0].as_deref(), Some("key7"));
+        assert_eq!(PanelState::from_stored(&stored, id_of), state);
+    }
+
+    #[test]
+    fn a_pane_whose_terminal_is_gone_comes_back_empty() {
+        let mut stored = PanelState {
+            visible: true,
+            layout: Layout::Columns,
+            panes: [Some(TerminalId(1)), Some(TerminalId(2)), None, None],
+            ..PanelState::default()
+        }
+        .to_stored(key_of);
+        stored.panes[1] = Some("closed-long-ago".into());
+        let back = PanelState::from_stored(&stored, id_of);
+        assert_eq!(back.panes, [Some(TerminalId(1)), None, None, None]);
+    }
+
+    #[test]
+    fn an_unknown_layout_is_single_and_focus_stays_inside_it() {
+        let stored = StoredPanel { layout: "tiles".into(), focused_pane: 3, ..StoredPanel::default() };
+        let back = PanelState::from_stored(&stored, id_of);
+        assert_eq!((back.layout, back.focused_pane), (Layout::Single, 0));
+    }
+
+    #[test]
+    fn a_terminal_stored_in_two_panes_fills_only_the_first() {
+        let mut stored = StoredPanel { layout: "columns".into(), ..StoredPanel::default() };
+        stored.panes[0] = Some("key5".into());
+        stored.panes[1] = Some("key5".into());
+        let back = PanelState::from_stored(&stored, id_of);
+        assert_eq!(back.panes, [Some(TerminalId(5)), None, None, None]);
     }
 
     #[test]
