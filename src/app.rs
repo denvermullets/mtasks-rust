@@ -296,6 +296,8 @@ pub enum Message {
     // UI
     CloseModal,
     ToggleHelp,
+    /// `/` or the palette command on the project page: show or hide Properties.
+    ToggleProjectProperties,
     /// Cmd+K: open the command palette.
     OpenCommandPalette,
     /// The palette's text field changed.
@@ -994,6 +996,7 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
+            on_project_detail: matches!(self.view, View::ProjectDetail(_)),
             terminal_focus: self.terminals.palette_focus(self.panel_team()),
             terminal_panel_showing: self.terminals.panel_showing(self.panel_team()),
             tabs: self
@@ -5516,6 +5519,9 @@ impl App {
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
+                    PaletteNav::ToggleProjectProperties => {
+                        return self.update(Message::ToggleProjectProperties)
+                    }
                     PaletteNav::FocusTerminal => {
                         return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusTerminal))
                     }
@@ -5544,6 +5550,14 @@ impl App {
 
             Message::ToggleHelp => {
                 self.show_help = !self.show_help;
+            }
+
+            Message::ToggleProjectProperties => {
+                if matches!(self.view, View::ProjectDetail(_)) {
+                    let mut new_cfg = self.config.clone();
+                    new_cfg.project_properties_open = !new_cfg.project_properties_open;
+                    self.save_config_change(new_cfg);
+                }
             }
 
             Message::OpenSettings => {
@@ -7030,6 +7044,8 @@ impl App {
                             &self.images,
                             &self.config.api_base_url,
                             &self.detail_pending_paths,
+                            self.window_width,
+                            self.config.project_properties_open,
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.
@@ -7135,6 +7151,7 @@ impl App {
             &self.inaccessible_teams,
             self.sync_read_only,
             self.view == View::Inbox,
+            matches!(self.view, View::ProjectDetail(_)),
         );
 
         let main_pane = if self.removed_team_tab() {

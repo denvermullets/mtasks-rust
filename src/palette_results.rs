@@ -33,6 +33,9 @@ pub enum PaletteNav {
     FocusApp,
     /// Hide the Terminal panel (`TerminalMessage::Hide`).
     HidePanel,
+    /// Show or hide the project page's Properties sidebar
+    /// (`Message::ToggleProjectProperties`).
+    ToggleProjectProperties,
     /// Focus the open Tab at this position (`TabMessage::Focus`).
     Tab(usize),
 }
@@ -50,7 +53,8 @@ impl PaletteNav {
             PaletteNav::AttachFiles
             | PaletteNav::FocusTerminal
             | PaletteNav::FocusApp
-            | PaletteNav::HidePanel => "Command",
+            | PaletteNav::HidePanel
+            | PaletteNav::ToggleProjectProperties => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -114,6 +118,8 @@ pub struct PaletteData {
     pub tabs: Vec<SearchableTab>,
     /// An issue detail is open, so issue-only commands are offered.
     pub on_issue_detail: bool,
+    /// A project page is open, so its properties toggle is offered.
+    pub on_project_detail: bool,
     pub terminal_focus: TerminalFocus,
     /// The Terminal panel is on screen, so it can be hidden.
     pub terminal_panel_showing: bool,
@@ -222,6 +228,13 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             primary: "Attach file".to_string(),
             secondary: "Shortcut: a".to_string(),
             nav: PaletteNav::AttachFiles,
+        });
+    }
+    if data.on_project_detail && name_matches(needle, "Toggle project properties") {
+        rows.push(PaletteRow {
+            primary: "Toggle project properties".to_string(),
+            secondary: "Shortcut: /".to_string(),
+            nav: PaletteNav::ToggleProjectProperties,
         });
     }
     match data.terminal_focus {
@@ -748,6 +761,18 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].nav, PaletteNav::AttachFiles);
         assert!(palette_results("attach", &PaletteData::default()).is_empty());
+    }
+
+    #[test]
+    fn toggle_properties_command_only_on_the_project_page() {
+        let on = PaletteData { on_project_detail: true, ..PaletteData::default() };
+        let rows = palette_results("toggle project", &on);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Toggle project properties");
+        assert_eq!(rows[0].secondary, "Shortcut: /");
+        assert_eq!(rows[0].nav, PaletteNav::ToggleProjectProperties);
+        assert_eq!(rows[0].nav.label(), "Command");
+        assert!(palette_results("toggle project", &PaletteData::default()).is_empty());
     }
 
     fn dashboard_data() -> PaletteData {

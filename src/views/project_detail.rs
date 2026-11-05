@@ -97,6 +97,8 @@ pub fn view<'a>(
     images: &'a crate::files::images::ImageStore,
     host: &'a str,
     pending_paths: &'a crate::views::body::PendingInlineMap,
+    window_width: f32,
+    properties_open: bool,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let mut breadcrumb = row![].spacing(space::S2).align_y(Alignment::Center);
@@ -181,8 +183,11 @@ pub fn view<'a>(
         .spacing(space::S8)
         .push(description)
         .push_maybe(crate::views::attachments::section(attachments, images))
-        .push(burndown(project, issues))
-        .push(issues_section(visible, display, team, lanes, members))
+        .push(cards(
+            card_layout(page_width(window_width, properties_open)),
+            burndown(project, issues),
+            issues_section(visible, display, team, lanes, members),
+        ))
         .push(discussion_section(
             comments, detail, members, teams, issues, comment_attachments, images, host,
             pending_paths,
@@ -297,7 +302,7 @@ pub fn view<'a>(
             ..Default::default()
         });
 
-    row![]
+    let page = row![]
         .width(Length::Fill)
         .height(Length::Fill)
         .push(
@@ -306,10 +311,103 @@ pub fn view<'a>(
             )
                 .width(Length::Fill)
                 .height(Length::Fill),
-        )
-        .push(divider)
-        .push(sidebar_panel)
-        .into()
+        );
+    // Properties are hidden until `/` (or the palette) shows them.
+    if properties_open {
+        page.push(divider).push(sidebar_panel).into()
+    } else {
+        page.into()
+    }
+}
+
+/// Width of the app's left sidebar (the literal in `App::view`).
+const APP_SIDEBAR_WIDTH: f32 = 220.0;
+
+/// Narrowest page width at which Burndown and Issues sit side by side. Below
+/// it each card would get under about 300px, so they stack. The 800px window
+/// minimum leaves 516px, so it always stacks; a 1100px window shows them side
+/// by side until Properties opens.
+const SIDE_BY_SIDE_MIN_WIDTH: f32 = 760.0;
+
+/// How the Burndown and Issues cards sit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardLayout {
+    SideBySide,
+    Stacked,
+}
+
+/// Width the page's content column gets: the window less the app sidebar, the
+/// Properties panel and divider when open, and the page's own padding.
+fn page_width(window_width: f32, properties_open: bool) -> f32 {
+    let panel = if properties_open { util::SIDEBAR_WIDTH + 1.0 } else { 0.0 };
+    window_width - APP_SIDEBAR_WIDTH - panel - 2.0 * space::S8
+}
+
+fn card_layout(page_width: f32) -> CardLayout {
+    if page_width >= SIDE_BY_SIDE_MIN_WIDTH {
+        CardLayout::SideBySide
+    } else {
+        CardLayout::Stacked
+    }
+}
+
+/// Burndown (wider, left) and Issues (right) side by side, or stacked.
+fn cards<'a>(
+    layout: CardLayout,
+    burndown: Element<'a, Message>,
+    issues: Element<'a, Message>,
+) -> Element<'a, Message> {
+    match layout {
+        CardLayout::SideBySide => row![]
+            .spacing(space::S4)
+            .align_y(Alignment::Start)
+            .push(container(burndown).width(Length::FillPortion(3)))
+            .push(container(issues).width(Length::FillPortion(2)))
+            .into(),
+        CardLayout::Stacked => column![].spacing(space::S4).push(burndown).push(issues).into(),
+    }
+}
+
+fn card_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(t::bg_secondary())),
+        border: Border {
+            color: t::border(),
+            width: 1.0,
+            radius: radius::MD.into(),
+        },
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn minimum_window_stacks_the_cards() {
+        assert_eq!(card_layout(page_width(800.0, false)), CardLayout::Stacked);
+        assert_eq!(card_layout(page_width(800.0, true)), CardLayout::Stacked);
+    }
+
+    #[test]
+    fn a_roomy_window_puts_them_side_by_side_until_properties_open() {
+        assert_eq!(card_layout(page_width(1100.0, false)), CardLayout::SideBySide);
+        assert_eq!(card_layout(page_width(1100.0, true)), CardLayout::Stacked);
+        assert_eq!(card_layout(page_width(1440.0, true)), CardLayout::SideBySide);
+    }
+
+    #[test]
+    fn the_breakpoint_is_inclusive() {
+        assert_eq!(card_layout(SIDE_BY_SIDE_MIN_WIDTH), CardLayout::SideBySide);
+        assert_eq!(card_layout(SIDE_BY_SIDE_MIN_WIDTH - 0.5), CardLayout::Stacked);
+    }
+
+    #[test]
+    fn page_width_subtracts_sidebars_and_padding() {
+        assert_eq!(page_width(1000.0, false), 1000.0 - 220.0 - 64.0);
+        assert_eq!(page_width(1000.0, true), 1000.0 - 220.0 - 321.0 - 64.0);
+    }
 }
 
 /// The project's discussion: threaded comments with indented replies, rendered
@@ -401,15 +499,7 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
     )
     .width(Length::Fill)
     .padding(space::S4)
-    .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_secondary())),
-        border: Border {
-            color: t::border(),
-            width: 1.0,
-            radius: radius::MD.into(),
-        },
-        ..Default::default()
-    })
+    .style(card_style)
     .into()
 }
 
@@ -442,7 +532,11 @@ fn issues_section<'a>(
         }
     }
 
-    util::with_heading(heading, col)
+    container(util::with_heading(heading, col))
+        .width(Length::Fill)
+        .padding(space::S4)
+        .style(card_style)
+        .into()
 }
 
 fn issue_row<'a>(
@@ -473,11 +567,16 @@ fn issue_row<'a>(
                 .color(t::priority_color(Priority::from_i32(issue.priority))),
         );
     }
+    // One line, cut at the card edge: the title never pushes the facts out.
     content = content.push(
-        text(&issue.title)
-            .size(type_scale::SM)
-            .color(t::text_primary())
-            .width(Length::Fill),
+        container(
+            text(&issue.title)
+                .size(type_scale::SM)
+                .color(t::text_primary())
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .width(Length::Fill)
+        .clip(true),
     );
     // Right-hand facts, only the enabled ones.
     let mut facts: Vec<String> = Vec::new();
@@ -520,13 +619,14 @@ fn issue_row<'a>(
         .on_press(Message::OpenIssueDetail(issue.id.clone()))
         .padding([space::S2, space::S3])
         .width(Length::Fill)
-        .style(|_theme: &Theme, _status| button::Style {
-            background: Some(iced::Background::Color(t::bg_secondary())),
+        .style(|_theme: &Theme, status| button::Style {
+            // Rows sit inside the Issues card, so no border of their own.
+            background: (status == button::Status::Hovered)
+                .then(|| iced::Background::Color(t::bg_primary())),
             text_color: t::text_primary(),
             border: Border {
-                color: t::border(),
-                width: 1.0,
-                radius: radius::MD.into(),
+                radius: radius::SM.into(),
+                ..Default::default()
             },
             ..Default::default()
         })
