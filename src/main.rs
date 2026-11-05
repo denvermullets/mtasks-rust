@@ -25,6 +25,8 @@ mod schedule_summary;
 mod scroll;
 mod search_match;
 mod sync;
+#[allow(dead_code)] // wired into App by later Tab tickets
+mod tabs;
 mod theme;
 mod views;
 
