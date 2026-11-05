@@ -40,7 +40,11 @@ impl App {
 
     /// Focus (or open) a team's Tab, for navigation into that team.
     pub(super) fn focus_team_tab(&mut self, team_id: &str) {
-        self.focus_tab(TabKey::Team(team_id.to_string()));
+        self.ensure_tab_set();
+        if let Some(set) = self.tab_set.as_mut() {
+            let switch = tab_state::focus_team(set, team_id);
+            self.apply_switch(switch);
+        }
     }
 
     /// Focus the Tab for `key`, opening it at the end of the bar if it isn't

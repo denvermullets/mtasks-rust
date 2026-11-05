@@ -878,6 +878,8 @@ pub struct App {
     /// Buffered edit state while the right pane shows `View::IssueDetail`.
     issue_detail: Option<issue_detail::IssueDetailState>,
     /// Buffered edit state while the right pane shows `View::ProjectDetail`.
+    /// Lanes and labels of the team a new issue from My Issues goes to.
+    new_issue_scope: Option<(Vec<Lane>, Vec<Label>)>,
     project_detail: Option<project_detail::ProjectDetailState>,
     /// Projects table sort key + direction (session-only).
     project_sort: ProjectSort,
@@ -1818,11 +1820,38 @@ impl App {
         )
     }
 
+    /// The team a new issue goes to from My Issues: the most recently active
+    /// team Tab's team, else the first team. An archived team (its Tab stays
+    /// open, but its data isn't loaded on My Issues) falls back to the first.
+    fn cross_team_new_issue_team(&self) -> Option<String> {
+        let first = default_team_id(&self.teams);
+        let team = self
+            .tab_set
+            .as_ref()
+            .and_then(|set| set.new_issue_team(first.as_deref()))
+            .or(first.as_deref())?;
+        let archived = self
+            .teams
+            .iter()
+            .any(|t| t.id == team && t.archived_at.is_some());
+        if archived { first } else { Some(team.to_string()) }
+    }
+
+    /// The lanes and labels a new issue's form offers when My Issues loaded
+    /// every team's: only the selected team's.
+    fn new_issue_scope(&self) -> Option<(Vec<Lane>, Vec<Label>)> {
+        let team = self.selected_team_id.as_deref()?;
+        Some((
+            self.lanes.iter().filter(|l| l.team_id == team).cloned().collect(),
+            self.labels.iter().filter(|l| l.team_id == team).cloned().collect(),
+        ))
+    }
+
     /// What the header "+ New" button creates on the current view, if anything.
     fn new_action(&self) -> Option<Message> {
         self.selected_team()?;
         match self.view {
-            View::Board => Some(Message::CreateIssue),
+            View::Board | View::MyIssues => Some(Message::CreateIssue),
             View::ProjectList => Some(Message::CreateProject),
             View::Roadmap => Some(Message::OpenRoadmapAdd(RoadmapCommitment::Now)),
             _ => None,
@@ -3039,6 +3068,7 @@ impl App {
             modal: Modal::None,
             issue_form: None,
             issue_detail: None,
+            new_issue_scope: None,
             project_detail: None,
             project_sort: ProjectSort::Created,
             project_sort_dir: SortDir::Asc,
@@ -3346,14 +3376,16 @@ impl App {
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
-        // My Issues spans several teams: create and lane moves need a single
-        // team's lanes, so they're no-ops here. Priority and delete act on the
-        // issue's own row/team, so they work cross-team.
+        // Cross-team pages span several teams: lane moves need a single team's
+        // lanes, so they're no-ops here, and so is create on a Dashboard. My
+        // Issues creates in the most recently active team Tab's team.
+        // Priority and delete act on the issue's own row/team, so they work
+        // cross-team.
         if self.view.is_cross_team()
-            && matches!(
+            && (matches!(
                 message,
-                Message::CreateIssue | Message::MoveIssueNextLane | Message::MoveIssuePrevLane
-            )
+                Message::MoveIssueNextLane | Message::MoveIssuePrevLane
+            ) || (matches!(message, Message::CreateIssue) && self.view != View::MyIssues))
         {
             return Task::none();
         }
@@ -4328,7 +4360,21 @@ impl App {
             }
 
             Message::CreateIssue => {
-                let default_lane = self.lanes.first().map(|l| l.id.clone()).unwrap_or_default();
+                if self.view == View::MyIssues {
+                    // My Issues spans teams: create in the most recently active
+                    // team Tab's team (see `TabSet::new_issue_team`).
+                    let Some(team_id) = self.cross_team_new_issue_team() else {
+                        return Task::none();
+                    };
+                    self.selected_team_id = Some(team_id);
+                }
+                self.new_issue_scope = if self.view == View::MyIssues {
+                    self.new_issue_scope()
+                } else {
+                    None
+                };
+                let lanes = self.new_issue_scope.as_ref().map_or(&self.lanes, |(l, _)| l);
+                let default_lane = lanes.first().map(|l| l.id.clone()).unwrap_or_default();
                 self.issue_form = Some(issue_form::IssueFormState::new(default_lane));
                 self.modal = Modal::IssueForm;
             }
@@ -6865,7 +6911,14 @@ impl App {
             }
             Modal::IssueForm => {
                 if let Some(ref form) = self.issue_form {
-                    let modal = issue_form::view(form, &self.lanes, &self.labels);
+                    let modal = match &self.new_issue_scope {
+                        Some((lanes, labels))
+                            if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
+                        {
+                            issue_form::view(form, lanes, labels)
+                        }
+                        _ => issue_form::view(form, &self.lanes, &self.labels),
+                    };
                     iced::widget::stack![base, modal].into()
                 } else {
                     base
