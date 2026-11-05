@@ -6,6 +6,8 @@ pub mod home_page;
 pub mod migrations;
 pub mod models;
 pub mod notifications;
+#[allow(dead_code)] // restored at launch by a later Tab ticket
+pub mod open_tabs;
 pub mod queries;
 pub mod recurring_issues;
 pub mod saved_views;

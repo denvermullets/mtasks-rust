@@ -434,8 +434,8 @@ impl Filters {
         *self = Filters::default();
     }
 
-    /// Drop selected ids that no longer exist in the loaded data (filters are
-    /// global but ids are per-team, so they go stale on a team switch).
+    /// Drop selected ids that no longer exist in the loaded data (ids are
+    /// per-team, so a set seeded from another team's goes stale).
     /// Priorities and the "none" values (empty string) are always valid.
     /// Returns whether anything was removed.
     pub fn prune(
