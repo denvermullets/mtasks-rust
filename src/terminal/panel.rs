@@ -29,6 +29,12 @@ pub fn panel_height(window_h: f32, requested: Option<f32>) -> f32 {
     wanted.clamp(MIN_HEIGHT, max)
 }
 
+/// Panel height while dragging the strip: it grows as the pointer moves up
+/// (`y` shrinks), kept within both limits.
+pub fn drag_height(window_h: f32, start_height: f32, start_y: f32, y: f32) -> f32 {
+    panel_height(window_h, Some(start_height + (start_y - y)))
+}
+
 /// Pixels available to the one pane for this window.
 pub fn pane_pixels(window_w: f32, window_h: f32, requested: Option<f32>) -> (f32, f32) {
     let w = (window_w - SIDEBAR_WIDTH).max(0.0);
@@ -92,6 +98,17 @@ mod tests {
         // 800x500 minimum window: the main area keeps its 200.
         assert_eq!(panel_height(500.0, Some(450.0)), 300.0);
         assert_eq!(panel_height(300.0, None), MIN_HEIGHT);
+    }
+
+    #[test]
+    fn dragging_up_grows_the_panel_within_both_limits() {
+        assert_eq!(drag_height(900.0, 300.0, 600.0, 500.0), 400.0);
+        assert_eq!(drag_height(900.0, 300.0, 600.0, 650.0), 250.0);
+        assert_eq!(drag_height(900.0, 300.0, 600.0, 900.0), MIN_HEIGHT);
+        assert_eq!(drag_height(900.0, 300.0, 600.0, 0.0), 700.0);
+        // 800x500 window.
+        assert_eq!(drag_height(500.0, 166.0, 300.0, 0.0), 300.0);
+        assert_eq!(drag_height(500.0, 166.0, 300.0, 500.0), MIN_HEIGHT);
     }
 
     #[test]

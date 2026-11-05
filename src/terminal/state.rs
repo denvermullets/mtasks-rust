@@ -38,6 +38,11 @@ pub enum TerminalMessage {
     FocusTerminal,
     /// Palette: give the keyboard back to the app.
     FocusApp,
+    /// The pointer pressed the strip.
+    DragStart,
+    /// The pointer moved (window y) while dragging.
+    DragMove(f32),
+    DragEnd,
     /// Hide the panel. Every Terminal keeps running; the keyboard goes to the app.
     Hide,
     /// "New Terminal" on an empty panel.
@@ -48,7 +53,15 @@ pub enum TerminalMessage {
 
 static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new();
 
+/// A strip drag in progress. The first pointer move after the press fixes
+/// where the drag started.
+struct Drag {
+    start_y: Option<f32>,
+    start_height: f32,
+}
+
 pub struct TerminalState {
+    drag: Option<Drag>,
     terminals: Terminals,
     owners: HashMap<TerminalId, String>,
     names: HashMap<TerminalId, String>,
@@ -72,6 +85,7 @@ impl TerminalState {
             terminals: Terminals::new(move || {
                 let _ = tx.unbounded_send(());
             }),
+            drag: None,
             owners: HashMap::new(),
             names: HashMap::new(),
             panel: PanelState::default(),
@@ -116,6 +130,17 @@ impl TerminalState {
                 }
             }
             TerminalMessage::FocusApp => self.focused = false,
+            TerminalMessage::DragStart => {
+                self.drag = Some(Drag { start_y: None, start_height: self.height() });
+            }
+            TerminalMessage::DragMove(y) => {
+                if let Some(drag) = &mut self.drag {
+                    let start_y = *drag.start_y.get_or_insert(y);
+                    self.panel.height =
+                        Some(panel::drag_height(self.window.height, drag.start_height, start_y, y));
+                }
+            }
+            TerminalMessage::DragEnd => self.drag = None,
             TerminalMessage::Hide => {
                 // `sync` tells the engine they're hidden (`set_visible`).
                 self.panel.visible = false;
@@ -266,6 +291,17 @@ impl TerminalState {
             _ => None,
         });
         let mut subs = vec![wake, window];
+        if self.drag.is_some() {
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Terminal(TerminalMessage::DragMove(position.y)))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
+                    Some(Message::Terminal(TerminalMessage::DragEnd))
+                }
+                _ => None,
+            }));
+        }
         if self.takes_keys(modal_open) {
             subs.push(event::listen_with(|e, _status, _id| match e {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
@@ -282,6 +318,10 @@ impl TerminalState {
             }));
         }
         Subscription::batch(subs)
+    }
+
+    fn height(&self) -> f32 {
+        panel::panel_height(self.window.height, self.panel.height)
     }
 
     fn owned_by(&self, team: &str) -> Vec<TerminalId> {
