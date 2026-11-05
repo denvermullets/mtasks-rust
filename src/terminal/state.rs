@@ -104,9 +104,6 @@ pub struct TerminalState {
     /// Each team's starting directory; unset means home.
     team_dirs: HashMap<String, std::path::PathBuf>,
     panel: PanelState,
-    /// The panel as last handed out by `take_panel_change`, so only changes
-    /// are written.
-    saved_panel: Option<StoredPanel>,
     /// The page is a removed team's: its panel stays shown (the Terminals have
     /// no other way in) and can't be hidden or add Terminals.
     pinned: bool,
@@ -142,7 +139,6 @@ impl TerminalState {
             shutting_down: false,
             team_dirs: HashMap::new(),
             panel: PanelState::default(),
-            saved_panel: None,
             pinned: false,
             focused: false,
             window: Size::new(1100.0, 700.0),
@@ -179,18 +175,9 @@ impl TerminalState {
         self.drag = None;
     }
 
-    /// The panel if it changed since the last call, for the app to store.
-    /// Nothing while the strip is being dragged: it is stored on release.
-    pub fn take_panel_change(&mut self) -> Option<StoredPanel> {
-        if self.drag.is_some() {
-            return None;
-        }
-        let now = self.stored_panel();
-        if self.saved_panel.as_ref() == Some(&now) {
-            return None;
-        }
-        self.saved_panel = Some(now.clone());
-        Some(now)
+    /// The strip is being dragged: its height is stored on release.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     pub fn update(&mut self, message: TerminalMessage, team: Option<&str>) -> Task<Message> {
@@ -940,17 +927,5 @@ mod tests {
         let _ = t.update(TerminalMessage::New, Some("gone"));
         assert!(t.stored_panel().visible);
         assert_eq!(t.roster.ids_of_team("gone").len(), 1, "no new Terminal for a removed team");
-    }
-
-    #[test]
-    fn a_change_is_reported_once() {
-        let mut t = TerminalState::new();
-        t.restore_records(vec![record("k1", "a")]);
-        t.restore_panel(&panel("single", [Some("k1"), None, None, None]));
-        assert!(t.take_panel_change().is_some());
-        assert_eq!(t.take_panel_change(), None);
-        t.restore_panel(&panel("grid", [Some("k1"), None, None, None]));
-        assert_eq!(t.take_panel_change().map(|p| p.layout), Some("grid".to_string()));
-        assert_eq!(t.take_panel_change(), None);
     }
 }

@@ -807,6 +807,8 @@ pub struct App {
     /// Pages restored at launch for Tabs not focused yet; a Tab takes its
     /// entry the first time it becomes live.
     restored_pages: HashMap<crate::tabs::TabKey, crate::tabs::Page>,
+    /// The panels last written to the local database, so a change is saved once.
+    saved_panels: Option<Vec<(Option<crate::tabs::TabKey>, crate::db::panel_states::StoredPanel)>>,
     /// Panels stored for Tabs restored at launch, until each is first focused.
     restored_panels: HashMap<crate::tabs::TabKey, crate::db::panel_states::StoredPanel>,
     /// Window width and the tab bar's sideways scroll, for keeping the active
@@ -3170,6 +3172,7 @@ impl App {
             tab_set: None,
             saved_tabs: None,
             restored_pages: HashMap::new(),
+            saved_panels: None,
             restored_panels: HashMap::new(),
             window_width: 1100.0,
             tab_bar_offset: 0.0,
@@ -3523,11 +3526,24 @@ impl App {
 
     /// Store the panel when it changed since the last message. Local only.
     fn save_panel(&mut self) {
-        let Some(panel) = self.terminals.take_panel_change() else {
+        let Some(set) = &self.tab_set else {
             return;
         };
-        if let Err(e) = crate::db::panel_states::save(&self.db(), &[(None, panel)]) {
-            eprintln!("could not save panel state: {e}");
+        if self.terminals.dragging() {
+            return;
+        }
+        let rows = crate::tab_state::panel_rows(
+            set,
+            &self.terminals.stored_panel(),
+            &self.parked_tabs,
+            &self.restored_panels,
+        );
+        if self.saved_panels.as_ref() == Some(&rows) {
+            return;
+        }
+        match crate::db::panel_states::save(&self.db(), &rows) {
+            Ok(()) => self.saved_panels = Some(rows),
+            Err(e) => eprintln!("could not save panel state: {e}"),
         }
     }
 

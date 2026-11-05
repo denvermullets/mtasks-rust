@@ -178,6 +178,34 @@ pub fn keeps_removed_team(key: &TabKey, team_has_terminals: impl Fn(&str) -> boo
     matches!(key, TabKey::Team(id) if team_has_terminals(id))
 }
 
+/// The panel of every open team or project Tab, for storing. The active Tab's
+/// is `live`; a parked Tab's is in `parked`; a Tab restored at launch and not
+/// focused yet keeps the one it was stored with (`restored`). A cross-team Tab
+/// has none.
+pub fn panel_rows(
+    set: &TabSet,
+    live: &StoredPanel,
+    parked: &Parked,
+    restored: &HashMap<TabKey, StoredPanel>,
+) -> Vec<(Option<TabKey>, StoredPanel)> {
+    set.tabs()
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| !key.is_cross_team())
+        .filter_map(|(i, key)| {
+            let panel = if i == set.active_index() {
+                Some(live.clone())
+            } else {
+                parked
+                    .get(key)
+                    .and_then(|p| p.panel.clone())
+                    .or_else(|| restored.get(key).cloned())
+            };
+            panel.map(|p| (Some(key.clone()), p))
+        })
+        .collect()
+}
+
 /// The panels a launch gives back to its Tabs. `rows` is what was stored:
 /// each Tab's own, and the one implicit panel saved before Tabs had their
 /// own. A row for a Tab that isn't open, or for a cross-team Tab (no panel),
@@ -535,6 +563,35 @@ mod tests {
         assert!(!keeps_removed_team(&team("b"), has));
         assert!(!keeps_removed_team(&TabKey::Project("a".into()), has));
         assert!(!keeps_removed_team(&TabKey::Dashboard("a".into()), has));
+    }
+
+    #[test]
+    fn two_tabs_with_different_layouts_survive_store_and_launch() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let project = TabKey::Project("p".into());
+        let mut set = TabSet::new(team("a"));
+        set.open(project.clone());
+        set.open(TabKey::Inbox);
+        set.open(team("never-focused"));
+        set.focus(0);
+        // Team a is live; the project Tab is parked; the last was restored
+        // at an earlier launch and never focused since.
+        let mut parked = Parked::default();
+        let mut p = ParkedTab::new(View::ProjectDetail("p".into()), Some("a".into()));
+        p.panel = Some(stored("columns", "k2"));
+        parked.save(project.clone(), p);
+        let mut restored = HashMap::new();
+        restored.insert(team("never-focused"), stored("single", "k3"));
+        let rows = panel_rows(&set, &stored("grid", "k1"), &parked, &restored);
+        assert_eq!(rows.len(), 3, "the Inbox Tab has no panel");
+
+        crate::db::panel_states::save(&conn, &rows).unwrap();
+        let loaded = crate::db::panel_states::load(&conn).unwrap();
+        let got = launch_panels(loaded, set.tabs(), &team("a"));
+        assert_eq!(got[&team("a")], stored("grid", "k1"));
+        assert_eq!(got[&project], stored("columns", "k2"));
+        assert_eq!(got[&team("never-focused")], stored("single", "k3"));
     }
 
     #[test]
