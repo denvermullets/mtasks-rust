@@ -121,29 +121,50 @@ impl App {
         let Some(set) = self.tab_set.as_mut() else {
             return Task::none();
         };
-        let (teams, dashboards) = (&self.teams, &self.dashboards);
+        let (teams, dashboards, terminals) = (&self.teams, &self.dashboards, &self.terminals);
         let pruned = set.prune(
             |key| tab_subject_exists(teams, dashboards, &conn, key),
-            // A removed team with running Terminals keeps its Tab (JRST-421).
-            |_| false,
+            // A removed team with Terminals keeps its Tab (JRST-421).
+            |key| tab_state::keeps_removed_team(key, |team| terminals.has_terminals(team)),
             &home,
         );
-        if pruned.closed.is_empty() {
-            return Task::none();
-        }
         let active = set.active().clone();
         for key in &pruned.closed {
             if let Some(draft) = self.parked_tabs.forget(key).and_then(|p| p.comment_draft) {
                 self.drop_drafts(&draft.owner_ids());
             }
         }
-        if !pruned.active_changed {
-            return Task::none();
+        let mut task = Task::none();
+        if pruned.active_changed {
+            // The removed Tab's live state goes with it; edits can't commit to a
+            // row that no longer exists.
+            self.discard_live_composers();
+            task = self.restore_tab(&active);
         }
-        // The removed Tab's live state goes with it; edits can't commit to a
-        // row that no longer exists.
-        self.discard_live_composers();
-        self.restore_tab(&active)
+        self.hold_removed_team_tab();
+        task
+    }
+
+    /// Whether the active Tab is a team's that is no longer in the local
+    /// mirror, kept for its Terminals. It shows a notice and the panel only.
+    pub(super) fn removed_team_tab(&self) -> bool {
+        matches!(self.active_tab_key(), Some(TabKey::Team(id)) if !self.teams.iter().any(|t| t.id == *id))
+    }
+
+    /// A kept removed team's Tab stays on that team: `leave_deleted_teams`
+    /// and `reload_data` pick another team when the selected one goes, which
+    /// would put that team's data under this Tab.
+    fn hold_removed_team_tab(&mut self) {
+        let Some(TabKey::Team(id)) = self.active_tab_key().cloned() else {
+            return;
+        };
+        if self.removed_team_tab() {
+            self.selected_team_id = Some(id);
+            self.view = View::Board;
+            self.open_view = None;
+            self.issue_detail = None;
+            self.reload_data();
+        }
     }
 
     /// The Tab the Home page opens, or `None` when it doesn't resolve.
@@ -233,6 +254,8 @@ impl App {
             tab_subject_exists(teams, dashboards, &conn, key)
         });
         let active = set.active().clone();
+        let panels = crate::db::panel_states::load(&conn).unwrap_or_default();
+        self.restored_panels = tab_state::launch_panels(panels, set.tabs(), &active);
         self.tab_set = Some(set);
         self.restored_pages = pages;
         self.restore_tab(&active)
@@ -306,6 +329,23 @@ impl App {
         }
     }
 
+    /// The team whose Terminals the active Tab shows: a team Tab's team, or a
+    /// project Tab's. A cross-team Tab shows none, whatever page it is on (an
+    /// issue opened there from another team included). Before the Tab set
+    /// exists, the page decides.
+    pub(super) fn panel_team(&self) -> Option<&str> {
+        match self.active_tab_key() {
+            Some(key) => {
+                let project_team = match key {
+                    TabKey::Project(id) => self.tab_projects.get(id).map(|(_, team)| team.as_str()),
+                    _ => None,
+                };
+                tab_state::panel_team(key, project_team.or(self.selected_team_id.as_deref()))
+            }
+            None => crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()),
+        }
+    }
+
     /// The active Tab's key, once the set exists.
     pub(super) fn active_tab_key(&self) -> Option<&TabKey> {
         self.tab_set.as_ref().map(|set| set.active())
@@ -326,6 +366,7 @@ impl App {
     /// Park the live per-Tab fields under `key`. Add new per-Tab fields here.
     pub(super) fn stash_active_tab(&mut self, key: TabKey) {
         let draft = self.take_comment_draft();
+        let key_is_cross_team = key.is_cross_team();
         let view = tab_state::parked_view(&key, self.view.clone());
         self.parked_tabs.save(
             key,
@@ -343,6 +384,8 @@ impl App {
                     dashboard: self.detail_from_dashboard.clone(),
                     page: self.detail_from_page.clone(),
                 },
+                // A cross-team Tab has no panel to park.
+                panel: (!key_is_cross_team).then(|| self.terminals.stored_panel()),
                 ..ParkedTab::new(view, self.selected_team_id.clone())
                     .with_comment_draft(self.view.clone(), draft)
             },
@@ -451,7 +494,9 @@ impl App {
         let parked = self.parked_tabs.take(key);
         // A Tab restored at launch returns to its stored page on first focus.
         let restored = self.restored_pages.remove(key).filter(|_| parked.is_none());
-        let (view, team, scroll_state, search, focus, collapsed, open_view, draft, detail_from) = match parked {
+        // A Tab restored at launch returns to its stored panel on first focus.
+        let restored_panel = self.restored_panels.remove(key);
+        let (view, team, scroll_state, search, focus, collapsed, open_view, draft, detail_from, panel) = match parked {
             Some(p) => (
                 p.view,
                 p.selected_team_id,
@@ -462,6 +507,7 @@ impl App {
                 p.open_view,
                 p.comment_draft,
                 p.detail_from,
+                p.panel,
             ),
             None => (
                 restored.as_ref().map_or_else(
@@ -485,6 +531,7 @@ impl App {
                 None,
                 None,
                 DetailFrom::default(),
+                restored_panel,
             ),
         };
         // An issue deleted while the Tab was parked: show the Tab's root page,
@@ -518,6 +565,8 @@ impl App {
         self.collapsed_sections = collapsed;
         self.selected_team_id = team;
         self.view = view;
+        // A Tab never shown, or a cross-team one, has the default hidden panel.
+        self.terminals.restore_panel(&panel.unwrap_or_default());
         self.reload_data();
         if self.view == View::Inbox {
             self.reload_inbox();

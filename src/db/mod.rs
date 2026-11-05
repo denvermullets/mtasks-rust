@@ -7,6 +7,7 @@ pub mod migrations;
 pub mod models;
 pub mod notifications;
 pub mod open_tabs;
+pub mod panel_states;
 pub mod queries;
 pub mod recurring_issues;
 pub mod saved_views;

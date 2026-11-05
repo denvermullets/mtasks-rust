@@ -835,6 +835,28 @@ const MIGRATIONS: &[Migration] = &[
             CREATE INDEX idx_terminal_records_team ON terminal_records(team_id, position);
         ",
     },
+    Migration {
+        version: 40,
+        name: "panel_states",
+        up: "
+            -- A Tab's Terminal panel: visibility, height, layout and which
+            -- Terminal fills each pane. `panes` is a JSON array of Terminal
+            -- record ids (terminal_records.id), never engine ids. Local only:
+            -- never queued for Data sync. tab_kind is a Tab's kind as in
+            -- open_tabs, or 'implicit' for the panel state saved before Tabs
+            -- had their own.
+            CREATE TABLE panel_states (
+                tab_kind TEXT NOT NULL,
+                tab_ref TEXT NOT NULL DEFAULT '',
+                visible INTEGER NOT NULL,
+                height REAL,
+                layout TEXT NOT NULL,
+                panes TEXT NOT NULL,
+                focused_pane INTEGER NOT NULL,
+                PRIMARY KEY (tab_kind, tab_ref)
+            );
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1417,6 +1439,31 @@ mod tests {
         run(&conn).unwrap();
 
         assert!(table_exists(&conn, "terminal_records"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v39_adds_the_panel_states_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 40) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "panel_states"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "panel_states"));
         let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
         assert_eq!(teams, 1);
     }

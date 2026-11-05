@@ -3,8 +3,8 @@
 //! panel, the canvas caches) is inside.
 //!
 //! Terminals are outside every Tab (ADR 0001 doesn't apply to them). The
-//! panel state is per Tab; until Tabs wire it (JRST-417) one `PanelState`
-//! stands in as the implicit Tab.
+//! panel state is per Tab: `panel` is the active Tab's, and the app parks and
+//! restores it on a switch with `stored_panel` and `restore_panel`.
 //!
 //! The app calls `sync` after every message. It reconciles what the engine is
 //! told (visible, size, theme) with what is on screen, sending only changes.
@@ -21,6 +21,7 @@ use super::input::{self, Route};
 use super::links::Link;
 use super::panel::{self, Layout, PanelState, Toggle, MAX_PANES};
 use super::roster::Roster;
+use crate::db::panel_states::StoredPanel;
 use super::{
     active_term_theme, Closing, MouseAction, MouseInput, SpawnConfig, TerminalId, Terminals,
     WheelInput,
@@ -73,7 +74,7 @@ pub enum TerminalMessage {
     Pick(usize, TerminalId),
     /// A layout chosen in the strip.
     SetLayout(Layout),
-    /// Focus the next or previous pane (Cmd+] and Cmd+[, JRST-405).
+    /// Focus the next or previous pane (Cmd+] and Cmd+[).
     CyclePane(i32),
     /// The shown Terminal's name was clicked.
     RenameStart(TerminalId),
@@ -117,6 +118,9 @@ pub struct TerminalState {
     /// Each team's starting directory; unset means home.
     team_dirs: HashMap<String, std::path::PathBuf>,
     panel: PanelState,
+    /// The page is a removed team's: its panel stays shown (the Terminals have
+    /// no other way in) and can't be hidden or add Terminals.
+    pinned: bool,
     focused: bool,
     window: Size,
     cell: Option<(f32, f32)>,
@@ -149,6 +153,7 @@ impl TerminalState {
             shutting_down: false,
             team_dirs: HashMap::new(),
             panel: PanelState::default(),
+            pinned: false,
             focused: false,
             window: Size::new(1100.0, 700.0),
             cell: None,
@@ -167,6 +172,26 @@ impl TerminalState {
     /// each starts when a pane first shows it.
     pub fn restore_records(&mut self, stored: Vec<crate::db::terminal_records::Stored>) {
         self.roster.restore(stored);
+    }
+
+    /// The live panel as stored, panes by record key.
+    pub fn stored_panel(&self) -> StoredPanel {
+        self.panel.to_stored(|id| self.roster.key_of(id))
+    }
+
+    /// Make `stored` the live panel: a Tab was focused, or the app launched.
+    /// A pane whose Terminal is gone comes back empty. The size each Terminal
+    /// was last sent is kept: `sync` resizes any that the new panel shows at
+    /// another size.
+    pub fn restore_panel(&mut self, stored: &StoredPanel) {
+        self.panel = PanelState::from_stored(stored, |key| self.roster.id_of_key(key));
+        self.renaming = None;
+        self.drag = None;
+    }
+
+    /// The strip is being dragged: its height is stored on release.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     pub fn update(&mut self, message: TerminalMessage, team: Option<&str>) -> Task<Message> {
@@ -245,6 +270,8 @@ impl TerminalState {
                 }
             }
             TerminalMessage::DragEnd => self.drag = None,
+            TerminalMessage::Hide if self.pinned => {}
+            TerminalMessage::New | TerminalMessage::NewIn(_) if self.pinned => {}
             TerminalMessage::Hide => {
                 // `sync` tells the engine they're hidden (`set_visible`).
                 self.panel.visible = false;
@@ -335,9 +362,7 @@ impl TerminalState {
                         return iced::clipboard::read()
                             .map(|s| Message::Terminal(TerminalMessage::Pasted(s)))
                     }
-                    // The app's own Tab switch. Focus follows `sync`: it stays
-                    // with the Terminal while the new Tab shows a panel, and
-                    // falls to the app on a page without one.
+                    Route::CyclePane(delta) => self.panel.cycle_focus(delta),
                     // The answer comes from the Terminal's owner thread, which
                     // can take up to 500 ms if it is stuck: wait on a blocking
                     // thread so `update` returns at once. No selection copies
@@ -352,6 +377,9 @@ impl TerminalState {
                             |text| Message::Terminal(TerminalMessage::Copied(text)),
                         );
                     }
+                    // The app's own Tab switch. Focus follows `sync`: it stays
+                    // with the Terminal while the new Tab shows a panel, and
+                    // falls to the app on a page without one.
                     Route::Tab(i) => {
                         return Task::done(Message::Tab(crate::app::TabMessage::Focus(i)))
                     }
@@ -381,6 +409,9 @@ impl TerminalState {
     /// Reconcile the engine and the canvas with the current team and layout.
     /// Cheap when nothing changed: it sends only differences.
     pub fn sync(&mut self, team: Option<&str>) {
+        if self.pinned && team.is_some() {
+            self.panel.visible = true;
+        }
         if team.is_none() || !self.panel.visible {
             self.focused = false;
         }
@@ -692,6 +723,24 @@ impl TerminalState {
         self.shown = self.panel.panes;
     }
 
+    /// A click on `team`'s sidebar row has just focused its Tab: show that
+    /// Tab's panel if the team has an open Terminal. The keyboard stays with
+    /// the app.
+    pub fn reveal_for_click(&mut self, team: &str) {
+        self.panel.visible =
+            panel::visible_after_click(self.terminals.open_count(team), self.panel.visible);
+    }
+
+    /// The page is a removed team's, whose panel can't be hidden.
+    pub fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
+    }
+
+    /// Whether the team has any Terminal in its strip, running or stopped.
+    pub fn has_terminals(&self, team: &str) -> bool {
+        self.roster.of_team(team).next().is_some()
+    }
+
     /// How many of the team's Terminals have a live shell.
     pub fn open_count(&self, team: &str) -> usize {
         self.terminals.open_count(team)
@@ -832,5 +881,123 @@ pub fn panel_team<'a>(
     match view {
         View::MyIssues | View::Inbox | View::Dashboard(_) => None,
         _ => selected_team_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::terminal_records::Stored;
+
+    fn record(key: &str, team: &str) -> Stored {
+        Stored { key: key.into(), team_id: team.into(), name: key.into(), cwd: None }
+    }
+
+    fn panel(layout: &str, panes: [Option<&str>; 4]) -> StoredPanel {
+        StoredPanel {
+            visible: true,
+            height: Some(250.0),
+            layout: layout.into(),
+            panes: panes.map(|k| k.map(str::to_string)),
+            focused_pane: 0,
+        }
+    }
+
+    #[test]
+    fn a_stored_panel_comes_back_by_key_and_drops_terminals_that_are_gone() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a"), record("k2", "a")]);
+        t.restore_panel(&panel("columns", [Some("k2"), Some("closed"), None, None]));
+        let back = t.stored_panel();
+        assert_eq!(back.panes, [Some("k2".to_string()), None, None, None]);
+        assert_eq!((back.visible, back.height, back.layout.as_str()), (true, Some(250.0), "columns"));
+    }
+
+    #[test]
+    fn two_tabs_keep_separate_panels_over_one_shared_terminal() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let team_tab = panel("grid", [Some("k1"), None, None, None]);
+        let project_tab = StoredPanel { visible: false, height: Some(180.0), ..panel("single", [Some("k1"), None, None, None]) };
+        // Park the team Tab's panel, show the project Tab's, switch back.
+        t.restore_panel(&team_tab);
+        let parked_team = t.stored_panel();
+        t.restore_panel(&project_tab);
+        let parked_project = t.stored_panel();
+        t.restore_panel(&parked_team);
+        assert_eq!(t.stored_panel(), parked_team);
+        assert_eq!((parked_team.layout.as_str(), parked_team.visible), ("grid", true));
+        assert_eq!((parked_project.layout.as_str(), parked_project.visible), ("single", false));
+        assert_eq!(parked_team.panes[0], parked_project.panes[0], "one Terminal, two Tabs");
+    }
+
+    #[test]
+    fn a_parked_panel_follows_a_terminal_whose_id_changed() {
+        // Restart and a restored shell starting both give a record a new id.
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let parked = panel("single", [Some("k1"), None, None, None]);
+        let old = t.roster.id_of_key("k1").unwrap();
+        t.roster.replace_id(old, TerminalId(42));
+        t.restore_panel(&parked);
+        assert_eq!(t.panel.panes[0], Some(TerminalId(42)));
+    }
+
+    #[test]
+    fn cmd_j_on_a_page_without_a_panel_does_nothing() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let _ = t.update(TerminalMessage::ToggleFocus, None);
+        assert!(!t.stored_panel().visible);
+        assert!(!t.takes_keys(false));
+        assert_eq!(t.roster.ids_of_team("a").len(), 1, "no Terminal was created");
+    }
+
+    #[test]
+    fn a_page_without_a_panel_shows_none_and_hides_every_terminal() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        t.restore_panel(&panel("single", [Some("k1"), None, None, None]));
+        t.sync(None);
+        assert!(!t.panel_showing(None));
+        assert!(t.panel_view(None).is_none());
+        assert!(!t.takes_keys(false));
+    }
+
+    #[test]
+    fn a_team_and_its_project_tab_list_the_same_terminals() {
+        use crate::tabs::TabKey;
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a"), record("k2", "a"), record("k3", "b")]);
+        let team_tab = TabKey::Team("a".into());
+        let project_tab = TabKey::Project("p".into());
+        let of = |key: &TabKey| {
+            crate::tab_state::panel_team(key, Some("a")).map(|team| t.owned_by(team))
+        };
+        assert_eq!(of(&team_tab), of(&project_tab));
+        assert_eq!(of(&team_tab).map(|ids| ids.len()), Some(2));
+    }
+
+    #[test]
+    fn a_click_on_a_team_with_no_open_terminals_leaves_the_panel_alone() {
+        let mut t = TerminalState::new();
+        // Restored and not started: in the strip, but not open.
+        t.restore_records(vec![record("k1", "a")]);
+        t.reveal_for_click("a");
+        assert!(!t.stored_panel().visible);
+    }
+
+    #[test]
+    fn a_pinned_panel_shows_and_cannot_be_hidden_or_grown() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "gone")]);
+        assert!(t.has_terminals("gone") && !t.has_terminals("other"));
+        t.set_pinned(true);
+        t.sync(Some("gone"));
+        assert!(t.stored_panel().visible, "shown although it was hidden");
+        let _ = t.update(TerminalMessage::Hide, Some("gone"));
+        let _ = t.update(TerminalMessage::New, Some("gone"));
+        assert!(t.stored_panel().visible);
+        assert_eq!(t.roster.ids_of_team("gone").len(), 1, "no new Terminal for a removed team");
     }
 }

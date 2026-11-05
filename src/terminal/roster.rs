@@ -105,6 +105,16 @@ impl Roster {
         self.records.iter().find(|r| r.id == id)
     }
 
+    /// The record key of the Terminal with this id.
+    pub fn key_of(&self, id: TerminalId) -> Option<String> {
+        self.get(id).map(|r| r.key.clone())
+    }
+
+    /// The Terminal's current id, from its record key.
+    pub fn id_of_key(&self, key: &str) -> Option<TerminalId> {
+        self.records.iter().find(|r| r.key == key).map(|r| r.id)
+    }
+
     pub fn of_team<'a>(&'a self, team: &'a str) -> impl Iterator<Item = &'a Record> {
         self.records.iter().filter(move |r| r.team == team)
     }

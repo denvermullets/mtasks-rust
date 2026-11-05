@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::app::View;
 use crate::db::attachments::Attachment;
+use crate::db::panel_states::StoredPanel;
 use crate::saved_view::OpenView;
 use crate::tabs::{Page, TabKey, TabSet};
 use crate::views::{
@@ -118,6 +119,10 @@ pub struct ParkedTab {
     pub open_view: Option<OpenView>,
     /// Where Back from the open issue returns to.
     pub detail_from: DetailFrom,
+    /// The Tab's Terminal panel, panes by Terminal record key: ids change when
+    /// a Terminal restarts, keys don't. `None` for a cross-team Tab, which has
+    /// no panel, and for one never shown (the default, hidden panel).
+    pub panel: Option<StoredPanel>,
 }
 
 impl ParkedTab {
@@ -137,6 +142,7 @@ impl ParkedTab {
             collapsed_sections: HashSet::new(),
             open_view: None,
             detail_from: DetailFrom::default(),
+            panel: None,
         }
     }
 
@@ -150,6 +156,83 @@ impl ParkedTab {
         }
         self
     }
+}
+
+/// The team whose Terminals the Tab `key` shows. A team Tab shows its own
+/// team's; a project Tab its project's team (`project_team`), so both Tabs list
+/// the same Terminals and a new one belongs to the team. A cross-team Tab
+/// shows none, whatever page it is on: an issue opened there from another
+/// team switches the selected team, and must not bring that team's panel.
+pub fn panel_team<'a>(key: &'a TabKey, project_team: Option<&'a str>) -> Option<&'a str> {
+    match key {
+        TabKey::Team(id) => Some(id.as_str()),
+        TabKey::Project(_) => project_team,
+        TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_) => None,
+    }
+}
+
+/// Whether a Tab whose team was removed stays open: a team Tab does while the
+/// team still has Terminals (`team_has_terminals`), since the sidebar row that
+/// reached them is gone. Any other Tab closes with its subject.
+pub fn keeps_removed_team(key: &TabKey, team_has_terminals: impl Fn(&str) -> bool) -> bool {
+    matches!(key, TabKey::Team(id) if team_has_terminals(id))
+}
+
+/// The panel of every open team or project Tab, for storing. The active Tab's
+/// is `live`; a parked Tab's is in `parked`; a Tab restored at launch and not
+/// focused yet keeps the one it was stored with (`restored`). A cross-team Tab
+/// has none.
+pub fn panel_rows(
+    set: &TabSet,
+    live: &StoredPanel,
+    parked: &Parked,
+    restored: &HashMap<TabKey, StoredPanel>,
+) -> Vec<(Option<TabKey>, StoredPanel)> {
+    set.tabs()
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| !key.is_cross_team())
+        .filter_map(|(i, key)| {
+            let panel = if i == set.active_index() {
+                Some(live.clone())
+            } else {
+                parked
+                    .get(key)
+                    .and_then(|p| p.panel.clone())
+                    .or_else(|| restored.get(key).cloned())
+            };
+            panel.map(|p| (Some(key.clone()), p))
+        })
+        .collect()
+}
+
+/// The panels a launch gives back to its Tabs. `rows` is what was stored:
+/// each Tab's own, and the one implicit panel saved before Tabs had their
+/// own. A row for a Tab that isn't open, or for a cross-team Tab (no panel),
+/// is dropped. The implicit panel moves onto `active` when that is a team or
+/// project Tab with no panel of its own; otherwise it is dropped.
+pub fn launch_panels(
+    rows: Vec<(Option<TabKey>, StoredPanel)>,
+    open: &[TabKey],
+    active: &TabKey,
+) -> HashMap<TabKey, StoredPanel> {
+    let mut out = HashMap::new();
+    let mut implicit = None;
+    for (tab, panel) in rows {
+        match tab {
+            Some(key) if open.contains(&key) && !key.is_cross_team() => {
+                out.entry(key).or_insert(panel);
+            }
+            None => implicit = implicit.or(Some(panel)),
+            Some(_) => {}
+        }
+    }
+    if let Some(panel) = implicit {
+        if !active.is_cross_team() && open.contains(active) {
+            out.entry(active.clone()).or_insert(panel);
+        }
+    }
+    out
 }
 
 /// The `scroll_state` keys of the scrollables `view` shows. Widgets keep
@@ -422,6 +505,122 @@ mod tests {
         assert_eq!(a.selected_team_id.as_deref(), Some("a"));
         assert!(parked.take(&team("a")).is_none());
         assert_eq!(parked.take(&team("b")).unwrap().view, View::ProjectList);
+    }
+
+    fn stored(layout: &str, key: &str) -> StoredPanel {
+        let mut p = StoredPanel { visible: true, layout: layout.into(), ..StoredPanel::default() };
+        p.panes[0] = Some(key.into());
+        p
+    }
+
+    #[test]
+    fn panel_state_parks_per_tab_and_a_shared_terminal_keeps_its_key() {
+        let mut parked = Parked::default();
+        // Two team Tabs, different layouts; the project Tab shares "k" with its team's.
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.panel = Some(stored("grid", "k"));
+        let mut proj = ParkedTab::new(View::ProjectDetail("p".into()), Some("a".into()));
+        proj.panel = Some(stored("single", "k"));
+        let mut b = ParkedTab::new(View::Board, Some("b".into()));
+        b.panel = Some(StoredPanel { height: Some(400.0), ..stored("columns", "kb") });
+        parked.save(team("a"), a);
+        parked.save(TabKey::Project("p".into()), proj);
+        parked.save(team("b"), b);
+        let a = parked.take(&team("a")).unwrap().panel.unwrap();
+        let proj = parked.take(&TabKey::Project("p".into())).unwrap().panel.unwrap();
+        let b = parked.take(&team("b")).unwrap().panel.unwrap();
+        assert_eq!((a.layout.as_str(), proj.layout.as_str(), b.layout.as_str()), ("grid", "single", "columns"));
+        assert_eq!(a.panes[0], proj.panes[0], "one Terminal in two Tabs");
+        assert_eq!((a.height, b.height), (None, Some(400.0)));
+    }
+
+    #[test]
+    fn closing_a_parked_tab_returns_its_panel_state_and_nothing_else_is_stopped() {
+        // `forget` only hands back the Tab's own state; Terminals aren't in it.
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.panel = Some(stored("columns", "k"));
+        parked.save(team("a"), a);
+        let forgotten = parked.forget(&team("a")).unwrap();
+        assert_eq!(forgotten.panel.unwrap().panes[0].as_deref(), Some("k"));
+        assert!(parked.take(&team("a")).is_none());
+    }
+
+    #[test]
+    fn only_team_and_project_tabs_show_a_panel() {
+        assert_eq!(panel_team(&team("a"), Some("a")), Some("a"));
+        assert_eq!(panel_team(&TabKey::Project("p".into()), Some("a")), Some("a"));
+        // Even with another team's issue open in the Tab.
+        for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            assert_eq!(panel_team(&key, Some("other")), None);
+        }
+    }
+
+    #[test]
+    fn only_a_team_tab_with_terminals_survives_its_teams_removal() {
+        let has = |id: &str| id == "a";
+        assert!(keeps_removed_team(&team("a"), has));
+        assert!(!keeps_removed_team(&team("b"), has));
+        assert!(!keeps_removed_team(&TabKey::Project("a".into()), has));
+        assert!(!keeps_removed_team(&TabKey::Dashboard("a".into()), has));
+    }
+
+    #[test]
+    fn two_tabs_with_different_layouts_survive_store_and_launch() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let project = TabKey::Project("p".into());
+        let mut set = TabSet::new(team("a"));
+        set.open(project.clone());
+        set.open(TabKey::Inbox);
+        set.open(team("never-focused"));
+        set.focus(0);
+        // Team a is live; the project Tab is parked; the last was restored
+        // at an earlier launch and never focused since.
+        let mut parked = Parked::default();
+        let mut p = ParkedTab::new(View::ProjectDetail("p".into()), Some("a".into()));
+        p.panel = Some(stored("columns", "k2"));
+        parked.save(project.clone(), p);
+        let mut restored = HashMap::new();
+        restored.insert(team("never-focused"), stored("single", "k3"));
+        let rows = panel_rows(&set, &stored("grid", "k1"), &parked, &restored);
+        assert_eq!(rows.len(), 3, "the Inbox Tab has no panel");
+
+        crate::db::panel_states::save(&conn, &rows).unwrap();
+        let loaded = crate::db::panel_states::load(&conn).unwrap();
+        let got = launch_panels(loaded, set.tabs(), &team("a"));
+        assert_eq!(got[&team("a")], stored("grid", "k1"));
+        assert_eq!(got[&project], stored("columns", "k2"));
+        assert_eq!(got[&team("never-focused")], stored("single", "k3"));
+    }
+
+    #[test]
+    fn launch_gives_each_open_team_or_project_tab_its_own_panel() {
+        let open = [team("a"), TabKey::Project("p".into()), TabKey::MyIssues];
+        let rows = vec![
+            (Some(team("a")), stored("grid", "k1")),
+            (Some(TabKey::Project("p".into())), stored("columns", "k2")),
+            (Some(team("gone")), stored("single", "k3")),
+            (Some(TabKey::MyIssues), stored("single", "k4")),
+        ];
+        let got = launch_panels(rows, &open, &team("a"));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[&team("a")].layout, "grid");
+        assert_eq!(got[&TabKey::Project("p".into())].layout, "columns");
+    }
+
+    #[test]
+    fn the_implicit_panel_moves_onto_the_active_tab_unless_it_has_its_own() {
+        let open = [team("a"), team("b")];
+        let implicit = vec![(None, stored("grid", "k"))];
+        let got = launch_panels(implicit.clone(), &open, &team("b"));
+        assert_eq!(got.keys().collect::<Vec<_>>(), vec![&team("b")]);
+        let mut rows = implicit.clone();
+        rows.push((Some(team("b")), stored("columns", "kb")));
+        assert_eq!(launch_panels(rows, &open, &team("b"))[&team("b")].layout, "columns");
+        // Dropped cleanly on a cross-team Tab or one that isn't open.
+        assert!(launch_panels(implicit.clone(), &[TabKey::MyIssues], &TabKey::MyIssues).is_empty());
+        assert!(launch_panels(implicit, &open, &team("z")).is_empty());
     }
 
     #[test]

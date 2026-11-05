@@ -1,7 +1,8 @@
 //! Panel rules with no Iced and no engine: sizes, which Terminal a pane
-//! shows, and what Cmd+J does. `PanelState` is the per-Tab panel state; until
-//! Tabs wire it (JRST-417) `TerminalState` holds one as the implicit Tab.
+//! shows, and what Cmd+J does. `PanelState` is the active Tab's panel state;
+//! other Tabs park theirs as a `StoredPanel` (keys, not ids).
 use super::TerminalId;
+use crate::db::panel_states::StoredPanel;
 
 pub const MIN_HEIGHT: f32 = 120.0;
 /// The main area keeps at least this much.
@@ -47,13 +48,33 @@ impl Layout {
     }
 }
 
+impl Layout {
+    /// The name stored for this layout.
+    pub fn name(self) -> &'static str {
+        match self {
+            Layout::Single => "single",
+            Layout::Columns => "columns",
+            Layout::Grid => "grid",
+        }
+    }
+
+    /// The layout stored under `name`; an unknown name is `Single`.
+    pub fn from_name(name: &str) -> Layout {
+        match name {
+            "columns" => Layout::Columns,
+            "grid" => Layout::Grid,
+            _ => Layout::Single,
+        }
+    }
+}
+
 /// The Terminal in each pane, by slot. Slots past the layout are hidden: they
 /// keep their Terminal so growing the layout again brings it back.
 pub type Panes = [Option<TerminalId>; MAX_PANES];
 
 /// What one Tab remembers about its panel: whether it shows, how tall, the
 /// layout, which Terminal fills each pane and which pane has focus. Terminals
-/// themselves live outside. JRST-417 parks this per Tab.
+/// themselves live outside. Each Tab parks its own.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PanelState {
     pub visible: bool,
@@ -71,10 +92,44 @@ impl PanelState {
         self.panes[self.focused_pane.min(self.layout.slots() - 1)]
     }
 
+    /// The state with each pane's Terminal as its record `key`, which outlives
+    /// a restart or a relaunch (a `TerminalId` doesn't). `key_of` is `None` for
+    /// a Terminal that no longer exists.
+    pub fn to_stored(&self, key_of: impl Fn(TerminalId) -> Option<String>) -> StoredPanel {
+        StoredPanel {
+            visible: self.visible,
+            height: self.height,
+            layout: self.layout.name().to_string(),
+            panes: std::array::from_fn(|i| self.panes[i].and_then(&key_of)),
+            focused_pane: self.focused_pane,
+        }
+    }
+
+    /// The state stored panel `p` describes. A pane whose key `id_of` can't
+    /// find (the Terminal was closed) comes back empty, and a key in two
+    /// panes keeps only the first.
+    pub fn from_stored(p: &StoredPanel, id_of: impl Fn(&str) -> Option<TerminalId>) -> PanelState {
+        let layout = Layout::from_name(&p.layout);
+        let mut panes: Panes = [None; MAX_PANES];
+        for (slot, key) in p.panes.iter().enumerate() {
+            let id = key.as_deref().and_then(&id_of);
+            if id.is_some() && !panes.contains(&id) {
+                panes[slot] = id;
+            }
+        }
+        PanelState {
+            visible: p.visible,
+            height: p.height,
+            layout,
+            panes,
+            focused_pane: p.focused_pane.min(layout.slots() - 1),
+        }
+    }
+
     /// Move focus to the next (`1`) or previous (`-1`) pane, wrapping.
-    /// This is what Cmd+] and Cmd+[ call (JRST-405).
+    /// This is what Cmd+] and Cmd+[ call. Empty panes are skipped.
     pub fn cycle_focus(&mut self, delta: i32) {
-        self.focused_pane = next_slot(self.focused_pane, self.layout, delta);
+        self.focused_pane = next_pane(&self.panes, self.layout, self.focused_pane, delta);
     }
 }
 
@@ -114,8 +169,22 @@ pub fn unshown(owned_by_team: &[TerminalId], panes: &Panes, layout: Layout) -> V
     owned_by_team.iter().copied().filter(|id| !shown.contains(&Some(*id))).collect()
 }
 
+/// The nearest pane holding a Terminal, `delta` steps (1 or -1) from
+/// `current` and wrapping within the layout. With no other pane to go to,
+/// focus stays where it is.
+pub fn next_pane(panes: &Panes, layout: Layout, current: usize, delta: i32) -> usize {
+    let mut slot = current.min(layout.slots() - 1);
+    for _ in 0..layout.slots() {
+        slot = next_slot(slot, layout, delta);
+        if panes[slot].is_some() {
+            return slot;
+        }
+    }
+    current.min(layout.slots() - 1)
+}
+
 /// The pane `delta` steps from `current`, wrapping within the layout.
-pub fn next_slot(current: usize, layout: Layout, delta: i32) -> usize {
+fn next_slot(current: usize, layout: Layout, delta: i32) -> usize {
     let n = layout.slots() as i32;
     ((current.min(layout.slots() - 1) as i32 + delta).rem_euclid(n)) as usize
 }
@@ -200,6 +269,12 @@ pub fn grid_for(width: f32, height: f32, cell_w: f32, cell_h: f32) -> (u16, u16)
 /// focus itself is kept, so closing the modal hands the keyboard back.
 pub fn keys_go_to_terminal(focused: bool, panel_visible: bool, modal_open: bool) -> bool {
     focused && panel_visible && !modal_open
+}
+
+/// Whether a click on a team's sidebar row shows its panel: it does when the
+/// team has an open Terminal, and otherwise leaves the panel as it was.
+pub fn visible_after_click(open_terminals: usize, visible: bool) -> bool {
+    visible || open_terminals > 0
 }
 
 /// What a pane says over its last screen.
@@ -354,14 +429,100 @@ mod tests {
         assert_eq!(unshown(&[a, b, c], &panes, Layout::Columns), vec![b, c]);
     }
 
+    fn full() -> Panes {
+        [Some(TerminalId(1)), Some(TerminalId(2)), Some(TerminalId(3)), Some(TerminalId(4))]
+    }
+
+    fn key_of(id: TerminalId) -> Option<String> {
+        Some(format!("key{}", id.0))
+    }
+
+    fn id_of(key: &str) -> Option<TerminalId> {
+        key.strip_prefix("key")?.parse().ok().map(TerminalId)
+    }
+
+    #[test]
+    fn panel_state_round_trips_through_keys() {
+        let state = PanelState {
+            visible: true,
+            height: Some(333.0),
+            layout: Layout::Grid,
+            panes: [Some(TerminalId(7)), None, Some(TerminalId(3)), None],
+            focused_pane: 2,
+        };
+        let stored = state.to_stored(key_of);
+        assert_eq!(stored.layout, "grid");
+        assert_eq!(stored.panes[0].as_deref(), Some("key7"));
+        assert_eq!(PanelState::from_stored(&stored, id_of), state);
+    }
+
+    #[test]
+    fn a_pane_whose_terminal_is_gone_comes_back_empty() {
+        let mut stored = PanelState {
+            visible: true,
+            layout: Layout::Columns,
+            panes: [Some(TerminalId(1)), Some(TerminalId(2)), None, None],
+            ..PanelState::default()
+        }
+        .to_stored(key_of);
+        stored.panes[1] = Some("closed-long-ago".into());
+        let back = PanelState::from_stored(&stored, id_of);
+        assert_eq!(back.panes, [Some(TerminalId(1)), None, None, None]);
+    }
+
+    #[test]
+    fn an_unknown_layout_is_single_and_focus_stays_inside_it() {
+        let stored = StoredPanel { layout: "tiles".into(), focused_pane: 3, ..StoredPanel::default() };
+        let back = PanelState::from_stored(&stored, id_of);
+        assert_eq!((back.layout, back.focused_pane), (Layout::Single, 0));
+    }
+
+    #[test]
+    fn a_terminal_stored_in_two_panes_fills_only_the_first() {
+        let mut stored = StoredPanel { layout: "columns".into(), ..StoredPanel::default() };
+        stored.panes[0] = Some("key5".into());
+        stored.panes[1] = Some("key5".into());
+        let back = PanelState::from_stored(&stored, id_of);
+        assert_eq!(back.panes, [Some(TerminalId(5)), None, None, None]);
+    }
+
+    #[test]
+    fn a_click_shows_the_panel_only_for_a_team_with_open_terminals() {
+        assert!(visible_after_click(2, false), "hidden panel is shown");
+        assert!(visible_after_click(1, true));
+        assert!(!visible_after_click(0, false), "nothing open: unchanged");
+        assert!(visible_after_click(0, true), "and never hidden");
+    }
+
     #[test]
     fn panes_cycle_both_ways_and_wrap() {
-        assert_eq!(next_slot(0, Layout::Columns, 1), 1);
-        assert_eq!(next_slot(1, Layout::Columns, 1), 0);
-        assert_eq!(next_slot(0, Layout::Columns, -1), 1);
-        assert_eq!(next_slot(0, Layout::Single, 1), 0);
+        let p = full();
+        assert_eq!(next_pane(&p, Layout::Columns, 0, 1), 1);
+        assert_eq!(next_pane(&p, Layout::Columns, 1, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Columns, 0, -1), 1);
         // A slot past the layout (after shrinking) lands inside it.
-        assert_eq!(next_slot(3, Layout::Single, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Columns, 3, 1), 0);
+    }
+
+    #[test]
+    fn cycling_with_one_pane_stays_put() {
+        let p = full();
+        assert_eq!(next_pane(&p, Layout::Single, 0, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Single, 0, -1), 0);
+        assert_eq!(next_pane(&p, Layout::Single, 3, 1), 0);
+    }
+
+    #[test]
+    fn cycling_skips_empty_panes_and_stays_when_none_other_has_a_terminal() {
+        let a = Some(TerminalId(1));
+        let b = Some(TerminalId(2));
+        let p: Panes = [a, None, None, b];
+        assert_eq!(next_pane(&p, Layout::Grid, 0, 1), 3);
+        assert_eq!(next_pane(&p, Layout::Grid, 3, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Grid, 0, -1), 3);
+        let lone: Panes = [None, a, None, None];
+        assert_eq!(next_pane(&lone, Layout::Grid, 1, 1), 1);
+        assert_eq!(next_pane(&[None; MAX_PANES], Layout::Columns, 0, 1), 0);
     }
 
     #[test]
@@ -415,8 +576,8 @@ mod tests {
     #[test]
     fn a_grid_has_four_panes_that_cycle_and_a_quarter_of_the_panel_each() {
         assert_eq!(Layout::Grid.slots(), 4);
-        assert_eq!(next_slot(3, Layout::Grid, 1), 0);
-        assert_eq!(next_slot(0, Layout::Grid, -1), 3);
+        assert_eq!(next_pane(&full(), Layout::Grid, 3, 1), 0);
+        assert_eq!(next_pane(&full(), Layout::Grid, 0, -1), 3);
         assert_eq!(pane_size(1100.0, 900.0, None, Layout::Grid), (439.5, 135.5));
         assert_eq!(slot_for_new(&[Some(TerminalId(1)), Some(TerminalId(2)), None, None], Layout::Grid, 0), 2);
     }

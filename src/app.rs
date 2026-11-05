@@ -807,6 +807,10 @@ pub struct App {
     /// Pages restored at launch for Tabs not focused yet; a Tab takes its
     /// entry the first time it becomes live.
     restored_pages: HashMap<crate::tabs::TabKey, crate::tabs::Page>,
+    /// The panels last written to the local database, so a change is saved once.
+    saved_panels: Option<Vec<(Option<crate::tabs::TabKey>, crate::db::panel_states::StoredPanel)>>,
+    /// Panels stored for Tabs restored at launch, until each is first focused.
+    restored_panels: HashMap<crate::tabs::TabKey, crate::db::panel_states::StoredPanel>,
     /// Window width and the tab bar's sideways scroll, for keeping the active
     /// Tab in view. Neither is per Tab.
     window_width: f32,
@@ -990,14 +994,8 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
-            terminal_focus: self.terminals.palette_focus(crate::terminal::panel_team(
-                &self.view,
-                self.selected_team_id.as_deref(),
-            )),
-            terminal_panel_showing: self.terminals.panel_showing(crate::terminal::panel_team(
-                &self.view,
-                self.selected_team_id.as_deref(),
-            )),
+            terminal_focus: self.terminals.palette_focus(self.panel_team()),
+            terminal_panel_showing: self.terminals.panel_showing(self.panel_team()),
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -3174,6 +3172,8 @@ impl App {
             tab_set: None,
             saved_tabs: None,
             restored_pages: HashMap::new(),
+            saved_panels: None,
+            restored_panels: HashMap::new(),
             window_width: 1100.0,
             tab_bar_offset: 0.0,
             tab_projects: HashMap::new(),
@@ -3513,13 +3513,38 @@ impl App {
         self.discard_dead_composers();
         self.save_tabs();
         self.save_terminal_records();
-        self.terminals
-            .sync(crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()));
+        self.save_panel();
+        let panel_team = self.panel_team().map(str::to_string);
+        self.terminals.set_pinned(self.removed_team_tab());
+        self.terminals.sync(panel_team.as_deref());
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
         task
+    }
+
+    /// Store the panel when it changed since the last message. Local only.
+    fn save_panel(&mut self) {
+        let Some(set) = &self.tab_set else {
+            return;
+        };
+        if self.terminals.dragging() {
+            return;
+        }
+        let rows = crate::tab_state::panel_rows(
+            set,
+            &self.terminals.stored_panel(),
+            &self.parked_tabs,
+            &self.restored_panels,
+        );
+        if self.saved_panels.as_ref() == Some(&rows) {
+            return;
+        }
+        match crate::db::panel_states::save(&self.db(), &rows) {
+            Ok(()) => self.saved_panels = Some(rows),
+            Err(e) => eprintln!("could not save panel state: {e}"),
+        }
     }
 
     /// Store what changed in the Terminal strips since the last message.
@@ -3626,15 +3651,14 @@ impl App {
 
             Message::SelectTeamRow(team_id) => {
                 self.expanded_teams.insert(team_id.clone());
-                // Focus the Tab as it was left. A team Tab that is showing a
-                // cross-team page has nothing of the team's to return to, so
-                // that case goes to the team's Board.
-                if self.selected_team_id.as_deref() == Some(team_id.as_str())
-                    && self.view.is_cross_team()
-                {
-                    return self.update_inner(Message::SelectTeamView(team_id, View::Board));
-                }
-                return self.focus_team_tab(&team_id);
+                // Focus the Tab as it was left. A team's Tab never shows a
+                // cross-team page (those are Tabs of their own), so there is
+                // always something of the team's to return to.
+                let task = self.focus_team_tab(&team_id);
+                // Open Terminals are why a click may need to show the panel:
+                // this row is the way back to shells with no Tab open.
+                self.terminals.reveal_for_click(&team_id);
+                return task;
             }
 
             Message::OpenSavedView(view_id) => {
@@ -4175,8 +4199,7 @@ impl App {
                 self.modal = Modal::TerminalCloseConfirm(id);
             }
             Message::Terminal(crate::terminal::TerminalMessage::DirPicked(Some(dir))) => {
-                if let Some(team) = crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()) {
-                    let team = team.to_string();
+                if let Some(team) = self.panel_team().map(str::to_string) {
                     match crate::db::terminal_dirs::set(&self.db(), &team, &dir) {
                         Ok(()) => self.terminals.set_team_dir(&team, Some(dir)),
                         Err(e) => self.push_toast(format!("Could not save the folder: {e}"), ToastKind::Error, false),
@@ -4187,9 +4210,19 @@ impl App {
                 if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {
                     self.modal = Modal::None;
                 }
-                let team =
-                    crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref());
-                return self.terminals.update(m, team);
+                let team = self.panel_team().map(str::to_string);
+                // Closing a removed team's last Terminal closes its Tab.
+                let closes = matches!(
+                    m,
+                    crate::terminal::TerminalMessage::Close(_)
+                        | crate::terminal::TerminalMessage::CloseConfirmed(_)
+                );
+                let task = self.terminals.update(m, team.as_deref());
+                return if closes {
+                    Task::batch([task, self.close_removed_tabs()])
+                } else {
+                    task
+                };
             }
 
             Message::SelectTeamView(team_id, view) => {
@@ -7097,14 +7130,26 @@ impl App {
             self.view == View::Inbox,
         );
 
+        let main_pane = if self.removed_team_tab() {
+            iced::widget::container(
+                iced::widget::text(
+                    "This team is no longer available. Its Terminals keep running below until you close them.",
+                )
+                .size(14)
+                .color(t::text_muted()),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+        } else {
+            main_pane
+        };
+
         let main_content = column![]
             .push(tab_bar::view(&self.tab_labels(), self.window_width))
-            .push(header)
+            .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
-            .push_maybe(self.terminals.panel_view(crate::terminal::panel_team(
-                &self.view,
-                self.selected_team_id.as_deref(),
-            )))
+            .push_maybe(self.terminals.panel_view(self.panel_team()))
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);

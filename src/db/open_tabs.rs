@@ -63,7 +63,7 @@ pub fn load(conn: &Connection, home: &TabKey) -> Result<Option<Stored>> {
     Ok(Some(Stored { tabs: TabSet::from_parts(keys, active, home), pages }))
 }
 
-fn to_parts(key: &TabKey) -> (&'static str, Option<&str>) {
+pub(crate) fn to_parts(key: &TabKey) -> (&'static str, Option<&str>) {
     match key {
         TabKey::Team(id) => ("team", Some(id)),
         TabKey::Project(id) => ("project", Some(id)),
@@ -73,7 +73,7 @@ fn to_parts(key: &TabKey) -> (&'static str, Option<&str>) {
     }
 }
 
-fn from_parts(kind: &str, ref_id: Option<String>) -> Option<TabKey> {
+pub(crate) fn from_parts(kind: &str, ref_id: Option<String>) -> Option<TabKey> {
     match (kind, ref_id) {
         ("team", Some(id)) => Some(TabKey::Team(id)),
         ("project", Some(id)) => Some(TabKey::Project(id)),

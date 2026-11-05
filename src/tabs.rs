@@ -565,6 +565,26 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_teams_last_tab_stays_while_the_exception_holds_then_closes() {
+        let mut tabs = TabSet::new(team("a"));
+        let held = tabs.prune(|_| false, |k| *k == team("a"), &team("a"));
+        assert!(held.closed.is_empty() && !held.active_changed);
+        assert_eq!(tabs.tabs(), &[team("a")]);
+        // The last Terminal closed: the Tab goes, and the Home page replaces it.
+        let home = team("home");
+        let gone = tabs.prune(exists_except(&[team("a")]), never, &home);
+        assert_eq!(gone.closed, [team("a")]);
+        assert_eq!(tabs.tabs(), &[home]);
+    }
+
+    #[test]
+    fn a_stored_tab_of_a_removed_team_does_not_come_back_at_launch() {
+        let stored = set(&[team("a"), team("gone")], 1);
+        let launched = TabSet::for_launch(Some(stored), None, &home(), exists_except(&[team("gone")]));
+        assert_eq!(launched.tabs(), &[team("a")]);
+    }
+
+    #[test]
     fn my_issues_and_inbox_are_untouched_by_a_prune() {
         let mut tabs = set(&[TabKey::MyIssues, TabKey::Inbox, team("a")], 0);
         tabs.prune(exists_except(&[team("a")]), never, &home());

@@ -16,14 +16,16 @@ pub enum Route {
     Copy,
     /// Cmd+1 to Cmd+9: the Tab at this zero-based position.
     Tab(usize),
+    /// Cmd+] (1) and Cmd+[ (-1): focus the next or previous pane.
+    CyclePane(i32),
     Send(KeyInput),
     Ignore,
 }
 
 /// What a key does while a Terminal has focus. Command keys never reach the
-/// shell: Cmd+J, K, C, V and 1 to 9 are the app's, and Cmd+Q, Cmd+[ and Cmd+]
-/// are reserved (Quit is the native menu item; the others do nothing here, so
-/// no program ever sees a Command chord).
+/// shell: Cmd+J, K, C, V, [, ] and 1 to 9 are the app's, and Cmd+Q is reserved
+/// (Quit is the native menu item; other Command chords do nothing here, so no
+/// program ever sees one).
 pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
     if let Some(key) = editing_key(code, mods) {
         return Route::Send(key);
@@ -33,6 +35,8 @@ pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
             Code::KeyJ => Route::ToggleFocus,
             Code::KeyK => Route::Palette,
             Code::KeyV => Route::Paste,
+            Code::BracketRight => Route::CyclePane(1),
+            Code::BracketLeft => Route::CyclePane(-1),
             Code::KeyC => Route::Copy,
             c => tab_position(c).map_or(Route::Ignore, Route::Tab),
         };
@@ -230,9 +234,16 @@ mod tests {
         assert_eq!(route(Code::Digit1, Modifiers::LOGO, Some("1")), Route::Tab(0));
         assert_eq!(route(Code::Digit9, Modifiers::LOGO, Some("9")), Route::Tab(8));
         assert_eq!(route(Code::Digit0, Modifiers::LOGO, Some("0")), Route::Ignore);
-        for code in [Code::KeyQ, Code::BracketLeft, Code::BracketRight] {
+        for code in [Code::KeyQ, Code::KeyW] {
             assert_eq!(route(code, Modifiers::LOGO, None), Route::Ignore);
         }
+    }
+
+    #[test]
+    fn cmd_brackets_cycle_panes_and_never_reach_the_shell() {
+        assert_eq!(route(Code::BracketRight, Modifiers::LOGO, Some("]")), Route::CyclePane(1));
+        assert_eq!(route(Code::BracketLeft, Modifiers::LOGO, Some("[")), Route::CyclePane(-1));
+        assert!(matches!(route(Code::BracketLeft, Modifiers::empty(), Some("[")), Route::Send(_)));
     }
 
     fn sent(code: Code, mods: Modifiers) -> (char, bool, bool) {
