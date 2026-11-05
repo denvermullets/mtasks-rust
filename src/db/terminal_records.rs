@@ -54,8 +54,7 @@ pub fn apply(conn: &Connection, changes: &[Change]) -> Result<()> {
     tx.commit()
 }
 
-/// Every stored Terminal, in the order they were added. JRST-414 reads it at launch.
-#[allow(dead_code)]
+/// Every stored Terminal, in the order they were added. Read at launch.
 pub fn all(conn: &Connection) -> Result<Vec<Stored>> {
     let mut stmt = conn
         .prepare("SELECT id, team_id, name, cwd FROM terminal_records ORDER BY position, id")?;

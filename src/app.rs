@@ -3174,6 +3174,10 @@ impl App {
                 if let Ok(dirs) = connection::open().and_then(|c| crate::db::terminal_dirs::all(&c)) {
                     terminals.set_team_dirs(dirs);
                 }
+                match connection::open().and_then(|c| crate::db::terminal_records::all(&c)) {
+                    Ok(stored) => terminals.restore_records(stored),
+                    Err(e) => eprintln!("could not load Terminal records: {e}"),
+                }
                 terminals
             },
             parked_tabs: Default::default(),

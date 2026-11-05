@@ -80,6 +80,9 @@ pub struct TerminalState {
     sent_size: HashMap<TerminalId, (u16, u16)>,
     theme_key: &'static str,
     error: Option<String>,
+    /// Restored Terminals whose shell failed to start; `sync` doesn't retry
+    /// them every message. Restart does.
+    start_failed: Vec<TerminalId>,
 }
 
 impl TerminalState {
@@ -106,7 +109,14 @@ impl TerminalState {
             sent_size: HashMap::new(),
             theme_key: t::tok().key,
             error: None,
+            start_failed: Vec::new(),
         }
+    }
+
+    /// Put the stored Terminals back in the strips at launch. No shells start:
+    /// each starts when a pane first shows it.
+    pub fn restore_records(&mut self, stored: Vec<crate::db::terminal_records::Stored>) {
+        self.roster.restore(stored);
     }
 
     pub fn update(&mut self, message: TerminalMessage, team: Option<&str>) -> Task<Message> {
@@ -223,6 +233,13 @@ impl TerminalState {
         }
         let on_screen = team.is_some() && self.panel.visible;
         let shown = team.and_then(|t| panel::resolve_shown(self.panel.pane, &self.owned_by(t)));
+        let mut shown = shown;
+        // A restored Terminal starts its shell when a pane first shows it.
+        if let (true, Some(id)) = (on_screen, shown) {
+            if let Some(started) = self.start_restored(id) {
+                shown = Some(started);
+            }
+        }
         if shown != self.shown {
             self.shown = shown;
             self.pane.reset();
@@ -296,7 +313,7 @@ impl TerminalState {
                 id: r.id,
                 name: r.name.clone(),
                 active: Some(r.id) == self.shown,
-                exited: self.terminals.is_exited(r.id),
+                exited: r.shell && self.terminals.is_exited(r.id),
                 editing: self
                     .renaming
                     .as_ref()
@@ -316,7 +333,8 @@ impl TerminalState {
             }),
             notice: self.shown.and_then(|id| {
                 let dead = self.terminals.frame(id).is_some_and(|f| f.dead);
-                panel::pane_notice(self.terminals.is_exited(id), dead).map(|n| (id, n))
+                let exited = self.roster.get(id).is_some_and(|r| r.shell) && self.terminals.is_exited(id);
+                panel::pane_notice(exited, dead).map(|n| (id, n))
             }),
             note,
             height: panel::panel_height(self.window.height, self.panel.height),
@@ -445,8 +463,29 @@ impl TerminalState {
         panel::grid_for(w, h, cell.0, cell.1)
     }
 
+    /// Start the shell of a restored record in its working directory (home if
+    /// that is gone, as for any spawn). Returns the shell's id.
+    fn start_restored(&mut self, id: TerminalId) -> Option<TerminalId> {
+        let rec = self.roster.unstarted(id)?.clone();
+        if self.start_failed.contains(&id) {
+            return None;
+        }
+        match self.spawn(&rec.team, rec.cwd) {
+            Some(new) => {
+                self.roster.replace_id(id, new);
+                self.panel.pane = Some(new);
+                Some(new)
+            }
+            None => {
+                self.start_failed.push(id);
+                None
+            }
+        }
+    }
+
     fn restart(&mut self, id: TerminalId) {
         let Some(rec) = self.roster.get(id).cloned() else { return };
+        self.start_failed.retain(|f| *f != id);
         if !self.terminals.is_exited(id) {
             return;
         }

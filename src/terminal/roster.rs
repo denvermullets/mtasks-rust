@@ -19,12 +19,24 @@ pub struct Record {
     pub name: String,
     /// The directory the shell was started in; Restart reuses it.
     pub cwd: Option<PathBuf>,
+    /// Whether `id` is a real shell's. False for a restored record that has
+    /// not started: it is in the strip but has no engine.
+    pub shell: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Roster {
     records: Vec<Record>,
     changes: Vec<Change>,
+    /// Placeholder ids handed to restored records, counting down from the top
+    /// of the id space; the engine counts up from 1, so they never meet.
+    next_placeholder: u64,
+}
+
+impl Default for Roster {
+    fn default() -> Self {
+        Roster { records: Vec::new(), changes: Vec::new(), next_placeholder: u64::MAX }
+    }
 }
 
 /// "Terminal N" with the lowest N no name in `taken` uses.
@@ -49,8 +61,32 @@ impl Roster {
             name: name.clone(),
             cwd: cwd.clone(),
         }));
-        self.records.push(Record { key, id, team: team.to_string(), name: name.clone(), cwd });
+        self.records.push(Record { key, id, team: team.to_string(), name: name.clone(), cwd, shell: true });
         name
+    }
+
+    /// Put stored records back in the strip without a shell. Each gets a
+    /// placeholder id until `replace_id` gives it its shell's; nothing is
+    /// reported as a change, since it is already stored.
+    pub fn restore(&mut self, stored: Vec<Stored>) {
+        for s in stored {
+            let id = TerminalId(self.next_placeholder);
+            self.next_placeholder -= 1;
+            self.records.push(Record {
+                key: s.key,
+                id,
+                team: s.team_id,
+                name: s.name,
+                cwd: s.cwd,
+                shell: false,
+            });
+        }
+    }
+
+    /// The record with this id if it has no shell yet (restored and never
+    /// shown): the one a pane starting it needs.
+    pub fn unstarted(&self, id: TerminalId) -> Option<&Record> {
+        self.get(id).filter(|r| !r.shell)
     }
 
     pub fn remove(&mut self, id: TerminalId) {
@@ -95,6 +131,7 @@ impl Roster {
     pub fn replace_id(&mut self, old: TerminalId, new: TerminalId) {
         if let Some(r) = self.records.iter_mut().find(|r| r.id == old) {
             r.id = new;
+            r.shell = true;
         }
     }
 }
@@ -186,5 +223,55 @@ mod tests {
         r.replace_id(id(1), id(2));
         assert_eq!(r.get(id(2)).unwrap().key, key);
         assert!(r.take_changes().is_empty());
+    }
+
+    fn stored(key: &str, team: &str, name: &str, cwd: Option<&str>) -> Stored {
+        Stored { key: key.into(), team_id: team.into(), name: name.into(), cwd: cwd.map(Into::into) }
+    }
+
+    #[test]
+    fn restored_records_are_listed_by_name_with_no_shell_and_nothing_to_store() {
+        let mut r = Roster::default();
+        r.restore(vec![
+            stored("k1", "a", "claude", Some("/work")),
+            stored("k2", "a", "Terminal 2", None),
+            stored("k3", "b", "Terminal 1", None),
+        ]);
+        let names: Vec<_> = r.of_team("a").map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["claude", "Terminal 2"]);
+        assert!(r.of_team("a").all(|x| !x.shell));
+        assert!(r.take_changes().is_empty());
+        let ids = r.ids_of_team("a");
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn a_restored_record_waits_to_start_until_given_a_shell_and_keeps_its_key() {
+        let mut r = Roster::default();
+        r.restore(vec![stored("k1", "a", "claude", Some("/work"))]);
+        let placeholder = r.ids_of_team("a")[0];
+        let rec = r.unstarted(placeholder).unwrap();
+        assert_eq!(rec.cwd, Some("/work".into()));
+        r.replace_id(placeholder, id(7));
+        assert!(r.unstarted(id(7)).is_none());
+        assert_eq!(r.get(id(7)).unwrap().key, "k1");
+        assert!(r.take_changes().is_empty());
+    }
+
+    #[test]
+    fn a_new_terminal_after_a_restore_takes_the_lowest_free_name_and_never_a_restored_id() {
+        let mut r = Roster::default();
+        r.restore(vec![stored("k1", "a", "Terminal 1", None)]);
+        let placeholder = r.ids_of_team("a")[0];
+        assert_eq!(r.add(id(1), "a", None), "Terminal 2");
+        assert_ne!(placeholder, id(1));
+    }
+
+    #[test]
+    fn closing_a_restored_record_removes_its_stored_record() {
+        let mut r = Roster::default();
+        r.restore(vec![stored("k1", "a", "Terminal 1", None)]);
+        r.remove(r.ids_of_team("a")[0]);
+        assert_eq!(r.take_changes(), vec![Change::Removed { key: "k1".into() }]);
     }
 }
