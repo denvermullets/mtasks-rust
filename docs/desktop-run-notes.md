@@ -6,6 +6,20 @@
 Its config and database live under `mtasks-rusty` (`dirs::config_dir()` / `dirs::data_local_dir()`,
 e.g. `~/Library/Application Support/mtasks-rusty/jait.db`).
 
+## Toolchain for the Terminal engine
+
+The terminal engine links `libghostty-vt`, whose build script runs `zig build`. Zig comes from mise,
+never Homebrew, and is pinned to exactly 0.17.1 in `mise.toml`.
+
+- Run `mise install` once in each fresh worktree, then build through mise so Zig is on `PATH`:
+  `mise exec -- cargo build` (or activate mise in your shell and run plain `cargo build`).
+- The first build fetches Ghostty from GitHub, so it needs network access. To build offline, point
+  `GHOSTTY_SOURCE_DIR` at a local Ghostty checkout of the pinned commit.
+- The pins move together, on purpose: the `libghostty-vt` commit in `Cargo.toml`, Zig in `mise.toml`
+  and `portable-pty` (`=0.9.0`). crates.io `libghostty-vt` 0.2.2 only builds on Zig 0.15, so the
+  crate comes from git. Never bump one without the others (see `docs/adr/0002-*`).
+- The built app has no Zig, Ghostty or Homebrew runtime dependency.
+
 ## Dev and release builds are separate
 
 Debug or release decides both the server and the folder (`src/config.rs`):
