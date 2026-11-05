@@ -654,8 +654,10 @@ fn owner(
     let mut mouse_enc = mouse::Encoder::new().unwrap();
     let mut mouse_ev = mouse::Event::new().unwrap();
     let mut held: Option<MouseButton> = None;
+    let mut grab: Option<pointer::PointerTarget> = None;
     let mut wheel_acc = pointer::WheelAccum::default();
     let mut selector = Selector::new();
+    let mut published_modes = (false, false);
     let mut had_selection = false;
     let mut sel_bg = theme.selection;
 
@@ -738,18 +740,30 @@ fn owner(
                     }
                 }
                 Cmd::Mouse(m) => {
-                    let (action, button) = match m.action {
-                        MouseAction::Press(b) => {
-                            held = Some(b);
-                            (mouse::Action::Press, Some(b))
+                    // A gesture belongs to whoever it started with, even if Shift changes.
+                    let target = match (m.action, grab) {
+                        (MouseAction::Press(_), _) | (_, None) => {
+                            pointer::route(term.is_mouse_tracking().unwrap_or(false), m.mods.shift)
                         }
-                        MouseAction::Release(b) => {
-                            held = None;
-                            (mouse::Action::Release, Some(b))
-                        }
-                        MouseAction::Move => (mouse::Action::Motion, held),
+                        (_, Some(t)) => t,
                     };
-                    if term.is_mouse_tracking().unwrap_or(false) {
+                    grab = match m.action {
+                        MouseAction::Press(_) => Some(target),
+                        MouseAction::Release(_) => None,
+                        MouseAction::Move => grab,
+                    };
+                    if target == pointer::PointerTarget::Program {
+                        let (action, button) = match m.action {
+                            MouseAction::Press(b) => {
+                                held = Some(b);
+                                (mouse::Action::Press, Some(b))
+                            }
+                            MouseAction::Release(b) => {
+                                held = None;
+                                (mouse::Action::Release, Some(b))
+                            }
+                            MouseAction::Move => (mouse::Action::Motion, held),
+                        };
                         let sz = *size.lock().unwrap();
                         // Report the middle of the cell, clamped to the grid.
                         let col = m.col.clamp(0, sz.0 as i32 - 1) as f32;
@@ -885,6 +899,17 @@ fn owner(
             if batch_start.elapsed() < FRAME {
                 next = rx.try_recv().ok();
             }
+        }
+
+        // A program turning mouse tracking or the alternate screen on or off changes no
+        // cell, so the render state stays clean; the frame still has to say so.
+        let modes = (
+            term.is_mouse_tracking().unwrap_or(false),
+            term.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false),
+        );
+        if modes != published_modes {
+            published_modes = modes;
+            force_full = true;
         }
 
         if selector.autoscrolling() && selector.last_tick.elapsed() >= AUTOSCROLL {

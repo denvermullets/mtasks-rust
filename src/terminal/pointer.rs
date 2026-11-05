@@ -6,6 +6,26 @@ pub fn cell_at(x: f32, y: f32, cell_w: f32, cell_h: f32) -> (i32, i32) {
     ((x / cell_w).floor() as i32, (y / cell_h).floor() as i32)
 }
 
+/// Who receives a click or drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerTarget {
+    /// The program, as mouse reports.
+    Program,
+    /// The Terminal's own text selection.
+    Selection,
+}
+
+/// Where a gesture that starts now goes: to a program that tracks the mouse,
+/// unless Shift is held (the usual terminal way to select anyway). The choice
+/// holds for the whole gesture, so releasing Shift mid-drag changes nothing.
+pub fn route(tracking: bool, shift: bool) -> PointerTarget {
+    if tracking && !shift {
+        PointerTarget::Program
+    } else {
+        PointerTarget::Selection
+    }
+}
+
 /// Rows moved per wheel notch (a mouse wheel; a trackpad reports pixels instead).
 pub const LINES_PER_NOTCH: f32 = 3.0;
 
@@ -56,6 +76,14 @@ impl WheelAccum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_takes_a_gesture_from_a_tracking_program() {
+        assert_eq!(route(true, false), PointerTarget::Program);
+        assert_eq!(route(true, true), PointerTarget::Selection);
+        assert_eq!(route(false, false), PointerTarget::Selection);
+        assert_eq!(route(false, true), PointerTarget::Selection);
+    }
 
     #[test]
     fn a_trackpad_adds_up_small_movements_into_whole_rows() {

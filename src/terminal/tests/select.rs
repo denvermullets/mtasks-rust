@@ -90,6 +90,50 @@ fn a_selection_stays_on_its_text_as_output_arrives() {
     close_all(t);
 }
 
+/// `vim` with `set mouse=a`, as far as the terminal can tell: mouse reports on, echoed visibly.
+fn tracking_program() -> (Terminals, TerminalId) {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    type_line(&t, id, "stty raw -echo; printf 'one\\r\\ntwo\\r\\nthree\\r\\n\\033[?1000h\\033[?1006h'; cat -v");
+    wait_for(&t, id, "tracking on", |f| f.tracking && f.contains_line("three"));
+    (t, id)
+}
+
+fn with_shift(mut e: MouseInput) -> MouseInput {
+    e.mods.shift = true;
+    e
+}
+
+#[test]
+fn shift_drag_selects_in_a_tracking_program_and_sends_it_nothing() {
+    let (t, id) = tracking_program();
+    let r = row_of(&t.frame(id).unwrap(), "one");
+    t.mouse(id, with_shift(ev(MouseAction::Press(MouseButton::Left), 0, r)));
+    t.mouse(id, with_shift(ev(MouseAction::Move, 4, r + 2)));
+    // Shift is let go before the button: the gesture still belongs to the selection.
+    t.mouse(id, ev(MouseAction::Release(MouseButton::Left), 4, r + 2));
+    wait_for(&t, id, "a selection", |f| f.rows.iter().any(|r| r.selected.is_some()));
+    assert_eq!(t.selected_text(id).as_deref(), Some("one\ntwo\nthree"));
+    // Input is handled in order, so once the later key shows, any report would have.
+    t.send_key(id, key('z'));
+    let f = wait_for(&t, id, "the later key", |f| f.lines().iter().any(|l| l.ends_with('z')));
+    assert!(!f.lines().iter().any(|l| l.contains("^[")), "{:?}", f.lines());
+    close_all(t);
+}
+
+#[test]
+fn a_plain_drag_in_a_tracking_program_still_goes_to_the_program() {
+    let (t, id) = tracking_program();
+    let r = row_of(&t.frame(id).unwrap(), "one");
+    t.mouse(id, ev(MouseAction::Press(MouseButton::Left), 0, r));
+    t.mouse(id, ev(MouseAction::Release(MouseButton::Left), 0, r));
+    // Column 1, and the row 1-based: press then release reports.
+    let want = format!("^[[<0;1;{}M^[[<0;1;{}m", r + 1, r + 1);
+    let f = wait_for(&t, id, "a report", |f| f.lines().iter().any(|l| l.contains(&want)));
+    assert!(f.rows.iter().all(|r| r.selected.is_none()), "no selection was made");
+    close_all(t);
+}
+
 #[test]
 fn selecting_and_leaving_it_alone_costs_no_wakes() {
     let wakes = Arc::new(AtomicUsize::new(0));
