@@ -4131,6 +4131,8 @@ impl App {
             }
 
             Message::OpenDashboard(id) => {
+                // Each Dashboard has its own Tab.
+                self.focus_tab(crate::tabs::TabKey::Dashboard(id.clone()));
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
