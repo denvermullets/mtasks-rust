@@ -12,12 +12,12 @@ use iced::advanced::text::{self as adv_text, Paragraph as _};
 use iced::alignment::{Horizontal, Vertical};
 use iced::mouse::{self, Cursor};
 use iced::widget::canvas::{self, Cache, Canvas, Geometry, Text};
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{button, column, container, row, text, text_input, Space};
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
-use crate::terminal::panel::STRIP_HEIGHT;
-use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalMessage};
+use crate::terminal::panel::{PaneNotice, STRIP_HEIGHT};
+use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalId, TerminalMessage};
 use crate::theme as t;
 
 /// Family name inside the bundled JetBrains Mono files.
@@ -303,21 +303,183 @@ pub fn measure_cell() -> (f32, f32) {
 pub struct PanelView<'a> {
     /// The pane to draw, or `None` for a team with no Terminal yet.
     pub pane: Option<&'a Pane>,
-    pub title: String,
+    /// The team's Terminals, in strip order.
+    pub items: Vec<StripItem>,
     /// A line for the strip, such as an exited notice or a spawn error.
     pub note: Option<String>,
+    /// The Terminal whose shell exited, to say so over its last screen.
+    pub notice: Option<(TerminalId, PaneNotice)>,
+    /// Name of the team's starting folder, if one is set.
+    pub dir_label: Option<String>,
     pub height: f32,
 }
 
-pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
-    let mut strip = row![text(p.title).size(12).color(t::text_secondary())]
-        .spacing(12)
+/// One Terminal in the strip.
+pub struct StripItem {
+    pub id: TerminalId,
+    pub name: String,
+    /// The Terminal the pane is showing.
+    pub active: bool,
+    pub exited: bool,
+    /// The text being typed while this Terminal is renamed.
+    pub editing: Option<String>,
+}
+
+/// An ask-first dialog for closing a busy Terminal or quitting with one.
+pub fn confirm_modal<'a>(
+    title: &'a str,
+    body: String,
+    confirm_label: &'a str,
+    confirm: Message,
+) -> Element<'a, Message> {
+    let content = column![]
+        .spacing(16)
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(text(body).size(14).color(t::text_secondary()))
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text(confirm_label).size(14).color(Color::WHITE))
+                        .on_press(confirm)
+                        .padding([8, 24])
+                        .style(|_theme: &Theme, _status| button::Style {
+                            background: Some(iced::Background::Color(t::danger())),
+                            text_color: Color::WHITE,
+                            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
+                )
+                .push(
+                    button(text("Cancel").size(14))
+                        .on_press(Message::CloseModal)
+                        .padding([8, 24])
+                        .style(button::secondary),
+                ),
+        );
+    let card = container(content).padding(28).style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_modal())),
+        border: iced::Border { color: t::border(), width: 1.0, radius: 8.0.into() },
+        ..Default::default()
+    });
+    container(card)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.7))),
+            ..Default::default()
+        })
+        .into()
+}
+
+pub fn rename_input_id() -> text_input::Id {
+    text_input::Id::new("terminal-rename")
+}
+
+fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
+    if let Some(draft) = item.editing {
+        return text_input("Name", &draft)
+            .id(rename_input_id())
+            .size(12)
+            .width(140)
+            .padding([1, 6])
+            .on_input(|s| Message::Terminal(TerminalMessage::RenameInput(s)))
+            .on_submit(Message::Terminal(TerminalMessage::RenameSubmit))
+            .into();
+    }
+    let label = if item.exited { format!("{} (exited)", item.name) } else { item.name };
+    let (active, id) = (item.active, item.id);
+    button(text(label).size(12))
+        .padding([2, 8])
+        // Choosing the Terminal already shown renames it.
+        .on_press(Message::Terminal(if active {
+            TerminalMessage::RenameStart(id)
+        } else {
+            TerminalMessage::Select(id)
+        }))
+        .style(move |_theme: &Theme, _status| button::Style {
+            background: active.then(|| iced::Background::Color(t::bg_card_focused())),
+            text_color: if active { t::text_primary() } else { t::text_secondary() },
+            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// "Shell exited" over the bottom of the last screen, with Restart and Close.
+fn exited_bar<'a>(id: TerminalId, kind: PaneNotice) -> Element<'a, Message> {
+    let (message, restart) = match kind {
+        PaneNotice::Exited => ("Shell exited", true),
+        PaneNotice::Dead => ("This Terminal stopped working. Close it and open a new one", false),
+    };
+    let mut actions = row![text(message).size(12).color(t::text_primary())]
+        .spacing(10)
         .align_y(iced::Alignment::Center);
+    if restart {
+        actions = actions.push(
+            button(text("Restart").size(12))
+                .padding([2, 10])
+                .on_press(Message::Terminal(TerminalMessage::Restart(id)))
+                .style(button::secondary),
+        );
+    }
+    actions = actions.push(
+        button(text("Close").size(12))
+            .padding([2, 10])
+            .on_press(Message::Terminal(TerminalMessage::CloseConfirmed(id)))
+            .style(button::secondary),
+    );
+    let bar = container(actions)
+    .padding([6, 12])
+    .width(Length::Fill)
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_menu())),
+        border: iced::Border { color: t::border(), width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+    container(bar).align_bottom(Length::Fill).width(Length::Fill).height(Length::Fill).into()
+}
+
+pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
+    let mut strip = row![].spacing(6).align_y(iced::Alignment::Center);
+    for item in p.items {
+        let id = item.id;
+        let editing = item.editing.is_some();
+        strip = strip.push(strip_button(item));
+        if !editing {
+            strip = strip.push(
+                button(text("\u{00d7}").size(13))
+                    .padding([0, 4])
+                    .on_press(Message::Terminal(TerminalMessage::Close(id)))
+                    .style(button::text),
+            );
+        }
+    }
+    strip = strip.push(
+        button(text("+").size(13))
+            .padding([0, 8])
+            .on_press(Message::Terminal(TerminalMessage::New))
+            .style(button::text),
+    );
     if let Some(note) = p.note {
         strip = strip.push(text(note).size(12).color(t::text_muted()));
     }
     strip = strip
         .push(Space::with_width(Length::Fill))
+        .push(
+            button(
+                text(match p.dir_label {
+                    Some(d) => format!("Folder: {d}"),
+                    None => "Folder".to_string(),
+                })
+                .size(11),
+            )
+            .padding([2, 8])
+            .on_press(Message::Terminal(TerminalMessage::PickDir))
+            .style(button::text),
+        )
         .push(text("Cmd+J").size(11).color(t::text_muted()));
     let strip = container(strip)
         .padding([0, 10])
@@ -336,7 +498,13 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         .interaction(mouse::Interaction::ResizingVertically);
 
     let body: Element<'a, Message> = match p.pane {
-        Some(pane) => Canvas::new(pane).width(Length::Fill).height(Length::Fill).into(),
+        Some(pane) => {
+            let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
+            match p.notice {
+                Some((id, kind)) => iced::widget::stack![canvas, exited_bar(id, kind)].into(),
+                None => canvas.into(),
+            }
+        }
         None => container(
             button(text("New Terminal").size(13))
                 .padding([6, 14])

@@ -27,6 +27,13 @@ pub struct SidebarState<'a> {
     pub dashboards: &'a [Dashboard],
     /// Local id of the open dashboard (`View::Dashboard`), highlighted in its row.
     pub open_dashboard_id: Option<&'a str>,
+    /// Open Terminals per team id (JRST-407); teams at zero are absent.
+    pub open_terminals: HashMap<String, usize>,
+}
+
+/// What a row shows for its team's open Terminals: nothing at zero.
+pub fn open_terminals_label(count: usize) -> Option<String> {
+    (count > 0).then(|| format!("\u{2328} {count}"))
 }
 
 pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
@@ -41,6 +48,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         read_only,
         saved_views,
         open_view_id,
+        open_terminals,
         home,
         dashboards,
         open_dashboard_id,
@@ -169,7 +177,10 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
             .push(identifier_badge)
             .push(name_text)
             .push_maybe(is_home_team(home, team).then(home_marker))
-            .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())));
+            .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())))
+            .push_maybe(open_terminals_label(open_terminals.get(&team.id).copied().unwrap_or(0)).map(
+                |label| text(label).size(11).color(t::text_muted()),
+            ));
 
         // The chevron alone collapses or expands; the rest of the row expands
         // the team and focuses (or opens) its Tab.
@@ -603,5 +614,16 @@ mod tests {
         assert_eq!(badge_label(7).as_deref(), Some("7"));
         assert_eq!(badge_label(99).as_deref(), Some("99"));
         assert_eq!(badge_label(100).as_deref(), Some("99+"));
+    }
+}
+
+#[cfg(test)]
+mod terminal_count_tests {
+    use super::open_terminals_label;
+
+    #[test]
+    fn the_open_count_is_hidden_at_zero_and_shown_otherwise() {
+        assert_eq!(open_terminals_label(0), None);
+        assert_eq!(open_terminals_label(3).as_deref(), Some("\u{2328} 3"));
     }
 }
