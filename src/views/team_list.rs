@@ -166,17 +166,23 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         let header_content = row![]
             .spacing(8)
             .align_y(iced::Alignment::Center)
-            .push(chevron)
             .push(identifier_badge)
             .push(name_text)
             .push_maybe(is_home_team(home, team).then(home_marker))
             .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())));
 
-        let header_button = button(header_content)
+        // The chevron alone collapses or expands; the rest of the row expands
+        // the team and focuses (or opens) its Tab.
+        let chevron_button = button(chevron)
             .on_press(Message::ToggleTeamExpanded(team.id.clone()))
-            .padding([8, 14])
+            .padding(iced::Padding { top: 8.0, right: 4.0, bottom: 8.0, left: 14.0 })
+            .style(plain_row_style);
+        let name_button = button(header_content)
+            .on_press(Message::SelectTeamRow(team.id.clone()))
+            .padding(iced::Padding { top: 8.0, right: 14.0, bottom: 8.0, left: 4.0 })
             .width(Length::Fill)
             .style(plain_row_style);
+        let header_button = row![chevron_button, name_button].align_y(iced::Alignment::Center);
 
         // The kebab only shows on the expanded team header (iced 0.13 has no
         // cheap hover state for a sidebar row).

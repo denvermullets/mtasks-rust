@@ -50,6 +50,8 @@ pub enum Message {
     // Navigation
     /// Toggle a team's sidebar expansion (chevron / team-header click).
     ToggleTeamExpanded(String),
+    /// Click on a sidebar team row outside its chevron.
+    SelectTeamRow(String),
     /// Select a team and switch the right pane to `view` (team sub-row click).
     SelectTeamView(String, View),
     /// Tab bar actions; handled in `app/tab_update.rs`.
@@ -3437,6 +3439,19 @@ impl App {
                 } else {
                     self.expanded_teams.insert(team_id);
                 }
+            }
+
+            Message::SelectTeamRow(team_id) => {
+                self.expanded_teams.insert(team_id.clone());
+                // Focus the Tab as it was left. A team Tab that is showing a
+                // cross-team page has nothing of the team's to return to, so
+                // that case goes to the team's Board.
+                if self.selected_team_id.as_deref() == Some(team_id.as_str())
+                    && self.view.is_cross_team()
+                {
+                    return self.update_inner(Message::SelectTeamView(team_id, View::Board));
+                }
+                self.focus_team_tab(&team_id);
             }
 
             Message::OpenSavedView(view_id) => {

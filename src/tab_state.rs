@@ -197,4 +197,19 @@ mod tests {
         assert_eq!(close_index(&mut set, 3, &team("h")), None);
         assert_eq!(set.tabs(), &[team("a")]);
     }
+
+    #[test]
+    fn a_team_row_click_returns_to_the_page_the_tab_was_left_on() {
+        let mut set = TabSet::new(team("a"));
+        let mut parked = Parked::default();
+        // Leave team a on Roadmap for team b, as a sidebar row click does.
+        let Switch::Moved { from, to } = focus_team(&mut set, "b") else { panic!() };
+        parked.save(from, ParkedTab::new(View::Roadmap, Some("a".into())));
+        assert!(parked.take(&to).is_none()); // b opens fresh, on its Board
+        // Click a's row again: a's Tab is focused, not duplicated.
+        let Switch::Moved { from, to } = focus_team(&mut set, "a") else { panic!() };
+        parked.save(from, ParkedTab::new(View::Board, Some("b".into())));
+        assert_eq!(parked.take(&to).unwrap().view, View::Roadmap);
+        assert_eq!(set.tabs().len(), 2);
+    }
 }
