@@ -175,11 +175,6 @@ impl TerminalState {
         self.drag = None;
     }
 
-    /// Mark `stored` as already on disk, so a launch doesn't rewrite it.
-    pub fn mark_panel_saved(&mut self, stored: StoredPanel) {
-        self.saved_panel = Some(stored);
-    }
-
     /// The panel if it changed since the last call, for the app to store.
     /// Nothing while the strip is being dragged: it is stored on release.
     pub fn take_panel_change(&mut self) -> Option<StoredPanel> {
@@ -850,12 +845,41 @@ mod tests {
     }
 
     #[test]
-    fn a_change_is_reported_once_and_a_restored_panel_is_not_a_change() {
+    fn two_tabs_keep_separate_panels_over_one_shared_terminal() {
         let mut t = TerminalState::new();
         t.restore_records(vec![record("k1", "a")]);
-        let stored = panel("single", [Some("k1"), None, None, None]);
-        t.restore_panel(&stored);
-        t.mark_panel_saved(stored);
+        let team_tab = panel("grid", [Some("k1"), None, None, None]);
+        let project_tab = StoredPanel { visible: false, height: Some(180.0), ..panel("single", [Some("k1"), None, None, None]) };
+        // Park the team Tab's panel, show the project Tab's, switch back.
+        t.restore_panel(&team_tab);
+        let parked_team = t.stored_panel();
+        t.restore_panel(&project_tab);
+        let parked_project = t.stored_panel();
+        t.restore_panel(&parked_team);
+        assert_eq!(t.stored_panel(), parked_team);
+        assert_eq!((parked_team.layout.as_str(), parked_team.visible), ("grid", true));
+        assert_eq!((parked_project.layout.as_str(), parked_project.visible), ("single", false));
+        assert_eq!(parked_team.panes[0], parked_project.panes[0], "one Terminal, two Tabs");
+    }
+
+    #[test]
+    fn a_parked_panel_follows_a_terminal_whose_id_changed() {
+        // Restart and a restored shell starting both give a record a new id.
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let parked = panel("single", [Some("k1"), None, None, None]);
+        let old = t.roster.id_of_key("k1").unwrap();
+        t.roster.replace_id(old, TerminalId(42));
+        t.restore_panel(&parked);
+        assert_eq!(t.panel.panes[0], Some(TerminalId(42)));
+    }
+
+    #[test]
+    fn a_change_is_reported_once() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        t.restore_panel(&panel("single", [Some("k1"), None, None, None]));
+        assert!(t.take_panel_change().is_some());
         assert_eq!(t.take_panel_change(), None);
         t.restore_panel(&panel("grid", [Some("k1"), None, None, None]));
         assert_eq!(t.take_panel_change().map(|p| p.layout), Some("grid".to_string()));

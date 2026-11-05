@@ -807,6 +807,8 @@ pub struct App {
     /// Pages restored at launch for Tabs not focused yet; a Tab takes its
     /// entry the first time it becomes live.
     restored_pages: HashMap<crate::tabs::TabKey, crate::tabs::Page>,
+    /// Panels stored for Tabs restored at launch, until each is first focused.
+    restored_panels: HashMap<crate::tabs::TabKey, crate::db::panel_states::StoredPanel>,
     /// Window width and the tab bar's sideways scroll, for keeping the active
     /// Tab in view. Neither is per Tab.
     window_width: f32,
@@ -990,14 +992,8 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
-            terminal_focus: self.terminals.palette_focus(crate::terminal::panel_team(
-                &self.view,
-                self.selected_team_id.as_deref(),
-            )),
-            terminal_panel_showing: self.terminals.panel_showing(crate::terminal::panel_team(
-                &self.view,
-                self.selected_team_id.as_deref(),
-            )),
+            terminal_focus: self.terminals.palette_focus(self.panel_team()),
+            terminal_panel_showing: self.terminals.panel_showing(self.panel_team()),
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -3174,6 +3170,7 @@ impl App {
             tab_set: None,
             saved_tabs: None,
             restored_pages: HashMap::new(),
+            restored_panels: HashMap::new(),
             window_width: 1100.0,
             tab_bar_offset: 0.0,
             tab_projects: HashMap::new(),
@@ -3185,15 +3182,6 @@ impl App {
                 match connection::open().and_then(|c| crate::db::terminal_records::all(&c)) {
                     Ok(stored) => terminals.restore_records(stored),
                     Err(e) => eprintln!("could not load Terminal records: {e}"),
-                }
-                match connection::open().and_then(|c| crate::db::panel_states::load(&c)) {
-                    Ok(rows) => {
-                        if let Some((_, panel)) = rows.into_iter().find(|(tab, _)| tab.is_none()) {
-                            terminals.restore_panel(&panel);
-                            terminals.mark_panel_saved(panel);
-                        }
-                    }
-                    Err(e) => eprintln!("could not load panel state: {e}"),
                 }
                 terminals
             },
@@ -3523,8 +3511,8 @@ impl App {
         self.save_tabs();
         self.save_terminal_records();
         self.save_panel();
-        self.terminals
-            .sync(crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()));
+        let panel_team = self.panel_team().map(str::to_string);
+        self.terminals.sync(panel_team.as_deref());
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
@@ -4195,8 +4183,7 @@ impl App {
                 self.modal = Modal::TerminalCloseConfirm(id);
             }
             Message::Terminal(crate::terminal::TerminalMessage::DirPicked(Some(dir))) => {
-                if let Some(team) = crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()) {
-                    let team = team.to_string();
+                if let Some(team) = self.panel_team().map(str::to_string) {
                     match crate::db::terminal_dirs::set(&self.db(), &team, &dir) {
                         Ok(()) => self.terminals.set_team_dir(&team, Some(dir)),
                         Err(e) => self.push_toast(format!("Could not save the folder: {e}"), ToastKind::Error, false),
@@ -4207,9 +4194,8 @@ impl App {
                 if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {
                     self.modal = Modal::None;
                 }
-                let team =
-                    crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref());
-                return self.terminals.update(m, team);
+                let team = self.panel_team().map(str::to_string);
+                return self.terminals.update(m, team.as_deref());
             }
 
             Message::SelectTeamView(team_id, view) => {
@@ -7121,10 +7107,7 @@ impl App {
             .push(tab_bar::view(&self.tab_labels(), self.window_width))
             .push(header)
             .push(main_pane)
-            .push_maybe(self.terminals.panel_view(crate::terminal::panel_team(
-                &self.view,
-                self.selected_team_id.as_deref(),
-            )))
+            .push_maybe(self.terminals.panel_view(self.panel_team()))
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);
