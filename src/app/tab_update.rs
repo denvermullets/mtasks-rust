@@ -121,29 +121,50 @@ impl App {
         let Some(set) = self.tab_set.as_mut() else {
             return Task::none();
         };
-        let (teams, dashboards) = (&self.teams, &self.dashboards);
+        let (teams, dashboards, terminals) = (&self.teams, &self.dashboards, &self.terminals);
         let pruned = set.prune(
             |key| tab_subject_exists(teams, dashboards, &conn, key),
-            // A removed team with running Terminals keeps its Tab (JRST-421).
-            |_| false,
+            // A removed team with Terminals keeps its Tab (JRST-421).
+            |key| tab_state::keeps_removed_team(key, |team| terminals.has_terminals(team)),
             &home,
         );
-        if pruned.closed.is_empty() {
-            return Task::none();
-        }
         let active = set.active().clone();
         for key in &pruned.closed {
             if let Some(draft) = self.parked_tabs.forget(key).and_then(|p| p.comment_draft) {
                 self.drop_drafts(&draft.owner_ids());
             }
         }
-        if !pruned.active_changed {
-            return Task::none();
+        let mut task = Task::none();
+        if pruned.active_changed {
+            // The removed Tab's live state goes with it; edits can't commit to a
+            // row that no longer exists.
+            self.discard_live_composers();
+            task = self.restore_tab(&active);
         }
-        // The removed Tab's live state goes with it; edits can't commit to a
-        // row that no longer exists.
-        self.discard_live_composers();
-        self.restore_tab(&active)
+        self.hold_removed_team_tab();
+        task
+    }
+
+    /// Whether the active Tab is a team's that is no longer in the local
+    /// mirror, kept for its Terminals. It shows a notice and the panel only.
+    pub(super) fn removed_team_tab(&self) -> bool {
+        matches!(self.active_tab_key(), Some(TabKey::Team(id)) if !self.teams.iter().any(|t| t.id == *id))
+    }
+
+    /// A kept removed team's Tab stays on that team: `leave_deleted_teams`
+    /// and `reload_data` pick another team when the selected one goes, which
+    /// would put that team's data under this Tab.
+    fn hold_removed_team_tab(&mut self) {
+        let Some(TabKey::Team(id)) = self.active_tab_key().cloned() else {
+            return;
+        };
+        if self.removed_team_tab() {
+            self.selected_team_id = Some(id);
+            self.view = View::Board;
+            self.open_view = None;
+            self.issue_detail = None;
+            self.reload_data();
+        }
     }
 
     /// The Tab the Home page opens, or `None` when it doesn't resolve.

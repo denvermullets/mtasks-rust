@@ -107,6 +107,9 @@ pub struct TerminalState {
     /// The panel as last handed out by `take_panel_change`, so only changes
     /// are written.
     saved_panel: Option<StoredPanel>,
+    /// The page is a removed team's: its panel stays shown (the Terminals have
+    /// no other way in) and can't be hidden or add Terminals.
+    pinned: bool,
     focused: bool,
     window: Size,
     cell: Option<(f32, f32)>,
@@ -140,6 +143,7 @@ impl TerminalState {
             team_dirs: HashMap::new(),
             panel: PanelState::default(),
             saved_panel: None,
+            pinned: false,
             focused: false,
             window: Size::new(1100.0, 700.0),
             cell: None,
@@ -242,6 +246,8 @@ impl TerminalState {
                 }
             }
             TerminalMessage::DragEnd => self.drag = None,
+            TerminalMessage::Hide if self.pinned => {}
+            TerminalMessage::New | TerminalMessage::NewIn(_) if self.pinned => {}
             TerminalMessage::Hide => {
                 // `sync` tells the engine they're hidden (`set_visible`).
                 self.panel.visible = false;
@@ -361,6 +367,9 @@ impl TerminalState {
     /// Reconcile the engine and the canvas with the current team and layout.
     /// Cheap when nothing changed: it sends only differences.
     pub fn sync(&mut self, team: Option<&str>) {
+        if self.pinned && team.is_some() {
+            self.panel.visible = true;
+        }
         if team.is_none() || !self.panel.visible {
             self.focused = false;
         }
@@ -672,6 +681,16 @@ impl TerminalState {
         self.shown = self.panel.panes;
     }
 
+    /// The page is a removed team's, whose panel can't be hidden.
+    pub fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
+    }
+
+    /// Whether the team has any Terminal in its strip, running or stopped.
+    pub fn has_terminals(&self, team: &str) -> bool {
+        self.roster.of_team(team).next().is_some()
+    }
+
     /// How many of the team's Terminals have a live shell.
     pub fn open_count(&self, team: &str) -> usize {
         self.terminals.open_count(team)
@@ -907,6 +926,20 @@ mod tests {
         };
         assert_eq!(of(&team_tab), of(&project_tab));
         assert_eq!(of(&team_tab).map(|ids| ids.len()), Some(2));
+    }
+
+    #[test]
+    fn a_pinned_panel_shows_and_cannot_be_hidden_or_grown() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "gone")]);
+        assert!(t.has_terminals("gone") && !t.has_terminals("other"));
+        t.set_pinned(true);
+        t.sync(Some("gone"));
+        assert!(t.stored_panel().visible, "shown although it was hidden");
+        let _ = t.update(TerminalMessage::Hide, Some("gone"));
+        let _ = t.update(TerminalMessage::New, Some("gone"));
+        assert!(t.stored_panel().visible);
+        assert_eq!(t.roster.ids_of_team("gone").len(), 1, "no new Terminal for a removed team");
     }
 
     #[test]

@@ -3512,6 +3512,7 @@ impl App {
         self.save_terminal_records();
         self.save_panel();
         let panel_team = self.panel_team().map(str::to_string);
+        self.terminals.set_pinned(self.removed_team_tab());
         self.terminals.sync(panel_team.as_deref());
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
@@ -4195,7 +4196,18 @@ impl App {
                     self.modal = Modal::None;
                 }
                 let team = self.panel_team().map(str::to_string);
-                return self.terminals.update(m, team.as_deref());
+                // Closing a removed team's last Terminal closes its Tab.
+                let closes = matches!(
+                    m,
+                    crate::terminal::TerminalMessage::Close(_)
+                        | crate::terminal::TerminalMessage::CloseConfirmed(_)
+                );
+                let task = self.terminals.update(m, team.as_deref());
+                return if closes {
+                    Task::batch([task, self.close_removed_tabs()])
+                } else {
+                    task
+                };
             }
 
             Message::SelectTeamView(team_id, view) => {
@@ -7103,9 +7115,24 @@ impl App {
             self.view == View::Inbox,
         );
 
+        let main_pane = if self.removed_team_tab() {
+            iced::widget::container(
+                iced::widget::text(
+                    "This team is no longer available. Its Terminals keep running below until you close them.",
+                )
+                .size(14)
+                .color(t::text_muted()),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+        } else {
+            main_pane
+        };
+
         let main_content = column![]
             .push(tab_bar::view(&self.tab_labels(), self.window_width))
-            .push(header)
+            .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
             .push_maybe(self.terminals.panel_view(self.panel_team()))
             .push(status)

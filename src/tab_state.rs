@@ -171,6 +171,13 @@ pub fn panel_team<'a>(key: &'a TabKey, project_team: Option<&'a str>) -> Option<
     }
 }
 
+/// Whether a Tab whose team was removed stays open: a team Tab does while the
+/// team still has Terminals (`team_has_terminals`), since the sidebar row that
+/// reached them is gone. Any other Tab closes with its subject.
+pub fn keeps_removed_team(key: &TabKey, team_has_terminals: impl Fn(&str) -> bool) -> bool {
+    matches!(key, TabKey::Team(id) if team_has_terminals(id))
+}
+
 /// The panels a launch gives back to its Tabs. `rows` is what was stored:
 /// each Tab's own, and the one implicit panel saved before Tabs had their
 /// own. A row for a Tab that isn't open, or for a cross-team Tab (no panel),
@@ -519,6 +526,15 @@ mod tests {
         for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
             assert_eq!(panel_team(&key, Some("other")), None);
         }
+    }
+
+    #[test]
+    fn only_a_team_tab_with_terminals_survives_its_teams_removal() {
+        let has = |id: &str| id == "a";
+        assert!(keeps_removed_team(&team("a"), has));
+        assert!(!keeps_removed_team(&team("b"), has));
+        assert!(!keeps_removed_team(&TabKey::Project("a".into()), has));
+        assert!(!keeps_removed_team(&TabKey::Dashboard("a".into()), has));
     }
 
     #[test]
