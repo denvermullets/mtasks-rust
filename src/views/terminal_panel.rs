@@ -307,6 +307,8 @@ pub struct PanelView<'a> {
     pub items: Vec<StripItem>,
     /// A line for the strip, such as an exited notice or a spawn error.
     pub note: Option<String>,
+    /// The Terminal whose shell exited, to say so over its last screen.
+    pub notice: Option<TerminalId>,
     pub height: f32,
 }
 
@@ -404,6 +406,33 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
         .into()
 }
 
+/// "Shell exited" over the bottom of the last screen, with Restart and Close.
+fn exited_bar<'a>(id: TerminalId) -> Element<'a, Message> {
+    let bar = container(
+        row![
+            text("Shell exited").size(12).color(t::text_primary()),
+            button(text("Restart").size(12))
+                .padding([2, 10])
+                .on_press(Message::Terminal(TerminalMessage::Restart(id)))
+                .style(button::secondary),
+            button(text("Close").size(12))
+                .padding([2, 10])
+                .on_press(Message::Terminal(TerminalMessage::CloseConfirmed(id)))
+                .style(button::secondary),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([6, 12])
+    .width(Length::Fill)
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_menu())),
+        border: iced::Border { color: t::border(), width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+    container(bar).align_bottom(Length::Fill).width(Length::Fill).height(Length::Fill).into()
+}
+
 pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
     let mut strip = row![].spacing(6).align_y(iced::Alignment::Center);
     for item in p.items {
@@ -443,7 +472,13 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         });
 
     let body: Element<'a, Message> = match p.pane {
-        Some(pane) => Canvas::new(pane).width(Length::Fill).height(Length::Fill).into(),
+        Some(pane) => {
+            let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
+            match p.notice {
+                Some(id) => iced::widget::stack![canvas, exited_bar(id)].into(),
+                None => canvas.into(),
+            }
+        }
         None => container(
             button(text("New Terminal").size(13))
                 .padding([6, 14])

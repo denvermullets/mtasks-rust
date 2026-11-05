@@ -48,6 +48,8 @@ pub enum TerminalMessage {
     /// (`close_needs_confirm`), then sends `CloseConfirmed`.
     Close(TerminalId),
     CloseConfirmed(TerminalId),
+    /// Start a new shell in an exited Terminal, keeping name and directory.
+    Restart(TerminalId),
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
 }
@@ -160,6 +162,7 @@ impl TerminalState {
                 }
             }
             TerminalMessage::CloseConfirmed(id) => self.close(id),
+            TerminalMessage::Restart(id) => self.restart(id),
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
                 match input::route(code, mods, text.as_deref()) {
                     Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, team),
@@ -262,11 +265,11 @@ impl TerminalState {
         let note = self
             .error
             .clone()
-            .or_else(|| self.pane_exited().then(|| "shell exited".to_string()))
             .or_else(|| (pane.is_none() && self.owned_by(team).is_empty()).then(|| "none open".to_string()));
         Some(terminal_panel::view(PanelView {
             pane,
             items,
+            notice: self.shown.filter(|_| panel::pane_notice(self.pane_exited()).is_some()),
             note,
             height: panel::panel_height(self.window.height, self.panel.height),
         }))
@@ -358,7 +361,26 @@ impl TerminalState {
         panel::grid_for(w, h, cell.0, cell.1)
     }
 
-    fn create(&mut self, team: &str) {
+    fn restart(&mut self, id: TerminalId) {
+        let Some(rec) = self.roster.get(id).cloned() else { return };
+        if !self.terminals.is_exited(id) {
+            return;
+        }
+        let Some(new) = self.spawn(&rec.team, rec.cwd.clone()) else { return };
+        self.roster.replace_id(id, new);
+        if let Some(old) = self.terminals.close(id) {
+            self.closing.retain(|c| !c.is_done());
+            self.closing.push(old);
+        }
+        self.sent_visible.remove(&id);
+        self.sent_size.remove(&id);
+        self.panel.pane = Some(new);
+        self.shown = None;
+        self.focused = true;
+    }
+
+    /// Start a shell for `team`; shows the error in the strip on failure.
+    fn spawn(&mut self, team: &str, cwd: Option<std::path::PathBuf>) -> Option<TerminalId> {
         let cell = *self.cell.get_or_insert_with(terminal_panel::measure_cell);
         self.pane.set_cell(cell);
         let (cols, rows) = self.grid(cell);
@@ -367,17 +389,26 @@ impl TerminalState {
             cols,
             rows,
             theme: active_term_theme(),
-            cwd: None,
+            cwd,
             program: None,
         };
         match self.terminals.spawn(config) {
             Ok(id) => {
                 self.error = None;
-                self.roster.add(id, team, None);
                 self.sent_size.insert(id, (cols, rows));
-                self.panel.pane = Some(id);
+                Some(id)
             }
-            Err(e) => self.error = Some(format!("could not start a shell: {e}")),
+            Err(e) => {
+                self.error = Some(format!("could not start a shell: {e}"));
+                None
+            }
+        }
+    }
+
+    fn create(&mut self, team: &str) {
+        if let Some(id) = self.spawn(team, None) {
+            self.roster.add(id, team, None);
+            self.panel.pane = Some(id);
         }
     }
 

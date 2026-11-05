@@ -54,6 +54,18 @@ pub fn resolve_shown(
         .or_else(|| owned_by_team.first().copied())
 }
 
+/// What a pane says over its last screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneNotice {
+    /// The shell exited: Restart or Close.
+    Exited,
+}
+
+/// The notice for the Terminal a pane shows, from its latest frame.
+pub fn pane_notice(exited: bool) -> Option<PaneNotice> {
+    exited.then_some(PaneNotice::Exited)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toggle {
     /// Nothing to do (a cross-team page).
@@ -106,6 +118,12 @@ mod tests {
         assert_eq!(resolve_shown(Some(c), &[a, b]), Some(a));
         assert_eq!(resolve_shown(None, &[b]), Some(b));
         assert_eq!(resolve_shown(Some(a), &[]), None);
+    }
+
+    #[test]
+    fn only_an_exited_shell_gets_a_notice() {
+        assert_eq!(pane_notice(true), Some(PaneNotice::Exited));
+        assert_eq!(pane_notice(false), None);
     }
 
     #[test]
