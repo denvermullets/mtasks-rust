@@ -27,6 +27,12 @@ pub enum PaletteNav {
     Dashboard(String),
     /// Attach files to the open issue (`Message::PickAttachmentFiles`).
     AttachFiles,
+    /// Give the keyboard to the Terminal (`TerminalMessage::FocusTerminal`).
+    FocusTerminal,
+    /// Give the keyboard back to the app (`TerminalMessage::FocusApp`).
+    FocusApp,
+    /// Hide the Terminal panel (`TerminalMessage::Hide`).
+    HidePanel,
     /// Focus the open Tab at this position (`TabMessage::Focus`).
     Tab(usize),
 }
@@ -41,7 +47,10 @@ impl PaletteNav {
             PaletteNav::Project { .. } => "Project",
             PaletteNav::SavedView(_) => "View",
             PaletteNav::Dashboard(_) => "Dashboard",
-            PaletteNav::AttachFiles => "Command",
+            PaletteNav::AttachFiles
+            | PaletteNav::FocusTerminal
+            | PaletteNav::FocusApp
+            | PaletteNav::HidePanel => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -77,6 +86,18 @@ pub struct SearchableTab {
     pub active: bool,
 }
 
+/// Where the keyboard is, as far as the focus commands care.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TerminalFocus {
+    /// This page has no panel (a cross-team page): no focus commands.
+    #[default]
+    Unavailable,
+    /// The app has the keyboard; a Terminal can take it.
+    App,
+    /// A Terminal has the keyboard (the palette opened over it).
+    Terminal,
+}
+
 /// Local data the palette searches, owned so `PaletteState` can keep it and
 /// recompute rows on every keystroke. Issues and projects of archived teams,
 /// and those teams themselves, are already left out when this is loaded.
@@ -93,6 +114,9 @@ pub struct PaletteData {
     pub tabs: Vec<SearchableTab>,
     /// An issue detail is open, so issue-only commands are offered.
     pub on_issue_detail: bool,
+    pub terminal_focus: TerminalFocus,
+    /// The Terminal panel is on screen, so it can be hidden.
+    pub terminal_panel_showing: bool,
 }
 
 /// Most rows the palette ever shows.
@@ -198,6 +222,30 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             primary: "Attach file".to_string(),
             secondary: "Shortcut: a".to_string(),
             nav: PaletteNav::AttachFiles,
+        });
+    }
+    match data.terminal_focus {
+        TerminalFocus::App if name_matches(needle, "Focus Terminal") => {
+            rows.push(PaletteRow {
+                primary: "Focus Terminal".to_string(),
+                secondary: "Shortcut: Cmd+J".to_string(),
+                nav: PaletteNav::FocusTerminal,
+            });
+        }
+        TerminalFocus::Terminal if name_matches(needle, "Focus app") => {
+            rows.push(PaletteRow {
+                primary: "Focus app".to_string(),
+                secondary: "Shortcut: Cmd+J".to_string(),
+                nav: PaletteNav::FocusApp,
+            });
+        }
+        _ => {}
+    }
+    if data.terminal_panel_showing && name_matches(needle, "Hide Terminal panel") {
+        rows.push(PaletteRow {
+            primary: "Hide Terminal panel".to_string(),
+            secondary: "Terminals keep running".to_string(),
+            nav: PaletteNav::HidePanel,
         });
     }
 }
@@ -649,6 +697,30 @@ mod tests {
         assert_eq!(state.selected, 0);
         state.move_selection(1);
         assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn focus_commands_appear_only_where_they_apply() {
+        let with = |terminal_focus| PaletteData { terminal_focus, ..PaletteData::default() };
+        let navs = |d: &PaletteData| -> Vec<PaletteNav> {
+            palette_results("focus", d).into_iter().map(|r| r.nav).collect()
+        };
+        assert!(navs(&with(TerminalFocus::Unavailable)).is_empty());
+        assert_eq!(navs(&with(TerminalFocus::App)), vec![PaletteNav::FocusTerminal]);
+        assert_eq!(navs(&with(TerminalFocus::Terminal)), vec![PaletteNav::FocusApp]);
+        // Unfiltered, the commands are listed too.
+        let all = palette_results("", &with(TerminalFocus::App));
+        assert!(all.iter().any(|r| r.nav == PaletteNav::FocusTerminal));
+    }
+
+    #[test]
+    fn hide_panel_is_offered_only_while_the_panel_shows() {
+        let hide = |terminal_panel_showing| {
+            let d = PaletteData { terminal_panel_showing, ..PaletteData::default() };
+            palette_results("hide", &d).into_iter().any(|r| r.nav == PaletteNav::HidePanel)
+        };
+        assert!(hide(true));
+        assert!(!hide(false));
     }
 
     #[test]

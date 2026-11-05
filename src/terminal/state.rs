@@ -35,6 +35,22 @@ pub enum TerminalMessage {
     ToggleFocus,
     /// A click on the pane in this slot.
     Focus(usize),
+    /// Palette: show the panel if needed and give the Terminal the keyboard.
+    FocusTerminal,
+    /// Palette: give the keyboard back to the app.
+    FocusApp,
+    /// The pointer moved (window point). Sent only while a Terminal has focus.
+    Moved(f32, f32),
+    /// A left press anywhere, sent only while a Terminal has focus. One
+    /// outside the panel, at the last pointer position, moves focus to the app.
+    PressedAt,
+    /// The pointer pressed the strip.
+    DragStart,
+    /// The pointer moved (window y) while dragging.
+    DragMove(f32),
+    DragEnd,
+    /// Hide the panel. Every Terminal keeps running; the keyboard goes to the app.
+    Hide,
     /// "New Terminal", from the strip or an empty panel.
     New,
     /// "New Terminal" offered by the empty pane in this slot.
@@ -68,7 +84,16 @@ pub enum TerminalMessage {
 
 static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new();
 
+/// A strip drag in progress. The first pointer move after the press fixes
+/// where the drag started.
+struct Drag {
+    start_y: Option<f32>,
+    start_height: f32,
+}
+
 pub struct TerminalState {
+    drag: Option<Drag>,
+    pointer: Option<(f32, f32)>,
     terminals: Terminals,
     roster: Roster,
     renaming: Option<(TerminalId, String)>,
@@ -99,6 +124,8 @@ impl TerminalState {
             terminals: Terminals::new(move || {
                 let _ = tx.unbounded_send(());
             }),
+            drag: None,
+            pointer: None,
             roster: Roster::default(),
             renaming: None,
             closing: Vec::new(),
@@ -143,6 +170,38 @@ impl TerminalState {
             TerminalMessage::Focus(slot) => {
                 self.focus_slot(slot);
                 self.focused = true;
+            }
+            TerminalMessage::FocusTerminal => {
+                if !self.focused {
+                    return self.update(TerminalMessage::ToggleFocus, team);
+                }
+            }
+            TerminalMessage::FocusApp => self.focused = false,
+            TerminalMessage::Moved(x, y) => self.pointer = Some((x, y)),
+            TerminalMessage::PressedAt => {
+                // Unknown until the pointer moves after focus was taken.
+                let leaves = self.pointer.is_some_and(|(x, y)| {
+                    panel::press_leaves_panel(self.window.height, self.panel.height, x, y)
+                });
+                if leaves {
+                    self.focused = false;
+                }
+            }
+            TerminalMessage::DragStart => {
+                self.drag = Some(Drag { start_y: None, start_height: self.height() });
+            }
+            TerminalMessage::DragMove(y) => {
+                if let Some(drag) = &mut self.drag {
+                    let start_y = *drag.start_y.get_or_insert(y);
+                    self.panel.height =
+                        Some(panel::drag_height(self.window.height, drag.start_height, start_y, y));
+                }
+            }
+            TerminalMessage::DragEnd => self.drag = None,
+            TerminalMessage::Hide => {
+                // `sync` tells the engine they're hidden (`set_visible`).
+                self.panel.visible = false;
+                self.focused = false;
             }
             TerminalMessage::New => {
                 if let Some(team) = team {
@@ -229,6 +288,12 @@ impl TerminalState {
                         return iced::clipboard::read()
                             .map(|s| Message::Terminal(TerminalMessage::Pasted(s)))
                     }
+                    // The app's own Tab switch. Focus follows `sync`: it stays
+                    // with the Terminal while the new Tab shows a panel, and
+                    // falls to the app on a page without one.
+                    Route::Tab(i) => {
+                        return Task::done(Message::Tab(crate::app::TabMessage::Focus(i)))
+                    }
                     Route::Send(key) => {
                         if let Some(id) = self.focused_terminal() {
                             self.terminals.send_key(id, key);
@@ -306,6 +371,10 @@ impl TerminalState {
         for (slot, pane) in self.panes.iter_mut().enumerate() {
             pane.set_focused(self.focused && slot == self.panel.focused_pane);
         }
+        if !self.focused {
+            // A position seen before focus began may be stale by the time of a press.
+            self.pointer = None;
+        }
     }
 
     /// Apply the Terminal font from config, live. The cell is measured again;
@@ -331,7 +400,22 @@ impl TerminalState {
 
     /// Whether key presses go to the Terminal instead of the app's shortcuts.
     pub fn takes_keys(&self, modal_open: bool) -> bool {
-        self.focused && self.panel.visible && !modal_open
+        panel::keys_go_to_terminal(self.focused, self.panel.visible, modal_open)
+    }
+
+    /// Which focus commands the palette offers on this page.
+    pub fn palette_focus(&self, team: Option<&str>) -> crate::palette_results::TerminalFocus {
+        use crate::palette_results::TerminalFocus as F;
+        match (team, self.focused && self.panel.visible) {
+            (None, _) => F::Unavailable,
+            (Some(_), true) => F::Terminal,
+            (Some(_), false) => F::App,
+        }
+    }
+
+    /// The panel is on screen for this page.
+    pub fn panel_showing(&self, team: Option<&str>) -> bool {
+        team.is_some() && self.panel.visible
     }
 
     /// The panel for the current team, if it is showing.
@@ -418,7 +502,28 @@ impl TerminalState {
             _ => None,
         });
         let mut subs = vec![wake, window];
+        if self.drag.is_some() {
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Terminal(TerminalMessage::DragMove(position.y)))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
+                    Some(Message::Terminal(TerminalMessage::DragEnd))
+                }
+                _ => None,
+            }));
+        }
         if self.takes_keys(modal_open) {
+            // Needs the cursor position, which a press event doesn't carry.
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Terminal(TerminalMessage::Moved(position.x, position.y)))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                    Some(Message::Terminal(TerminalMessage::PressedAt))
+                }
+                _ => None,
+            }));
             subs.push(event::listen_with(|e, _status, _id| match e {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     physical_key,
@@ -434,6 +539,10 @@ impl TerminalState {
             }));
         }
         Subscription::batch(subs)
+    }
+
+    fn height(&self) -> f32 {
+        panel::panel_height(self.window.height, self.panel.height)
     }
 
     fn owned_by(&self, team: &str) -> Vec<TerminalId> {
