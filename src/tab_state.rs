@@ -212,4 +212,16 @@ mod tests {
         assert_eq!(parked.take(&to).unwrap().view, View::Roadmap);
         assert_eq!(set.tabs().len(), 2);
     }
+
+    #[test]
+    fn a_sub_row_of_the_current_team_adds_no_tab() {
+        let mut set = TabSet::new(team("a"));
+        assert_eq!(focus_team(&mut set, "a"), Switch::Stay);
+        assert_eq!(set.tabs().len(), 1);
+        // A sub-row of another team switches to (or opens) that team's Tab.
+        assert_eq!(
+            focus_team(&mut set, "b"),
+            Switch::Moved { from: team("a"), to: team("b") }
+        );
+    }
 }
