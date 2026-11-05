@@ -133,28 +133,42 @@ fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
 /// Owns a freshly started shell until `Engine` takes it over. Any failure
 /// between the two drops the guard, which kills and reaps the shell so a failed
 /// spawn leaves no orphan.
-struct ChildGuard(Option<Box<dyn Child + Send + Sync>>);
+struct ChildGuard {
+    child: Option<Box<dyn Child + Send + Sync>>,
+    /// Its own copy of the master, so the guard can drain output while it reaps.
+    drain: OwnedFd,
+}
 
 impl ChildGuard {
     fn child(&self) -> &(dyn Child + Send + Sync) {
-        self.0.as_deref().expect("guard holds the child until disarmed")
+        self.child.as_deref().expect("guard holds the child until disarmed")
     }
 
     /// Hand the shell over: it is `Engine`'s to shut down now.
     fn disarm(mut self) -> Box<dyn Child + Send + Sync> {
-        self.0.take().expect("guard holds the child until disarmed")
+        self.child.take().expect("guard holds the child until disarmed")
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             if let Some(pid) = child.process_id() {
                 // The shell leads its own session; take its foreground jobs too.
                 unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
             }
             let _ = child.kill();
-            let _ = child.wait();
+            // Never a blocking wait: macOS holds an exiting process until its
+            // PTY output drains, and nothing else reads the master yet.
+            let deadline = Instant::now() + KILL_GRACE;
+            loop {
+                drain_master(self.drain.as_raw_fd());
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if Instant::now() >= deadline => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
         }
     }
 }
@@ -166,6 +180,8 @@ pub(super) mod seam {
     thread_local! {
         pub static FAIL_AFTER_START: Cell<bool> = const { Cell::new(false) };
         pub static LAST_PID: Cell<u32> = const { Cell::new(0) };
+        /// Lets the shell write before the injected failure, so its output sits unread.
+        pub static DELAY_AFTER_START_MS: Cell<u64> = const { Cell::new(0) };
     }
 }
 
@@ -173,6 +189,10 @@ fn after_start(pid: u32) -> std::io::Result<()> {
     #[cfg(test)]
     {
         seam::LAST_PID.with(|p| p.set(pid));
+        let delay = seam::DELAY_AFTER_START_MS.with(|d| d.get());
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
         if seam::FAIL_AFTER_START.with(|f| f.get()) {
             return Err(std::io::Error::other("injected failure after the shell started"));
         }
@@ -211,7 +231,11 @@ impl Engine {
             Some(dir) => cmd.cwd(dir),
             None => {}
         }
-        let child = ChildGuard(Some(pty.slave.spawn_command(cmd).map_err(|e| io(e.into()))?));
+        let guard_fd = dup_cloexec(master_fd)?;
+        let child = ChildGuard {
+            child: Some(pty.slave.spawn_command(cmd).map_err(|e| io(e.into()))?),
+            drain: guard_fd,
+        };
         drop(pty.slave);
         let pid = child.child().process_id().unwrap_or(0);
         after_start(pid)?;

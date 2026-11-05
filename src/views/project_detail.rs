@@ -188,10 +188,12 @@ pub fn view<'a>(
             burndown(project, issues),
             issues_section(visible, display, team, lanes, members),
         ))
-        .push(discussion_section(
-            comments, detail, members, teams, issues, comment_attachments, images, host,
-            pending_paths,
-        ));
+        .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
+            discussion_section(
+                comments, detail, members, teams, issues, comment_attachments, images, host,
+                pending_paths,
+            )
+        }));
     let left = column![]
         .spacing(space::S6)
         .padding(space::S8)
@@ -409,6 +411,10 @@ mod layout_tests {
         assert_eq!(page_width(1000.0, true), 1000.0 - 220.0 - 321.0 - 64.0);
     }
 }
+
+/// Project discussion is unfinished, so the page doesn't show it yet. Flip this
+/// to bring it back; the section and its messages are kept intact.
+const SHOW_PROJECT_DISCUSSION: bool = false;
 
 /// The project's discussion: threaded comments with indented replies, rendered
 /// by the same rows and composer as issue detail. No delete on project comments

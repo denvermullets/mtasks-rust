@@ -257,7 +257,7 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
     if data.terminal_panel_showing && name_matches(needle, "Hide Terminal panel") {
         rows.push(PaletteRow {
             primary: "Hide Terminal panel".to_string(),
-            secondary: "Terminals keep running".to_string(),
+            secondary: "Shortcut: Cmd+Shift+J · Terminals keep running".to_string(),
             nav: PaletteNav::HidePanel,
         });
     }

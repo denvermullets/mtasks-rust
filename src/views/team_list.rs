@@ -357,6 +357,9 @@ fn home_marker<'a>() -> Element<'a, Message> {
     text("\u{2302}").size(12).color(t::accent()).into() // ⌂
 }
 
+/// Issue export isn't offered to users yet.
+const SHOW_EXPORT_CSV: bool = false;
+
 /// Sidebar footer: per-team CSV export / import (disabled without a team).
 pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
     let btn = |label: &'a str, msg: Message| {
@@ -372,7 +375,9 @@ pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
     };
     container(
         column![]
-            .push(btn("Export CSV", Message::ExportCsv))
+            // Export isn't available to users yet; `Message::ExportCsv` stays
+            // wired for when it is.
+            .push_maybe(SHOW_EXPORT_CSV.then(|| btn("Export CSV", Message::ExportCsv)))
             .push(btn("Import CSV", Message::PickCsvImport)),
     )
     .padding([6, 0])

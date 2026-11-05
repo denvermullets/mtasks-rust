@@ -18,12 +18,14 @@ pub enum Route {
     Tab(usize),
     /// Cmd+] (1) and Cmd+[ (-1): focus the next or previous pane.
     CyclePane(i32),
+    /// Cmd+Shift+J: hide the panel. Terminals keep running.
+    Hide,
     Send(KeyInput),
     Ignore,
 }
 
 /// What a key does while a Terminal has focus. Command keys never reach the
-/// shell: Cmd+J, K, C, V, [, ] and 1 to 9 are the app's, and Cmd+Q is reserved
+/// shell: Cmd+J, Cmd+Shift+J, K, C, V, [, ] and 1 to 9 are the app's, and Cmd+Q is reserved
 /// (Quit is the native menu item; other Command chords do nothing here, so no
 /// program ever sees one).
 pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
@@ -32,6 +34,7 @@ pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
     }
     if mods.logo() {
         return match code {
+            Code::KeyJ if mods.shift() => Route::Hide,
             Code::KeyJ => Route::ToggleFocus,
             Code::KeyK => Route::Palette,
             Code::KeyV => Route::Paste,
@@ -216,6 +219,7 @@ mod tests {
     #[test]
     fn reserved_command_keys_stay_with_the_app() {
         assert_eq!(route(Code::KeyJ, Modifiers::LOGO, None), Route::ToggleFocus);
+        assert_eq!(route(Code::KeyJ, Modifiers::LOGO | Modifiers::SHIFT, None), Route::Hide);
         assert_eq!(route(Code::KeyK, Modifiers::LOGO, None), Route::Palette);
         assert_eq!(route(Code::KeyV, Modifiers::LOGO, None), Route::Paste);
         assert_eq!(route(Code::KeyX, Modifiers::LOGO, Some("x")), Route::Ignore);

@@ -367,6 +367,7 @@ impl TerminalState {
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
                 match input::route(code, mods, text.as_deref()) {
                     Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, team),
+                    Route::Hide => return self.update(TerminalMessage::Hide, team),
                     Route::Palette => return Task::done(Message::OpenCommandPalette),
                     Route::Paste => {
                         return iced::clipboard::read()

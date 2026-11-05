@@ -162,6 +162,30 @@ fn waiting_gives_up_at_the_limit_instead_of_hanging() {
 }
 
 #[test]
+fn a_failure_after_the_shell_starts_with_unread_output_still_reaps_it() {
+    // macOS holds an exiting process until its PTY output drains, so a guard
+    // that only waits would hang here: nothing reads the master yet.
+    use crate::terminal::engine::seam;
+    let mut t = terminals();
+    let mut config = sh_config("t1");
+    config.program = Some((
+        "/bin/sh".into(),
+        vec!["-c".into(), "head -c 300000 /dev/zero | tr '\\0' x; sleep 100".into()],
+    ));
+    seam::FAIL_AFTER_START.with(|f| f.set(true));
+    seam::DELAY_AFTER_START_MS.with(|d| d.set(500));
+    let started = std::time::Instant::now();
+    let result = t.spawn(config);
+    seam::FAIL_AFTER_START.with(|f| f.set(false));
+    seam::DELAY_AFTER_START_MS.with(|d| d.set(0));
+    assert!(result.is_err());
+    let pid = seam::LAST_PID.with(|p| p.get()) as libc::pid_t;
+    assert!(pid > 0, "the shell did start");
+    assert!(started.elapsed() < std::time::Duration::from_secs(8), "the failed spawn returned");
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the shell is gone");
+}
+
+#[test]
 fn a_failure_after_the_shell_starts_kills_and_reaps_it() {
     use crate::terminal::engine::seam;
     let mut t = terminals();

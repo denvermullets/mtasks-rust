@@ -27,6 +27,9 @@ pub fn handle_key_press(
             // Global shortcuts — active on any view.
             "f" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
+            "j" | "J" if modifiers.command() && modifiers.shift() => Some(Message::Terminal(
+                crate::terminal::TerminalMessage::Hide,
+            )),
             "j" if modifiers.command() => Some(Message::Terminal(
                 crate::terminal::TerminalMessage::ToggleFocus,
             )),
@@ -316,6 +319,22 @@ mod tests {
         ));
         assert!(handle_project_detail_key(&e, Modifiers::COMMAND, false).is_none());
         assert!(handle_project_detail_key(&e, Modifiers::SHIFT, false).is_none());
+    }
+
+    #[test]
+    fn cmd_shift_j_hides_the_panel_and_cmd_j_still_toggles_focus() {
+        use crate::terminal::TerminalMessage;
+        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        for c in ["J", "j"] {
+            assert!(matches!(
+                handle_key_press(Key::Character(c.into()), cmd_shift, false, false, true),
+                Some(Message::Terminal(TerminalMessage::Hide))
+            ));
+        }
+        assert!(matches!(
+            handle_key_press(Key::Character("j".into()), Modifiers::COMMAND, false, false, true),
+            Some(Message::Terminal(TerminalMessage::ToggleFocus))
+        ));
     }
 
     #[test]
