@@ -366,6 +366,8 @@ pub struct PaneView<'a> {
     pub pane: Option<&'a Pane>,
     /// The pane that takes keys.
     pub focused: bool,
+    /// Under 20x4 cells: say so instead of drawing.
+    pub too_small: bool,
     /// For an empty pane: the team's Terminals no pane shows.
     pub offer: Vec<(TerminalId, String)>,
     /// The Terminal whose shell exited, to say so over its last screen.
@@ -505,6 +507,10 @@ fn exited_bar<'a>(id: TerminalId, kind: PaneNotice) -> Element<'a, Message> {
 fn pane_body<'a>(pv: PaneView<'a>) -> Element<'a, Message> {
     let slot = pv.slot;
     let inner: Element<'a, Message> = match pv.pane {
+        Some(_) if pv.too_small => container(text("Too small").size(12).color(t::text_muted()))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into(),
         Some(pane) => {
             let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
             match pv.notice {

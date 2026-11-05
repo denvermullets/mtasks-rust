@@ -154,6 +154,21 @@ pub fn pane_size(window_w: f32, window_h: f32, requested: Option<f32>, layout: L
     )
 }
 
+/// A pane smaller than this many columns by rows says "too small".
+pub const MIN_COLS: u16 = 20;
+pub const MIN_ROWS: u16 = 4;
+
+/// Whether a pane of `cols` x `rows` cells is too small to use. Its PTY then
+/// keeps its last size, so the shell doesn't reflow into something unusable.
+pub fn too_small(cols: u16, rows: u16) -> bool {
+    cols < MIN_COLS || rows < MIN_ROWS
+}
+
+/// The size a new shell starts at: the pane's, or the smallest usable one.
+pub fn spawn_grid((cols, rows): (u16, u16)) -> (u16, u16) {
+    (cols.max(MIN_COLS), rows.max(MIN_ROWS))
+}
+
 /// Whole cells that fit, never below 1x1.
 pub fn grid_for(width: f32, height: f32, cell_w: f32, cell_h: f32) -> (u16, u16) {
     let cols = (width / cell_w).floor().clamp(1.0, u16::MAX as f32) as u16;
@@ -354,6 +369,34 @@ mod tests {
         assert_eq!(next_slot(0, Layout::Grid, -1), 3);
         assert_eq!(pane_size(1100.0, 900.0, None, Layout::Grid), (439.5, 135.5));
         assert_eq!(slot_for_new(&[Some(TerminalId(1)), Some(TerminalId(2)), None, None], Layout::Grid, 0), 2);
+    }
+
+    #[test]
+    fn a_pane_under_20_by_4_cells_is_too_small() {
+        assert!(!too_small(20, 4));
+        assert!(too_small(19, 4));
+        assert!(too_small(20, 3));
+        assert!(too_small(1, 1));
+        assert!(!too_small(120, 30));
+    }
+
+    #[test]
+    fn a_shell_started_in_a_small_pane_gets_the_smallest_usable_size() {
+        assert_eq!(spawn_grid((12, 2)), (20, 4));
+        assert_eq!(spawn_grid((80, 24)), (80, 24));
+        assert_eq!(spawn_grid((19, 30)), (20, 30));
+    }
+
+    #[test]
+    fn a_2x2_grid_in_the_minimum_window_is_too_small_until_the_panel_grows() {
+        // The default panel there is 166 px; a pane in 2x2 is 68 px tall.
+        let (w, h) = pane_size(800.0, 500.0, None, Layout::Grid);
+        let (cols, rows) = grid_for(w, h, 8.0, 18.0);
+        assert!(too_small(cols, rows));
+        // A taller panel fits it again.
+        let (w, h) = pane_size(800.0, 500.0, Some(300.0), Layout::Grid);
+        let (cols, rows) = grid_for(w, h, 8.0, 18.0);
+        assert!(!too_small(cols, rows));
     }
 
     #[test]

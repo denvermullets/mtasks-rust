@@ -283,7 +283,9 @@ impl TerminalState {
         // A pane takes its Terminal's size; a hidden Terminal keeps its last.
         if let (true, Some(cell)) = (on_screen, self.cell) {
             let grid = self.grid(cell);
-            for id in visible_ids.iter().flatten() {
+            // A too-small pane leaves its PTY at the last size; enlarging
+            // the pane sends the new one.
+            for id in visible_ids.iter().flatten().filter(|_| !panel::too_small(grid.0, grid.1)) {
                 if self.sent_size.get(id) != Some(&grid) {
                     self.sent_size.insert(*id, grid);
                     self.terminals.resize(*id, grid.0, grid.1, cell.0, cell.1);
@@ -345,6 +347,10 @@ impl TerminalState {
             .into_iter()
             .filter_map(|id| Some((id, self.roster.get(id)?.name.clone())))
             .collect();
+        let too_small = self.cell.is_some_and(|c| {
+            let (cols, rows) = self.grid(c);
+            panel::too_small(cols, rows)
+        });
         let slots = (0..layout.slots())
             .map(|slot| {
                 let id = self.shown[slot];
@@ -352,6 +358,7 @@ impl TerminalState {
                     slot,
                     pane: id.map(|_| &self.panes[slot]),
                     focused: slot == self.panel.focused_pane,
+                    too_small,
                     offer: if id.is_none() { offer.clone() } else { Vec::new() },
                     notice: id.and_then(|id| {
                         let dead = self.terminals.frame(id).is_some_and(|f| f.dead);
@@ -554,7 +561,7 @@ impl TerminalState {
         for pane in &mut self.panes {
             pane.set_cell(cell);
         }
-        let (cols, rows) = self.grid(cell);
+        let (cols, rows) = panel::spawn_grid(self.grid(cell));
         let config = SpawnConfig {
             team: team.to_string(),
             cols,
