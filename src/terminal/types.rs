@@ -34,6 +34,8 @@ pub struct BgRun {
 pub struct RowData {
     pub runs: Vec<Run>,
     pub bgs: Vec<BgRun>,
+    /// Selected cells on this row, as an inclusive column range.
+    pub selected: Option<(u16, u16)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +61,8 @@ pub struct Frame {
     pub rows: Vec<Arc<RowData>>,
     pub bg: Rgb,
     pub fg: Rgb,
+    /// Colour behind selected cells (the theme's selection colour).
+    pub selection_bg: Rgb,
     pub cursor: Option<CursorData>,
     pub title: String,
     pub scrollback: usize,
@@ -103,7 +107,7 @@ pub struct TermTheme {
     pub fg: Rgb,
     pub bg: Rgb,
     pub cursor: Rgb,
-    /// Selection highlight; drawn by the pane once selection exists.
+    /// Selection highlight, drawn behind selected cells.
     pub selection: Rgb,
     /// A light theme: answers `CSI ?996n`.
     pub light: bool,

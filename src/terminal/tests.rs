@@ -469,4 +469,5 @@ mod load;
 mod mouse;
 mod resize;
 mod scroll;
+mod select;
 mod wake;

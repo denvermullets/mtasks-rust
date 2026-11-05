@@ -195,8 +195,9 @@ impl canvas::Program<Message> for Pane {
                 )
             }
             mouse::Event::CursorMoved { position } => {
-                // Moves matter only to a program tracking the mouse; send one per cell.
-                if !self.frame.tracking || !(state.pressed || cursor.is_over(bounds)) {
+                // Moves matter to a program tracking the mouse, and to a drag in
+                // progress (a selection); send one per cell.
+                if !(state.pressed || (self.frame.tracking && cursor.is_over(bounds))) {
                     return (Ignored, None);
                 }
                 let cell = at(position);
@@ -253,6 +254,13 @@ impl canvas::Program<Message> for Pane {
                         Point::new(g.col as f32 * cw, py),
                         Size::new(g.len as f32 * cw, ch),
                         col(g.color),
+                    );
+                }
+                if let Some((from, to)) = data.selected {
+                    fr.fill_rectangle(
+                        Point::new(from as f32 * cw, py),
+                        Size::new((to - from + 1) as f32 * cw, ch),
+                        col(f.selection_bg),
                     );
                 }
                 for run in &data.runs {
@@ -454,6 +462,7 @@ mod tests {
                 ascii: true,
             }],
             bgs: vec![],
+            selected: None,
         })
     }
 
