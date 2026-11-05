@@ -6,7 +6,7 @@
 //! `App::stash_active_tab` and apply it in `App::restore_tab`
 //! (`src/app/tab_update.rs`). Those two functions are the only places.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::app::View;
 use crate::tabs::{TabKey, TabSet};
@@ -22,6 +22,9 @@ pub struct ParkedTab {
     /// View search text and the view it was typed in.
     pub search_query: String,
     pub search_view: View,
+    pub focused_lane: usize,
+    pub focused_issue: usize,
+    pub collapsed_sections: HashSet<String>,
 }
 
 impl ParkedTab {
@@ -40,6 +43,9 @@ impl ParkedTab {
             scroll_state: HashMap::new(),
             search_query: String::new(),
             search_view: View::Board,
+            focused_lane: 0,
+            focused_issue: 0,
+            collapsed_sections: HashSet::new(),
         }
     }
 }
@@ -243,5 +249,22 @@ mod tests {
         assert_eq!(parked.take(&team("b")).unwrap().search_query, "");
         let a = parked.take(&team("a")).unwrap();
         assert_eq!((a.search_query.as_str(), a.search_view), ("login", View::Board));
+    }
+
+    #[test]
+    fn focus_and_collapsed_sections_stay_with_their_tab() {
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.focused_lane = 2;
+        a.focused_issue = 5;
+        a.collapsed_sections.insert("Done".into());
+        parked.save(team("a"), a);
+        parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
+        let b = parked.take(&team("b")).unwrap();
+        assert_eq!((b.focused_lane, b.focused_issue), (0, 0));
+        assert!(b.collapsed_sections.is_empty());
+        let a = parked.take(&team("a")).unwrap();
+        assert_eq!((a.focused_lane, a.focused_issue), (2, 5));
+        assert!(a.collapsed_sections.contains("Done"));
     }
 }

@@ -68,6 +68,9 @@ impl App {
                 scroll_state: self.scroll_state.clone(),
                 search_query: self.search_query.clone(),
                 search_view: self.search_view.clone(),
+                focused_lane: self.focused_lane,
+                focused_issue: self.focused_issue,
+                collapsed_sections: self.collapsed_sections.clone(),
                 ..ParkedTab::new(self.view.clone(), self.selected_team_id.clone())
             },
         );
@@ -82,12 +85,14 @@ impl App {
     /// the Tab's offset (see `tab_state::scroll_keys`).
     pub(super) fn restore_tab(&mut self, key: &TabKey) -> Task<Message> {
         let parked = self.parked_tabs.take(key);
-        let (view, team, scroll_state, search) = match parked {
+        let (view, team, scroll_state, search, focus, collapsed) = match parked {
             Some(p) => (
                 p.view,
                 p.selected_team_id,
                 p.scroll_state,
                 (p.search_query, p.search_view),
+                (p.focused_lane, p.focused_issue),
+                p.collapsed_sections,
             ),
             None => (
                 View::Board,
@@ -97,6 +102,8 @@ impl App {
                 },
                 Default::default(),
                 (String::new(), View::Board),
+                (0, 0),
+                Default::default(),
             ),
         };
         self.scroll_state = scroll_state;
@@ -109,8 +116,8 @@ impl App {
         self.project_detail = None;
         self.dashboard_menu = None;
         self.composer_focused = false;
-        self.focused_lane = 0;
-        self.focused_issue = 0;
+        (self.focused_lane, self.focused_issue) = focus;
+        self.collapsed_sections = collapsed;
         self.selected_team_id = team;
         self.view = view;
         self.reload_data();
@@ -120,6 +127,10 @@ impl App {
         if self.view == View::RecurringIssues {
             let conn = self.db();
             self.reload_recurring(&conn);
+        }
+        // Parked focus may point past rows that went away.
+        if matches!(self.view, View::Board | View::MyIssues) {
+            self.clamp_focus();
         }
         self.restore_dashboard_session();
         self.restore_scroll()
