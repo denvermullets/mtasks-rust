@@ -23,6 +23,9 @@ pub enum Route {
 /// are reserved (Quit is the native menu item; the others do nothing here, so
 /// no program ever sees a Command chord).
 pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
+    if let Some(key) = editing_key(code, mods) {
+        return Route::Send(key);
+    }
     if mods.logo() {
         return match code {
             Code::KeyJ => Route::ToggleFocus,
@@ -51,6 +54,34 @@ pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
             logo: false,
         },
         text,
+        option_as_alt: true,
+    })
+}
+
+/// Mac line editing, as the shell's own keys: Cmd+Delete is `^U`, Cmd+Left
+/// `^A`, Cmd+Right `^E`, Option+Left `ESC b` and Option+Right `ESC f`.
+/// (Option is Alt everywhere, so `ESC b` is Alt+B.)
+fn editing_key(code: Code, mods: Modifiers) -> Option<KeyInput> {
+    let (ch, ctrl, alt) = if mods.logo() && !mods.alt() && !mods.control() {
+        match code {
+            Code::Backspace => ('u', true, false),
+            Code::ArrowLeft => ('a', true, false),
+            Code::ArrowRight => ('e', true, false),
+            _ => return None,
+        }
+    } else if mods.alt() && !mods.logo() && !mods.control() && !mods.shift() {
+        match code {
+            Code::ArrowLeft => ('b', false, true),
+            Code::ArrowRight => ('f', false, true),
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    Some(KeyInput {
+        key: TermKey::Char(ch),
+        mods: KeyMods { shift: false, alt, ctrl, logo: false },
+        text: None,
         option_as_alt: true,
     })
 }
@@ -191,6 +222,47 @@ mod tests {
         for code in [Code::KeyQ, Code::BracketLeft, Code::BracketRight] {
             assert_eq!(route(code, Modifiers::LOGO, None), Route::Ignore);
         }
+    }
+
+    fn sent(code: Code, mods: Modifiers) -> (char, bool, bool) {
+        let Route::Send(k) = route(code, mods, None) else {
+            panic!("{code:?} must be sent");
+        };
+        let TermKey::Char(c) = k.key else {
+            panic!("expected a letter chord");
+        };
+        assert!(!k.mods.logo && k.text.is_none() && k.option_as_alt);
+        (c, k.mods.ctrl, k.mods.alt)
+    }
+
+    #[test]
+    fn mac_editing_keys_become_shell_editing_chords() {
+        assert_eq!(sent(Code::Backspace, Modifiers::LOGO), ('u', true, false));
+        assert_eq!(sent(Code::ArrowLeft, Modifiers::LOGO), ('a', true, false));
+        assert_eq!(sent(Code::ArrowRight, Modifiers::LOGO), ('e', true, false));
+        assert_eq!(sent(Code::ArrowLeft, Modifiers::ALT), ('b', false, true));
+        assert_eq!(sent(Code::ArrowRight, Modifiers::ALT), ('f', false, true));
+    }
+
+    #[test]
+    fn option_letters_are_alt_not_composed_text() {
+        let Route::Send(k) = route(Code::KeyB, Modifiers::ALT, Some("\u{222b}")) else {
+            panic!("Option+B must be sent");
+        };
+        assert!(k.mods.alt && k.option_as_alt);
+        assert_eq!(k.key, TermKey::Char('b'));
+    }
+
+    #[test]
+    fn plain_arrows_and_option_backspace_are_untouched() {
+        let Route::Send(k) = route(Code::ArrowLeft, Modifiers::empty(), None) else {
+            panic!();
+        };
+        assert_eq!(k.key, TermKey::ArrowLeft);
+        let Route::Send(k) = route(Code::Backspace, Modifiers::ALT, None) else {
+            panic!();
+        };
+        assert_eq!((k.key, k.mods.alt), (TermKey::Backspace, true));
     }
 
     #[test]
