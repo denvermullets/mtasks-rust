@@ -176,6 +176,16 @@ pub struct MouseInput {
     pub mods: KeyMods,
 }
 
+/// Wheel or trackpad movement over a pane. `rows` is positive toward older
+/// output and may be fractional; the engine adds up fractions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WheelInput {
+    pub rows: f32,
+    pub col: i32,
+    pub row: i32,
+    pub mods: KeyMods,
+}
+
 /// What `close` did, once it finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseReport {

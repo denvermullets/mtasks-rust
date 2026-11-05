@@ -30,6 +30,7 @@ pub(super) enum Cmd {
     Key(KeyInput),
     Paste(String),
     Mouse(MouseInput),
+    Wheel(WheelInput),
     Resize { cols: u16, rows: u16, cell_w: f32, cell_h: f32 },
     Theme(TermTheme),
     Visible(bool),
@@ -500,6 +501,7 @@ fn owner(
     let mut mouse_enc = mouse::Encoder::new().unwrap();
     let mut mouse_ev = mouse::Event::new().unwrap();
     let mut held: Option<MouseButton> = None;
+    let mut wheel_acc = pointer::WheelAccum::default();
 
     let mut prev: Vec<Arc<RowData>> = vec![];
     let mut exited = false;
@@ -600,6 +602,54 @@ fn owner(
                         let mut out = Vec::new();
                         if mouse_enc.encode_to_vec(&mouse_ev, &mut out).is_ok() && !out.is_empty() {
                             let _ = wtx.send(out);
+                        }
+                    }
+                }
+                Cmd::Wheel(w) => {
+                    let n = wheel_acc.push(w.rows);
+                    if n != 0 {
+                        let tracking = term.is_mouse_tracking().unwrap_or(false);
+                        let alt = term.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false)
+                            || term.mode(Mode::ALT_SCREEN).unwrap_or(false)
+                            || term.mode(Mode::ALT_SCREEN_LEGACY).unwrap_or(false);
+                        match pointer::wheel_target(tracking, alt) {
+                            pointer::WheelTarget::Program => {
+                                let sz = *size.lock().unwrap();
+                                sync_mouse(&mut mouse_enc, &term, sz, false);
+                                let col = w.col.clamp(0, sz.0 as i32 - 1) as f32;
+                                let row = w.row.clamp(0, sz.1 as i32 - 1) as f32;
+                                let button =
+                                    if n > 0 { mouse::Button::Four } else { mouse::Button::Five };
+                                mouse_ev.set_button(Some(button)).set_mods(map_mods(w.mods)).set_position(
+                                    mouse::Position {
+                                        x: (col + 0.5) * sz.2 as f32,
+                                        y: (row + 0.5) * sz.3 as f32,
+                                    },
+                                );
+                                let mut out = Vec::new();
+                                for _ in 0..n.unsigned_abs() {
+                                    mouse_ev.set_action(mouse::Action::Press);
+                                    let _ = mouse_enc.encode_to_vec(&mouse_ev, &mut out);
+                                    mouse_ev.set_action(mouse::Action::Release);
+                                    let _ = mouse_enc.encode_to_vec(&mouse_ev, &mut out);
+                                }
+                                if !out.is_empty() {
+                                    let _ = wtx.send(out);
+                                }
+                            }
+                            pointer::WheelTarget::Arrows => {
+                                let app = term.mode(Mode::DECCKM).unwrap_or(false);
+                                let seq: &[u8] = match (n > 0, app) {
+                                    (true, true) => b"\x1bOA",
+                                    (true, false) => b"\x1b[A",
+                                    (false, true) => b"\x1bOB",
+                                    (false, false) => b"\x1b[B",
+                                };
+                                let _ = wtx.send(seq.repeat(n.unsigned_abs() as usize));
+                            }
+                            pointer::WheelTarget::Scrollback => {
+                                term.scroll_viewport(ScrollViewport::Delta(-(n as isize)));
+                            }
                         }
                     }
                 }

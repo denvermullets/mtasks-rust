@@ -20,7 +20,7 @@ use crate::app::Message;
 use crate::terminal::panel::STRIP_HEIGHT;
 use crate::terminal::{
     pointer, CursorShape, Frame, KeyMods, MouseAction, MouseButton, MouseInput, Rgb, RowData, Run,
-    TerminalMessage,
+    TerminalMessage, WheelInput,
 };
 use crate::theme as t;
 
@@ -208,6 +208,18 @@ impl canvas::Program<Message> for Pane {
                     Ignored,
                     send(MouseInput { action: MouseAction::Move, col: cell.0, row: cell.1, mods }),
                 )
+            }
+            mouse::Event::WheelScrolled { delta } => {
+                let Some(p) = cursor.position_in(bounds) else {
+                    return (Ignored, None);
+                };
+                let (y, pixels) = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => (y, false),
+                    mouse::ScrollDelta::Pixels { y, .. } => (y, true),
+                };
+                let (col, row) = pointer::cell_at(p.x, p.y, self.cell.0, self.cell.1);
+                let rows = pointer::wheel_rows(y, pixels, self.cell.1);
+                (Captured, Some(Message::Terminal(TerminalMessage::Wheel(WheelInput { rows, col, row, mods }))))
             }
             _ => (Ignored, None),
         }

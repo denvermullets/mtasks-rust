@@ -121,6 +121,15 @@ impl Terminals {
         }
     }
 
+    /// Wheel or trackpad movement: goes to a program that tracks the mouse, as
+    /// arrow keys to a full-screen program that doesn't, and otherwise scrolls
+    /// back through output.
+    pub fn wheel(&self, id: TerminalId, event: WheelInput) {
+        if let Some(e) = self.entries.get(&id) {
+            e.engine.send(engine::Cmd::Wheel(event));
+        }
+    }
+
     pub fn paste(&self, id: TerminalId, text: String) {
         if let Some(e) = self.entries.get(&id) {
             e.engine.send(engine::Cmd::Paste(text));
