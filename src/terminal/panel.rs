@@ -54,6 +54,45 @@ pub fn resolve_shown(
         .or_else(|| owned_by_team.first().copied())
 }
 
+/// What a pane says over its last screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneNotice {
+    /// The shell exited: Restart or Close.
+    Exited,
+    /// The Terminal's owner thread panicked: Close only.
+    Dead,
+}
+
+/// The notice for the Terminal a pane shows, from its latest frame.
+pub fn pane_notice(exited: bool, dead: bool) -> Option<PaneNotice> {
+    if dead {
+        Some(PaneNotice::Dead)
+    } else {
+        exited.then_some(PaneNotice::Exited)
+    }
+}
+
+/// What a quit request does about Terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitPlan {
+    /// A Terminal is busy: ask first.
+    Ask,
+    /// Close every Terminal, then exit.
+    Shutdown,
+    /// A shutdown is already under way.
+    Ignore,
+}
+
+pub fn quit_plan(any_busy: bool, confirmed: bool, shutting_down: bool) -> QuitPlan {
+    if shutting_down {
+        QuitPlan::Ignore
+    } else if any_busy && !confirmed {
+        QuitPlan::Ask
+    } else {
+        QuitPlan::Shutdown
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toggle {
     /// Nothing to do (a cross-team page).
@@ -106,6 +145,26 @@ mod tests {
         assert_eq!(resolve_shown(Some(c), &[a, b]), Some(a));
         assert_eq!(resolve_shown(None, &[b]), Some(b));
         assert_eq!(resolve_shown(Some(a), &[]), None);
+    }
+
+    #[test]
+    fn an_exited_shell_gets_a_notice_and_a_live_one_none() {
+        assert_eq!(pane_notice(true, false), Some(PaneNotice::Exited));
+        assert_eq!(pane_notice(false, false), None);
+    }
+
+    #[test]
+    fn a_dead_terminal_says_so_even_though_it_also_counts_as_exited() {
+        assert_eq!(pane_notice(true, true), Some(PaneNotice::Dead));
+    }
+
+    #[test]
+    fn quitting_asks_only_when_something_is_busy_and_never_twice() {
+        assert_eq!(quit_plan(false, false, false), QuitPlan::Shutdown);
+        assert_eq!(quit_plan(true, false, false), QuitPlan::Ask);
+        assert_eq!(quit_plan(true, true, false), QuitPlan::Shutdown);
+        assert_eq!(quit_plan(true, true, true), QuitPlan::Ignore);
+        assert_eq!(quit_plan(false, false, true), QuitPlan::Ignore);
     }
 
     #[test]

@@ -19,10 +19,11 @@ use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
 use super::panel::{self, PanelState, Toggle};
-use super::{active_term_theme, SpawnConfig, TerminalId, Terminals};
+use super::roster::Roster;
+use super::{active_term_theme, Closing, SpawnConfig, TerminalId, Terminals};
 use crate::app::Message;
 use crate::theme as t;
-use crate::views::terminal_panel::{self, Pane, PanelView, TermFont};
+use crate::views::terminal_panel::{self, Pane, PanelView, StripItem, TermFont};
 
 #[derive(Debug, Clone)]
 pub enum TerminalMessage {
@@ -34,8 +35,25 @@ pub enum TerminalMessage {
     ToggleFocus,
     /// A click on the pane.
     Focus,
-    /// "New Terminal" on an empty panel.
+    /// "New Terminal", from the strip or an empty panel.
     New,
+    /// A Terminal chosen in the strip.
+    Select(TerminalId),
+    /// The shown Terminal's name was clicked.
+    RenameStart(TerminalId),
+    RenameInput(String),
+    /// Enter: an empty name is refused and the old one kept.
+    RenameSubmit,
+    /// The strip's close button. The app asks first when the Terminal is busy
+    /// (`close_needs_confirm`), then sends `CloseConfirmed`.
+    Close(TerminalId),
+    CloseConfirmed(TerminalId),
+    /// Start a new shell in an exited Terminal, keeping name and directory.
+    Restart(TerminalId),
+    /// "Folder" in the strip: choose where the team's new shells start.
+    PickDir,
+    /// The picker's answer; the app stores it (`db::terminal_dirs`).
+    DirPicked(Option<std::path::PathBuf>),
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
 }
@@ -44,8 +62,13 @@ static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new()
 
 pub struct TerminalState {
     terminals: Terminals,
-    owners: HashMap<TerminalId, String>,
-    names: HashMap<TerminalId, String>,
+    roster: Roster,
+    renaming: Option<(TerminalId, String)>,
+    /// Closes in flight; quit waits for them.
+    closing: Vec<Closing>,
+    shutting_down: bool,
+    /// Each team's starting directory; unset means home.
+    team_dirs: HashMap<String, std::path::PathBuf>,
     panel: PanelState,
     focused: bool,
     window: Size,
@@ -67,8 +90,11 @@ impl TerminalState {
             terminals: Terminals::new(move || {
                 let _ = tx.unbounded_send(());
             }),
-            owners: HashMap::new(),
-            names: HashMap::new(),
+            roster: Roster::default(),
+            renaming: None,
+            closing: Vec::new(),
+            shutting_down: false,
+            team_dirs: HashMap::new(),
             panel: PanelState::default(),
             focused: false,
             window: Size::new(1100.0, 700.0),
@@ -113,6 +139,55 @@ impl TerminalState {
                     self.create(team);
                 }
             }
+            TerminalMessage::Select(id) => {
+                self.renaming = None;
+                if team.is_some_and(|t| self.owned_by(t).contains(&id)) {
+                    self.panel.pane = Some(id);
+                    self.focused = true;
+                }
+            }
+            TerminalMessage::RenameStart(id) => {
+                if let Some(r) = self.roster.get(id) {
+                    self.renaming = Some((id, r.name.clone()));
+                    // The text field takes the keyboard, not the shell.
+                    self.focused = false;
+                    return iced::widget::text_input::focus(terminal_panel::rename_input_id());
+                }
+            }
+            TerminalMessage::RenameInput(s) => {
+                if let Some((_, draft)) = self.renaming.as_mut() {
+                    *draft = s;
+                }
+            }
+            TerminalMessage::RenameSubmit => {
+                if let Some((id, draft)) = self.renaming.take() {
+                    self.roster.rename(id, &draft);
+                    self.focused = true;
+                }
+            }
+            TerminalMessage::Close(id) => {
+                // Without the app's ask there is nothing to confirm with: an
+                // idle Terminal closes at once, a busy one waits for the ask.
+                if !self.close_needs_confirm(id) {
+                    self.close(id);
+                }
+            }
+            TerminalMessage::CloseConfirmed(id) => self.close(id),
+            TerminalMessage::Restart(id) => self.restart(id),
+            TerminalMessage::PickDir => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Folder for new Terminals")
+                            .pick_folder()
+                            .await
+                            .map(|h| h.path().to_path_buf())
+                    },
+                    |dir| Message::Terminal(TerminalMessage::DirPicked(dir)),
+                );
+            }
+            // The app stores it first and then calls `set_team_dir`.
+            TerminalMessage::DirPicked(_) => {}
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
                 match input::route(code, mods, text.as_deref()) {
                     Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, team),
@@ -214,18 +289,35 @@ impl TerminalState {
             return None;
         }
         let pane = self.shown.map(|_| &self.pane);
-        let title = self
-            .shown
-            .and_then(|id| self.names.get(&id).cloned())
-            .unwrap_or_else(|| "Terminals".to_string());
+        let items = self
+            .roster
+            .of_team(team)
+            .map(|r| StripItem {
+                id: r.id,
+                name: r.name.clone(),
+                active: Some(r.id) == self.shown,
+                exited: self.terminals.is_exited(r.id),
+                editing: self
+                    .renaming
+                    .as_ref()
+                    .filter(|(id, _)| *id == r.id)
+                    .map(|(_, draft)| draft.clone()),
+            })
+            .collect();
         let note = self
             .error
             .clone()
-            .or_else(|| self.pane_exited().then(|| "shell exited".to_string()))
             .or_else(|| (pane.is_none() && self.owned_by(team).is_empty()).then(|| "none open".to_string()));
         Some(terminal_panel::view(PanelView {
             pane,
-            title,
+            items,
+            dir_label: self.team_dirs.get(team).map(|d| {
+                d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned())
+            }),
+            notice: self.shown.and_then(|id| {
+                let dead = self.terminals.frame(id).is_some_and(|f| f.dead);
+                panel::pane_notice(self.terminals.is_exited(id), dead).map(|n| (id, n))
+            }),
             note,
             height: panel::panel_height(self.window.height, self.panel.height),
         }))
@@ -270,11 +362,73 @@ impl TerminalState {
     }
 
     fn owned_by(&self, team: &str) -> Vec<TerminalId> {
-        self.terminals
-            .ids()
-            .into_iter()
-            .filter(|id| self.owners.get(id).is_some_and(|o| o == team))
-            .collect()
+        self.roster.ids_of_team(team)
+    }
+
+    pub fn set_team_dirs(&mut self, dirs: HashMap<String, std::path::PathBuf>) {
+        self.team_dirs = dirs;
+    }
+
+    /// New shells on `team` start in `dir`; existing shells don't move.
+    pub fn set_team_dir(&mut self, team: &str, dir: Option<std::path::PathBuf>) {
+        match dir {
+            Some(d) => self.team_dirs.insert(team.to_string(), d),
+            None => self.team_dirs.remove(team),
+        };
+    }
+
+    /// Whether any Terminal, on any team and shown or hidden, is busy.
+    pub fn any_busy(&self) -> bool {
+        self.terminals.any_busy()
+    }
+
+    pub fn quit_plan(&self, confirmed: bool) -> panel::QuitPlan {
+        panel::quit_plan(self.any_busy(), confirmed, self.shutting_down)
+    }
+
+    /// Close every Terminal for quitting, and hand back every close in flight
+    /// (earlier closes included) for the caller to wait on.
+    pub fn begin_shutdown(&mut self) -> Vec<Closing> {
+        self.shutting_down = true;
+        self.focused = false;
+        let mut all = std::mem::take(&mut self.closing);
+        all.extend(self.terminals.close_all());
+        all
+    }
+
+    /// Closing a busy Terminal asks first; an idle or exited one doesn't.
+    pub fn close_needs_confirm(&self, id: TerminalId) -> bool {
+        self.terminals.is_busy(id)
+    }
+
+    /// The Terminal's name, for the ask.
+    pub fn name_of(&self, id: TerminalId) -> Option<String> {
+        self.roster.get(id).map(|r| r.name.clone())
+    }
+
+    /// Stop a Terminal now. It leaves the strip at once; its shell is
+    /// reaped in the background.
+    fn close(&mut self, id: TerminalId) {
+        self.roster.remove(id);
+        self.sent_visible.remove(&id);
+        self.sent_size.remove(&id);
+        if self.renaming.as_ref().is_some_and(|(r, _)| *r == id) {
+            self.renaming = None;
+        }
+        if self.panel.pane == Some(id) {
+            self.panel.pane = None;
+        }
+        if let Some(closing) = self.terminals.close(id) {
+            self.closing.retain(|c| !c.is_done());
+            self.closing.push(closing);
+        }
+        self.pane.reset();
+        self.shown = None;
+    }
+
+    /// How many of the team's Terminals have a live shell.
+    pub fn open_count(&self, team: &str) -> usize {
+        self.terminals.open_count(team)
     }
 
     fn pane_exited(&self) -> bool {
@@ -286,7 +440,26 @@ impl TerminalState {
         panel::grid_for(w, h, cell.0, cell.1)
     }
 
-    fn create(&mut self, team: &str) {
+    fn restart(&mut self, id: TerminalId) {
+        let Some(rec) = self.roster.get(id).cloned() else { return };
+        if !self.terminals.is_exited(id) {
+            return;
+        }
+        let Some(new) = self.spawn(&rec.team, rec.cwd.clone()) else { return };
+        self.roster.replace_id(id, new);
+        if let Some(old) = self.terminals.close(id) {
+            self.closing.retain(|c| !c.is_done());
+            self.closing.push(old);
+        }
+        self.sent_visible.remove(&id);
+        self.sent_size.remove(&id);
+        self.panel.pane = Some(new);
+        self.shown = None;
+        self.focused = true;
+    }
+
+    /// Start a shell for `team`; shows the error in the strip on failure.
+    fn spawn(&mut self, team: &str, cwd: Option<std::path::PathBuf>) -> Option<TerminalId> {
         let font = self.font;
         let cell = *self.cell.get_or_insert_with(|| terminal_panel::measure_cell(font));
         self.pane.set_cell(cell);
@@ -296,19 +469,27 @@ impl TerminalState {
             cols,
             rows,
             theme: active_term_theme(),
-            cwd: None,
+            cwd,
             program: None,
         };
         match self.terminals.spawn(config) {
             Ok(id) => {
                 self.error = None;
-                self.owners.insert(id, team.to_string());
-                let n = self.owned_by(team).len();
-                self.names.insert(id, format!("Terminal {n}"));
                 self.sent_size.insert(id, (cols, rows));
-                self.panel.pane = Some(id);
+                Some(id)
             }
-            Err(e) => self.error = Some(format!("could not start a shell: {e}")),
+            Err(e) => {
+                self.error = Some(format!("could not start a shell: {e}"));
+                None
+            }
+        }
+    }
+
+    fn create(&mut self, team: &str) {
+        let cwd = self.team_dirs.get(team).cloned();
+        if let Some(id) = self.spawn(team, cwd.clone()) {
+            self.roster.add(id, team, cwd);
+            self.panel.pane = Some(id);
         }
     }
 

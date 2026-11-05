@@ -12,6 +12,7 @@ pub mod recurring_issues;
 pub mod saved_views;
 pub mod sync_queue;
 pub mod team_purge;
+pub mod terminal_dirs;
 
 /// Wire/storage timestamp format used for every `*_at` column.
 pub const TS_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";

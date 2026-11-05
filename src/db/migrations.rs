@@ -806,6 +806,18 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE open_tabs ADD COLUMN page TEXT;
         ",
     },
+    Migration {
+        version: 38,
+        name: "team_terminal_dirs",
+        up: "
+            -- Where a team's new Terminals start. Local only: never queued for
+            -- Data sync. Removed with the team.
+            CREATE TABLE team_terminal_dirs (
+                team_id TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+                path TEXT NOT NULL
+            );
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1340,6 +1352,31 @@ mod tests {
             .query_row("SELECT page FROM open_tabs WHERE position = 0", [], |r| r.get(0))
             .unwrap();
         assert_eq!(page, None);
+    }
+
+    #[test]
+    fn upgrade_from_v37_adds_the_terminal_dirs_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 38) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "team_terminal_dirs"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "team_terminal_dirs"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
     }
 
     #[test]

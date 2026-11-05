@@ -16,6 +16,7 @@ mod engine;
 mod input;
 mod palette;
 pub mod panel;
+mod roster;
 mod state;
 mod types;
 
@@ -70,6 +71,18 @@ impl Closing {
             reaped: false,
         })
     }
+}
+
+/// Wait for closes to finish, but never longer than `limit` in all. Returns the
+/// reports of the closes that finished; one still running at the limit is
+/// left to finish on its own thread (the caller is about to exit). A close
+/// whose owner thread panicked still reports, because the engine catches it.
+pub fn wait_all(closings: Vec<Closing>, limit: std::time::Duration) -> Vec<CloseReport> {
+    let deadline = std::time::Instant::now() + limit;
+    while !closings.iter().all(Closing::is_done) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    closings.into_iter().filter(Closing::is_done).map(Closing::wait).collect()
 }
 
 pub struct Terminals {
@@ -159,6 +172,18 @@ impl Terminals {
         self.entries.get(&id).is_none_or(|e| e.engine.exited())
     }
 
+    /// Busy: a program other than the shell is in the foreground (`tcgetpgrp`
+    /// on the PTY differs from the shell's process). A job the shell
+    /// backgrounded doesn't count (known gap). An exited Terminal isn't busy.
+    pub fn is_busy(&self, id: TerminalId) -> bool {
+        self.entries.get(&id).is_some_and(|e| !e.engine.exited() && e.engine.busy())
+    }
+
+    /// Whether any Terminal, on any team and shown or hidden, is busy.
+    pub fn any_busy(&self) -> bool {
+        self.entries.keys().any(|&id| self.is_busy(id))
+    }
+
     /// How many of the team's Terminals have a live shell.
     pub fn open_count(&self, team: &str) -> usize {
         self.entries
@@ -183,6 +208,12 @@ impl Terminals {
             .spawn(move || entry.engine.shutdown())
             .ok()?;
         Some(Closing { handle })
+    }
+
+    /// Close every Terminal on every team with the explicit close.
+    pub fn close_all(&mut self) -> Vec<Closing> {
+        let ids = self.ids();
+        ids.into_iter().filter_map(|id| self.close(id)).collect()
     }
 
     /// Test hook: show the top of the scrollback.
