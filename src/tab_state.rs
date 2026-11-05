@@ -158,6 +158,18 @@ impl ParkedTab {
     }
 }
 
+/// The team whose Terminals the Tab `key` shows. A team Tab shows its own
+/// team's; a project Tab its project's team, `selected_team_id`. A cross-team
+/// Tab shows none, whatever page it is on: an issue opened there from another
+/// team switches `selected_team_id`, and must not bring that team's panel.
+pub fn panel_team<'a>(key: &'a TabKey, selected_team_id: Option<&'a str>) -> Option<&'a str> {
+    match key {
+        TabKey::Team(id) => Some(id.as_str()),
+        TabKey::Project(_) => selected_team_id,
+        TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_) => None,
+    }
+}
+
 /// The panels a launch gives back to its Tabs. `rows` is what was stored:
 /// each Tab's own, and the one implicit panel saved before Tabs had their
 /// own. A row for a Tab that isn't open, or for a cross-team Tab (no panel),
@@ -496,6 +508,16 @@ mod tests {
         let forgotten = parked.forget(&team("a")).unwrap();
         assert_eq!(forgotten.panel.unwrap().panes[0].as_deref(), Some("k"));
         assert!(parked.take(&team("a")).is_none());
+    }
+
+    #[test]
+    fn only_team_and_project_tabs_show_a_panel() {
+        assert_eq!(panel_team(&team("a"), Some("a")), Some("a"));
+        assert_eq!(panel_team(&TabKey::Project("p".into()), Some("a")), Some("a"));
+        // Even with another team's issue open in the Tab.
+        for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            assert_eq!(panel_team(&key, Some("other")), None);
+        }
     }
 
     #[test]

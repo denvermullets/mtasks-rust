@@ -314,9 +314,7 @@ impl App {
     /// exists, the page decides.
     pub(super) fn panel_team(&self) -> Option<&str> {
         match self.active_tab_key() {
-            Some(TabKey::Team(id)) => Some(id.as_str()),
-            Some(TabKey::Project(_)) => self.selected_team_id.as_deref(),
-            Some(_) => None,
+            Some(key) => tab_state::panel_team(key, self.selected_team_id.as_deref()),
             None => crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()),
         }
     }

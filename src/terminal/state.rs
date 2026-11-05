@@ -875,6 +875,27 @@ mod tests {
     }
 
     #[test]
+    fn cmd_j_on_a_page_without_a_panel_does_nothing() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let _ = t.update(TerminalMessage::ToggleFocus, None);
+        assert!(!t.stored_panel().visible);
+        assert!(!t.takes_keys(false));
+        assert_eq!(t.roster.ids_of_team("a").len(), 1, "no Terminal was created");
+    }
+
+    #[test]
+    fn a_page_without_a_panel_shows_none_and_hides_every_terminal() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        t.restore_panel(&panel("single", [Some("k1"), None, None, None]));
+        t.sync(None);
+        assert!(!t.panel_showing(None));
+        assert!(t.panel_view(None).is_none());
+        assert!(!t.takes_keys(false));
+    }
+
+    #[test]
     fn a_change_is_reported_once() {
         let mut t = TerminalState::new();
         t.restore_records(vec![record("k1", "a")]);
