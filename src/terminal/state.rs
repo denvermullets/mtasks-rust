@@ -126,6 +126,9 @@ pub struct TerminalState {
     sent_size: HashMap<TerminalId, (u16, u16)>,
     theme_key: &'static str,
     error: Option<String>,
+    /// Restored Terminals whose shell failed to start; `sync` doesn't retry
+    /// them every message. Restart does.
+    start_failed: Vec<TerminalId>,
 }
 
 impl TerminalState {
@@ -154,7 +157,14 @@ impl TerminalState {
             sent_size: HashMap::new(),
             theme_key: t::tok().key,
             error: None,
+            start_failed: Vec::new(),
         }
+    }
+
+    /// Put the stored Terminals back in the strips at launch. No shells start:
+    /// each starts when a pane first shows it.
+    pub fn restore_records(&mut self, stored: Vec<crate::db::terminal_records::Stored>) {
+        self.roster.restore(stored);
     }
 
     pub fn update(&mut self, message: TerminalMessage, team: Option<&str>) -> Task<Message> {
@@ -360,6 +370,15 @@ impl TerminalState {
             Some(t) => panel::reconcile(&self.panel.panes, &self.owned_by(t), layout),
             None => [None; MAX_PANES],
         };
+        let mut shown = shown;
+        // A restored Terminal starts its shell when a pane first shows it.
+        if on_screen {
+            for slot in 0..layout.slots() {
+                if let Some(started) = shown[slot].and_then(|id| self.start_restored(id)) {
+                    shown[slot] = Some(started);
+                }
+            }
+        }
         for slot in 0..MAX_PANES {
             if shown[slot] != self.shown[slot] {
                 self.panes[slot].reset();
@@ -481,7 +500,8 @@ impl TerminalState {
                     offer: if id.is_none() { offer.clone() } else { Vec::new() },
                     notice: id.and_then(|id| {
                         let dead = self.terminals.frame(id).is_some_and(|f| f.dead);
-                        panel::pane_notice(self.terminals.is_exited(id), dead).map(|n| (id, n))
+                        let exited = self.roster.get(id).is_some_and(|r| r.shell) && self.terminals.is_exited(id);
+                        panel::pane_notice(exited, dead).map(|n| (id, n))
                     }),
                 }
             })
@@ -493,7 +513,7 @@ impl TerminalState {
                 id: r.id,
                 name: r.name.clone(),
                 active: Some(r.id) == focused_id,
-                exited: self.terminals.is_exited(r.id),
+                exited: r.shell && self.terminals.is_exited(r.id),
                 editing: self
                     .renaming
                     .as_ref()
@@ -582,6 +602,11 @@ impl TerminalState {
 
     fn owned_by(&self, team: &str) -> Vec<TerminalId> {
         self.roster.ids_of_team(team)
+    }
+
+    /// Strip changes since the last call, for the app to store.
+    pub fn take_record_changes(&mut self) -> Vec<crate::db::terminal_records::Change> {
+        self.roster.take_changes()
     }
 
     pub fn set_team_dirs(&mut self, dirs: HashMap<String, std::path::PathBuf>) {
@@ -678,8 +703,31 @@ impl TerminalState {
         panel::grid_for(w, h, cell.0, cell.1)
     }
 
+    /// Start the shell of a restored record in its working directory (home if
+    /// that is gone, as for any spawn). Returns the shell's id.
+    fn start_restored(&mut self, id: TerminalId) -> Option<TerminalId> {
+        let rec = self.roster.unstarted(id)?.clone();
+        if self.start_failed.contains(&id) {
+            return None;
+        }
+        match self.spawn(&rec.team, rec.cwd) {
+            Some(new) => {
+                self.roster.replace_id(id, new);
+                for p in self.panel.panes.iter_mut().filter(|p| **p == Some(id)) {
+                    *p = Some(new);
+                }
+                Some(new)
+            }
+            None => {
+                self.start_failed.push(id);
+                None
+            }
+        }
+    }
+
     fn restart(&mut self, id: TerminalId) {
         let Some(rec) = self.roster.get(id).cloned() else { return };
+        self.start_failed.retain(|f| *f != id);
         if !self.terminals.is_exited(id) {
             return;
         }
