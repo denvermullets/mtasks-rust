@@ -23,6 +23,8 @@ pub enum Layout {
     Single,
     /// Two panes side by side.
     Columns,
+    /// Two by two.
+    Grid,
 }
 
 impl Layout {
@@ -31,6 +33,7 @@ impl Layout {
         match self {
             Layout::Single => 1,
             Layout::Columns => 2,
+            Layout::Grid => 4,
         }
     }
 
@@ -39,6 +42,7 @@ impl Layout {
         match self {
             Layout::Single => (1, 1),
             Layout::Columns => (2, 1),
+            Layout::Grid => (2, 2),
         }
     }
 }
@@ -307,6 +311,49 @@ mod tests {
         assert_eq!(slot_for_new(&[Some(a), None, None, None], Layout::Columns, 0), 1);
         assert_eq!(slot_for_new(&[Some(a), Some(b), None, None], Layout::Columns, 1), 1);
         assert_eq!(slot_for_new(&[None, Some(b), None, None], Layout::Columns, 1), 0);
+    }
+
+    #[test]
+    fn shrinking_hides_the_extra_terminals_without_dropping_them() {
+        let (a, b, c) = ids();
+        let d = TerminalId(4);
+        let grid: Panes = [Some(a), Some(b), Some(c), Some(d)];
+        let owned = [a, b, c, d];
+        // Down to one pane: the rest stay assigned, and are the ones offered.
+        assert_eq!(reconcile(&grid, &owned, Layout::Single), grid);
+        assert_eq!(unshown(&owned, &grid, Layout::Single), vec![b, c, d]);
+        assert_eq!(unshown(&owned, &grid, Layout::Columns), vec![c, d]);
+        assert_eq!(unshown(&owned, &grid, Layout::Grid), Vec::<TerminalId>::new());
+        // Growing again brings them back to the same panes.
+        assert_eq!(reconcile(&reconcile(&grid, &owned, Layout::Single), &owned, Layout::Grid), grid);
+    }
+
+    #[test]
+    fn shrinking_past_an_empty_first_pane_fills_it_without_duplicating() {
+        let (a, b, c) = ids();
+        let panes: Panes = [None, Some(b), Some(c), None];
+        let out = reconcile(&panes, &[a, b, c], Layout::Single);
+        assert_eq!(out, [Some(a), Some(b), Some(c), None]);
+        // The first Terminal came out of a hidden pane: it moves, never twice.
+        let hidden: Panes = [None, None, Some(a), None];
+        assert_eq!(reconcile(&hidden, &[a, b], Layout::Single), [Some(a), None, None, None]);
+    }
+
+    #[test]
+    fn a_pick_in_a_four_pane_layout_moves_between_any_two_panes() {
+        let (a, b, _) = ids();
+        let mut panes: Panes = [Some(a), None, None, Some(b)];
+        assign(&mut panes, 2, b);
+        assert_eq!(panes, [Some(a), None, Some(b), None]);
+    }
+
+    #[test]
+    fn a_grid_has_four_panes_that_cycle_and_a_quarter_of_the_panel_each() {
+        assert_eq!(Layout::Grid.slots(), 4);
+        assert_eq!(next_slot(3, Layout::Grid, 1), 0);
+        assert_eq!(next_slot(0, Layout::Grid, -1), 3);
+        assert_eq!(pane_size(1100.0, 900.0, None, Layout::Grid), (439.5, 135.5));
+        assert_eq!(slot_for_new(&[Some(TerminalId(1)), Some(TerminalId(2)), None, None], Layout::Grid, 0), 2);
     }
 
     #[test]

@@ -566,7 +566,7 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             .on_press(Message::Terminal(TerminalMessage::New))
             .style(button::text),
     );
-    for (layout, label) in [(Layout::Single, "1"), (Layout::Columns, "1\u{00d7}2")] {
+    for (layout, label) in [(Layout::Single, "1"), (Layout::Columns, "1\u{00d7}2"), (Layout::Grid, "2\u{00d7}2")] {
         let on = layout == p.layout;
         strip = strip.push(
             button(text(label).size(11))
@@ -609,11 +609,22 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             ..Default::default()
         });
 
-    let mut panes = row![].spacing(PANE_GAP).width(Length::Fill).height(Length::Fill);
-    for pv in p.slots {
-        panes = panes.push(pane_body(pv));
+    let (cols, _) = p.layout.grid();
+    let mut slots = p.slots.into_iter();
+    let mut grid = column![].spacing(PANE_GAP).width(Length::Fill).height(Length::Fill);
+    loop {
+        let mut line = row![].spacing(PANE_GAP).width(Length::Fill).height(Length::FillPortion(1));
+        let mut any = false;
+        for pv in slots.by_ref().take(cols) {
+            line = line.push(pane_body(pv));
+            any = true;
+        }
+        if !any {
+            break;
+        }
+        grid = grid.push(line);
     }
-    let body: Element<'a, Message> = panes.into();
+    let body: Element<'a, Message> = grid.into();
     column![strip, body]
         .width(Length::Fill)
         .height(Length::Fixed(p.height))
