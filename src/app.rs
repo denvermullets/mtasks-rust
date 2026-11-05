@@ -1800,6 +1800,25 @@ impl App {
         crumbs
     }
 
+    /// The header's Back for an open issue (`tab_state::back_target`).
+    fn back_message(&self) -> Option<Message> {
+        use crate::tab_state::{back_target, Back, DetailFrom};
+        if !matches!(self.view, View::IssueDetail(_)) {
+            return None;
+        }
+        let from = DetailFrom {
+            my_issues: self.detail_from_my_issues,
+            inbox: self.detail_from_inbox,
+            dashboard: self.detail_from_dashboard.clone(),
+        };
+        Some(match back_target(self.active_tab_key()?, &from)? {
+            Back::MyIssues => Message::BackToMyIssues,
+            Back::Inbox => Message::BackToInbox,
+            Back::Dashboard(_) => Message::BackToDashboard,
+            Back::TabRoot => Message::Tab(TabMessage::BackToRoot),
+        })
+    }
+
     /// Empty-state text for My Issues, when there's something to explain.
     fn my_issues_empty(&self) -> Option<&'static str> {
         let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
@@ -6705,17 +6724,7 @@ impl App {
             )
             .then(|| self.active_filter_count()),
             self.new_action(),
-            (self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)))
-                .then_some(Message::BackToMyIssues)
-                .or_else(|| {
-                    (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
-                        .then_some(Message::BackToInbox)
-                })
-                .or_else(|| {
-                    (self.detail_from_dashboard.is_some()
-                        && matches!(self.view, View::IssueDetail(_)))
-                    .then_some(Message::BackToDashboard)
-                }),
+            self.back_message(),
             self.update_view_action(),
             )
         };
