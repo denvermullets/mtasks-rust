@@ -16,18 +16,56 @@ pub enum TabKey {
     Dashboard(String),
 }
 
+impl TabKey {
+    /// A cross-team page (My Issues, Inbox, a Dashboard). Issues opened from
+    /// one stay in that Tab; a team or project Tab only shows its own team.
+    #[allow(dead_code)] // used by the issue-opening tickets
+    pub fn is_cross_team(&self) -> bool {
+        matches!(self, TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_))
+    }
+}
+
 /// The open Tabs in display order, and which one is active. There is always
 /// at least one Tab and the active index always points at one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabSet {
     tabs: Vec<TabKey>,
     active: usize,
+    /// Team ids in the order their Tabs were last active, most recent last.
+    /// May name teams whose Tab has since closed; readers skip those.
+    recent_teams: Vec<String>,
 }
 
 impl TabSet {
     /// A set with one Tab, which is active.
     pub fn new(first: TabKey) -> Self {
-        Self { tabs: vec![first], active: 0 }
+        let mut set = Self { tabs: vec![first], active: 0, recent_teams: Vec::new() };
+        set.note_active();
+        set
+    }
+
+    /// Record the active Tab as the most recently active team Tab, if it is one.
+    fn note_active(&mut self) {
+        if let TabKey::Team(id) = &self.tabs[self.active] {
+            let id = id.clone();
+            self.recent_teams.retain(|t| *t != id);
+            self.recent_teams.push(id);
+        }
+    }
+
+    /// The team whose Tab was most recently active among the open Tabs.
+    pub fn recent_team(&self) -> Option<&str> {
+        self.recent_teams
+            .iter()
+            .rev()
+            .find(|id| self.tabs.contains(&TabKey::Team((*id).clone())))
+            .map(String::as_str)
+    }
+
+    /// The team a new issue defaults to from a cross-team Tab: the most
+    /// recently active team Tab's team, else `first_team` (the first team).
+    pub fn new_issue_team<'a>(&'a self, first_team: Option<&'a str>) -> Option<&'a str> {
+        self.recent_team().or(first_team)
     }
 
     /// Rebuild a set from stored parts: duplicates are dropped (first wins),
@@ -48,7 +86,14 @@ impl TabSet {
         let active = active_key
             .and_then(|key| kept.iter().position(|k| *k == key))
             .unwrap_or(0);
-        Self { tabs: kept, active }
+        // Without history, the first team Tab stands in for the last active one.
+        let first_team = kept.iter().find_map(|k| match k {
+            TabKey::Team(id) => Some(id.clone()),
+            _ => None,
+        });
+        let mut set = Self { tabs: kept, active, recent_teams: first_team.into_iter().collect() };
+        set.note_active();
+        set
     }
 
     pub fn tabs(&self) -> &[TabKey] {
@@ -70,6 +115,7 @@ impl TabSet {
             return false;
         }
         self.active = index;
+        self.note_active();
         true
     }
 
@@ -83,6 +129,7 @@ impl TabSet {
                 self.active = self.tabs.len() - 1;
             }
         }
+        self.note_active();
         self.active
     }
 
@@ -97,11 +144,13 @@ impl TabSet {
         }
         if self.tabs.len() == 1 {
             self.tabs[0] = home.clone();
+            self.note_active();
             return true;
         }
         self.tabs.remove(index);
         if index == self.active {
             self.active = index.min(self.tabs.len() - 1);
+            self.note_active();
             true
         } else {
             if index < self.active {
@@ -222,5 +271,84 @@ mod tests {
         assert_eq!(tabs.active_index(), 0);
         let tabs = set(&[], 0);
         assert_eq!(tabs.tabs(), [home()]);
+    }
+
+    fn project(id: &str) -> TabKey {
+        TabKey::Project(id.into())
+    }
+
+    #[test]
+    fn a_project_never_gets_two_tabs_and_two_projects_can_be_open() {
+        let mut tabs = TabSet::new(team("a"));
+        tabs.open(project("p"));
+        tabs.open(project("q"));
+        tabs.open(project("p"));
+        assert_eq!(tabs.tabs(), [team("a"), project("p"), project("q")]);
+        assert_eq!(tabs.active(), &project("p"));
+    }
+
+    #[test]
+    fn a_project_tab_and_its_teams_tab_coexist_and_focus_independently() {
+        // The project's id never equals its team's key, whatever the ids are.
+        let mut tabs = TabSet::new(team("same"));
+        tabs.open(project("same"));
+        assert_eq!(tabs.tabs().len(), 2);
+        assert!(tabs.focus(0));
+        assert_eq!(tabs.active(), &team("same"));
+        assert!(tabs.focus(1));
+        assert_eq!(tabs.active(), &project("same"));
+    }
+
+    #[test]
+    fn only_my_issues_inbox_and_dashboards_are_cross_team() {
+        assert!(TabKey::MyIssues.is_cross_team());
+        assert!(TabKey::Inbox.is_cross_team());
+        assert!(TabKey::Dashboard("d".into()).is_cross_team());
+        assert!(!team("a").is_cross_team());
+        assert!(!project("p").is_cross_team());
+    }
+
+    #[test]
+    fn two_dashboards_can_be_open_but_each_only_once() {
+        let mut tabs = TabSet::new(TabKey::Dashboard("d1".into()));
+        tabs.open(TabKey::Dashboard("d2".into()));
+        tabs.open(TabKey::Dashboard("d1".into()));
+        assert_eq!(tabs.tabs().len(), 2);
+    }
+
+    #[test]
+    fn new_issues_from_a_cross_team_tab_use_the_most_recent_team_tab() {
+        let mut tabs = TabSet::new(team("a"));
+        tabs.open(team("b"));
+        tabs.open(TabKey::MyIssues);
+        assert_eq!(tabs.new_issue_team(Some("first")), Some("b"));
+        tabs.focus(0);
+        tabs.open(TabKey::MyIssues);
+        assert_eq!(tabs.new_issue_team(Some("first")), Some("a"));
+    }
+
+    #[test]
+    fn project_tabs_do_not_count_as_the_recent_team_tab() {
+        let mut tabs = TabSet::new(team("a"));
+        tabs.open(project("p"));
+        tabs.open(TabKey::Inbox);
+        assert_eq!(tabs.new_issue_team(Some("first")), Some("a"));
+    }
+
+    #[test]
+    fn with_no_team_tab_open_new_issues_use_the_first_team() {
+        let mut tabs = TabSet::new(TabKey::MyIssues);
+        assert_eq!(tabs.new_issue_team(Some("first")), Some("first"));
+        assert_eq!(tabs.new_issue_team(None), None);
+        tabs.open(team("a"));
+        let a = tabs.tabs().iter().position(|k| *k == team("a")).unwrap();
+        tabs.close(a, &TabKey::MyIssues);
+        assert_eq!(tabs.new_issue_team(Some("first")), Some("first"));
+    }
+
+    #[test]
+    fn a_relaunched_set_falls_back_to_its_first_team_tab() {
+        let tabs = set(&[TabKey::MyIssues, team("a"), team("b")], 0);
+        assert_eq!(tabs.new_issue_team(Some("first")), Some("a"));
     }
 }

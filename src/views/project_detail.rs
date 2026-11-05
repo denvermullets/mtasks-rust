@@ -81,6 +81,7 @@ const PRIORITIES: [Priority; 5] = [
 #[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     project: &'a Project,
+    show_back: bool,
     detail: &'a ProjectDetailState,
     team: Option<&'a Team>,
     members: &'a [Member],
@@ -97,17 +98,18 @@ pub fn view<'a>(
     pending_paths: &'a crate::views::body::PendingInlineMap,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
-    let breadcrumb = row![]
-        .spacing(space::S2)
-        .align_y(Alignment::Center)
-        .push(
-            button(text("← Projects").size(type_scale::SM).color(t::text_secondary()))
-                .on_press(Message::NavigateToView(View::ProjectList))
-                .padding(0)
-                .style(button::text),
-        )
-        .push(text("›").size(type_scale::SM).color(t::text_muted()))
-        .push(text(&project.name).size(type_scale::SM).color(t::text_secondary()));
+    let mut breadcrumb = row![].spacing(space::S2).align_y(Alignment::Center);
+    if show_back {
+        breadcrumb = breadcrumb
+            .push(
+                button(text("← Projects").size(type_scale::SM).color(t::text_secondary()))
+                    .on_press(Message::NavigateToView(View::ProjectList))
+                    .padding(0)
+                    .style(button::text),
+            )
+            .push(text("›").size(type_scale::SM).color(t::text_muted()));
+    }
+    breadcrumb = breadcrumb.push(text(&project.name).size(type_scale::SM).color(t::text_secondary()));
 
     // ---- Header: status dot + buffered title ----
     let status_color = project

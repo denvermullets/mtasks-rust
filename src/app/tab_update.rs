@@ -4,7 +4,7 @@
 
 use iced::Task;
 
-use super::{App, Message, View};
+use super::{project_detail, App, Message, View};
 use crate::db::queries;
 use crate::tab_state::{self, CommentDraft, ParkedTab, Switch};
 use crate::tabs::{TabKey, TabSet};
@@ -112,6 +112,46 @@ impl App {
         Task::none()
     }
 
+    /// Focus the Tab for `key`, opening it at the end of the bar if it isn't
+    /// open. This is how every Tab kind is opened. On a move, the live state
+    /// is stashed and the target restored, with its data reloaded.
+    pub(super) fn focus_tab(&mut self, key: TabKey) -> Task<Message> {
+        self.ensure_tab_set();
+        if let Some(set) = self.tab_set.as_mut() {
+            let switch = tab_state::focus_key(set, key);
+            return self.apply_switch(switch);
+        }
+        Task::none()
+    }
+
+    /// Navigating to a team-level page (Board, Projects, Roadmap, Recurring
+    /// issues) from a project or cross-team Tab belongs to a team's Tab: the
+    /// team to go to, or `None` when the page is fine where it is.
+    pub(super) fn team_tab_for_navigation(&self, view: &View) -> Option<String> {
+        let team_page = matches!(
+            view,
+            View::Board | View::ProjectList | View::Roadmap | View::RecurringIssues
+        );
+        match self.active_tab_key()? {
+            TabKey::Team(_) => None,
+            _ if !team_page => None,
+            TabKey::Project(_) => self.selected_team_id.clone(),
+            _ => {
+                let first = self.teams.first().map(|t| t.id.as_str());
+                self.tab_set
+                    .as_ref()
+                    .and_then(|set| set.new_issue_team(first))
+                    .map(str::to_string)
+                    .or_else(|| self.selected_team_id.clone())
+            }
+        }
+    }
+
+    /// The active Tab's key, once the set exists.
+    pub(super) fn active_tab_key(&self) -> Option<&TabKey> {
+        self.tab_set.as_ref().map(|set| set.active())
+    }
+
     fn apply_switch(&mut self, switch: Switch) -> Task<Message> {
         let Switch::Moved { from, to } = switch else {
             return Task::none();
@@ -127,6 +167,7 @@ impl App {
     /// Park the live per-Tab fields under `key`. Add new per-Tab fields here.
     pub(super) fn stash_active_tab(&mut self, key: TabKey) {
         let draft = self.take_comment_draft();
+        let view = tab_state::parked_view(&key, self.view.clone());
         self.parked_tabs.save(
             key,
             ParkedTab {
@@ -137,7 +178,7 @@ impl App {
                 focused_issue: self.focused_issue,
                 collapsed_sections: self.collapsed_sections.clone(),
                 open_view: self.open_view.clone(),
-                ..ParkedTab::new(self.view.clone(), self.selected_team_id.clone())
+                ..ParkedTab::new(view, self.selected_team_id.clone())
                     .with_comment_draft(self.view.clone(), draft)
             },
         );
@@ -255,9 +296,15 @@ impl App {
                 p.comment_draft,
             ),
             None => (
-                View::Board,
+                tab_state::root_view(key),
                 match key {
                     TabKey::Team(id) => Some(id.clone()),
+                    // A project's Tab shows its own team's data.
+                    TabKey::Project(id) => queries::get_project(&self.db(), id)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.team_id)
+                        .or_else(|| self.selected_team_id.clone()),
                     _ => self.selected_team_id.clone(),
                 },
                 Default::default(),
@@ -298,7 +345,26 @@ impl App {
             self.clamp_focus();
         }
         self.restore_dashboard_session();
+        self.restore_project_detail();
         self.restore_scroll()
+    }
+
+    /// A project Tab's root is the project page: rebuild its buffers from the
+    /// reloaded project (they aren't parked; edits committed on leaving).
+    fn restore_project_detail(&mut self) {
+        let View::ProjectDetail(id) = &self.view else {
+            return;
+        };
+        // A restored comment draft already rebuilt the detail.
+        if self.project_detail.as_ref().is_some_and(|d| d.project_id == *id) {
+            return;
+        }
+        let Some(project) = self.projects.iter().find(|p| p.id == *id) else {
+            return;
+        };
+        self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
+        let conn = self.db();
+        self.load_detail_dependencies(&conn);
     }
 
     /// Scroll the live view's scrollables to `scroll_state`. Widgets keep
@@ -346,17 +412,41 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, key)| {
-                let label = match key {
-                    TabKey::Team(id) => self
-                        .teams
-                        .iter()
-                        .find(|t| t.id == *id)
-                        .map(|t| format!("{} {}", t.identifier, t.name))
-                        .unwrap_or_else(|| "Team".to_string()),
-                    _ => String::new(), // other kinds arrive in later tickets
-                };
+                let label = tab_state::label(
+                    key,
+                    |id| {
+                        self.teams
+                            .iter()
+                            .find(|t| t.id == id)
+                            .map(|t| (t.identifier.clone(), t.name.clone()))
+                    },
+                    |id| self.tab_projects.get(id).cloned(),
+                    |id| {
+                        self.dashboards
+                            .iter()
+                            .find(|d| d.id == id)
+                            .map(|d| d.name.clone())
+                    },
+                );
                 (label, i == set.active_index())
             })
             .collect()
+    }
+
+    /// Re-read the name and team of every open project Tab, so a rename that
+    /// arrived from Data sync shows from this reload on. Projects of other
+    /// teams aren't in `projects`, so this asks the local database.
+    pub(super) fn reload_tab_projects(&mut self, conn: &rusqlite::Connection) {
+        self.tab_projects.clear();
+        let Some(set) = &self.tab_set else {
+            return;
+        };
+        for key in set.tabs() {
+            if let TabKey::Project(id) = key {
+                if let Ok(Some(p)) = queries::get_project(conn, id) {
+                    self.tab_projects.insert(id.clone(), (p.name, p.team_id));
+                }
+            }
+        }
     }
 }
