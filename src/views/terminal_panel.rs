@@ -321,6 +321,55 @@ pub struct StripItem {
     pub editing: Option<String>,
 }
 
+/// An ask-first dialog for closing a busy Terminal or quitting with one.
+pub fn confirm_modal<'a>(
+    title: &'a str,
+    body: String,
+    confirm_label: &'a str,
+    confirm: Message,
+) -> Element<'a, Message> {
+    let content = column![]
+        .spacing(16)
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(text(body).size(14).color(t::text_secondary()))
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text(confirm_label).size(14).color(Color::WHITE))
+                        .on_press(confirm)
+                        .padding([8, 24])
+                        .style(|_theme: &Theme, _status| button::Style {
+                            background: Some(iced::Background::Color(t::danger())),
+                            text_color: Color::WHITE,
+                            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
+                )
+                .push(
+                    button(text("Cancel").size(14))
+                        .on_press(Message::CloseModal)
+                        .padding([8, 24])
+                        .style(button::secondary),
+                ),
+        );
+    let card = container(content).padding(28).style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_modal())),
+        border: iced::Border { color: t::border(), width: 1.0, radius: 8.0.into() },
+        ..Default::default()
+    });
+    container(card)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.7))),
+            ..Default::default()
+        })
+        .into()
+}
+
 pub fn rename_input_id() -> text_input::Id {
     text_input::Id::new("terminal-rename")
 }
@@ -358,7 +407,17 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
 pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
     let mut strip = row![].spacing(6).align_y(iced::Alignment::Center);
     for item in p.items {
+        let id = item.id;
+        let editing = item.editing.is_some();
         strip = strip.push(strip_button(item));
+        if !editing {
+            strip = strip.push(
+                button(text("\u{00d7}").size(13))
+                    .padding([0, 4])
+                    .on_press(Message::Terminal(TerminalMessage::Close(id)))
+                    .style(button::text),
+            );
+        }
     }
     strip = strip.push(
         button(text("+").size(13))

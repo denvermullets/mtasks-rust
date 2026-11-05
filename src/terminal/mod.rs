@@ -160,6 +160,18 @@ impl Terminals {
         self.entries.get(&id).is_none_or(|e| e.engine.exited())
     }
 
+    /// Busy: a program other than the shell is in the foreground (`tcgetpgrp`
+    /// on the PTY differs from the shell's process). A job the shell
+    /// backgrounded doesn't count (known gap). An exited Terminal isn't busy.
+    pub fn is_busy(&self, id: TerminalId) -> bool {
+        self.entries.get(&id).is_some_and(|e| !e.engine.exited() && e.engine.busy())
+    }
+
+    /// Whether any Terminal, on any team and shown or hidden, is busy.
+    pub fn any_busy(&self) -> bool {
+        self.entries.keys().any(|&id| self.is_busy(id))
+    }
+
     /// How many of the team's Terminals have a live shell.
     pub fn open_count(&self, team: &str) -> usize {
         self.entries

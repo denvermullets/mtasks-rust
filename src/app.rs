@@ -528,6 +528,8 @@ pub enum Modal {
     None,
     IssueForm,
     DeleteConfirm(String),
+    /// Ask before closing a busy Terminal.
+    TerminalCloseConfirm(crate::terminal::TerminalId),
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -4096,7 +4098,15 @@ impl App {
             }
 
             Message::Tab(m) => return self.update_tab(m),
+            Message::Terminal(crate::terminal::TerminalMessage::Close(id))
+                if self.terminals.close_needs_confirm(id) =>
+            {
+                self.modal = Modal::TerminalCloseConfirm(id);
+            }
             Message::Terminal(m) => {
+                if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {
+                    self.modal = Modal::None;
+                }
                 let team =
                     crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref());
                 return self.terminals.update(m, team);
@@ -7067,6 +7077,16 @@ impl App {
                     .unwrap_or("this issue");
 
                 let confirm = delete_confirm_modal(issue_title);
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::TerminalCloseConfirm(id) => {
+                let name = self.terminals.name_of(*id).unwrap_or_else(|| "this Terminal".into());
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Close Terminal?",
+                    format!("A program is still running in \"{name}\". Closing it will stop the program."),
+                    "Close",
+                    Message::Terminal(crate::terminal::TerminalMessage::CloseConfirmed(*id)),
+                );
                 iced::widget::stack![base, confirm].into()
             }
             Modal::Settings => {

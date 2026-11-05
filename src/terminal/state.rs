@@ -20,7 +20,7 @@ use iced::{event, window, Element, Size, Subscription, Task};
 use super::input::{self, Route};
 use super::panel::{self, PanelState, Toggle};
 use super::roster::Roster;
-use super::{active_term_theme, SpawnConfig, TerminalId, Terminals};
+use super::{active_term_theme, Closing, SpawnConfig, TerminalId, Terminals};
 use crate::app::Message;
 use crate::theme as t;
 use crate::views::terminal_panel::{self, Pane, PanelView, StripItem};
@@ -44,6 +44,10 @@ pub enum TerminalMessage {
     RenameInput(String),
     /// Enter: an empty name is refused and the old one kept.
     RenameSubmit,
+    /// The strip's close button. The app asks first when the Terminal is busy
+    /// (`close_needs_confirm`), then sends `CloseConfirmed`.
+    Close(TerminalId),
+    CloseConfirmed(TerminalId),
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
 }
@@ -54,6 +58,8 @@ pub struct TerminalState {
     terminals: Terminals,
     roster: Roster,
     renaming: Option<(TerminalId, String)>,
+    /// Closes in flight; quit waits for them.
+    closing: Vec<Closing>,
     panel: PanelState,
     focused: bool,
     window: Size,
@@ -76,6 +82,7 @@ impl TerminalState {
             }),
             roster: Roster::default(),
             renaming: None,
+            closing: Vec::new(),
             panel: PanelState::default(),
             focused: false,
             window: Size::new(1100.0, 700.0),
@@ -145,6 +152,14 @@ impl TerminalState {
                     self.focused = true;
                 }
             }
+            TerminalMessage::Close(id) => {
+                // Without the app's ask there is nothing to confirm with: an
+                // idle Terminal closes at once, a busy one waits for the ask.
+                if !self.close_needs_confirm(id) {
+                    self.close(id);
+                }
+            }
+            TerminalMessage::CloseConfirmed(id) => self.close(id),
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
                 match input::route(code, mods, text.as_deref()) {
                     Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, team),
@@ -297,6 +312,36 @@ impl TerminalState {
 
     fn owned_by(&self, team: &str) -> Vec<TerminalId> {
         self.roster.ids_of_team(team)
+    }
+
+    /// Closing a busy Terminal asks first; an idle or exited one doesn't.
+    pub fn close_needs_confirm(&self, id: TerminalId) -> bool {
+        self.terminals.is_busy(id)
+    }
+
+    /// The Terminal's name, for the ask.
+    pub fn name_of(&self, id: TerminalId) -> Option<String> {
+        self.roster.get(id).map(|r| r.name.clone())
+    }
+
+    /// Stop a Terminal now. It leaves the strip at once; its shell is
+    /// reaped in the background.
+    fn close(&mut self, id: TerminalId) {
+        self.roster.remove(id);
+        self.sent_visible.remove(&id);
+        self.sent_size.remove(&id);
+        if self.renaming.as_ref().is_some_and(|(r, _)| *r == id) {
+            self.renaming = None;
+        }
+        if self.panel.pane == Some(id) {
+            self.panel.pane = None;
+        }
+        if let Some(closing) = self.terminals.close(id) {
+            self.closing.retain(|c| !c.is_done());
+            self.closing.push(closing);
+        }
+        self.pane.reset();
+        self.shown = None;
     }
 
     /// How many of the team's Terminals have a live shell.
