@@ -6721,7 +6721,14 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let open_terminals: HashMap<String, usize> = self
+            .teams
+            .iter()
+            .map(|t| (t.id.clone(), self.terminals.open_count(&t.id)))
+            .filter(|(_, n)| *n > 0)
+            .collect();
         let team_sidebar = team_list::view(team_list::SidebarState {
+            open_terminals,
             teams: &self.teams,
             selected_team_id: self.selected_team_id.as_deref(),
             expanded_teams: &self.expanded_teams,
