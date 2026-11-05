@@ -773,6 +773,17 @@ const MIGRATIONS: &[Migration] = &[
             DELETE FROM pull_cursors WHERE resource = 'issues';
         ",
     },
+    Migration {
+        version: 35,
+        name: "issues_team_deleted_index",
+        up: "
+            -- Cross-team pages (My Issues, dashboards) and Tab switches load
+            -- every active team's live issues; see ADR 0001.
+            CREATE INDEX IF NOT EXISTS idx_issues_team_deleted
+                ON issues(team_id, deleted_at);
+            ANALYZE;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1212,6 +1223,50 @@ mod tests {
             count("SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name = 'archived_at'"),
             0
         );
+    }
+
+    #[test]
+    fn upgrade_from_v34_adds_the_issues_team_index_and_analyzes_it() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 35) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute_batch(&format!(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+               VALUES ('t1', 'T', 'T', '{now}', '{now}');
+             INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+               VALUES ('l1', 'L', 0, 't1', '{now}', '{now}');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+               VALUES ('i1', 'a', 0, 'l1', 't1', '{now}', '{now}'),
+                      ('i2', 'b', 0, 'l1', 't1', '{now}', '{now}');"
+        ))
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let index_columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_info('idx_issues_team_deleted') ORDER BY seqno")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(index_columns, ["team_id", "deleted_at"]);
+        // ANALYZE ran: the planner has statistics for the new index.
+        let stats: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_stat1 WHERE idx = 'idx_issues_team_deleted'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 1);
     }
 
     #[test]
