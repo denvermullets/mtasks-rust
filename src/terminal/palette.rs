@@ -10,7 +10,8 @@ use iced::Color;
 /// Red, green, yellow, blue, magenta, cyan.
 const TW_400: [Rgb; 6] = hues(["f87171", "4ade80", "facc15", "60a5fa", "c084fc", "22d3ee"]);
 const TW_300: [Rgb; 6] = hues(["fca5a5", "86efac", "fde047", "93c5fd", "d8b4fe", "67e8f9"]);
-const TW_700: [Rgb; 6] = hues(["b91c1c", "15803d", "a16207", "1d4ed8", "7e22ce", "0e7490"]);
+// JRST-392: green and yellow are darker than Tailwind 700 (15803d, a16207) to reach 4.5:1.
+const TW_700: [Rgb; 6] = hues(["b91c1c", "146c36", "945806", "1d4ed8", "7e22ce", "0e7490"]);
 const TW_800: [Rgb; 6] = hues(["991b1b", "166534", "854d0e", "1e40af", "6b21a8", "155e75"]);
 
 const fn hex_byte(b: u8) -> u8 {
@@ -123,6 +124,23 @@ mod tests {
         let p = term_theme(by_key("default"));
         assert_eq!(p.selection, mix(p.cursor, p.bg, 0.35));
         assert_ne!(p.selection, p.bg);
+    }
+
+    #[test]
+    fn non_black_colours_have_4_5_contrast_on_every_theme() {
+        let color = |c: Rgb| Color::from_rgb8(c[0], c[1], c[2]);
+        let mut low = vec![];
+        for t in theme::THEMES.iter() {
+            let p = term_theme(t);
+            // Entry 0 is black; the others, including bright black, must read.
+            for (i, c) in p.ansi.iter().enumerate().skip(1) {
+                let r = theme::contrast_ratio(color(*c), color(p.bg));
+                if r < 4.5 {
+                    low.push(format!("{} ansi[{i}] {c:02x?} {r:.2}", t.key));
+                }
+            }
+        }
+        assert!(low.is_empty(), "under 4.5:1:\n{}", low.join("\n"));
     }
 
     #[test]
