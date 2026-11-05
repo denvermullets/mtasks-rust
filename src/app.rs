@@ -795,6 +795,8 @@ pub struct App {
     /// Open Tabs (ADR 0001). The active Tab's state is this struct's live
     /// fields; the others are in `parked_tabs`. None until a team exists.
     tab_set: Option<crate::tabs::TabSet>,
+    /// The Tabs last written to the local database, so a change is saved once.
+    saved_tabs: Option<crate::tabs::TabSet>,
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
     tab_projects: HashMap<String, (String, String)>,
@@ -3112,6 +3114,7 @@ impl App {
             collapsed_dashboard_groups: Default::default(),
             dashboard_sessions: Default::default(),
             tab_set: None,
+            saved_tabs: None,
             tab_projects: HashMap::new(),
             terminals: crate::terminal::TerminalState::new(),
             parked_tabs: Default::default(),
@@ -3133,11 +3136,18 @@ impl App {
             sync_paused_auth: false,
         };
 
-        let task = match (launch_view, launch_dashboard) {
+        // Restore the stored Tabs and focus the Home page's. Doing this before
+        // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
+        let restored = app.launch_tabs();
+        if let Some(id) = app.selected_team_id.clone() {
+            app.expanded_teams.insert(id);
+        }
+        let opened = match (launch_view, launch_dashboard) {
             (Some(view_id), _) => app.update_inner(Message::OpenSavedView(view_id)),
             (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
             _ => Task::none(),
         };
+        let task = Task::batch([restored, opened]);
         // A release build does nothing without a token, so ask for one up front.
         if !cfg!(debug_assertions) && app.config.api_token.is_none() {
             app.settings_form = Some(settings::SettingsFormState::from_config(&app.config));
@@ -3397,6 +3407,7 @@ impl App {
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
+        self.save_tabs();
         self.terminals
             .sync(crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()));
         let task = Task::batch([task, self.request_visible_images()]);

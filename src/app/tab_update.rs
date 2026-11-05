@@ -17,6 +17,22 @@ pub enum TabMessage {
     Close(usize),
 }
 
+/// Whether a Tab's team, project or Dashboard is still in the local mirror.
+/// An archived team still exists.
+fn tab_subject_exists(
+    teams: &[crate::db::models::Team],
+    dashboards: &[crate::db::dashboards::Dashboard],
+    conn: &rusqlite::Connection,
+    key: &TabKey,
+) -> bool {
+    match key {
+        TabKey::Team(id) => teams.iter().any(|t| t.id == *id),
+        TabKey::Project(id) => matches!(queries::get_project(conn, id), Ok(Some(_))),
+        TabKey::Dashboard(id) => dashboards.iter().any(|d| d.id == *id),
+        TabKey::MyIssues | TabKey::Inbox => true,
+    }
+}
+
 impl App {
     pub(super) fn update_tab(&mut self, message: TabMessage) -> Task<Message> {
         match message {
@@ -79,12 +95,7 @@ impl App {
         };
         let (teams, dashboards) = (&self.teams, &self.dashboards);
         let pruned = set.prune(
-            |key| match key {
-                TabKey::Team(id) => teams.iter().any(|t| t.id == *id),
-                TabKey::Project(id) => matches!(queries::get_project(&conn, id), Ok(Some(_))),
-                TabKey::Dashboard(id) => dashboards.iter().any(|d| d.id == *id),
-                TabKey::MyIssues | TabKey::Inbox => true,
-            },
+            |key| tab_subject_exists(teams, dashboards, &conn, key),
             // A removed team with running Terminals keeps its Tab (JRST-421).
             |_| false,
             &home,
@@ -107,8 +118,8 @@ impl App {
         self.restore_tab(&active)
     }
 
-    /// The Tab the Home page opens, falling back to the first team's.
-    fn home_tab_key(&self) -> TabKey {
+    /// The Tab the Home page opens, or `None` when it doesn't resolve.
+    fn resolved_home_key(&self) -> Option<TabKey> {
         use crate::db::home_page::{launch_target, LaunchTarget};
         let launch = launch_target(
             self.home_page.as_ref(),
@@ -116,20 +127,62 @@ impl App {
             &self.saved_views,
             &self.dashboards,
         );
-        let team = match launch {
-            LaunchTarget::Team(id) => Some(id),
-            LaunchTarget::View { team_id, .. } => Some(team_id),
-            LaunchTarget::Dashboard(id) => return TabKey::Dashboard(id),
+        match launch {
+            LaunchTarget::Team(id) => Some(TabKey::Team(id)),
+            LaunchTarget::View { team_id, .. } => Some(TabKey::Team(team_id)),
+            LaunchTarget::Dashboard(id) => Some(TabKey::Dashboard(id)),
             LaunchTarget::Default => None,
+        }
+    }
+
+    /// The Tab shown when nothing else decides: the first team's, else My Issues.
+    fn fallback_tab_key(&self) -> TabKey {
+        self.teams
+            .iter()
+            .find(|t| t.archived_at.is_none())
+            .or_else(|| self.teams.first())
+            .map(|t| t.id.clone())
+            .map_or(TabKey::MyIssues, TabKey::Team)
+    }
+
+    /// The Tab the Home page opens, falling back to the first team's.
+    fn home_tab_key(&self) -> TabKey {
+        self.resolved_home_key().unwrap_or_else(|| self.fallback_tab_key())
+    }
+
+    /// Write the open Tabs to the local database when they changed since the
+    /// last write, so a relaunch can bring them back. Local only: nothing is
+    /// queued for Data sync.
+    pub(super) fn save_tabs(&mut self) {
+        if self.tab_set == self.saved_tabs {
+            return;
+        }
+        let Some(set) = self.tab_set.clone() else {
+            return;
         };
-        team.or_else(|| {
-            self.teams
-                .iter()
-                .find(|t| t.archived_at.is_none())
-                .or_else(|| self.teams.first())
-                .map(|t| t.id.clone())
-        })
-        .map_or(TabKey::MyIssues, TabKey::Team)
+        if crate::db::open_tabs::save(&self.db(), &set).is_ok() {
+            self.saved_tabs = Some(set);
+        }
+    }
+
+    /// Launch: restore the stored Tabs (those whose subject still exists),
+    /// focus the Home page's Tab (opening it if absent) and make it live. With
+    /// no teams yet there's nothing to show and no set is made. Returns the
+    /// task that scrolls the view into place.
+    pub(super) fn launch_tabs(&mut self) -> Task<Message> {
+        if self.teams.is_empty() {
+            return Task::none();
+        }
+        let conn = self.db();
+        let fallback = self.fallback_tab_key();
+        let stored = crate::db::open_tabs::load(&conn, &fallback).ok().flatten();
+        let (teams, dashboards) = (&self.teams, &self.dashboards);
+        let set = TabSet::for_launch(stored, self.resolved_home_key(), &fallback, |key| {
+            tab_subject_exists(teams, dashboards, &conn, key)
+        });
+        let active = set.active().clone();
+        self.tab_set = Some(set);
+        self.restore_tab(&active)
     }
 
     /// The set starts with the selected team's Tab once a team exists.

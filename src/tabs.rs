@@ -160,6 +160,27 @@ impl TabSet {
         }
     }
 
+    /// The set a launch starts with. `stored` is what the last run left
+    /// (`None` on a first run); Tabs whose subject is gone (`exists` false)
+    /// don't come back. `home` is the Home page's Tab when it resolves: it is
+    /// focused, opened if absent. With no resolvable Home page the stored
+    /// set's last active Tab stays focused. `fallback` stands in when nothing
+    /// is left to show, and for `home` on a first run.
+    pub fn for_launch(
+        stored: Option<TabSet>,
+        home: Option<TabKey>,
+        fallback: &TabKey,
+        exists: impl Fn(&TabKey) -> bool,
+    ) -> Self {
+        let landing = home.clone().unwrap_or_else(|| fallback.clone());
+        let mut set = stored.unwrap_or_else(|| Self::new(landing.clone()));
+        set.prune(exists, |_| false, &landing);
+        if let Some(home) = home {
+            set.open(home);
+        }
+        set
+    }
+
     /// Close every Tab whose subject a pull removed. `exists` says whether a
     /// Tab's team, project or Dashboard is still in the local mirror: an
     /// archived team still exists, so it keeps its Tab. `keep` is the escape
@@ -463,6 +484,67 @@ mod tests {
         let mut tabs = set(&[TabKey::MyIssues, TabKey::Inbox, team("a")], 0);
         tabs.prune(exists_except(&[team("a")]), never, &home());
         assert_eq!(tabs.tabs(), [TabKey::MyIssues, TabKey::Inbox]);
+    }
+
+    fn all(_: &TabKey) -> bool {
+        true
+    }
+
+    #[test]
+    fn launch_brings_back_the_stored_tabs_in_order() {
+        let stored = set(&[team("a"), TabKey::MyIssues, project("p")], 1);
+        let tabs = TabSet::for_launch(Some(stored.clone()), None, &home(), all);
+        assert_eq!(tabs.tabs(), stored.tabs());
+    }
+
+    #[test]
+    fn launch_focuses_the_home_page_tab() {
+        let stored = set(&[team("a"), team("b")], 0);
+        let tabs = TabSet::for_launch(Some(stored), Some(team("b")), &home(), all);
+        assert_eq!(tabs.tabs(), [team("a"), team("b")]);
+        assert_eq!(tabs.active(), &team("b"));
+    }
+
+    #[test]
+    fn launch_opens_the_home_page_tab_when_absent() {
+        let stored = set(&[team("a")], 0);
+        let dash = TabKey::Dashboard("d".into());
+        let tabs = TabSet::for_launch(Some(stored), Some(dash.clone()), &home(), all);
+        assert_eq!(tabs.tabs(), [team("a"), dash.clone()]);
+        assert_eq!(tabs.active(), &dash);
+    }
+
+    #[test]
+    fn launch_with_an_unresolvable_home_page_keeps_the_last_active_tab() {
+        let stored = set(&[team("a"), TabKey::Inbox, team("b")], 1);
+        let tabs = TabSet::for_launch(Some(stored), None, &home(), all);
+        assert_eq!(tabs.active(), &TabKey::Inbox);
+    }
+
+    #[test]
+    fn launch_drops_tabs_removed_while_the_app_was_closed() {
+        let stored = set(&[team("a"), project("p"), team("b")], 1);
+        let tabs = TabSet::for_launch(Some(stored), None, &home(), exists_except(&[project("p")]));
+        assert_eq!(tabs.tabs(), [team("a"), team("b")]);
+        assert_eq!(tabs.active(), &team("b"));
+    }
+
+    #[test]
+    fn launch_with_everything_removed_shows_the_home_page_or_fallback() {
+        let stored = set(&[team("a")], 0);
+        let gone = [team("a")];
+        let tabs = TabSet::for_launch(Some(stored.clone()), Some(team("h")), &home(), exists_except(&gone));
+        assert_eq!(tabs.tabs(), [team("h")]);
+        let tabs = TabSet::for_launch(Some(stored), None, &team("fb"), exists_except(&gone));
+        assert_eq!(tabs.tabs(), [team("fb")]);
+    }
+
+    #[test]
+    fn a_first_launch_opens_the_home_page_or_the_fallback() {
+        let tabs = TabSet::for_launch(None, Some(TabKey::Dashboard("d".into())), &home(), all);
+        assert_eq!(tabs.tabs(), [TabKey::Dashboard("d".into())]);
+        let tabs = TabSet::for_launch(None, None, &team("fb"), all);
+        assert_eq!(tabs.tabs(), [team("fb")]);
     }
 
     #[test]
