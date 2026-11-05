@@ -1,0 +1,15 @@
+# PROTOTYPE (JRST-328): throwaway spike. Not part of the app; never merged.
+[package]
+name = "terminal-pane-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+iced = { version = "0.13", features = ["tokio", "canvas", "advanced"] }
+# Unreleased main: crates.io 0.2.2 needs Zig 0.15; this rev builds with Zig 0.17.
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "3d8befe806d9c0801919b7c0209d4e13be943fd1" }
+portable-pty = "=0.9.0"
+libc = "0.2"
