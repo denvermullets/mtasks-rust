@@ -7,19 +7,11 @@ use iced::{Alignment, Border, Color, Element, Length, Theme};
 use chrono::Datelike;
 
 use crate::app::{Message, ProjectSort, SortDir};
+use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Member, Priority, Project, ProjectStatus, RoadmapCommitment};
 use crate::theme as t;
 use crate::theme::{radius, space, type_scale};
 use crate::views::progress_chart;
-
-/// Key of the Projects table in `App::scroll_state` (distinct from the lane
-/// indices and the other views' keys).
-pub const SCROLL_KEY: usize = usize::MAX - 3;
-
-/// Scrollable id of the Projects table.
-pub fn scroll_id() -> scrollable::Id {
-    scrollable::Id::new("project-list")
-}
 
 pub struct ProjectFormState {
     pub name: String,
@@ -441,12 +433,7 @@ pub fn list_view<'a>(
                 }),
             )
             .push(
-                scrollable(rows)
-                    .id(scroll_id())
-                    .on_scroll(|vp| {
-                        Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height)
-                    })
-                    .height(Length::Fill),
+                track(scrollable(rows), ScrollKey::Projects).height(Length::Fill),
             )
             .into()
     });

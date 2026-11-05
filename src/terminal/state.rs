@@ -81,6 +81,8 @@ pub enum TerminalMessage {
     RenameInput(String),
     /// Enter: an empty name is refused and the old one kept.
     RenameSubmit,
+    /// Escape: leave the field and keep the old name.
+    RenameCancel,
     /// The strip's close button. The app asks first when the Terminal is busy
     /// (`close_needs_confirm`), then sends `CloseConfirmed`.
     Close(TerminalId),
@@ -91,6 +93,9 @@ pub enum TerminalMessage {
     PickDir,
     /// The picker's answer; the app stores it (`db::terminal_dirs`).
     DirPicked(Option<std::path::PathBuf>),
+    /// The strip's clear button: new shells start in home again. The app
+    /// forgets the stored folder (`db::terminal_dirs::clear`).
+    ClearDir,
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
     /// The selected text, back from the Terminal (JRST-386); `None` copies nothing.
@@ -331,6 +336,11 @@ impl TerminalState {
                     self.focused = true;
                 }
             }
+            TerminalMessage::RenameCancel => {
+                if self.renaming.take().is_some() {
+                    self.focused = true;
+                }
+            }
             TerminalMessage::Close(id) => {
                 // Without the app's ask there is nothing to confirm with: an
                 // idle Terminal closes at once, a busy one waits for the ask.
@@ -353,7 +363,7 @@ impl TerminalState {
                 );
             }
             // The app stores it first and then calls `set_team_dir`.
-            TerminalMessage::DirPicked(_) => {}
+            TerminalMessage::DirPicked(_) | TerminalMessage::ClearDir => {}
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
                 match input::route(code, mods, text.as_deref()) {
                     Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, team),
@@ -364,8 +374,8 @@ impl TerminalState {
                     }
                     Route::CyclePane(delta) => self.panel.cycle_focus(delta),
                     // The answer comes from the Terminal's owner thread, which
-                    // can take up to 500 ms if it is stuck: wait on a blocking
-                    // thread so `update` returns at once. No selection copies
+                    // can take up to 500 ms if it is stuck: wait on a plain OS
+                    // thread (not tokio) so `update` returns at once. No selection copies
                     // nothing, and nothing is sent to the program either way.
                     Route::Copy => {
                         let Some(req) = self.focused_terminal().and_then(|id| self.terminals.selection_request(id))
@@ -373,7 +383,7 @@ impl TerminalState {
                             return Task::none();
                         };
                         return Task::perform(
-                            async move { tokio::task::spawn_blocking(move || req.wait()).await.ok().flatten() },
+                            req.wait_off_thread(),
                             |text| Message::Terminal(TerminalMessage::Copied(text)),
                         );
                     }
@@ -660,6 +670,11 @@ impl TerminalState {
         self.roster.take_changes()
     }
 
+    /// A strip name is being edited.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
     pub fn set_team_dirs(&mut self, dirs: HashMap<String, std::path::PathBuf>) {
         self.team_dirs = dirs;
     }
@@ -941,6 +956,44 @@ mod tests {
         t.roster.replace_id(old, TerminalId(42));
         t.restore_panel(&parked);
         assert_eq!(t.panel.panes[0], Some(TerminalId(42)));
+    }
+
+    #[test]
+    fn cancelling_a_rename_keeps_the_old_name_and_closes_the_field() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let id = t.roster.id_of_key("k1").unwrap();
+        let _ = t.update(TerminalMessage::RenameStart(id), Some("a"));
+        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some("a"));
+        assert!(t.is_renaming());
+        let _ = t.update(TerminalMessage::RenameCancel, Some("a"));
+        assert!(!t.is_renaming());
+        assert_eq!(t.roster.get(id).unwrap().name, "k1");
+        assert!(t.focused, "the keyboard goes back to the shell");
+    }
+
+    #[test]
+    fn clearing_a_teams_folder_sends_new_shells_home_and_leaves_other_teams() {
+        let mut t = TerminalState::new();
+        t.set_team_dir("a", Some("/tmp".into()));
+        t.set_team_dir("b", Some("/var".into()));
+        t.set_team_dir("a", None);
+        assert!(!t.team_dirs.contains_key("a"));
+        assert!(t.team_dirs.contains_key("b"));
+        // Clearing is its own message, so a cancelled picker never clears.
+        let _ = t.update(TerminalMessage::DirPicked(None), Some("b"));
+        assert!(t.team_dirs.contains_key("b"));
+    }
+
+    #[test]
+    fn submitting_a_rename_still_changes_the_name() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a")]);
+        let id = t.roster.id_of_key("k1").unwrap();
+        let _ = t.update(TerminalMessage::RenameStart(id), Some("a"));
+        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some("a"));
+        let _ = t.update(TerminalMessage::RenameSubmit, Some("a"));
+        assert_eq!(t.roster.get(id).unwrap().name, "changed");
     }
 
     #[test]

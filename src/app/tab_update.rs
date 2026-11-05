@@ -635,8 +635,6 @@ impl App {
     /// their offset across Tabs, so this runs on every switch, back to 0 for a
     /// view the Tab never scrolled.
     fn restore_scroll(&self) -> Task<Message> {
-        use crate::views::{board, dashboard, inbox, issue_list, projects, recurring_issues, roadmap};
-        use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
         let (list_mode, lanes) = match self.view {
             View::Board | View::MyIssues => (
                 self.board_display().view_mode == crate::display::ViewMode::List,
@@ -647,23 +645,7 @@ impl App {
         let keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
         let tasks = tab_state::restore_offsets(&keys, &self.scroll_state)
             .into_iter()
-            .map(|(k, offset)| {
-                let y = AbsoluteOffset { x: 0.0, y: offset };
-                match k {
-                    board::BOARD_SCROLL_KEY => {
-                        scroll_to(board::board_scroll_id(), AbsoluteOffset { x: offset, y: 0.0 })
-                    }
-                    inbox::SCROLL_KEY => scroll_to(inbox::scroll_id(), y),
-                    projects::SCROLL_KEY => scroll_to(projects::scroll_id(), y),
-                    roadmap::SCROLL_KEY => scroll_to(roadmap::scroll_id(), y),
-                    recurring_issues::SCROLL_KEY => scroll_to(recurring_issues::scroll_id(), y),
-                    issue_list::SCROLL_KEY if matches!(self.view, View::Dashboard(_)) => {
-                        scroll_to(dashboard::scroll_id(), y)
-                    }
-                    issue_list::SCROLL_KEY => scroll_to(issue_list::scroll_id(), y),
-                    lane => scroll_to(board::lane_scroll_id(lane), y),
-                }
-            });
+            .map(|(k, offset)| k.scroll_to(offset));
         Task::batch(tasks)
     }
 
@@ -739,6 +721,74 @@ impl App {
                     self.tab_projects.insert(id.clone(), (p.name, p.team_id));
                 }
             }
+        }
+    }
+}
+
+/// Whether a removed team's Tab refuses this message. That Tab keeps only the
+/// team's Terminals; its board is gone, so anything that creates, edits or
+/// moves an issue or project, or steps through the board, would act on a team
+/// that no longer exists (and could enqueue a write for it). Panel keys,
+/// Terminal messages, Tab switching and a plain sync are untouched.
+pub(super) fn blocked_on_removed_team(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::CreateIssue
+            | Message::CreateSubIssue(_)
+            | Message::EditFocusedIssue
+            | Message::ConfirmDeleteFocusedIssue
+            | Message::MoveIssueNextLane
+            | Message::MoveIssuePrevLane
+            | Message::MoveFocusedIssueToTeam
+            | Message::SetFocusedPriority(_)
+            | Message::FocusNextIssue
+            | Message::FocusPrevIssue
+            | Message::FocusNextLane
+            | Message::FocusPrevLane
+            | Message::ToggleViewMode
+            | Message::ToggleFocusedSection
+            | Message::CreateProject
+            | Message::NewRecurringIssue
+            | Message::OpenLabels
+    )
+}
+
+#[cfg(test)]
+mod removed_team_guard {
+    use super::*;
+    use crate::terminal::TerminalMessage;
+
+    #[test]
+    fn board_and_issue_actions_are_blocked_on_a_removed_teams_tab() {
+        for m in [
+            Message::CreateIssue,
+            Message::EditFocusedIssue,
+            Message::ConfirmDeleteFocusedIssue,
+            Message::MoveIssueNextLane,
+            Message::MoveIssuePrevLane,
+            Message::MoveFocusedIssueToTeam,
+            Message::SetFocusedPriority(2),
+            Message::FocusNextIssue,
+            Message::FocusPrevLane,
+            Message::CreateProject,
+        ] {
+            assert!(blocked_on_removed_team(&m), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_actions_tab_switching_and_sync_still_work() {
+        for m in [
+            Message::Terminal(TerminalMessage::New),
+            Message::Terminal(TerminalMessage::ToggleFocus),
+            Message::Terminal(TerminalMessage::Close(crate::terminal::TerminalId(1))),
+            Message::Tab(TabMessage::Focus(0)),
+            Message::Tab(TabMessage::Close(0)),
+            Message::SyncNow,
+            Message::OpenCommandPalette,
+            Message::CloseModal,
+        ] {
+            assert!(!blocked_on_removed_team(&m), "{m:?}");
         }
     }
 }

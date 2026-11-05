@@ -7,6 +7,7 @@ use iced::widget::text::LineHeight;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
 use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
 use crate::scroll;
@@ -135,12 +136,8 @@ pub fn view<'a>(
                 issue_cards.push(issue_card(issue, &data, is_focused, col_idx, issue_idx));
         }
 
-        let lane_content = scrollable(issue_cards)
-            .id(lane_scroll_id(col_idx))
-            .on_scroll(move |vp| {
-                Message::Scrolled(col_idx, vp.absolute_offset().y, vp.bounds().height)
-            })
-            .height(Length::Fill);
+        let lane_content =
+            track(scrollable(issue_cards), ScrollKey::Lane(col_idx)).height(Length::Fill);
 
         lane_columns = lane_columns.push(lane_content);
     }
@@ -154,12 +151,13 @@ pub fn view<'a>(
 
     // Built horizontal from the start: `scrollable()` validates as vertical, which
     // rejects this `Fill`-height content before `.direction()` could apply.
-    let board = scrollable::Scrollable::with_direction(
-        board,
-        scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
+    let board = track(
+        scrollable::Scrollable::with_direction(
+            board,
+            scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
+        ),
+        ScrollKey::Board,
     )
-        .id(board_scroll_id())
-        .on_scroll(|vp| Message::Scrolled(BOARD_SCROLL_KEY, vp.absolute_offset().x, vp.bounds().width))
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -230,19 +228,6 @@ pub fn card_height(issue: &Issue, data: &CardData<'_>) -> f32 {
             .is_some_and(|l| !l.is_empty());
     let has_meta = d.shows(CardProperty::Priority) || !card_facts(issue, data).is_empty();
     scroll::board_card_height(d.shows(CardProperty::Id), has_chips, has_meta)
-}
-
-/// `scroll_state` key of the board's horizontal scroll (lanes use their index).
-pub const BOARD_SCROLL_KEY: usize = usize::MAX - 2;
-
-/// Scrollable id of the board's horizontal scroll.
-pub fn board_scroll_id() -> scrollable::Id {
-    scrollable::Id::new("board-columns")
-}
-
-/// Scrollable id of board lane `idx`.
-pub fn lane_scroll_id(idx: usize) -> scrollable::Id {
-    scrollable::Id::new(format!("board-lane-{idx}"))
 }
 
 /// `(top, height)` of the focused card within its lane's scroll content.

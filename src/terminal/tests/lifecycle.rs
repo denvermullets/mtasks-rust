@@ -160,3 +160,18 @@ fn waiting_gives_up_at_the_limit_instead_of_hanging() {
     assert!(started.elapsed() < Duration::from_millis(1500));
     assert!(reports.is_empty(), "not finished yet, so no report");
 }
+
+#[test]
+fn a_failure_after_the_shell_starts_kills_and_reaps_it() {
+    use crate::terminal::engine::seam;
+    let mut t = terminals();
+    seam::FAIL_AFTER_START.with(|f| f.set(true));
+    let result = t.spawn(sh_config("t1"));
+    seam::FAIL_AFTER_START.with(|f| f.set(false));
+    assert!(result.is_err());
+    let pid = seam::LAST_PID.with(|p| p.get()) as libc::pid_t;
+    assert!(pid > 0, "the shell did start");
+    // Reaped, not just signalled: a zombie would still answer signal 0.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the shell is gone");
+    assert_eq!(t.open_count("t1"), 0);
+}

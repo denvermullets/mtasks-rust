@@ -130,6 +130,57 @@ fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
+/// Owns a freshly started shell until `Engine` takes it over. Any failure
+/// between the two drops the guard, which kills and reaps the shell so a failed
+/// spawn leaves no orphan.
+struct ChildGuard(Option<Box<dyn Child + Send + Sync>>);
+
+impl ChildGuard {
+    fn child(&self) -> &(dyn Child + Send + Sync) {
+        self.0.as_deref().expect("guard holds the child until disarmed")
+    }
+
+    /// Hand the shell over: it is `Engine`'s to shut down now.
+    fn disarm(mut self) -> Box<dyn Child + Send + Sync> {
+        self.0.take().expect("guard holds the child until disarmed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            if let Some(pid) = child.process_id() {
+                // The shell leads its own session; take its foreground jobs too.
+                unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Test seam: lets a test fail the setup that follows a successful start.
+#[cfg(test)]
+pub(super) mod seam {
+    use std::cell::Cell;
+    thread_local! {
+        pub static FAIL_AFTER_START: Cell<bool> = const { Cell::new(false) };
+        pub static LAST_PID: Cell<u32> = const { Cell::new(0) };
+    }
+}
+
+fn after_start(pid: u32) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        seam::LAST_PID.with(|p| p.set(pid));
+        if seam::FAIL_AFTER_START.with(|f| f.get()) {
+            return Err(std::io::Error::other("injected failure after the shell started"));
+        }
+    }
+    let _ = pid;
+    Ok(())
+}
+
 impl Engine {
     pub(super) fn spawn(config: SpawnConfig, wake: Arc<Wake>) -> std::io::Result<Engine> {
         let io = |e: anyhow_like::Error| std::io::Error::other(e.0);
@@ -160,9 +211,10 @@ impl Engine {
             Some(dir) => cmd.cwd(dir),
             None => {}
         }
-        let child = pty.slave.spawn_command(cmd).map_err(|e| io(e.into()))?;
+        let child = ChildGuard(Some(pty.slave.spawn_command(cmd).map_err(|e| io(e.into()))?));
         drop(pty.slave);
-        let pid = child.process_id().unwrap_or(0);
+        let pid = child.child().process_id().unwrap_or(0);
+        after_start(pid)?;
         let master = Arc::new(Mutex::new(pty.master));
 
         let read_fd = dup_cloexec(master_fd)?;
@@ -218,7 +270,7 @@ impl Engine {
                 }
             })?);
         }
-        Ok(Engine { tx, shared, pid, child, master, drain_fd, stop_w, stop, threads })
+        Ok(Engine { tx, shared, pid, child: child.disarm(), master, drain_fd, stop_w, stop, threads })
     }
 
     pub(super) fn send(&self, cmd: Cmd) {

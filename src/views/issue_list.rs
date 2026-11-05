@@ -18,6 +18,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::scroll::{track, ScrollKey};
 use crate::db::models::Issue;
 use crate::fonts;
 use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
@@ -41,15 +42,6 @@ const W_PROJECT: f32 = 120.0;
 const W_ASSIGNEE: f32 = 110.0;
 const W_ESTIMATE: f32 = 44.0;
 const W_DATE: f32 = 56.0;
-
-/// Scrollable id of the list.
-pub fn scroll_id() -> scrollable::Id {
-    scrollable::Id::new("issue-list")
-}
-
-/// Key under which the list's scroll state is stored in `App` (board lanes use
-/// their column index).
-pub const SCROLL_KEY: usize = usize::MAX;
 
 /// `(top, height)` of the focused row, accounting for collapsed sections.
 pub fn focused_span(
@@ -216,10 +208,7 @@ pub fn view<'a>(
         }
     }
 
-    let body = scrollable(list)
-        .id(scroll_id())
-        .on_scroll(|vp| Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height))
-        .height(Length::Fill);
+    let body = track(scrollable(list), ScrollKey::IssueList).height(Length::Fill);
 
     container(
         column![]

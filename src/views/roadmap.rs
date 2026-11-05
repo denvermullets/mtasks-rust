@@ -2,6 +2,7 @@ use iced::widget::{button, column, container, mouse_area, row, scrollable, text}
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Project, ProjectStatus, RoadmapCommitment, Team};
 use crate::theme as t;
 use crate::views::header;
@@ -41,15 +42,6 @@ const PER_ROW: usize = 3;
 /// completed projects are hidden entirely (Rails scopes to `not_completed`).
 /// `needle` (from the header search) narrows the lanes; the header counts
 /// still reflect the whole roadmap.
-/// Key of the roadmap in `App::scroll_state` (distinct from the lane indices
-/// and the other views' keys).
-pub const SCROLL_KEY: usize = usize::MAX - 4;
-
-/// Scrollable id of the roadmap.
-pub fn scroll_id() -> scrollable::Id {
-    scrollable::Id::new("roadmap")
-}
-
 pub fn view<'a>(
     projects: &'a [Project],
     team: Option<&'a Team>,
@@ -126,11 +118,7 @@ pub fn view<'a>(
         .push(container(header).padding([12, 16]))
         .push(divider())
         .push(
-            scrollable(container(lanes).padding(16))
-                .id(scroll_id())
-                .on_scroll(|vp| {
-                    Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height)
-                })
+            track(scrollable(container(lanes).padding(16)), ScrollKey::Roadmap)
                 .height(Length::Fill),
         );
 
