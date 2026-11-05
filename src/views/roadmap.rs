@@ -41,6 +41,15 @@ const PER_ROW: usize = 3;
 /// completed projects are hidden entirely (Rails scopes to `not_completed`).
 /// `needle` (from the header search) narrows the lanes; the header counts
 /// still reflect the whole roadmap.
+/// Key of the roadmap in `App::scroll_state` (distinct from the lane indices
+/// and the other views' keys).
+pub const SCROLL_KEY: usize = usize::MAX - 4;
+
+/// Scrollable id of the roadmap.
+pub fn scroll_id() -> scrollable::Id {
+    scrollable::Id::new("roadmap")
+}
+
 pub fn view<'a>(
     projects: &'a [Project],
     team: Option<&'a Team>,
@@ -116,7 +125,14 @@ pub fn view<'a>(
         .width(Length::Fill)
         .push(container(header).padding([12, 16]))
         .push(divider())
-        .push(scrollable(container(lanes).padding(16)).height(Length::Fill));
+        .push(
+            scrollable(container(lanes).padding(16))
+                .id(scroll_id())
+                .on_scroll(|vp| {
+                    Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height)
+                })
+                .height(Length::Fill),
+        );
 
     container(body)
         .width(Length::Fill)

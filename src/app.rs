@@ -3966,7 +3966,7 @@ impl App {
             Message::Tab(m) => return self.update_tab(m),
 
             Message::SelectTeamView(team_id, view) => {
-                self.focus_team_tab(&team_id);
+                let scroll = self.focus_team_tab(&team_id);
                 // Going to a team's own pages leaves any open Saved view.
                 self.open_view = None;
                 self.commit_issue_detail();
@@ -3987,6 +3987,7 @@ impl App {
                     let conn = self.db();
                     self.reload_recurring(&conn);
                 }
+                return scroll;
             }
 
             Message::InboxMove(delta) => {

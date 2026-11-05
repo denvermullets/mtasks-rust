@@ -21,7 +21,7 @@ impl App {
                 self.ensure_tab_set();
                 if let Some(set) = self.tab_set.as_mut() {
                     let switch = tab_state::focus_index(set, index);
-                    self.apply_switch(switch);
+                    return self.apply_switch(switch);
                 }
             }
         }
@@ -38,31 +38,36 @@ impl App {
     }
 
     /// Focus (or open) a team's Tab, for navigation into that team.
-    pub(super) fn focus_team_tab(&mut self, team_id: &str) {
+    /// The task scrolls the restored Tab's views back into place.
+    pub(super) fn focus_team_tab(&mut self, team_id: &str) -> Task<Message> {
         self.ensure_tab_set();
         if let Some(set) = self.tab_set.as_mut() {
             let switch = tab_state::focus_team(set, team_id);
-            self.apply_switch(switch);
+            return self.apply_switch(switch);
         }
+        Task::none()
     }
 
-    fn apply_switch(&mut self, switch: Switch) {
+    fn apply_switch(&mut self, switch: Switch) -> Task<Message> {
         let Switch::Moved { from, to } = switch else {
-            return;
+            return Task::none();
         };
         // Edits commit when leaving, as they do when navigating today.
         self.commit_issue_detail();
         self.commit_project_detail();
         self.stash_dashboard_session();
         self.stash_active_tab(from);
-        self.restore_tab(&to);
+        self.restore_tab(&to)
     }
 
     /// Park the live per-Tab fields under `key`. Add new per-Tab fields here.
     pub(super) fn stash_active_tab(&mut self, key: TabKey) {
         self.parked_tabs.save(
             key,
-            ParkedTab::new(self.view.clone(), self.selected_team_id.clone()),
+            ParkedTab {
+                scroll_state: self.scroll_state.clone(),
+                ..ParkedTab::new(self.view.clone(), self.selected_team_id.clone())
+            },
         );
     }
 
@@ -70,18 +75,23 @@ impl App {
     /// focus), then reload data from the local database. Per-Tab fields that
     /// aren't parked yet are reset so they can't leak between Tabs. Add new
     /// per-Tab fields here.
-    pub(super) fn restore_tab(&mut self, key: &TabKey) {
+    ///
+    /// The returned task scrolls every scrollable the restored view shows to
+    /// the Tab's offset (see `tab_state::scroll_keys`).
+    pub(super) fn restore_tab(&mut self, key: &TabKey) -> Task<Message> {
         let parked = self.parked_tabs.take(key);
-        let (view, team) = match parked {
-            Some(p) => (p.view, p.selected_team_id),
+        let (view, team, scroll_state) = match parked {
+            Some(p) => (p.view, p.selected_team_id, p.scroll_state),
             None => (
                 View::Board,
                 match key {
                     TabKey::Team(id) => Some(id.clone()),
                     _ => self.selected_team_id.clone(),
                 },
+                Default::default(),
             ),
         };
+        self.scroll_state = scroll_state;
         self.open_view = None;
         self.detail_from_my_issues = false;
         self.detail_from_inbox = false;
@@ -103,6 +113,43 @@ impl App {
             self.reload_recurring(&conn);
         }
         self.restore_dashboard_session();
+        self.restore_scroll()
+    }
+
+    /// Scroll the live view's scrollables to `scroll_state`. Widgets keep
+    /// their offset across Tabs, so this runs on every switch, back to 0 for a
+    /// view the Tab never scrolled.
+    fn restore_scroll(&self) -> Task<Message> {
+        use crate::views::{board, dashboard, inbox, issue_list, projects, recurring_issues, roadmap};
+        use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
+        let (list_mode, lanes) = match self.view {
+            View::Board | View::MyIssues => (
+                self.board_display().view_mode == crate::display::ViewMode::List,
+                self.board_columns().len(),
+            ),
+            _ => (false, 0),
+        };
+        let keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
+        let tasks = tab_state::restore_offsets(&keys, &self.scroll_state)
+            .into_iter()
+            .map(|(k, offset)| {
+                let y = AbsoluteOffset { x: 0.0, y: offset };
+                match k {
+                    board::BOARD_SCROLL_KEY => {
+                        scroll_to(board::board_scroll_id(), AbsoluteOffset { x: offset, y: 0.0 })
+                    }
+                    inbox::SCROLL_KEY => scroll_to(inbox::scroll_id(), y),
+                    projects::SCROLL_KEY => scroll_to(projects::scroll_id(), y),
+                    roadmap::SCROLL_KEY => scroll_to(roadmap::scroll_id(), y),
+                    recurring_issues::SCROLL_KEY => scroll_to(recurring_issues::scroll_id(), y),
+                    issue_list::SCROLL_KEY if matches!(self.view, View::Dashboard(_)) => {
+                        scroll_to(dashboard::scroll_id(), y)
+                    }
+                    issue_list::SCROLL_KEY => scroll_to(issue_list::scroll_id(), y),
+                    lane => scroll_to(board::lane_scroll_id(lane), y),
+                }
+            });
+        Task::batch(tasks)
     }
 
     /// Bar labels in order, with whether each is the active Tab.
