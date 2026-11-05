@@ -57,6 +57,8 @@ pub(super) struct Engine {
 
 /// Back-pressure: at most 4 MB of output the owner hasn't parsed yet.
 const MAX_INFLIGHT: u64 = 4 << 20;
+/// How long a shell gets to obey SIGHUP before SIGKILL.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
 const FRAME: Duration = Duration::from_millis(16);
 
 fn dup_cloexec(fd: RawFd) -> std::io::Result<OwnedFd> {
@@ -185,7 +187,8 @@ impl Engine {
         self.shared.exited.load(Acquire)
     }
 
-    /// Hang up the shell and its foreground group, reap it, and end all three threads.
+    /// SIGHUP the shell and its foreground process group, SIGKILL them if the shell
+    /// is still there after 2 seconds, reap it, and end all three threads.
     pub(super) fn shutdown(mut self) -> CloseReport {
         let fg = self.master.lock().ok().and_then(|m| m.process_group_leader());
         let pid = self.pid as libc::pid_t;
@@ -197,16 +200,31 @@ impl Engine {
         };
         signal_all(libc::SIGHUP);
         signal_all(libc::SIGCONT);
-        let _ = self.child.wait();
+        let deadline = Instant::now() + CLOSE_GRACE;
+        let mut escalated = false;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => {}
+            }
+            if Instant::now() >= deadline {
+                escalated = true;
+                signal_all(libc::SIGKILL);
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let _ = self.child.wait();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
+        // Dropping isn't enough: the owner and reader hold channel senders, so tell
+        // each thread to stop and join them.
         self.stop.store(true, Release);
         let _ = self.tx.send(Cmd::Shutdown);
         unsafe { libc::write(self.stop_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
         drop(self.tx);
-        for t in self.threads.drain(..) {
-            let _ = t.join();
-        }
-        CloseReport { escalated_to_sigkill: false }
+        let threads_exited = self.threads.drain(..).filter_map(|t| t.join().ok()).count();
+        CloseReport { escalated_to_sigkill: escalated, threads_exited }
     }
 }
 

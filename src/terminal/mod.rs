@@ -60,6 +60,7 @@ impl Closing {
     pub fn wait(self) -> CloseReport {
         self.handle.join().unwrap_or(CloseReport {
             escalated_to_sigkill: false,
+            threads_exited: 0,
         })
     }
 }

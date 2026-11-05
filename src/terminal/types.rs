@@ -153,6 +153,8 @@ pub struct KeyInput {
 pub struct CloseReport {
     /// The shell ignored SIGHUP and had to be killed after the grace period.
     pub escalated_to_sigkill: bool,
+    /// How many of the Terminal's three threads were joined (3 when all exited).
+    pub threads_exited: usize,
 }
 
 pub struct SpawnConfig {

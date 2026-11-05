@@ -186,6 +186,86 @@ fn a_hidden_terminal_builds_no_frames_until_shown() {
     close_all(t);
 }
 
+fn process_exists(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+fn group_exists(pgid: u32) -> bool {
+    unsafe { libc::killpg(pgid as libc::pid_t, 0) == 0 }
+}
+
+#[test]
+fn closing_a_normal_shell_reaps_it_and_ends_all_three_threads() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    type_line(&t, id, "echo up$((5+6))");
+    wait_for(&t, id, "up11", |f| f.contains_line("up11"));
+    let pid = t.pid(id).unwrap();
+    assert!(process_exists(pid));
+
+    let started = Instant::now();
+    let report = t.close(id).unwrap().wait();
+
+    assert!(started.elapsed() < Duration::from_millis(1500), "a shell that obeys SIGHUP closes at once");
+    assert!(!report.escalated_to_sigkill);
+    assert_eq!(report.threads_exited, 3);
+    assert!(!process_exists(pid), "the child must be reaped, not left as a zombie");
+    assert!(t.frame(id).is_none(), "a closed Terminal leaves the set");
+    assert_eq!(t.open_count("t1"), 0);
+}
+
+#[test]
+fn a_program_ignoring_sighup_is_killed_after_two_seconds() {
+    let mut t = terminals();
+    let mut config = sh_config("t1");
+    config.program = Some((
+        "/bin/sh".into(),
+        vec!["-c".into(), "trap '' HUP; echo ready$((6*7)); sleep 100".into()],
+    ));
+    let id = t.spawn(config).unwrap();
+    wait_for(&t, id, "ready42", |f| f.contains_line("ready42"));
+    let pid = t.pid(id).unwrap();
+
+    let started = Instant::now();
+    let closing = t.close(id).unwrap();
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(!closing.is_done(), "SIGHUP is ignored, so close must still be waiting");
+    let report = closing.wait();
+    let took = started.elapsed();
+
+    assert!(took >= Duration::from_millis(1900), "killed too early: {took:?}");
+    assert!(took < Duration::from_secs(5), "took too long: {took:?}");
+    assert!(report.escalated_to_sigkill);
+    assert_eq!(report.threads_exited, 3);
+    assert!(!process_exists(pid));
+    assert!(!group_exists(pid), "the whole process group must be gone, sleep included");
+}
+
+#[test]
+fn closing_an_exited_terminal_works() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    type_line(&t, id, "exit");
+    wait_for(&t, id, "exit", |f| f.exited);
+    let pid = t.pid(id).unwrap();
+    let report = t.close(id).unwrap().wait();
+    assert!(!report.escalated_to_sigkill);
+    assert_eq!(report.threads_exited, 3);
+    assert!(!process_exists(pid));
+}
+
+#[test]
+fn closing_a_dead_terminal_works() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    t.crash_owner(id);
+    wait_for(&t, id, "dead", |f| f.dead);
+    let pid = t.pid(id).unwrap();
+    let report = t.close(id).unwrap().wait();
+    assert_eq!(report.threads_exited, 3);
+    assert!(!process_exists(pid));
+}
+
 /// Only `engine.rs` may name the engine crates, so an unstable API stays in one file.
 #[test]
 fn only_the_engine_file_touches_the_engine_crates() {
