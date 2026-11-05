@@ -12,7 +12,9 @@ use crate::app::View;
 use crate::db::attachments::Attachment;
 use crate::saved_view::OpenView;
 use crate::tabs::{Page, TabKey, TabSet};
-use crate::views::{board, inbox, issue_list, projects, recurring_issues, roadmap};
+use crate::views::{
+    board, inbox, issue_detail, issue_list, project_detail, projects, recurring_issues, roadmap,
+};
 
 /// The comment or reply being typed on an issue or project detail, and its
 /// staged files. Parked with the Tab; closing the Tab discards it, and it isn't
@@ -46,6 +48,56 @@ impl CommentDraft {
     }
 }
 
+/// The page an open issue was opened from, which Back returns to. One level
+/// per Tab, no history: issue A to issue B keeps the page, not A. A team
+/// Tab's issue has no origin (Back is the breadcrumb, as before), and a
+/// project Tab's Back always goes to the project, its root.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DetailFrom {
+    pub my_issues: bool,
+    pub inbox: bool,
+    /// The Dashboard's local id.
+    pub dashboard: Option<String>,
+    /// The team-level page (Board, Roadmap, ...) a team Tab's issue was
+    /// opened from. Never an issue page.
+    pub page: Option<View>,
+}
+
+/// Where Back from an open issue goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Back {
+    MyIssues,
+    Inbox,
+    Dashboard(String),
+    /// The Tab's root page: the project, in a project Tab.
+    TabRoot,
+    /// The page a team Tab's issue was opened from.
+    Page(View),
+}
+
+/// The one level of Back for an open issue in the Tab `key`, or `None` when
+/// the Tab has none to give (a team Tab that never recorded a page). It reads only the
+/// origin, not which issue is open, so issue A to issue B then Back returns
+/// to the page, not to A.
+pub fn back_target(key: &TabKey, from: &DetailFrom) -> Option<Back> {
+    if from.my_issues {
+        Some(Back::MyIssues)
+    } else if from.inbox {
+        Some(Back::Inbox)
+    } else if let Some(id) = &from.dashboard {
+        Some(Back::Dashboard(id.clone()))
+    } else if matches!(key, TabKey::Project(_)) {
+        Some(Back::TabRoot)
+    } else if matches!(key, TabKey::Team(_)) {
+        from.page
+            .clone()
+            .filter(|v| !matches!(v, View::IssueDetail(_)))
+            .map(Back::Page)
+    } else {
+        None
+    }
+}
+
 /// Everything remembered about one parked Tab.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParkedTab {
@@ -64,12 +116,14 @@ pub struct ParkedTab {
     /// view). Switching Tabs keeps it; leaving the view inside the Tab drops
     /// it as before.
     pub open_view: Option<OpenView>,
+    /// Where Back from the open issue returns to.
+    pub detail_from: DetailFrom,
 }
 
 impl ParkedTab {
-    /// Park `view` and the selected team. The caller maps an open detail to
-    /// its Tab's root first (see [`parked_view`]): detail buffers aren't
-    /// parked yet, so a detail couldn't render on return.
+    /// Park `view` and the selected team. The caller maps the view through
+    /// [`parked_view`] first. An open issue parks as itself and is rebuilt
+    /// from the local database on return (its edits commit when leaving).
     pub fn new(view: View, selected_team_id: Option<String>) -> Self {
         Self {
             view,
@@ -82,6 +136,7 @@ impl ParkedTab {
             focused_issue: 0,
             collapsed_sections: HashSet::new(),
             open_view: None,
+            detail_from: DetailFrom::default(),
         }
     }
 
@@ -112,8 +167,8 @@ pub fn scroll_keys(view: &View, list_mode: bool, lanes: usize) -> Vec<usize> {
         View::ProjectList => vec![projects::SCROLL_KEY],
         View::Roadmap => vec![roadmap::SCROLL_KEY],
         View::RecurringIssues => vec![recurring_issues::SCROLL_KEY],
-        // Detail views don't report their offset; they park as the Board.
-        View::IssueDetail(_) | View::ProjectDetail(_) => Vec::new(),
+        View::IssueDetail(_) => vec![issue_detail::SCROLL_KEY],
+        View::ProjectDetail(_) => vec![project_detail::SCROLL_KEY],
     }
 }
 
@@ -177,17 +232,33 @@ pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
     focus_key(set, TabKey::Team(team_id.to_string()))
 }
 
-/// The view a Tab parks under `key`. An open issue or project detail has no
-/// buffers parked yet, so it parks as the Tab's root: the team's Board, the
-/// project, or the cross-team page. A team Tab's other views park as they are.
+/// The view a Tab parks under `key`. An open issue parks as itself in any
+/// Tab (a cross-team Tab keeps it as the Tab's page, ADR 0001). A team Tab's
+/// project detail parks as the Board; a project or cross-team Tab's other
+/// views park as that Tab's own page.
 pub fn parked_view(key: &TabKey, view: View) -> View {
     match (key, view) {
-        (TabKey::Team(_), View::IssueDetail(_) | View::ProjectDetail(_)) => View::Board,
+        (_, view @ View::IssueDetail(_)) => view,
+        (TabKey::Team(_), View::ProjectDetail(_)) => View::Board,
         (TabKey::Team(_), other) => other,
         // Project and cross-team Tabs have one page of their own. Whatever
-        // was opened from it (an issue, which may have switched the live
-        // view to the issue's team) parks as that page.
+        // else the live view is parks as that page.
         (key, _) => root_view(key),
+    }
+}
+
+/// The view to restore for a parked Tab: an issue deleted while the Tab was
+/// parked falls back to the Tab's root page (`exists` says whether an issue
+/// is still there). The bool is true on that fallback, so the caller drops
+/// what belonged to the issue: its Back origin and any comment draft.
+pub fn resolve_parked(
+    key: &TabKey,
+    view: View,
+    exists: impl Fn(&str) -> bool,
+) -> (View, bool) {
+    match view {
+        View::IssueDetail(id) if !exists(&id) => (root_view(key), true),
+        view => (view, false),
     }
 }
 
@@ -354,18 +425,115 @@ mod tests {
     }
 
     #[test]
-    fn a_detail_parks_as_its_tabs_root() {
+    fn an_open_issue_parks_as_itself_in_every_tab() {
         let detail = View::IssueDetail("i".into());
         let project = TabKey::Project("p".into());
-        assert_eq!(parked_view(&team("a"), detail.clone()), View::Board);
-        assert_eq!(parked_view(&team("a"), View::ProjectDetail("p".into())), View::Board);
-        assert_eq!(parked_view(&project, detail.clone()), View::ProjectDetail("p".into()));
-        assert_eq!(parked_view(&TabKey::MyIssues, detail.clone()), View::MyIssues);
-        assert_eq!(parked_view(&TabKey::Inbox, detail.clone()), View::Inbox);
+        assert_eq!(parked_view(&team("a"), detail.clone()), detail);
+        assert_eq!(parked_view(&project, detail.clone()), detail);
+        assert_eq!(parked_view(&TabKey::MyIssues, detail.clone()), detail);
+        assert_eq!(parked_view(&TabKey::Inbox, detail.clone()), detail);
+        assert_eq!(parked_view(&TabKey::Dashboard("d".into()), detail.clone()), detail);
+    }
+
+    #[test]
+    fn a_deleted_parked_issue_falls_back_to_the_tabs_root() {
+        let gone = View::IssueDetail("i".into());
+        let none = |_: &str| false;
+        let all = |_: &str| true;
+        assert_eq!(resolve_parked(&team("a"), gone.clone(), none), (View::Board, true));
         assert_eq!(
-            parked_view(&TabKey::Dashboard("d".into()), detail),
-            View::Dashboard("d".into())
+            resolve_parked(&TabKey::Project("p".into()), gone.clone(), none),
+            (View::ProjectDetail("p".into()), true)
         );
+        assert_eq!(resolve_parked(&TabKey::MyIssues, gone.clone(), none), (View::MyIssues, true));
+        assert_eq!(resolve_parked(&TabKey::Inbox, gone.clone(), none), (View::Inbox, true));
+        assert_eq!(
+            resolve_parked(&TabKey::Dashboard("d".into()), gone.clone(), none),
+            (View::Dashboard("d".into()), true)
+        );
+        // Still there, or not an issue: unchanged.
+        assert_eq!(resolve_parked(&team("a"), gone.clone(), all), (gone, false));
+        assert_eq!(resolve_parked(&team("a"), View::Roadmap, none), (View::Roadmap, false));
+    }
+
+    #[test]
+    fn back_origin_is_parked_per_tab() {
+        let mut parked = Parked::default();
+        let from = DetailFrom { inbox: true, ..DetailFrom::default() };
+        parked.save(
+            TabKey::Inbox,
+            ParkedTab { detail_from: from.clone(), ..ParkedTab::new(View::IssueDetail("i".into()), None) },
+        );
+        parked.save(TabKey::MyIssues, ParkedTab::new(View::MyIssues, None));
+        assert_eq!(parked.take(&TabKey::MyIssues).unwrap().detail_from, DetailFrom::default());
+        assert_eq!(parked.take(&TabKey::Inbox).unwrap().detail_from, from);
+    }
+
+    #[test]
+    fn back_goes_to_the_page_the_issue_came_from() {
+        let none = DetailFrom::default();
+        let dash = DetailFrom { dashboard: Some("d".into()), ..none.clone() };
+        let mine = DetailFrom { my_issues: true, ..none.clone() };
+        let inbox = DetailFrom { inbox: true, ..none.clone() };
+        assert_eq!(back_target(&TabKey::MyIssues, &mine), Some(Back::MyIssues));
+        assert_eq!(back_target(&TabKey::Inbox, &inbox), Some(Back::Inbox));
+        assert_eq!(
+            back_target(&TabKey::Dashboard("d".into()), &dash),
+            Some(Back::Dashboard("d".into()))
+        );
+        assert_eq!(back_target(&TabKey::Project("p".into()), &none), Some(Back::TabRoot));
+        assert_eq!(back_target(&team("a"), &none), None);
+        let from_roadmap = DetailFrom { page: Some(View::Roadmap), ..none };
+        assert_eq!(back_target(&team("a"), &from_roadmap), Some(Back::Page(View::Roadmap)));
+    }
+
+    #[test]
+    fn a_team_tab_goes_back_to_the_page_not_to_issue_a() {
+        // The origin is a page, never an issue: opening B from A keeps it.
+        let from = DetailFrom { page: Some(View::Board), ..DetailFrom::default() };
+        assert_eq!(back_target(&team("a"), &from), Some(Back::Page(View::Board)));
+        let bad = DetailFrom { page: Some(View::IssueDetail("a".into())), ..DetailFrom::default() };
+        assert_eq!(back_target(&team("a"), &bad), None);
+    }
+
+    #[test]
+    fn issue_a_to_issue_b_keeps_back_on_the_page() {
+        // The origin doesn't name an issue, so opening B from A changes nothing.
+        let from = DetailFrom { inbox: true, ..DetailFrom::default() };
+        let on_a = back_target(&TabKey::Inbox, &from);
+        let on_b = back_target(&TabKey::Inbox, &from.clone());
+        assert_eq!(on_a, on_b);
+        assert_eq!(on_b, Some(Back::Inbox));
+    }
+
+    #[test]
+    fn back_survives_a_stash_and_restore() {
+        let mut parked = Parked::default();
+        let from = DetailFrom { my_issues: true, ..DetailFrom::default() };
+        parked.save(
+            TabKey::MyIssues,
+            ParkedTab { detail_from: from, ..ParkedTab::new(View::IssueDetail("i".into()), None) },
+        );
+        let back = parked.take(&TabKey::MyIssues).unwrap();
+        assert_eq!(back_target(&TabKey::MyIssues, &back.detail_from), Some(Back::MyIssues));
+    }
+
+    #[test]
+    fn detail_views_report_their_scroll() {
+        assert_eq!(
+            scroll_keys(&View::IssueDetail("i".into()), false, 0),
+            vec![issue_detail::SCROLL_KEY]
+        );
+        assert_eq!(
+            scroll_keys(&View::ProjectDetail("p".into()), false, 0),
+            vec![project_detail::SCROLL_KEY]
+        );
+    }
+
+    #[test]
+    fn other_views_park_as_their_tabs_page() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(parked_view(&team("a"), View::ProjectDetail("p".into())), View::Board);
         // Team-level pages and a project Tab's own page park as they are.
         assert_eq!(parked_view(&team("a"), View::RecurringIssues), View::RecurringIssues);
         assert_eq!(
@@ -644,10 +812,10 @@ mod tests {
     #[test]
     fn an_empty_draft_is_not_parked() {
         let view = View::IssueDetail("i".into());
-        // The caller maps the detail to its Tab's root first (`parked_view`).
         let tab = ParkedTab::new(parked_view(&team("a"), view.clone()), None)
-            .with_comment_draft(view.clone(), Some(draft(view, "")));
-        assert_eq!(tab.view, View::Board);
+            .with_comment_draft(view.clone(), Some(draft(view.clone(), "")));
+        // The issue still parks as itself, with nothing to restore into it.
+        assert_eq!(tab.view, view);
         assert!(tab.comment_draft.is_none());
     }
 

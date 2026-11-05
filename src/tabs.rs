@@ -19,9 +19,27 @@ pub enum TabKey {
 impl TabKey {
     /// A cross-team page (My Issues, Inbox, a Dashboard). Issues opened from
     /// one stay in that Tab; a team or project Tab only shows its own team.
-    #[allow(dead_code)] // used by the issue-opening tickets
     pub fn is_cross_team(&self) -> bool {
         matches!(self, TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_))
+    }
+}
+
+/// Where an issue opens from the active Tab. `tab_team` is the team a team or
+/// project Tab shows. `None` means the issue opens in the active Tab: it is
+/// from the Tab's own team, or the Tab is cross-team (My Issues, Inbox, a
+/// Dashboard) and loads the issue's team for the detail. `Some` is the team
+/// Tab to focus or open, so team and project Tabs only ever show their own team.
+pub fn issue_open_target(
+    active: &TabKey,
+    tab_team: Option<&str>,
+    issue_team: &str,
+) -> Option<TabKey> {
+    match active {
+        TabKey::Team(_) | TabKey::Project(_) => match tab_team {
+            Some(team) if team != issue_team => Some(TabKey::Team(issue_team.to_string())),
+            _ => None,
+        },
+        TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_) => None,
     }
 }
 
@@ -274,6 +292,28 @@ mod tests {
 
     fn home() -> TabKey {
         team("home")
+    }
+
+    #[test]
+    fn an_issue_from_the_tabs_own_team_opens_in_the_tab() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(issue_open_target(&team("a"), Some("a"), "a"), None);
+        assert_eq!(issue_open_target(&project, Some("a"), "a"), None);
+    }
+
+    #[test]
+    fn another_teams_issue_goes_to_that_teams_tab() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(issue_open_target(&team("a"), Some("a"), "b"), Some(team("b")));
+        assert_eq!(issue_open_target(&project, Some("a"), "b"), Some(team("b")));
+    }
+
+    #[test]
+    fn an_issue_from_a_cross_team_tab_stays_in_it() {
+        for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            assert_eq!(issue_open_target(&key, None, "b"), None);
+            assert_eq!(issue_open_target(&key, Some("a"), "b"), None);
+        }
     }
 
     fn set(keys: &[TabKey], active: usize) -> TabSet {

@@ -421,10 +421,29 @@ pub fn view<'a>(
     row![]
         .width(Length::Fill)
         .height(Length::Fill)
-        .push(container(scrollable(left)).width(Length::Fill).height(Length::Fill))
+        .push(
+            container(
+                scrollable(left)
+                    .id(scroll_id())
+                    .on_scroll(|vp| {
+                        Message::Scrolled(SCROLL_KEY, vp.absolute_offset().y, vp.bounds().height)
+                    }),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
         .push(divider)
         .push(sidebar_panel)
         .into()
+}
+
+/// Key of the detail's body in `App::scroll_state` (distinct from the lane
+/// indices and the other views' keys).
+pub const SCROLL_KEY: usize = usize::MAX - 6;
+
+/// Scrollable id of the detail's body.
+pub fn scroll_id() -> iced::widget::scrollable::Id {
+    iced::widget::scrollable::Id::new("issue-detail")
 }
 
 /// `IDENT-#` for an issue, or `#N` when the team isn't loaded.

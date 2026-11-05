@@ -6,7 +6,7 @@ use iced::Task;
 
 use super::{project_detail, App, Message, View};
 use crate::db::queries;
-use crate::tab_state::{self, CommentDraft, ParkedTab, Switch};
+use crate::tab_state::{self, CommentDraft, DetailFrom, ParkedTab, Switch};
 use crate::tabs::{Page, TabKey, TabSet};
 
 #[derive(Debug, Clone)]
@@ -15,6 +15,10 @@ pub enum TabMessage {
     Focus(usize),
     /// Close a Tab from the bar, by position.
     Close(usize),
+    /// Back from an issue opened in a project Tab to the project, its root.
+    BackToRoot,
+    /// Back from a team Tab's issue to the page it was opened from.
+    BackToPage(View),
     /// The tab bar scrolled sideways to this offset.
     BarScrolled(f32),
 }
@@ -46,6 +50,8 @@ impl App {
                 }
             }
             TabMessage::Close(index) => return self.close_tab(index),
+            TabMessage::BackToRoot => return self.back_to_tab_root(),
+            TabMessage::BackToPage(view) => return self.back_to_page(view),
             TabMessage::BarScrolled(x) => self.tab_bar_offset = x,
         }
         Task::none()
@@ -84,6 +90,25 @@ impl App {
             return self.restore_tab(&to);
         }
         Task::none()
+    }
+
+    /// Leave the open issue for the active Tab's root page (the project, for a
+    /// project Tab). One level: opening issue B from issue A comes back here,
+    /// not to A.
+    fn back_to_tab_root(&mut self) -> Task<Message> {
+        let Some(key) = self.active_tab_key().cloned() else {
+            return Task::none();
+        };
+        self.back_to_page(tab_state::root_view(&key))
+    }
+
+    /// Leave the open issue for `view`, the page it was opened from.
+    fn back_to_page(&mut self, view: View) -> Task<Message> {
+        self.commit_issue_detail();
+        self.issue_detail = None;
+        self.switch_view(view);
+        self.restore_project_detail();
+        self.restore_scroll()
     }
 
     /// Close the Tabs whose team, project or Dashboard a pull removed. An
@@ -268,6 +293,19 @@ impl App {
         }
     }
 
+    /// The team a team or project Tab shows; `None` on a cross-team Tab.
+    pub(super) fn active_tab_team(&self) -> Option<String> {
+        match self.active_tab_key()? {
+            TabKey::Team(id) => Some(id.clone()),
+            TabKey::Project(id) => self
+                .tab_projects
+                .get(id)
+                .map(|(_, team_id)| team_id.clone())
+                .or_else(|| self.selected_team_id.clone()),
+            _ => None,
+        }
+    }
+
     /// The active Tab's key, once the set exists.
     pub(super) fn active_tab_key(&self) -> Option<&TabKey> {
         self.tab_set.as_ref().map(|set| set.active())
@@ -299,6 +337,12 @@ impl App {
                 focused_issue: self.focused_issue,
                 collapsed_sections: self.collapsed_sections.clone(),
                 open_view: self.open_view.clone(),
+                detail_from: DetailFrom {
+                    my_issues: self.detail_from_my_issues,
+                    inbox: self.detail_from_inbox,
+                    dashboard: self.detail_from_dashboard.clone(),
+                    page: self.detail_from_page.clone(),
+                },
                 ..ParkedTab::new(view, self.selected_team_id.clone())
                     .with_comment_draft(self.view.clone(), draft)
             },
@@ -352,8 +396,8 @@ impl App {
 
     /// Rebuild the detail page a parked draft was typed on and put the draft
     /// back. When the issue or project is gone the draft is discarded and the
-    /// Tab falls back to its Board.
-    fn restore_comment_draft(&mut self, draft: CommentDraft) {
+    /// Tab falls back to its root page.
+    fn restore_comment_draft(&mut self, draft: CommentDraft, key: &TabKey) {
         use iced::widget::text_editor::Content;
         let conn = self.db();
         let files = crate::views::issue_detail::ComposerFiles {
@@ -392,7 +436,7 @@ impl App {
             },
             _ => {}
         }
-        self.view = View::Board;
+        self.view = tab_state::root_view(key);
         self.drop_drafts(&draft.owner_ids());
     }
 
@@ -407,7 +451,7 @@ impl App {
         let parked = self.parked_tabs.take(key);
         // A Tab restored at launch returns to its stored page on first focus.
         let restored = self.restored_pages.remove(key).filter(|_| parked.is_none());
-        let (view, team, scroll_state, search, focus, collapsed, open_view, draft) = match parked {
+        let (view, team, scroll_state, search, focus, collapsed, open_view, draft, detail_from) = match parked {
             Some(p) => (
                 p.view,
                 p.selected_team_id,
@@ -417,6 +461,7 @@ impl App {
                 p.collapsed_sections,
                 p.open_view,
                 p.comment_draft,
+                p.detail_from,
             ),
             None => (
                 restored.as_ref().map_or_else(
@@ -439,14 +484,32 @@ impl App {
                 Default::default(),
                 None,
                 None,
+                DetailFrom::default(),
             ),
+        };
+        // An issue deleted while the Tab was parked: show the Tab's root page,
+        // and drop what belonged to the issue (its Back origin, a draft).
+        let (view, gone) = {
+            let conn = self.db();
+            tab_state::resolve_parked(key, view, |id| {
+                matches!(queries::get_issue(&conn, id), Ok(Some(_)))
+            })
+        };
+        let (detail_from, draft) = if gone {
+            if let Some(draft) = &draft {
+                self.drop_drafts(&draft.owner_ids());
+            }
+            (DetailFrom::default(), None)
+        } else {
+            (detail_from, draft)
         };
         self.scroll_state = scroll_state;
         (self.search_query, self.search_view) = search;
         self.open_view = open_view;
-        self.detail_from_my_issues = false;
-        self.detail_from_inbox = false;
-        self.detail_from_dashboard = None;
+        self.detail_from_my_issues = detail_from.my_issues;
+        self.detail_from_inbox = detail_from.inbox;
+        self.detail_from_dashboard = detail_from.dashboard;
+        self.detail_from_page = detail_from.page;
         self.issue_detail = None;
         self.project_detail = None;
         self.dashboard_menu = None;
@@ -464,7 +527,12 @@ impl App {
             self.reload_recurring(&conn);
         }
         if let Some(draft) = draft {
-            self.restore_comment_draft(draft);
+            self.restore_comment_draft(draft, key);
+        }
+        if let View::IssueDetail(id) = self.view.clone() {
+            if self.issue_detail.as_ref().map_or(true, |d| d.issue_id != id) {
+                self.restore_issue_detail(&id, key);
+            }
         }
         // Parked focus may point past rows that went away.
         if matches!(self.view, View::Board | View::MyIssues) {
@@ -481,9 +549,24 @@ impl App {
         Task::batch([self.restore_scroll(), opened])
     }
 
+    /// A parked Tab's open issue: rebuild its buffers from the local
+    /// database (edits were committed when the Tab was left).
+    fn restore_issue_detail(&mut self, id: &str, key: &TabKey) {
+        let conn = self.db();
+        match queries::get_issue(&conn, id) {
+            Ok(Some(issue)) => {
+                self.issue_detail =
+                    Some(crate::views::issue_detail::IssueDetailState::from_issue(&issue));
+                self.load_detail_dependencies(&conn);
+                self.reload_detail_origin(&conn);
+            }
+            _ => self.view = tab_state::root_view(key),
+        }
+    }
+
     /// A project Tab's root is the project page: rebuild its buffers from the
     /// reloaded project (they aren't parked; edits committed on leaving).
-    fn restore_project_detail(&mut self) {
+    pub(super) fn restore_project_detail(&mut self) {
         let View::ProjectDetail(id) = &self.view else {
             return;
         };

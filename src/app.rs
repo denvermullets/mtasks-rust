@@ -37,14 +37,6 @@ use crate::views::{
 mod tab_update;
 pub use tab_update::TabMessage;
 
-/// Where an issue detail opened from a dashboard returns to.
-#[derive(Debug, Clone, PartialEq)]
-struct DashboardOrigin {
-    dashboard_id: String,
-    /// The team selected before the detail switched to the issue's own team.
-    prev_team_id: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub enum Message {
     // Navigation
@@ -854,7 +846,9 @@ pub struct App {
     /// The open issue detail was reached from the Inbox (Back returns there).
     detail_from_inbox: bool,
     /// The open issue detail was reached from a dashboard (Back returns there).
-    detail_from_dashboard: Option<DashboardOrigin>,
+    detail_from_dashboard: Option<String>,
+    /// The team-level page a team Tab's open issue was opened from (Back).
+    detail_from_page: Option<View>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -1010,17 +1004,6 @@ impl App {
             .collect()
     }
 
-    /// Before opening an issue or project from the palette: when it belongs to
-    /// another team (or we are on My Issues, whose data is mixed), select its
-    /// team like a sidebar click, so the sidebar follows and its data is loaded.
-    fn select_team_for_palette(&mut self, team_id: &str) -> Task<Message> {
-        if self.selected_team_id.as_deref() == Some(team_id) && !self.view.is_cross_team() {
-            return Task::none();
-        }
-        self.expanded_teams.insert(team_id.to_string());
-        self.update(Message::SelectTeamView(team_id.to_string(), View::Board))
-    }
-
     fn db(&self) -> rusqlite::Connection {
         connection::open().expect("Failed to open database")
     }
@@ -1116,15 +1099,11 @@ impl App {
         self.reload_detail_origin(&conn);
         self.refresh_open_view();
 
-        // Filters are global but hold per-team ids; drop the ones this data
-        // doesn't contain (My Issues loads every team, so its ids all stay).
-        // Skipped while a dashboard-opened detail is up: the selected team is
-        // temporarily the issue's, and pruning would drop the board filters of
-        // the team that was selected before.
-        if self.selected_team_id.is_some()
-            && self.detail_from_dashboard.is_none()
-            && self.prune_board_filters()
-        {
+        // Filters hold per-team ids; drop the ones this data doesn't contain
+        // from the scope's own set (My Issues loads every team, so its ids
+        // all stay). An issue opened from a cross-team Tab selects the
+        // issue's team, whose set is pruned against that team's data.
+        if self.selected_team_id.is_some() && self.prune_board_filters() {
             if let Err(e) = config::save(&self.config) {
                 self.config_error = Some(e);
             }
@@ -1796,7 +1775,7 @@ impl App {
             crumbs.insert(0, "My Issues".into());
         }
         if let (Some(o), View::IssueDetail(_)) = (&self.detail_from_dashboard, &self.view) {
-            if let Some(d) = self.dashboards.iter().find(|d| d.id == o.dashboard_id) {
+            if let Some(d) = self.dashboards.iter().find(|d| d.id == *o) {
                 crumbs.insert(0, d.name.clone());
             }
         }
@@ -1820,6 +1799,27 @@ impl App {
             }
         }
         crumbs
+    }
+
+    /// The header's Back for an open issue (`tab_state::back_target`).
+    fn back_message(&self) -> Option<Message> {
+        use crate::tab_state::{back_target, Back, DetailFrom};
+        if !matches!(self.view, View::IssueDetail(_)) {
+            return None;
+        }
+        let from = DetailFrom {
+            my_issues: self.detail_from_my_issues,
+            inbox: self.detail_from_inbox,
+            dashboard: self.detail_from_dashboard.clone(),
+            page: self.detail_from_page.clone(),
+        };
+        Some(match back_target(self.active_tab_key()?, &from)? {
+            Back::MyIssues => Message::BackToMyIssues,
+            Back::Inbox => Message::BackToInbox,
+            Back::Dashboard(_) => Message::BackToDashboard,
+            Back::TabRoot => Message::Tab(TabMessage::BackToRoot),
+            Back::Page(view) => Message::Tab(TabMessage::BackToPage(view)),
+        })
     }
 
     /// Empty-state text for My Issues, when there's something to explain.
@@ -2227,8 +2227,23 @@ impl App {
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
+        // A team or project Tab only shows its own team: another team's
+        // issue opens in that team's Tab (`tabs::issue_open_target`).
+        let target = self.active_tab_key().and_then(|active| {
+            crate::tabs::issue_open_target(active, self.active_tab_team().as_deref(), &issue.team_id)
+        });
+        if let Some(key) = target {
+            if let crate::tabs::TabKey::Team(id) = &key {
+                self.expanded_teams.insert(id.clone());
+            }
+            let focus = self.focus_tab(key);
+            return Task::batch([focus, self.open_issue_detail(&issue)]);
+        }
         if let View::Dashboard(dashboard_id) = self.view.clone() {
             return self.open_issue_from_dashboard(dashboard_id, issue);
+        }
+        if self.view == View::Inbox {
+            return self.open_issue_from_inbox(issue);
         }
         if self.view == View::MyIssues {
             self.selected_team_id = Some(issue.team_id.clone());
@@ -2236,38 +2251,45 @@ impl App {
             self.reload_data();
             self.detail_from_my_issues = true;
         }
+        // Issue to issue inside a cross-team Tab (a link, a dependency): the
+        // Tab stays, and loads the next issue's team for the detail. Back
+        // keeps the origin flags, so it still returns to the page.
+        let cross_team_tab = self.active_tab_key().is_some_and(crate::tabs::TabKey::is_cross_team);
+        if cross_team_tab
+            && matches!(self.view, View::IssueDetail(_))
+            && self.selected_team_id.as_deref() != Some(issue.team_id.as_str())
+        {
+            self.selected_team_id = Some(issue.team_id.clone());
+            self.reload_data();
+        }
         self.open_issue_detail(&issue)
     }
 
     /// Open `issue` from a dashboard: select its own team (like My Issues) so
-    /// the detail is that team's, remembering the dashboard and the team that
-    /// was selected before, so Back restores both.
+    /// the detail is that team's, remembering the dashboard for Back.
     fn open_issue_from_dashboard(&mut self, dashboard_id: String, issue: Issue) -> Task<Message> {
         // The view is about to stop being a dashboard, which skips the stash
         // `update` does afterwards: park the focus now (a click sets it and
         // opens the issue in the same message).
         self.stash_dashboard_session();
-        self.detail_from_dashboard = Some(DashboardOrigin {
-            dashboard_id,
-            prev_team_id: self.selected_team_id.clone(),
-        });
+        self.detail_from_dashboard = Some(dashboard_id);
         self.selected_team_id = Some(issue.team_id.clone());
         self.view = View::Board;
         self.reload_data();
         self.open_issue_detail(&issue)
     }
 
-    /// Leave an issue detail opened from a dashboard: put the previously
-    /// selected team back and return to the dashboard. False when the detail
-    /// didn't come from one.
+    /// Leave an issue detail opened from a dashboard and return to it. False
+    /// when the detail didn't come from one. The selected team stays the
+    /// issue's: the Dashboard's Tab is cross-team, and its data and display
+    /// options don't depend on it.
     fn back_to_dashboard(&mut self) -> bool {
-        let Some(origin) = self.detail_from_dashboard.take() else {
+        let Some(dashboard_id) = self.detail_from_dashboard.take() else {
             return false;
         };
         self.commit_issue_detail();
         self.issue_detail = None;
-        self.selected_team_id = origin.prev_team_id;
-        self.switch_view(View::Dashboard(origin.dashboard_id));
+        self.switch_view(View::Dashboard(dashboard_id));
         true
     }
 
@@ -2296,6 +2318,11 @@ impl App {
     }
 
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
+        // The page Back returns a team Tab to: set when leaving a page, kept
+        // when going from issue A to issue B.
+        if !matches!(self.view, View::IssueDetail(_)) {
+            self.detail_from_page = Some(self.view.clone());
+        }
         self.commit_issue_detail();
         self.commit_project_detail();
         if let Some(old) = self.issue_detail.take() {
@@ -3074,6 +3101,7 @@ impl App {
             detail_from_my_issues: false,
             detail_from_inbox: false,
             detail_from_dashboard: None,
+            detail_from_page: None,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
@@ -4952,8 +4980,13 @@ impl App {
             Message::OpenIssueDetail(issue_id) => {
                 // A click on a row ends its hover (the view may not change).
                 self.body_hover.event(crate::hover_card::Event::Clicked);
-                if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
-                    return self.open_issue_detail(&issue);
+                // A link can name another team's issue, which isn't loaded.
+                let issue = match self.issues.iter().find(|i| i.id == issue_id).cloned() {
+                    Some(issue) => Some(issue),
+                    None => queries::get_issue(&self.db(), &issue_id).ok().flatten(),
+                };
+                if let Some(issue) = issue {
+                    return self.open_focused_issue(issue);
                 }
             }
             Message::OpenDependencyPicker(direction) => {
@@ -5358,9 +5391,10 @@ impl App {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
                         };
-                        let select = self.select_team_for_palette(&issue.team_id);
-                        // open_issue_detail commits any open detail edits first.
-                        return Task::batch([select, self.open_issue_detail(&issue)]);
+                        // The same rule as every other open path: the issue's
+                        // team Tab from a team or project Tab, the current
+                        // Tab from a cross-team one. Commits open edits first.
+                        return self.open_focused_issue(issue);
                     }
                     PaletteNav::Project { project_id, .. } => {
                         // The project's Tab loads its own team's data.
@@ -6726,17 +6760,7 @@ impl App {
             )
             .then(|| self.active_filter_count()),
             self.new_action(),
-            (self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)))
-                .then_some(Message::BackToMyIssues)
-                .or_else(|| {
-                    (self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)))
-                        .then_some(Message::BackToInbox)
-                })
-                .or_else(|| {
-                    (self.detail_from_dashboard.is_some()
-                        && matches!(self.view, View::IssueDetail(_)))
-                    .then_some(Message::BackToDashboard)
-                }),
+            self.back_message(),
             self.update_view_action(),
             )
         };
