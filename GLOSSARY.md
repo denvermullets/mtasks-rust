@@ -28,6 +28,10 @@ _Avoid_: Filter preset, bookmark, view (alone)
 An open Saved view whose display or filters the user has changed but not yet written back. It can be updated or reverted.
 _Avoid_: Dirty view, unsaved view
 
+**Tab**:
+An open place in the main area: a team, a project, or a cross-team page such as My Issues, Inbox or a Dashboard. Each team, project or page has at most one tab, and moving around inside a team stays in its tab. At least one tab is always open.
+_Avoid_: Workspace, window, session
+
 **Home page**:
 The one team board, Saved view or dashboard the user lands on at launch, shared with the web app.
 _Avoid_: Default view, start page
@@ -104,3 +108,9 @@ _Avoid_: Start date (a project's date), first run
 **Paused**:
 The state of a Recurring issue that creates no issues until it is resumed. Pausing keeps the schedule; the opposite state is Active.
 _Avoid_: Disabled, inactive, stopped
+
+### Terminals
+
+**Terminal**:
+An interactive shell session that belongs to a team and runs only on this device. Any tab on that team can show it, and its contents never reach the server.
+_Avoid_: Console, shell, agent session
