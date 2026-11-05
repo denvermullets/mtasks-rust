@@ -101,6 +101,20 @@ impl SelectionRequest {
     pub fn wait(self) -> Option<String> {
         self.0.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten()
     }
+
+    /// `wait` on a plain OS thread, answered through a oneshot: a Task can
+    /// await this without blocking `update` or a tokio worker. Nothing here
+    /// runs on tokio (ADR 0002). The 500 ms limit still applies.
+    pub async fn wait_off_thread(self) -> Option<String> {
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        std::thread::Builder::new()
+            .name("term-copy".into())
+            .spawn(move || {
+                let _ = tx.send(self.wait());
+            })
+            .ok()?;
+        rx.await.ok().flatten()
+    }
 }
 
 impl Terminals {
@@ -280,3 +294,29 @@ impl Terminals {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod selection_wait {
+    use super::SelectionRequest;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_off_thread_wait_returns_the_answer() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some("hello".to_string())).unwrap();
+        let got = iced::futures::executor::block_on(SelectionRequest(rx).wait_off_thread());
+        assert_eq!(got.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn the_off_thread_wait_gives_up_after_500_ms_and_the_caller_never_blocks_on_it() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        let started = Instant::now();
+        let fut = SelectionRequest(rx).wait_off_thread();
+        // Building the future does no waiting: only awaiting it does.
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(iced::futures::executor::block_on(fut), None);
+        assert!(started.elapsed() >= Duration::from_millis(450));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+}

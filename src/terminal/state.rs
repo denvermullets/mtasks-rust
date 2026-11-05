@@ -374,8 +374,8 @@ impl TerminalState {
                     }
                     Route::CyclePane(delta) => self.panel.cycle_focus(delta),
                     // The answer comes from the Terminal's owner thread, which
-                    // can take up to 500 ms if it is stuck: wait on a blocking
-                    // thread so `update` returns at once. No selection copies
+                    // can take up to 500 ms if it is stuck: wait on a plain OS
+                    // thread (not tokio) so `update` returns at once. No selection copies
                     // nothing, and nothing is sent to the program either way.
                     Route::Copy => {
                         let Some(req) = self.focused_terminal().and_then(|id| self.terminals.selection_request(id))
@@ -383,7 +383,7 @@ impl TerminalState {
                             return Task::none();
                         };
                         return Task::perform(
-                            async move { tokio::task::spawn_blocking(move || req.wait()).await.ok().flatten() },
+                            req.wait_off_thread(),
                             |text| Message::Terminal(TerminalMessage::Copied(text)),
                         );
                     }
