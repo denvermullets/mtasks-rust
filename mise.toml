@@ -1,2 +1,3 @@
 [tools]
-zig = "0.17"
+# Exact on purpose: Zig and the libghostty-vt commit in Cargo.toml are upgraded together.
+zig = "0.17.1"
