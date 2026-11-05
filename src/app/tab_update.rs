@@ -13,6 +13,8 @@ use crate::tabs::{TabKey, TabSet};
 pub enum TabMessage {
     /// Click a Tab in the bar, by position.
     Focus(usize),
+    /// Close a Tab from the bar, by position.
+    Close(usize),
 }
 
 impl App {
@@ -25,8 +27,62 @@ impl App {
                     self.apply_switch(switch);
                 }
             }
+            TabMessage::Close(index) => self.close_tab(index),
         }
         Task::none()
+    }
+
+    /// Close the Tab at `index`. Closing the active Tab (or the last Tab,
+    /// which becomes the Home page) restores the Tab that takes over;
+    /// closing a background Tab only forgets its parked state, comment draft
+    /// included (ADR 0001).
+    fn close_tab(&mut self, index: usize) {
+        self.ensure_tab_set();
+        let home = self.home_tab_key();
+        let Some(set) = self.tab_set.as_mut() else {
+            return;
+        };
+        let from = set.active().clone();
+        let Some(closed) = tab_state::close_index(set, index, &home) else {
+            return;
+        };
+        self.parked_tabs.forget(&closed.closed);
+        if let Some(to) = closed.to {
+            // The closed Tab is gone, so its live state is dropped, not
+            // stashed. Edits still commit, as on any switch.
+            self.commit_issue_detail();
+            self.commit_project_detail();
+            self.stash_dashboard_session();
+            if closed.closed != from {
+                self.stash_active_tab(from);
+            }
+            self.restore_tab(&to);
+        }
+    }
+
+    /// The Tab the Home page opens, falling back to the first team's.
+    fn home_tab_key(&self) -> TabKey {
+        use crate::db::home_page::{launch_target, LaunchTarget};
+        let launch = launch_target(
+            self.home_page.as_ref(),
+            &self.teams,
+            &self.saved_views,
+            &self.dashboards,
+        );
+        let team = match launch {
+            LaunchTarget::Team(id) => Some(id),
+            LaunchTarget::View { team_id, .. } => Some(team_id),
+            LaunchTarget::Dashboard(id) => return TabKey::Dashboard(id),
+            LaunchTarget::Default => None,
+        };
+        team.or_else(|| {
+            self.teams
+                .iter()
+                .find(|t| t.archived_at.is_none())
+                .or_else(|| self.teams.first())
+                .map(|t| t.id.clone())
+        })
+        .map_or(TabKey::MyIssues, TabKey::Team)
     }
 
     /// The set starts with the selected team's Tab once a team exists.
