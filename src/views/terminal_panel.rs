@@ -309,6 +309,8 @@ pub struct PanelView<'a> {
     pub note: Option<String>,
     /// The Terminal whose shell exited, to say so over its last screen.
     pub notice: Option<(TerminalId, PaneNotice)>,
+    /// Name of the team's starting folder, if one is set.
+    pub dir_label: Option<String>,
     pub height: f32,
 }
 
@@ -466,6 +468,18 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
     }
     strip = strip
         .push(Space::with_width(Length::Fill))
+        .push(
+            button(
+                text(match p.dir_label {
+                    Some(d) => format!("Folder: {d}"),
+                    None => "Folder".to_string(),
+                })
+                .size(11),
+            )
+            .padding([2, 8])
+            .on_press(Message::Terminal(TerminalMessage::PickDir))
+            .style(button::text),
+        )
         .push(text("Cmd+J").size(11).color(t::text_muted()));
     let strip = container(strip)
         .padding([0, 10])

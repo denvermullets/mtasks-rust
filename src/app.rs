@@ -3157,7 +3157,13 @@ impl App {
             window_width: 1100.0,
             tab_bar_offset: 0.0,
             tab_projects: HashMap::new(),
-            terminals: crate::terminal::TerminalState::new(),
+            terminals: {
+                let mut terminals = crate::terminal::TerminalState::new();
+                if let Ok(dirs) = connection::open().and_then(|c| crate::db::terminal_dirs::all(&c)) {
+                    terminals.set_team_dirs(dirs);
+                }
+                terminals
+            },
             parked_tabs: Default::default(),
             open_view: None,
             save_view_name: String::new(),
@@ -4102,6 +4108,15 @@ impl App {
                 if self.terminals.close_needs_confirm(id) =>
             {
                 self.modal = Modal::TerminalCloseConfirm(id);
+            }
+            Message::Terminal(crate::terminal::TerminalMessage::DirPicked(Some(dir))) => {
+                if let Some(team) = crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()) {
+                    let team = team.to_string();
+                    match crate::db::terminal_dirs::set(&self.db(), &team, &dir) {
+                        Ok(()) => self.terminals.set_team_dir(&team, Some(dir)),
+                        Err(e) => self.push_toast(format!("Could not save the folder: {e}"), ToastKind::Error, false),
+                    }
+                }
             }
             Message::Terminal(m) => {
                 if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {

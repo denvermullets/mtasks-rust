@@ -50,6 +50,38 @@ fn an_exited_or_unknown_terminal_is_not_busy() {
     close_all(t);
 }
 
+fn pwd_of(cwd: Option<std::path::PathBuf>) -> String {
+    let mut t = terminals();
+    let mut cfg = sh_config("t1");
+    cfg.cwd = cwd;
+    let id = t.spawn(cfg).unwrap();
+    type_line(&t, id, "echo cwd=$(pwd -P)=end");
+    let f = wait_for(&t, id, "the pwd line", |f| {
+        f.lines().iter().any(|l| l.starts_with("cwd=") && l.ends_with("=end"))
+    });
+    let line = f.lines().into_iter().find(|l| l.starts_with("cwd=") && l.ends_with("=end")).unwrap();
+    close_all(t);
+    line["cwd=".len()..line.len() - "=end".len()].to_string()
+}
+
+#[test]
+fn a_shell_starts_in_the_given_directory() {
+    let dir = std::env::temp_dir().join(format!("mtasks-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let want = dir.canonicalize().unwrap();
+    assert_eq!(pwd_of(Some(dir.clone())), want.to_string_lossy());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_missing_directory_falls_back_to_home_and_the_shell_still_starts() {
+    let gone = std::env::temp_dir().join(format!("mtasks-gone-{}", std::process::id()));
+    assert!(!gone.exists());
+    let home = dirs::home_dir().unwrap().canonicalize().unwrap();
+    assert_eq!(pwd_of(Some(gone)), home.to_string_lossy());
+    assert_eq!(pwd_of(None), home.to_string_lossy());
+}
+
 #[test]
 fn a_program_setting_its_title_does_not_change_the_terminals_name() {
     let mut t = terminals();
