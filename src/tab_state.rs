@@ -47,7 +47,6 @@ impl Parked {
     }
 
     /// Forget a closed Tab's state.
-    #[allow(dead_code)] // used by the close-Tab ticket
     pub fn forget(&mut self, key: &TabKey) {
         self.0.remove(key);
     }
@@ -79,6 +78,25 @@ pub fn focus_index(set: &mut TabSet, index: usize) -> Switch {
         return Switch::Stay;
     }
     Switch::Moved { from, to: set.active().clone() }
+}
+
+/// The outcome of closing a Tab. `closed` is the key that went away (its
+/// parked state is to be forgotten, and a comment draft with it); `to` is the
+/// Tab to make live when the active Tab was the one closed, or when closing
+/// the last Tab opened the Home page. `None` when the active Tab is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closed {
+    pub closed: TabKey,
+    pub to: Option<TabKey>,
+}
+
+/// Close the Tab at `index`. Out of range does nothing (`None`). The last Tab
+/// is replaced by the Home page's Tab, so there's always one open.
+pub fn close_index(set: &mut TabSet, index: usize, home: &TabKey) -> Option<Closed> {
+    let closed = set.tabs().get(index)?.clone();
+    let changed = set.close(index, home);
+    let to = changed.then(|| set.active().clone());
+    Some(Closed { closed, to })
 }
 
 #[cfg(test)]
@@ -140,5 +158,43 @@ mod tests {
         let tab = ParkedTab::new(View::ProjectDetail("p".into()), None);
         assert_eq!(tab.view, View::Board);
         assert_eq!(ParkedTab::new(View::RecurringIssues, None).view, View::RecurringIssues);
+    }
+
+    #[test]
+    fn closing_a_background_tab_keeps_the_active_one() {
+        let mut set = TabSet::new(team("a"));
+        focus_team(&mut set, "b");
+        focus_team(&mut set, "c");
+        let out = close_index(&mut set, 0, &team("a")).unwrap();
+        assert_eq!(out, Closed { closed: team("a"), to: None });
+        assert_eq!(set.tabs(), &[team("b"), team("c")]);
+        assert_eq!(set.active(), &team("c"));
+    }
+
+    #[test]
+    fn closing_the_active_tab_focuses_a_neighbour() {
+        let mut set = TabSet::new(team("a"));
+        focus_team(&mut set, "b");
+        focus_team(&mut set, "c");
+        focus_index(&mut set, 1);
+        let out = close_index(&mut set, 1, &team("a")).unwrap();
+        assert_eq!(out, Closed { closed: team("b"), to: Some(team("c")) });
+        let out = close_index(&mut set, 1, &team("a")).unwrap();
+        assert_eq!(out.to, Some(team("a")));
+    }
+
+    #[test]
+    fn closing_the_last_tab_opens_home() {
+        let mut set = TabSet::new(team("a"));
+        let out = close_index(&mut set, 0, &team("h")).unwrap();
+        assert_eq!(out, Closed { closed: team("a"), to: Some(team("h")) });
+        assert_eq!(set.tabs(), &[team("h")]);
+    }
+
+    #[test]
+    fn closing_out_of_range_does_nothing() {
+        let mut set = TabSet::new(team("a"));
+        assert_eq!(close_index(&mut set, 3, &team("h")), None);
+        assert_eq!(set.tabs(), &[team("a")]);
     }
 }
