@@ -174,17 +174,41 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, key)| {
-                let label = match key {
-                    TabKey::Team(id) => self
-                        .teams
-                        .iter()
-                        .find(|t| t.id == *id)
-                        .map(|t| format!("{} {}", t.identifier, t.name))
-                        .unwrap_or_else(|| "Team".to_string()),
-                    _ => String::new(), // other kinds arrive in later tickets
-                };
+                let label = tab_state::label(
+                    key,
+                    |id| {
+                        self.teams
+                            .iter()
+                            .find(|t| t.id == id)
+                            .map(|t| (t.identifier.clone(), t.name.clone()))
+                    },
+                    |id| self.tab_projects.get(id).cloned(),
+                    |id| {
+                        self.dashboards
+                            .iter()
+                            .find(|d| d.id == id)
+                            .map(|d| d.name.clone())
+                    },
+                );
                 (label, i == set.active_index())
             })
             .collect()
+    }
+
+    /// Re-read the name and team of every open project Tab, so a rename that
+    /// arrived from Data sync shows from this reload on. Projects of other
+    /// teams aren't in `projects`, so this asks the local database.
+    pub(super) fn reload_tab_projects(&mut self, conn: &rusqlite::Connection) {
+        self.tab_projects.clear();
+        let Some(set) = &self.tab_set else {
+            return;
+        };
+        for key in set.tabs() {
+            if let TabKey::Project(id) = key {
+                if let Ok(Some(p)) = queries::get_project(conn, id) {
+                    self.tab_projects.insert(id.clone(), (p.name, p.team_id));
+                }
+            }
+        }
     }
 }

@@ -86,6 +86,35 @@ pub fn parked_view(key: &TabKey, view: View) -> View {
     }
 }
 
+/// The text a Tab shows in the bar. A team reads "IDENT Name"; a project
+/// reads "Name · IDENT" with its team's identifier last, so a team and a
+/// project with similar names differ at a glance; a page is its name.
+/// Lookups return `(identifier, name)` for a team, `(name, team id)` for a
+/// project and the name for a Dashboard; a missing row gives a plain kind
+/// word, never an empty label.
+pub fn label(
+    key: &TabKey,
+    team: impl Fn(&str) -> Option<(String, String)>,
+    project: impl Fn(&str) -> Option<(String, String)>,
+    dashboard: impl Fn(&str) -> Option<String>,
+) -> String {
+    match key {
+        TabKey::Team(id) => team(id)
+            .map(|(identifier, name)| format!("{identifier} {name}"))
+            .unwrap_or_else(|| "Team".to_string()),
+        TabKey::Project(id) => match project(id) {
+            Some((name, team_id)) => match team(&team_id) {
+                Some((identifier, _)) => format!("{name} \u{b7} {identifier}"),
+                None => name,
+            },
+            None => "Project".to_string(),
+        },
+        TabKey::MyIssues => "My Issues".to_string(),
+        TabKey::Inbox => "Inbox".to_string(),
+        TabKey::Dashboard(id) => dashboard(id).unwrap_or_else(|| "Dashboard".to_string()),
+    }
+}
+
 /// The Tab a view opens in when it is a cross-team page; `None` for views
 /// that stay inside the current team or project Tab.
 pub fn cross_team_key(view: &View) -> Option<TabKey> {
@@ -212,6 +241,36 @@ mod tests {
         for view in [View::Board, View::ProjectList, View::Roadmap, View::RecurringIssues] {
             assert_eq!(cross_team_key(&view), None);
         }
+    }
+
+    fn label_of(key: &TabKey) -> String {
+        label(
+            key,
+            |id| (id == "t").then(|| ("JAIT".to_string(), "Desktop".to_string())),
+            |id| (id == "p").then(|| ("Desktop".to_string(), "t".to_string())),
+            |id| (id == "d").then(|| "Weekly".to_string()),
+        )
+    }
+
+    #[test]
+    fn labels_say_what_each_tab_is() {
+        assert_eq!(label_of(&team("t")), "JAIT Desktop");
+        assert_eq!(label_of(&TabKey::Project("p".into())), "Desktop \u{b7} JAIT");
+        assert_eq!(label_of(&TabKey::MyIssues), "My Issues");
+        assert_eq!(label_of(&TabKey::Inbox), "Inbox");
+        assert_eq!(label_of(&TabKey::Dashboard("d".into())), "Weekly");
+    }
+
+    #[test]
+    fn a_team_and_a_project_with_similar_names_get_different_labels() {
+        assert_ne!(label_of(&team("t")), label_of(&TabKey::Project("p".into())));
+    }
+
+    #[test]
+    fn a_missing_row_still_gets_a_label() {
+        assert_eq!(label_of(&team("gone")), "Team");
+        assert_eq!(label_of(&TabKey::Project("gone".into())), "Project");
+        assert_eq!(label_of(&TabKey::Dashboard("gone".into())), "Dashboard");
     }
 
     #[test]

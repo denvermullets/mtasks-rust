@@ -792,6 +792,8 @@ pub struct App {
     /// fields; the others are in `parked_tabs`. None until a team exists.
     tab_set: Option<crate::tabs::TabSet>,
     parked_tabs: crate::tab_state::Parked,
+    /// Project id to (name, team id) for each open project Tab, for its label.
+    tab_projects: HashMap<String, (String, String)>,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -1070,6 +1072,7 @@ impl App {
             self.selected_team_id = default_team_id(&self.teams);
         }
         self.ensure_tab_set();
+        self.reload_tab_projects(&conn);
 
         if self.view.is_cross_team() {
             self.load_cross_team(&conn);
@@ -3098,6 +3101,7 @@ impl App {
             collapsed_dashboard_groups: Default::default(),
             dashboard_sessions: Default::default(),
             tab_set: None,
+            tab_projects: HashMap::new(),
             parked_tabs: Default::default(),
             open_view: None,
             save_view_name: String::new(),
