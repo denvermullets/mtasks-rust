@@ -12,17 +12,23 @@ pub enum Route {
     Palette,
     /// Cmd+V.
     Paste,
+    /// Cmd+1 to Cmd+9: the Tab at this zero-based position.
+    Tab(usize),
     Send(KeyInput),
     Ignore,
 }
 
+/// What a key does while a Terminal has focus. Command keys never reach the
+/// shell: Cmd+J, K, V and 1 to 9 are the app's, and Cmd+Q, Cmd+[ and Cmd+]
+/// are reserved (Quit is the native menu item; the others do nothing here, so
+/// no program ever sees a Command chord).
 pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
     if mods.logo() {
         return match code {
             Code::KeyJ => Route::ToggleFocus,
             Code::KeyK => Route::Palette,
             Code::KeyV => Route::Paste,
-            _ => Route::Ignore,
+            c => tab_position(c).map_or(Route::Ignore, Route::Tab),
         };
     }
     let Some(key) = term_key(code) else {
@@ -47,6 +53,21 @@ pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
         text,
         option_as_alt: true,
     })
+}
+
+fn tab_position(code: Code) -> Option<usize> {
+    let digits = [
+        Code::Digit1,
+        Code::Digit2,
+        Code::Digit3,
+        Code::Digit4,
+        Code::Digit5,
+        Code::Digit6,
+        Code::Digit7,
+        Code::Digit8,
+        Code::Digit9,
+    ];
+    digits.iter().position(|d| *d == code)
 }
 
 pub fn term_key(code: Code) -> Option<TermKey> {
@@ -160,6 +181,16 @@ mod tests {
         assert_eq!(route(Code::KeyK, Modifiers::LOGO, None), Route::Palette);
         assert_eq!(route(Code::KeyV, Modifiers::LOGO, None), Route::Paste);
         assert_eq!(route(Code::KeyX, Modifiers::LOGO, Some("x")), Route::Ignore);
+    }
+
+    #[test]
+    fn cmd_digits_pick_a_tab_and_other_reserved_keys_are_never_sent() {
+        assert_eq!(route(Code::Digit1, Modifiers::LOGO, Some("1")), Route::Tab(0));
+        assert_eq!(route(Code::Digit9, Modifiers::LOGO, Some("9")), Route::Tab(8));
+        assert_eq!(route(Code::Digit0, Modifiers::LOGO, Some("0")), Route::Ignore);
+        for code in [Code::KeyQ, Code::BracketLeft, Code::BracketRight] {
+            assert_eq!(route(code, Modifiers::LOGO, None), Route::Ignore);
+        }
     }
 
     #[test]
