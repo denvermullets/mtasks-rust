@@ -19,6 +19,9 @@ pub struct ParkedTab {
     pub selected_team_id: Option<String>,
     /// Last reported (offset, viewport) per scrollable, see `scroll_keys`.
     pub scroll_state: HashMap<usize, (f32, f32)>,
+    /// View search text and the view it was typed in.
+    pub search_query: String,
+    pub search_view: View,
 }
 
 impl ParkedTab {
@@ -35,6 +38,8 @@ impl ParkedTab {
             view,
             selected_team_id,
             scroll_state: HashMap::new(),
+            search_query: String::new(),
+            search_view: View::Board,
         }
     }
 }
@@ -226,5 +231,17 @@ mod tests {
         parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
         assert!(parked.take(&team("b")).unwrap().scroll_state.is_empty());
         assert_eq!(parked.take(&team("a")).unwrap().scroll_state[&0], (300.0, 500.0));
+    }
+
+    #[test]
+    fn view_search_stays_with_its_tab() {
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.search_query = "login".into();
+        parked.save(team("a"), a);
+        parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
+        assert_eq!(parked.take(&team("b")).unwrap().search_query, "");
+        let a = parked.take(&team("a")).unwrap();
+        assert_eq!((a.search_query.as_str(), a.search_view), ("login", View::Board));
     }
 }
