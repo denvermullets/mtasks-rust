@@ -216,6 +216,14 @@ impl Terminals {
         ids.into_iter().filter_map(|id| self.close(id)).collect()
     }
 
+    /// Test hook: show the top of the scrollback.
+    #[cfg(test)]
+    fn scroll_top(&self, id: TerminalId) {
+        if let Some(e) = self.entries.get(&id) {
+            e.engine.send(engine::Cmd::ScrollTop);
+        }
+    }
+
     /// Test hook: make the owner thread panic.
     #[cfg(test)]
     fn crash_owner(&self, id: TerminalId) {

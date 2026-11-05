@@ -457,4 +457,5 @@ mod hidden;
 mod lifecycle;
 mod load;
 mod resize;
+mod theme;
 mod wake;

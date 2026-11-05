@@ -12,6 +12,8 @@ pub struct SettingsFormState {
     pub api_token: String,
     pub theme: t::ThemeChoice,
     pub font: fonts::FontChoice,
+    pub terminal_font: fonts::FontChoice,
+    pub terminal_size: u16,
     pub native_notifications: bool,
     pub status: Option<String>,
     pub testing: bool,
@@ -24,6 +26,8 @@ impl SettingsFormState {
             api_token: cfg.api_token.clone().unwrap_or_default(),
             theme: t::choice_for_key(&cfg.theme),
             font: fonts::choice_for_key(&cfg.font),
+            terminal_font: fonts::terminal_choice_for_key(&cfg.terminal_font),
+            terminal_size: fonts::clamp_terminal_size(cfg.terminal_font_size).round() as u16,
             native_notifications: cfg.native_notifications,
             status: None,
             testing: false,
@@ -102,6 +106,37 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                 )
                 .push(
                     text("Applies after restart")
+                        .size(11)
+                        .color(t::text_muted()),
+                ),
+        )
+        .push(
+            column![]
+                .spacing(4)
+                .push(text("Terminal font").size(12).color(t::text_secondary()))
+                .push(
+                    pick_list(
+                        fonts::terminal_choices(),
+                        Some(form.terminal_font),
+                        Message::SettingsTerminalFontChanged,
+                    )
+                    .padding(10)
+                    .text_size(14)
+                    .width(Length::Fill),
+                )
+                .push(text("Terminal font size").size(12).color(t::text_secondary()))
+                .push(
+                    pick_list(
+                        fonts::TERMINAL_SIZES.to_vec(),
+                        Some(form.terminal_size),
+                        Message::SettingsTerminalSizeChanged,
+                    )
+                    .padding(10)
+                    .text_size(14)
+                    .width(Length::Fill),
+                )
+                .push(
+                    text("Applies to open Terminals straight away")
                         .size(11)
                         .color(t::text_muted()),
                 ),

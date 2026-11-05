@@ -20,9 +20,35 @@ use crate::terminal::panel::{PaneNotice, STRIP_HEIGHT};
 use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalId, TerminalMessage};
 use crate::theme as t;
 
-/// Family name inside the bundled JetBrains Mono files.
-pub const FONT_FAMILY: &str = "JetBrains Mono";
 pub const FONT_SIZE: f32 = 13.0;
+
+/// The Terminal font: a bundled monospace family and a size, both from config.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TermFont {
+    pub family: &'static str,
+    pub size: f32,
+}
+
+impl Default for TermFont {
+    fn default() -> Self {
+        TermFont {
+            family: crate::fonts::terminal_family(crate::fonts::DEFAULT_TERMINAL_FONT_KEY),
+            size: FONT_SIZE,
+        }
+    }
+}
+
+impl TermFont {
+    /// The font a config key names, at `size`. An unknown key gives the default family.
+    pub fn from_key(key: &str, size: f32) -> Self {
+        TermFont { family: crate::fonts::terminal_family(key), size: crate::fonts::clamp_terminal_size(size) }
+    }
+
+    /// Height of one cell: 1.25 em, rounded up.
+    fn line_height(&self) -> f32 {
+        (self.size * 1.25).ceil()
+    }
+}
 
 fn col(c: Rgb) -> Color {
     Color::from_rgb8(c[0], c[1], c[2])
@@ -47,6 +73,7 @@ pub struct Pane {
     bg: Cache,
     cursor: Cache,
     cell: (f32, f32),
+    font: TermFont,
     focused: bool,
 }
 
@@ -59,6 +86,7 @@ impl Pane {
             bg: Cache::new(),
             cursor: Cache::new(),
             cell: (FONT_SIZE * 0.6, (FONT_SIZE * 1.25).ceil()),
+            font: TermFont::default(),
             focused: false,
         }
     }
@@ -93,6 +121,15 @@ impl Pane {
     pub fn set_cell(&mut self, cell: (f32, f32)) {
         if cell != self.cell {
             self.cell = cell;
+            self.reset();
+        }
+    }
+
+    /// A new font or size: the glyphs change, so every row redraws. The cell
+    /// size follows through `set_cell`.
+    pub fn set_font(&mut self, font: TermFont) {
+        if font != self.font {
+            self.font = font;
             self.reset();
         }
     }
@@ -153,7 +190,8 @@ impl canvas::Program<Message> for Pane {
             self.bg
                 .draw(renderer, size, |fr| fr.fill_rectangle(Point::ORIGIN, size, col(f.bg))),
         );
-        let base = Font::with_name(FONT_FAMILY);
+        let base = Font::with_name(self.font.family);
+        let font_size = self.font.size;
         for (y, data) in f.rows.iter().enumerate() {
             let Some(cache) = self.caches.get(y) else {
                 break;
@@ -168,7 +206,7 @@ impl canvas::Program<Message> for Pane {
                     );
                 }
                 for run in &data.runs {
-                    draw_run(fr, run, base, cw, ch, py, None, f.bg);
+                    draw_run(fr, run, base, font_size, cw, ch, py, None, f.bg);
                 }
             }));
         }
@@ -213,7 +251,7 @@ impl canvas::Program<Message> for Pane {
                                 cells: 1,
                                 ..run.clone()
                             };
-                            draw_run(fr, &one, base, cw, ch, py, Some(f.bg), f.bg);
+                            draw_run(fr, &one, base, font_size, cw, ch, py, Some(f.bg), f.bg);
                         }
                     }
                 }
@@ -236,6 +274,7 @@ fn draw_run(
     fr: &mut canvas::Frame,
     run: &Run,
     base: Font,
+    font_size: f32,
     cw: f32,
     ch: f32,
     py: f32,
@@ -258,7 +297,7 @@ fn draw_run(
             content: run.text.clone(),
             position: Point::new(x, py),
             color: c,
-            size: Pixels(FONT_SIZE),
+            size: Pixels(font_size),
             line_height: iced::widget::text::LineHeight::Absolute(Pixels(ch)),
             font,
             horizontal_alignment: Horizontal::Left,
@@ -281,16 +320,16 @@ fn draw_run(
 
 /// Pixel size of one cell for the Terminal font: width of an "M", and a line
 /// height of 1.25 em. Needs the font loaded, so call it after startup.
-pub fn measure_cell() -> (f32, f32) {
+pub fn measure_cell(font: TermFont) -> (f32, f32) {
     type P = <Renderer as adv_text::Renderer>::Paragraph;
-    let ch = (FONT_SIZE * 1.25).ceil();
+    let ch = font.line_height();
     let n = 100.0;
     let p = P::with_text(adv_text::Text {
         content: &"M".repeat(n as usize),
         bounds: Size::INFINITY,
-        size: Pixels(FONT_SIZE),
+        size: Pixels(font.size),
         line_height: iced::widget::text::LineHeight::Absolute(Pixels(ch)),
-        font: Font::with_name(FONT_FAMILY),
+        font: Font::with_name(font.family),
         horizontal_alignment: Horizontal::Left,
         vertical_alignment: Vertical::Top,
         shaping: iced::widget::text::Shaping::Basic,
