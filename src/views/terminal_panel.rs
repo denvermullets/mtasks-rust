@@ -760,6 +760,7 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
     if let Some(note) = p.note {
         strip = strip.push(text(note).size(12).color(t::text_muted()));
     }
+    let has_dir = p.dir_label.is_some();
     strip = strip
         .push(Space::with_width(Length::Fill))
         .push(
@@ -773,8 +774,17 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             .padding([2, 8])
             .on_press(Message::Terminal(TerminalMessage::PickDir))
             .style(button::text),
-        )
-        .push(text("Cmd+J").size(11).color(t::text_muted()));
+        );
+    if has_dir {
+        // New shells start in home again.
+        strip = strip.push(
+            button(text("\u{00d7}").size(13))
+                .padding([0, 4])
+                .on_press(Message::Terminal(TerminalMessage::ClearDir))
+                .style(button::text),
+        );
+    }
+    strip = strip.push(text("Cmd+J").size(11).color(t::text_muted()));
     let strip = container(strip)
         .padding([0, 10])
         .height(STRIP_HEIGHT)

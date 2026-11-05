@@ -93,6 +93,9 @@ pub enum TerminalMessage {
     PickDir,
     /// The picker's answer; the app stores it (`db::terminal_dirs`).
     DirPicked(Option<std::path::PathBuf>),
+    /// The strip's clear button: new shells start in home again. The app
+    /// forgets the stored folder (`db::terminal_dirs::clear`).
+    ClearDir,
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
     /// The selected text, back from the Terminal (JRST-386); `None` copies nothing.
@@ -360,7 +363,7 @@ impl TerminalState {
                 );
             }
             // The app stores it first and then calls `set_team_dir`.
-            TerminalMessage::DirPicked(_) => {}
+            TerminalMessage::DirPicked(_) | TerminalMessage::ClearDir => {}
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
                 match input::route(code, mods, text.as_deref()) {
                     Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, team),
@@ -967,6 +970,19 @@ mod tests {
         assert!(!t.is_renaming());
         assert_eq!(t.roster.get(id).unwrap().name, "k1");
         assert!(t.focused, "the keyboard goes back to the shell");
+    }
+
+    #[test]
+    fn clearing_a_teams_folder_sends_new_shells_home_and_leaves_other_teams() {
+        let mut t = TerminalState::new();
+        t.set_team_dir("a", Some("/tmp".into()));
+        t.set_team_dir("b", Some("/var".into()));
+        t.set_team_dir("a", None);
+        assert!(!t.team_dirs.contains_key("a"));
+        assert!(t.team_dirs.contains_key("b"));
+        // Clearing is its own message, so a cancelled picker never clears.
+        let _ = t.update(TerminalMessage::DirPicked(None), Some("b"));
+        assert!(t.team_dirs.contains_key("b"));
     }
 
     #[test]

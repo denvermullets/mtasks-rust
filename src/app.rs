@@ -4200,6 +4200,14 @@ impl App {
                     }
                 }
             }
+            Message::Terminal(crate::terminal::TerminalMessage::ClearDir) => {
+                if let Some(team) = self.panel_team().map(str::to_string) {
+                    match crate::db::terminal_dirs::clear(&self.db(), &team) {
+                        Ok(()) => self.terminals.set_team_dir(&team, None),
+                        Err(e) => self.push_toast(format!("Could not clear the folder: {e}"), ToastKind::Error, false),
+                    }
+                }
+            }
             Message::Terminal(m) => {
                 if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {
                     self.modal = Modal::None;
