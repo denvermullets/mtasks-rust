@@ -980,6 +980,10 @@ impl App {
                 &self.view,
                 self.selected_team_id.as_deref(),
             )),
+            terminal_panel_showing: self.terminals.panel_showing(crate::terminal::panel_team(
+                &self.view,
+                self.selected_team_id.as_deref(),
+            )),
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -5392,6 +5396,9 @@ impl App {
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
                     PaletteNav::FocusTerminal => {
                         return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusTerminal))
+                    }
+                    PaletteNav::HidePanel => {
+                        return self.update(Message::Terminal(crate::terminal::TerminalMessage::Hide))
                     }
                     PaletteNav::FocusApp => {
                         return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusApp))

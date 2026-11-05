@@ -38,6 +38,8 @@ pub enum TerminalMessage {
     FocusTerminal,
     /// Palette: give the keyboard back to the app.
     FocusApp,
+    /// Hide the panel. Every Terminal keeps running; the keyboard goes to the app.
+    Hide,
     /// "New Terminal" on an empty panel.
     New,
     Key(Physical, keyboard::Modifiers, Option<String>),
@@ -114,6 +116,11 @@ impl TerminalState {
                 }
             }
             TerminalMessage::FocusApp => self.focused = false,
+            TerminalMessage::Hide => {
+                // `sync` tells the engine they're hidden (`set_visible`).
+                self.panel.visible = false;
+                self.focused = false;
+            }
             TerminalMessage::New => {
                 if let Some(team) = team {
                     self.panel.visible = true;
@@ -208,6 +215,11 @@ impl TerminalState {
             (Some(_), true) => F::Terminal,
             (Some(_), false) => F::App,
         }
+    }
+
+    /// The panel is on screen for this page.
+    pub fn panel_showing(&self, team: Option<&str>) -> bool {
+        team.is_some() && self.panel.visible
     }
 
     /// The panel for the current team, if it is showing.

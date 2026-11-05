@@ -62,6 +62,18 @@ fn a_paste_is_bracketed_once_the_program_asks_for_it() {
     close_all(t);
 }
 
+#[test]
+fn a_job_keeps_running_while_the_terminal_is_hidden() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    type_line(&t, id, "sleep 1; echo job-finished");
+    t.set_visible(id, false);
+    std::thread::sleep(Duration::from_millis(2500));
+    t.set_visible(id, true);
+    wait_for(&t, id, "the job's output on return", |f| f.contains_line("job-finished"));
+    close_all(t);
+}
+
 fn routed(code: iced::keyboard::key::Code, mods: iced::keyboard::Modifiers) -> KeyInput {
     use crate::terminal::input::{route, Route};
     match route(code, mods, None) {

@@ -31,6 +31,8 @@ pub enum PaletteNav {
     FocusTerminal,
     /// Give the keyboard back to the app (`TerminalMessage::FocusApp`).
     FocusApp,
+    /// Hide the Terminal panel (`TerminalMessage::Hide`).
+    HidePanel,
     /// Focus the open Tab at this position (`TabMessage::Focus`).
     Tab(usize),
 }
@@ -45,9 +47,10 @@ impl PaletteNav {
             PaletteNav::Project { .. } => "Project",
             PaletteNav::SavedView(_) => "View",
             PaletteNav::Dashboard(_) => "Dashboard",
-            PaletteNav::AttachFiles | PaletteNav::FocusTerminal | PaletteNav::FocusApp => {
-                "Command"
-            }
+            PaletteNav::AttachFiles
+            | PaletteNav::FocusTerminal
+            | PaletteNav::FocusApp
+            | PaletteNav::HidePanel => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -112,6 +115,8 @@ pub struct PaletteData {
     /// An issue detail is open, so issue-only commands are offered.
     pub on_issue_detail: bool,
     pub terminal_focus: TerminalFocus,
+    /// The Terminal panel is on screen, so it can be hidden.
+    pub terminal_panel_showing: bool,
 }
 
 /// Most rows the palette ever shows.
@@ -235,6 +240,13 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             });
         }
         _ => {}
+    }
+    if data.terminal_panel_showing && name_matches(needle, "Hide Terminal panel") {
+        rows.push(PaletteRow {
+            primary: "Hide Terminal panel".to_string(),
+            secondary: "Terminals keep running".to_string(),
+            nav: PaletteNav::HidePanel,
+        });
     }
 }
 
@@ -699,6 +711,16 @@ mod tests {
         // Unfiltered, the commands are listed too.
         let all = palette_results("", &with(TerminalFocus::App));
         assert!(all.iter().any(|r| r.nav == PaletteNav::FocusTerminal));
+    }
+
+    #[test]
+    fn hide_panel_is_offered_only_while_the_panel_shows() {
+        let hide = |terminal_panel_showing| {
+            let d = PaletteData { terminal_panel_showing, ..PaletteData::default() };
+            palette_results("hide", &d).into_iter().any(|r| r.nav == PaletteNav::HidePanel)
+        };
+        assert!(hide(true));
+        assert!(!hide(false));
     }
 
     #[test]
