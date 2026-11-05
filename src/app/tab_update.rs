@@ -266,8 +266,8 @@ impl App {
 
     /// Rebuild the detail page a parked draft was typed on and put the draft
     /// back. When the issue or project is gone the draft is discarded and the
-    /// Tab falls back to its Board.
-    fn restore_comment_draft(&mut self, draft: CommentDraft) {
+    /// Tab falls back to its root page.
+    fn restore_comment_draft(&mut self, draft: CommentDraft, key: &TabKey) {
         use iced::widget::text_editor::Content;
         let conn = self.db();
         let files = crate::views::issue_detail::ComposerFiles {
@@ -306,7 +306,7 @@ impl App {
             },
             _ => {}
         }
-        self.view = View::Board;
+        self.view = tab_state::root_view(key);
         self.drop_drafts(&draft.owner_ids());
     }
 
@@ -352,6 +352,22 @@ impl App {
                 DetailFrom::default(),
             ),
         };
+        // An issue deleted while the Tab was parked: show the Tab's root page,
+        // and drop what belonged to the issue (its Back origin, a draft).
+        let (view, gone) = {
+            let conn = self.db();
+            tab_state::resolve_parked(key, view, |id| {
+                matches!(queries::get_issue(&conn, id), Ok(Some(_)))
+            })
+        };
+        let (detail_from, draft) = if gone {
+            if let Some(draft) = &draft {
+                self.drop_drafts(&draft.owner_ids());
+            }
+            (DetailFrom::default(), None)
+        } else {
+            (detail_from, draft)
+        };
         self.scroll_state = scroll_state;
         (self.search_query, self.search_view) = search;
         self.open_view = open_view;
@@ -375,7 +391,7 @@ impl App {
             self.reload_recurring(&conn);
         }
         if let Some(draft) = draft {
-            self.restore_comment_draft(draft);
+            self.restore_comment_draft(draft, key);
         }
         if let View::IssueDetail(id) = self.view.clone() {
             if self.issue_detail.as_ref().map_or(true, |d| d.issue_id != id) {
