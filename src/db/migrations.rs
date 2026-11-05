@@ -818,6 +818,23 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 39,
+        name: "terminal_records",
+        up: "
+            -- One row per Terminal in a team's strip: its name and working
+            -- directory, not its process or scrollback. Local only: never queued
+            -- for Data sync. Removed with the team.
+            CREATE TABLE terminal_records (
+                id TEXT PRIMARY KEY,
+                team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                cwd TEXT,
+                position INTEGER NOT NULL
+            );
+            CREATE INDEX idx_terminal_records_team ON terminal_records(team_id, position);
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1375,6 +1392,31 @@ mod tests {
         run(&conn).unwrap();
 
         assert!(table_exists(&conn, "team_terminal_dirs"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v38_adds_the_terminal_records_table_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 39) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "terminal_records"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists(&conn, "terminal_records"));
         let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
         assert_eq!(teams, 1);
     }
