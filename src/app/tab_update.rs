@@ -71,6 +71,7 @@ impl App {
                 focused_lane: self.focused_lane,
                 focused_issue: self.focused_issue,
                 collapsed_sections: self.collapsed_sections.clone(),
+                open_view: self.open_view.clone(),
                 ..ParkedTab::new(self.view.clone(), self.selected_team_id.clone())
             },
         );
@@ -85,7 +86,7 @@ impl App {
     /// the Tab's offset (see `tab_state::scroll_keys`).
     pub(super) fn restore_tab(&mut self, key: &TabKey) -> Task<Message> {
         let parked = self.parked_tabs.take(key);
-        let (view, team, scroll_state, search, focus, collapsed) = match parked {
+        let (view, team, scroll_state, search, focus, collapsed, open_view) = match parked {
             Some(p) => (
                 p.view,
                 p.selected_team_id,
@@ -93,6 +94,7 @@ impl App {
                 (p.search_query, p.search_view),
                 (p.focused_lane, p.focused_issue),
                 p.collapsed_sections,
+                p.open_view,
             ),
             None => (
                 View::Board,
@@ -104,11 +106,12 @@ impl App {
                 (String::new(), View::Board),
                 (0, 0),
                 Default::default(),
+                None,
             ),
         };
         self.scroll_state = scroll_state;
         (self.search_query, self.search_view) = search;
-        self.open_view = None;
+        self.open_view = open_view;
         self.detail_from_my_issues = false;
         self.detail_from_inbox = false;
         self.detail_from_dashboard = None;

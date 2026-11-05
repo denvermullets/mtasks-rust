@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::app::View;
+use crate::saved_view::OpenView;
 use crate::tabs::{TabKey, TabSet};
 use crate::views::{board, inbox, issue_list, projects, recurring_issues, roadmap};
 
@@ -25,6 +26,10 @@ pub struct ParkedTab {
     pub focused_lane: usize,
     pub focused_issue: usize,
     pub collapsed_sections: HashSet<String>,
+    /// The Saved view open in this Tab with any unsaved changes (a Modified
+    /// view). Switching Tabs keeps it; leaving the view inside the Tab drops
+    /// it as before.
+    pub open_view: Option<OpenView>,
 }
 
 impl ParkedTab {
@@ -46,6 +51,7 @@ impl ParkedTab {
             focused_lane: 0,
             focused_issue: 0,
             collapsed_sections: HashSet::new(),
+            open_view: None,
         }
     }
 }
@@ -266,5 +272,27 @@ mod tests {
         let a = parked.take(&team("a")).unwrap();
         assert_eq!((a.focused_lane, a.focused_issue), (2, 5));
         assert!(a.collapsed_sections.contains("Done"));
+    }
+
+    #[test]
+    fn a_modified_view_parks_with_its_tab() {
+        use crate::saved_view::{BoardState, OpenView, RawQuery};
+        let mut modified = BoardState::default();
+        modified.search = "changed".into();
+        let open = OpenView {
+            view_id: "v".into(),
+            team_id: "a".into(),
+            name: "Mine".into(),
+            state: modified,
+            raw: RawQuery::new(),
+            baseline: BoardState::default(),
+        };
+        let mut parked = Parked::default();
+        let mut a = ParkedTab::new(View::Board, Some("a".into()));
+        a.open_view = Some(open.clone());
+        parked.save(team("a"), a);
+        parked.save(team("b"), ParkedTab::new(View::Board, Some("b".into())));
+        assert!(parked.take(&team("b")).unwrap().open_view.is_none());
+        assert_eq!(parked.take(&team("a")).unwrap().open_view, Some(open));
     }
 }

@@ -3968,9 +3968,16 @@ impl App {
             Message::Tab(m) => return self.update_tab(m),
 
             Message::SelectTeamView(team_id, view) => {
+                let before = self.tab_set.as_ref().map(|s| s.active().clone());
                 let scroll = self.focus_team_tab(&team_id);
-                // Going to a team's own pages leaves any open Saved view.
-                self.open_view = None;
+                let moved = before != self.tab_set.as_ref().map(|s| s.active().clone());
+                // Going to a team's own pages leaves any open Saved view. A
+                // switch of Tab doesn't: the Tab's Modified view came back
+                // with it, and `retain_open_view` below drops it if the
+                // page asked for isn't its board.
+                if !moved {
+                    self.open_view = None;
+                }
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
@@ -3985,6 +3992,7 @@ impl App {
                     self.reload_data();
                 }
                 self.view = view;
+                self.retain_open_view();
                 if self.view == View::RecurringIssues {
                     let conn = self.db();
                     self.reload_recurring(&conn);
