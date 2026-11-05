@@ -31,8 +31,11 @@ use crate::views::{
     board, command_palette, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
     project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
-    team_list, team_members, team_picker, toast,
+    tab_bar, team_list, team_members, team_picker, toast,
 };
+
+mod tab_update;
+pub use tab_update::TabMessage;
 
 /// Where an issue detail opened from a dashboard returns to.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +52,8 @@ pub enum Message {
     ToggleTeamExpanded(String),
     /// Select a team and switch the right pane to `view` (team sub-row click).
     SelectTeamView(String, View),
+    /// Tab bar actions; handled in `app/tab_update.rs`.
+    Tab(TabMessage),
     /// Open a Saved view (local id) on its team's board.
     OpenSavedView(String),
     /// Pause (false) or resume (true) a recurring issue (local id); local
@@ -783,6 +788,10 @@ pub struct App {
     collapsed_dashboard_groups: crate::views::dashboard::CollapsedGroups,
     /// Header state and focus parked per dashboard (session only).
     dashboard_sessions: crate::dashboard_session::Sessions,
+    /// Open Tabs (ADR 0001). The active Tab's state is this struct's live
+    /// fields; the others are in `parked_tabs`. None until a team exists.
+    tab_set: Option<crate::tabs::TabSet>,
+    parked_tabs: crate::tab_state::Parked,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -1058,6 +1067,7 @@ impl App {
         if self.selected_team_id.is_none() {
             self.selected_team_id = default_team_id(&self.teams);
         }
+        self.ensure_tab_set();
 
         if self.view.is_cross_team() {
             self.load_cross_team(&conn);
@@ -3057,6 +3067,8 @@ impl App {
             dashboard_header: Default::default(),
             collapsed_dashboard_groups: Default::default(),
             dashboard_sessions: Default::default(),
+            tab_set: None,
+            parked_tabs: Default::default(),
             open_view: None,
             save_view_name: String::new(),
             save_view_error: None,
@@ -3951,7 +3963,10 @@ impl App {
                 }
             }
 
+            Message::Tab(m) => return self.update_tab(m),
+
             Message::SelectTeamView(team_id, view) => {
+                self.focus_team_tab(&team_id);
                 // Going to a team's own pages leaves any open Saved view.
                 self.open_view = None;
                 self.commit_issue_detail();
@@ -3959,8 +3974,8 @@ impl App {
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
-                let from_my = self.view == View::MyIssues;
-                if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_my {
+                let from_cross = self.view.is_cross_team();
+                if self.selected_team_id.as_deref() != Some(team_id.as_str()) || from_cross {
                     self.selected_team_id = Some(team_id);
                     self.focused_lane = 0;
                     self.focused_issue = 0;
@@ -6778,6 +6793,7 @@ impl App {
         );
 
         let main_content = column![]
+            .push(tab_bar::view(&self.tab_labels()))
             .push(header)
             .push(main_pane)
             .push(status)

@@ -26,7 +26,8 @@ mod schedule_summary;
 mod scroll;
 mod search_match;
 mod sync;
-#[allow(dead_code)] // wired into App by later Tab tickets
+mod tab_state;
+#[allow(dead_code)] // close, from_parts and friends are wired by later Tab tickets
 mod tabs;
 mod theme;
 mod views;
