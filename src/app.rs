@@ -380,6 +380,7 @@ pub enum Message {
     SettingsThemeChanged(t::ThemeChoice),
     /// Font picked in Settings: saves to config; applies after restart.
     SettingsFontChanged(fonts::FontChoice),
+    SettingsTerminalFontChanged(fonts::FontChoice),
     SettingsNativeNotificationsToggled(bool),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
@@ -3175,6 +3176,8 @@ impl App {
             sync_paused_auth: false,
         };
 
+        app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, crate::views::terminal_panel::FONT_SIZE));
+
         // Restore the stored Tabs and focus the Home page's. Doing this before
         // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
         let restored = app.launch_tabs();
@@ -5444,6 +5447,17 @@ impl App {
                     form.font = choice;
                 }
                 // No live apply: Iced fixes the default font at launch.
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SettingsTerminalFontChanged(choice) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.terminal_font = choice.key.to_string();
+                if let Some(ref mut form) = self.settings_form {
+                    form.terminal_font = choice;
+                }
+                // Applied live: the Terminals re-measure and resize on the next sync.
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&choice.key, crate::views::terminal_panel::FONT_SIZE));
                 self.save_config_change(new_cfg);
             }
 

@@ -22,7 +22,7 @@ use super::panel::{self, PanelState, Toggle};
 use super::{active_term_theme, SpawnConfig, TerminalId, Terminals};
 use crate::app::Message;
 use crate::theme as t;
-use crate::views::terminal_panel::{self, Pane, PanelView};
+use crate::views::terminal_panel::{self, Pane, PanelView, TermFont};
 
 #[derive(Debug, Clone)]
 pub enum TerminalMessage {
@@ -50,6 +50,7 @@ pub struct TerminalState {
     focused: bool,
     window: Size,
     cell: Option<(f32, f32)>,
+    font: TermFont,
     pane: Pane,
     shown: Option<TerminalId>,
     sent_visible: HashMap<TerminalId, bool>,
@@ -72,6 +73,7 @@ impl TerminalState {
             focused: false,
             window: Size::new(1100.0, 700.0),
             cell: None,
+            font: TermFont::default(),
             pane: Pane::new(),
             shown: None,
             sent_visible: HashMap::new(),
@@ -183,6 +185,23 @@ impl TerminalState {
         self.pane.set_focused(self.focused);
     }
 
+    /// Apply the Terminal font from config, live. The cell is measured again;
+    /// `sync` then resizes the shown Terminal's grid and PTY to it, and a
+    /// hidden Terminal follows when it is next shown.
+    pub fn set_font(&mut self, font: TermFont) {
+        if font == self.font {
+            return;
+        }
+        self.font = font;
+        self.pane.set_font(font);
+        if self.cell.is_some() {
+            let cell = terminal_panel::measure_cell(font);
+            self.cell = Some(cell);
+            self.pane.set_cell(cell);
+        }
+        self.sent_size.clear();
+    }
+
     /// Whether key presses go to the Terminal instead of the app's shortcuts.
     pub fn takes_keys(&self, modal_open: bool) -> bool {
         self.focused && self.panel.visible && !modal_open
@@ -268,7 +287,8 @@ impl TerminalState {
     }
 
     fn create(&mut self, team: &str) {
-        let cell = *self.cell.get_or_insert_with(terminal_panel::measure_cell);
+        let font = self.font;
+        let cell = *self.cell.get_or_insert_with(|| terminal_panel::measure_cell(font));
         self.pane.set_cell(cell);
         let (cols, rows) = self.grid(cell);
         let config = SpawnConfig {

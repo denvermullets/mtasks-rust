@@ -222,6 +222,38 @@ fn code_for(ui: Font) -> Font {
     }
 }
 
+/// Default Terminal font: a config key from the catalog.
+pub const DEFAULT_TERMINAL_FONT_KEY: &str = "jetbrains-mono";
+
+/// A monospace catalog entry, which is all the Terminal font can be.
+fn terminal_def(key: &str) -> &'static FontDef {
+    FONTS
+        .iter()
+        .find(|f| f.key == key && f.family.is_some_and(|n| MONO_FAMILIES.contains(&n)))
+        .unwrap_or_else(|| lookup(DEFAULT_TERMINAL_FONT_KEY))
+}
+
+/// Family name for a Terminal font key. A key that is unknown or not
+/// monospace resolves to JetBrains Mono.
+pub fn terminal_family(key: &str) -> &'static str {
+    terminal_def(key).family.unwrap_or(FALLBACK_MONO)
+}
+
+/// The monospace fonts a Terminal can use, in catalog order, for a picker.
+pub fn terminal_choices() -> Vec<FontChoice> {
+    FONTS
+        .iter()
+        .filter(|f| f.family.is_some_and(|n| MONO_FAMILIES.contains(&n)))
+        .map(|f| FontChoice { key: f.key, name: f.name })
+        .collect()
+}
+
+/// The picker choice for a Terminal font key.
+pub fn terminal_choice_for_key(key: &str) -> FontChoice {
+    let f = terminal_def(key);
+    FontChoice { key: f.key, name: f.name }
+}
+
 /// A catalog entry for pick lists: displays as the font name, carries the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontChoice {
@@ -372,6 +404,25 @@ mod tests {
             let mono = MONO_FAMILIES.iter().any(|m| Some(*m) == f.family);
             assert_eq!(n, if mono { f.family.unwrap() } else { FALLBACK_MONO }, "{}", f.key);
         }
+    }
+
+    #[test]
+    fn terminal_choices_are_the_six_monospace_fonts() {
+        let names: Vec<_> = terminal_choices().iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            ["IBM Plex Mono", "JetBrains Mono", "Fira Code", "SUSE Mono", "Roboto Mono", "Atkinson Hyperlegible Mono"]
+        );
+        assert_eq!(terminal_choice_for_key("fira-code").key, "fira-code");
+    }
+
+    #[test]
+    fn terminal_font_falls_back_to_jetbrains_mono() {
+        for key in ["inter", "system", "nope", ""] {
+            assert_eq!(terminal_family(key), "JetBrains Mono", "{key}");
+            assert_eq!(terminal_choice_for_key(key).key, DEFAULT_TERMINAL_FONT_KEY, "{key}");
+        }
+        assert_eq!(terminal_family("roboto-mono"), "Roboto Mono");
     }
 
     #[test]
