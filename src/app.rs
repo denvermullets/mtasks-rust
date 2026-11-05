@@ -1606,9 +1606,12 @@ impl App {
         }
     }
 
-    /// Whose display options and filters the active board uses: the selected
-    /// team's, or the global set on cross-team pages.
+    /// Whose display options and filters the active board uses: My Issues' own,
+    /// the selected team's, or the global set on other cross-team pages.
     fn board_scope(&self) -> config::BoardScope {
+        if self.view == View::MyIssues {
+            return config::BoardScope::MyIssues;
+        }
         match &self.selected_team_id {
             Some(id) if !self.view.is_cross_team() => config::BoardScope::Team(id.clone()),
             _ => config::BoardScope::Global,

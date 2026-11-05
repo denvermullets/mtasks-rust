@@ -25,8 +25,10 @@ pub const APP_DIR: &str = if cfg!(debug_assertions) { "mtasks-rusty" } else { "J
 /// Whose display options (and filters) a board reads and writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardScope {
-    /// No team of its own (cross-team pages): the global set.
+    /// Cross-team pages without a set of their own: the global set.
     Global,
+    /// The My Issues page's own set.
+    MyIssues,
     /// One team's board, by local team id.
     Team(String),
 }
@@ -56,6 +58,10 @@ pub struct Config {
     /// first time its options change, copied from the global set.
     #[serde(default)]
     pub team_display: BTreeMap<String, DisplayOptions>,
+    /// My Issues' own display options. None until they first change, and then
+    /// the page reads the global set (seeded on first edit).
+    #[serde(default)]
+    pub my_issues_display: Option<DisplayOptions>,
     /// Global board issue filters: what a team without its own entry in
     /// `team_filters` starts from, and what cross-team pages use.
     #[serde(default)]
@@ -64,6 +70,9 @@ pub struct Config {
     /// its filters change or are pruned, copied from the global set.
     #[serde(default)]
     pub team_filters: BTreeMap<String, Filters>,
+    /// My Issues' own filters; None until first changed or pruned.
+    #[serde(default)]
+    pub my_issues_filters: Option<Filters>,
     /// Key of the selected color theme (see `theme::THEMES`).
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -103,8 +112,10 @@ impl Default for Config {
             current_user_name: None,
             display: DisplayOptions::default(),
             team_display: BTreeMap::new(),
+            my_issues_display: None,
             filters: Filters::default(),
             team_filters: BTreeMap::new(),
+            my_issues_filters: None,
             theme: default_theme(),
             font: default_font(),
             native_notifications: true,
@@ -118,6 +129,7 @@ impl Config {
     pub fn display_for(&self, scope: &BoardScope) -> &DisplayOptions {
         match scope {
             BoardScope::Global => &self.display,
+            BoardScope::MyIssues => self.my_issues_display.as_ref().unwrap_or(&self.display),
             BoardScope::Team(id) => self.team_display.get(id).unwrap_or(&self.display),
         }
     }
@@ -127,6 +139,10 @@ impl Config {
     pub fn display_for_mut(&mut self, scope: &BoardScope) -> &mut DisplayOptions {
         match scope {
             BoardScope::Global => &mut self.display,
+            BoardScope::MyIssues => {
+                let seed = &self.display;
+                self.my_issues_display.get_or_insert_with(|| seed.clone())
+            }
             BoardScope::Team(id) => {
                 let seed = &self.display;
                 self.team_display
@@ -142,6 +158,7 @@ impl Config {
     pub fn filters_for(&self, scope: &BoardScope) -> &Filters {
         match scope {
             BoardScope::Global => &self.filters,
+            BoardScope::MyIssues => self.my_issues_filters.as_ref().unwrap_or(&self.filters),
             BoardScope::Team(id) => self.team_filters.get(id).unwrap_or(&self.filters),
         }
     }
@@ -151,6 +168,10 @@ impl Config {
     pub fn filters_for_mut(&mut self, scope: &BoardScope) -> &mut Filters {
         match scope {
             BoardScope::Global => &mut self.filters,
+            BoardScope::MyIssues => {
+                let seed = &self.filters;
+                self.my_issues_filters.get_or_insert_with(|| seed.clone())
+            }
             BoardScope::Team(id) => {
                 let seed = &self.filters;
                 self.team_filters
@@ -434,5 +455,42 @@ mod tests {
         let old: Config = toml::from_str("[filters]\npriorities = [\"1\"]\n").unwrap();
         assert!(old.team_filters.is_empty());
         assert_eq!(old.filters.priorities, vec!["1"]);
+    }
+
+    #[test]
+    fn my_issues_is_separate_from_teams_and_seeds_from_global() {
+        let mut cfg = Config::default();
+        cfg.display.order_by = OrderBy::DueDate;
+        cfg.filters.toggle(FilterField::Priority, "1");
+        let team = BoardScope::Team("a".into());
+        assert_eq!(cfg.display_for(&BoardScope::MyIssues), &cfg.display);
+        assert_eq!(cfg.filters_for(&BoardScope::MyIssues), &cfg.filters);
+
+        cfg.display_for_mut(&BoardScope::MyIssues).group_by = GroupBy::Priority;
+        cfg.filters_for_mut(&BoardScope::MyIssues)
+            .toggle(FilterField::Priority, "2");
+        assert_eq!(cfg.display_for(&BoardScope::MyIssues).order_by, OrderBy::DueDate);
+        assert_eq!(cfg.filters_for(&BoardScope::MyIssues).priorities, vec!["1", "2"]);
+        assert_eq!(cfg.display_for(&team), &cfg.display);
+        assert_eq!(cfg.filters_for(&team).priorities, vec!["1"]);
+
+        cfg.display_for_mut(&team).group_by = GroupBy::Assignee;
+        cfg.filters_for_mut(&team).clear();
+        assert_eq!(cfg.display_for(&BoardScope::MyIssues).group_by, GroupBy::Priority);
+        assert_eq!(cfg.filters_for(&BoardScope::MyIssues).priorities, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn my_issues_round_trips_and_old_config_has_none() {
+        let mut cfg = Config::default();
+        cfg.display_for_mut(&BoardScope::MyIssues).group_by = GroupBy::Assignee;
+        cfg.filters_for_mut(&BoardScope::MyIssues)
+            .toggle(FilterField::Priority, "3");
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.my_issues_display, cfg.my_issues_display);
+        assert_eq!(back.my_issues_filters, cfg.my_issues_filters);
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert!(old.my_issues_display.is_none() && old.my_issues_filters.is_none());
+        assert_eq!(old.display_for(&BoardScope::MyIssues), &old.display);
     }
 }
