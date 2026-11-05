@@ -39,6 +39,29 @@ fn cat_v_shows(key: KeyInput) -> String {
     line
 }
 
+#[test]
+fn a_paste_reaches_the_shell() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    t.paste(id, "echo pasted-$((6*7))\n".to_string());
+    wait_for(&t, id, "pasted output", |f| f.contains_line("pasted-42"));
+    close_all(t);
+}
+
+#[test]
+fn a_paste_is_bracketed_once_the_program_asks_for_it() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    type_line(&t, id, "stty -icanon -echo; printf '\\033[?2004h'; cat -v");
+    std::thread::sleep(Duration::from_millis(700));
+    t.paste(id, "one\ntwo".to_string());
+    let f = wait_for(&t, id, "bracketed paste", |f| {
+        f.lines().iter().any(|l| l.contains("^[[200~one"))
+    });
+    assert!(f.lines().iter().any(|l| l.contains("two^[[201~")), "{:?}", f.lines());
+    close_all(t);
+}
+
 fn routed(code: iced::keyboard::key::Code, mods: iced::keyboard::Modifiers) -> KeyInput {
     use crate::terminal::input::{route, Route};
     match route(code, mods, None) {
