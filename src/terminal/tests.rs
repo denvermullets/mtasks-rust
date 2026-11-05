@@ -465,10 +465,13 @@ fn mode_2031_pushes_a_report_when_the_theme_changes() {
 }
 
 mod hidden;
+mod keys;
+mod lifecycle;
 mod links;
 mod load;
 mod mouse;
 mod resize;
 mod scroll;
 mod select;
+mod theme;
 mod wake;

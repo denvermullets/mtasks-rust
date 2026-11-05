@@ -6,6 +6,7 @@
 //! - PTY writer: writes to the PTY, so a child that stops reading can't stall emulation.
 //!
 //! Ported from the JRST-328 spike. Nothing here runs on tokio.
+use super::palette::{min_contrast, CONTRAST_FLOOR};
 use super::*;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::CellWide;
@@ -45,6 +46,8 @@ pub(super) enum Cmd {
     Shutdown,
     #[cfg(test)]
     Panic,
+    #[cfg(test)]
+    ScrollTop,
 }
 
 /// What the owner thread shares with the API side.
@@ -228,6 +231,12 @@ impl Engine {
 
     pub(super) fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// The PTY's foreground process group isn't the shell's own.
+    pub(super) fn busy(&self) -> bool {
+        let fg = self.master.lock().ok().and_then(|m| m.process_group_leader());
+        fg.is_some_and(|fg| fg != self.pid as libc::pid_t)
     }
 
     pub(super) fn exited(&self) -> bool {
@@ -699,6 +708,10 @@ fn owner(
                 Cmd::Shutdown => return,
                 #[cfg(test)]
                 Cmd::Panic => panic!("test: owner thread panic"),
+                #[cfg(test)]
+                Cmd::ScrollTop => {
+                    term.scroll_viewport(ScrollViewport::Top);
+                }
                 Cmd::Output(b) => {
                     term.vt_write(&b);
                     inflight.fetch_sub(b.len() as u64, Relaxed);
@@ -942,6 +955,21 @@ fn owner(
     }
 }
 
+/// Always on; tests switch it off to time what the floor costs.
+fn floor_enabled() -> bool {
+    #[cfg(test)]
+    {
+        FLOOR_OFF.load(Relaxed) == false
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
+static FLOOR_OFF: AtomicBool = AtomicBool::new(false);
+
 fn apply_theme(term: &mut Terminal<'_, '_>, t: &TermTheme) {
     let c = |c: Rgb| RgbColor { r: c[0], g: c[1], b: c[2] };
     term.set_default_fg_color(Some(c(t.fg))).unwrap();
@@ -983,6 +1011,7 @@ fn build_frame(
     let mut rows = Vec::with_capacity(nrows);
     let mut iter = row_it.update(&snap).ok()?;
     let mut y = 0usize;
+    let mut floored: Option<(Rgb, Rgb, Rgb)> = None;
     let mut text = String::new();
     while let Some(row) = iter.next() {
         let clean = !full && !row.dirty().unwrap_or(true) && y < prev.len();
@@ -1047,8 +1076,20 @@ fn build_frame(
                 }
                 text.clear();
                 let _ = cell.graphemes_utf8(&mut text);
-                let fg = fg.unwrap_or(rgb(colors.foreground));
+                let mut fg = fg.unwrap_or(rgb(colors.foreground));
                 let blank = text.is_empty() || invisible;
+                if !blank && floor_enabled() {
+                    // The contrast floor (JRST-393). Invisible text is blanked above and never floored.
+                    let cell_bg = bg.unwrap_or(rgb(colors.background));
+                    fg = match floored {
+                        Some((f, b, out)) if f == fg && b == cell_bg => out,
+                        _ => {
+                            let out = min_contrast(fg, cell_bg, CONTRAST_FLOOR);
+                            floored = Some((fg, cell_bg, out));
+                            out
+                        }
+                    };
+                }
                 if blank && !underline && !strike {
                     // Plain blank: extends a same-style ASCII run only if more text follows; trimmed below.
                     if let Some(r) = data.runs.last_mut() {
@@ -1142,4 +1183,55 @@ fn build_frame(
         tracking: term.is_mouse_tracking().unwrap_or(false),
         alt: term.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false),
     })
+}
+
+#[cfg(test)]
+mod cost {
+    use super::*;
+
+    /// Time a full frame build of a 200x40 screen, floor off then on. Run with
+    /// `cargo test --release floor_cost -- --ignored --nocapture`.
+    fn timed(label: &str, fill: &dyn Fn(usize, usize) -> String) {
+        let mut term: Terminal<'static, 'static> = Terminal::new(200, 40).unwrap();
+        let mut out = String::new();
+        for y in 0..40 {
+            for x in 0..200 {
+                out.push_str(&fill(x, y));
+            }
+            out.push_str("\x1b[0m\r\n");
+        }
+        term.vt_write(out.as_bytes());
+        let mut rs = RenderState::new().unwrap();
+        let mut row_it = RowIterator::new().unwrap();
+        let mut cell_it = CellIterator::new().unwrap();
+        for off in [true, false, true, false] {
+            FLOOR_OFF.store(off, Relaxed);
+            let mut prev = vec![];
+            let n = 200;
+            let t0 = Instant::now();
+            for _ in 0..n {
+                build_frame(&term, &mut rs, &mut row_it, &mut cell_it, &mut prev, true, false, &mut false, [0; 3])
+                    .unwrap();
+            }
+            let per = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+            println!("{label:28} floor {:3}: {per:8.1} us per full frame", if off { "off" } else { "on" });
+        }
+        FLOOR_OFF.store(false, Relaxed);
+    }
+
+    #[test]
+    #[ignore]
+    fn floor_cost() {
+        timed("plain text (default colours)", &|x, _| format!("{}", (b'a' + (x % 26) as u8) as char));
+        timed("ansi colour every 8 cells", &|x, y| {
+            let c = 31 + ((x / 8 + y) % 7);
+            format!("\x1b[{c}m{}", (b'a' + (x % 26) as u8) as char)
+        });
+        timed("truecolor, every cell differs", &|x, y| {
+            format!("\x1b[38;2;{};{};{}m{}", (x * 7) % 256, (y * 11) % 256, (x * y) % 256, 'x')
+        });
+        timed("truecolor fg+bg, all differ", &|x, y| {
+            format!("\x1b[38;2;{};{};{};48;2;{};{};{}mx", (x * 7) % 256, (y * 11) % 256, (x * y) % 256, (x * 3) % 256, (y * 5) % 256, (x + y) % 256)
+        });
+    }
 }

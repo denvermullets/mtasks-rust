@@ -13,20 +13,46 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::keyboard;
 use iced::mouse::{self, Cursor};
 use iced::widget::canvas::{self, Cache, Canvas, Geometry, Text};
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{button, column, container, row, text, text_input, Space};
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
-use crate::terminal::panel::STRIP_HEIGHT;
+use crate::terminal::panel::{Layout, PaneNotice, PANE_GAP, STRIP_HEIGHT};
 use crate::terminal::{
     links::Link, pointer, CursorShape, Frame, KeyMods, MouseAction, MouseButton, MouseInput, Rgb, RowData, Run,
-    TerminalMessage, WheelInput,
+    TerminalId, TerminalMessage, WheelInput,
 };
 use crate::theme as t;
 
-/// Family name inside the bundled JetBrains Mono files.
-pub const FONT_FAMILY: &str = "JetBrains Mono";
 pub const FONT_SIZE: f32 = 13.0;
+
+/// The Terminal font: a bundled monospace family and a size, both from config.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TermFont {
+    pub family: &'static str,
+    pub size: f32,
+}
+
+impl Default for TermFont {
+    fn default() -> Self {
+        TermFont {
+            family: crate::fonts::terminal_family(crate::fonts::DEFAULT_TERMINAL_FONT_KEY),
+            size: FONT_SIZE,
+        }
+    }
+}
+
+impl TermFont {
+    /// The font a config key names, at `size`. An unknown key gives the default family.
+    pub fn from_key(key: &str, size: f32) -> Self {
+        TermFont { family: crate::fonts::terminal_family(key), size: crate::fonts::clamp_terminal_size(size) }
+    }
+
+    /// Height of one cell: 1.25 em, rounded up.
+    fn line_height(&self) -> f32 {
+        (self.size * 1.25).ceil()
+    }
+}
 
 fn col(c: Rgb) -> Color {
     Color::from_rgb8(c[0], c[1], c[2])
@@ -76,12 +102,20 @@ pub struct Pane {
     hover: Option<Link>,
     hover_cache: Cache,
     cell: (f32, f32),
+    font: TermFont,
     focused: bool,
+    /// The panel slot this pane draws, sent with its focus click.
+    slot: usize,
 }
 
 impl Pane {
     pub fn new() -> Self {
+        Self::for_slot(0)
+    }
+
+    pub fn for_slot(slot: usize) -> Self {
         Pane {
+            slot,
             frame: Arc::new(Frame::default()),
             caches: Vec::new(),
             last: Vec::new(),
@@ -90,6 +124,7 @@ impl Pane {
             hover: None,
             hover_cache: Cache::new(),
             cell: (FONT_SIZE * 0.6, (FONT_SIZE * 1.25).ceil()),
+            font: TermFont::default(),
             focused: false,
         }
     }
@@ -152,6 +187,15 @@ impl Pane {
         }
     }
 
+    /// A new font or size: the glyphs change, so every row redraws. The cell
+    /// size follows through `set_cell`.
+    pub fn set_font(&mut self, font: TermFont) {
+        if font != self.font {
+            self.font = font;
+            self.reset();
+        }
+    }
+
     pub fn set_focused(&mut self, focused: bool) {
         if focused != self.focused {
             self.focused = focused;
@@ -187,14 +231,15 @@ impl canvas::Program<Message> for Pane {
             // Cmd going down or up over a link underlines it or not.
             let link = cursor.position_in(bounds).filter(|_| m.logo()).and_then(|p| self.link_under(p));
             if link != self.hover {
-                return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(link))));
+                return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(self.slot, link))));
             }
             return (Ignored, None);
         }
         let canvas::Event::Mouse(ev) = event else {
             return (Ignored, None);
         };
-        let send = |input: MouseInput| Some(Message::Terminal(TerminalMessage::Mouse(input)));
+        let slot = self.slot;
+        let send = |input: MouseInput| Some(Message::Terminal(TerminalMessage::Mouse(slot, input)));
         let at = |p: Point| {
             let (c, r) = pointer::cell_at(p.x - bounds.x, p.y - bounds.y, self.cell.0, self.cell.1);
             (c, r)
@@ -244,7 +289,7 @@ impl canvas::Program<Message> for Pane {
                 let inside = Point::new(position.x - bounds.x, position.y - bounds.y);
                 let link = bounds.contains(position).then(|| self.link_under(inside)).flatten();
                 if link != self.hover {
-                    return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(link))));
+                    return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(slot, link))));
                 }
                 (Ignored, None)
             }
@@ -274,7 +319,13 @@ impl canvas::Program<Message> for Pane {
                 };
                 let (col, row) = pointer::cell_at(p.x, p.y, self.cell.0, self.cell.1);
                 let rows = pointer::wheel_rows(y, pixels, self.cell.1);
-                (Captured, Some(Message::Terminal(TerminalMessage::Wheel(WheelInput { rows, col, row, mods }))))
+                (
+                    Captured,
+                    Some(Message::Terminal(TerminalMessage::Wheel(
+                        slot,
+                        WheelInput { rows, col, row, mods },
+                    ))),
+                )
             }
             _ => (Ignored, None),
         }
@@ -296,7 +347,8 @@ impl canvas::Program<Message> for Pane {
             self.bg
                 .draw(renderer, size, |fr| fr.fill_rectangle(Point::ORIGIN, size, col(f.bg))),
         );
-        let base = Font::with_name(FONT_FAMILY);
+        let base = Font::with_name(self.font.family);
+        let font_size = self.font.size;
         for (y, data) in f.rows.iter().enumerate() {
             let Some(cache) = self.caches.get(y) else {
                 break;
@@ -318,7 +370,7 @@ impl canvas::Program<Message> for Pane {
                     );
                 }
                 for run in &data.runs {
-                    draw_run(fr, run, base, cw, ch, py, None, f.bg);
+                    draw_run(fr, run, base, font_size, cw, ch, py, None, f.bg);
                 }
             }));
         }
@@ -375,7 +427,7 @@ impl canvas::Program<Message> for Pane {
                                 cells: 1,
                                 ..run.clone()
                             };
-                            draw_run(fr, &one, base, cw, ch, py, Some(f.bg), f.bg);
+                            draw_run(fr, &one, base, font_size, cw, ch, py, Some(f.bg), f.bg);
                         }
                     }
                 }
@@ -400,6 +452,7 @@ fn draw_run(
     fr: &mut canvas::Frame,
     run: &Run,
     base: Font,
+    font_size: f32,
     cw: f32,
     ch: f32,
     py: f32,
@@ -422,7 +475,7 @@ fn draw_run(
             content: run.text.clone(),
             position: Point::new(x, py),
             color: c,
-            size: Pixels(FONT_SIZE),
+            size: Pixels(font_size),
             line_height: iced::widget::text::LineHeight::Absolute(Pixels(ch)),
             font,
             horizontal_alignment: Horizontal::Left,
@@ -445,16 +498,16 @@ fn draw_run(
 
 /// Pixel size of one cell for the Terminal font: width of an "M", and a line
 /// height of 1.25 em. Needs the font loaded, so call it after startup.
-pub fn measure_cell() -> (f32, f32) {
+pub fn measure_cell(font: TermFont) -> (f32, f32) {
     type P = <Renderer as adv_text::Renderer>::Paragraph;
-    let ch = (FONT_SIZE * 1.25).ceil();
+    let ch = font.line_height();
     let n = 100.0;
     let p = P::with_text(adv_text::Text {
         content: &"M".repeat(n as usize),
         bounds: Size::INFINITY,
-        size: Pixels(FONT_SIZE),
+        size: Pixels(font.size),
         line_height: iced::widget::text::LineHeight::Absolute(Pixels(ch)),
-        font: Font::with_name(FONT_FAMILY),
+        font: Font::with_name(font.family),
         horizontal_alignment: Horizontal::Left,
         vertical_alignment: Vertical::Top,
         shaping: iced::widget::text::Shaping::Basic,
@@ -465,23 +518,262 @@ pub fn measure_cell() -> (f32, f32) {
 
 /// Everything the panel view needs, as plain borrowed data.
 pub struct PanelView<'a> {
-    /// The pane to draw, or `None` for a team with no Terminal yet.
-    pub pane: Option<&'a Pane>,
-    pub title: String,
+    pub layout: Layout,
+    /// One entry per pane of the layout, in slot order.
+    pub slots: Vec<PaneView<'a>>,
+    /// The team's Terminals, in strip order.
+    pub items: Vec<StripItem>,
     /// A line for the strip, such as an exited notice or a spawn error.
     pub note: Option<String>,
+    /// Name of the team's starting folder, if one is set.
+    pub dir_label: Option<String>,
     pub height: f32,
 }
 
-pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
-    let mut strip = row![text(p.title).size(12).color(t::text_secondary())]
-        .spacing(12)
+/// One pane of the panel.
+pub struct PaneView<'a> {
+    pub slot: usize,
+    /// The canvas to draw, or `None` for an empty pane.
+    pub pane: Option<&'a Pane>,
+    /// The pane that takes keys.
+    pub focused: bool,
+    /// Under 20x4 cells: say so instead of drawing.
+    pub too_small: bool,
+    /// For an empty pane: the team's Terminals no pane shows.
+    pub offer: Vec<(TerminalId, String)>,
+    /// The Terminal whose shell exited, to say so over its last screen.
+    pub notice: Option<(TerminalId, PaneNotice)>,
+}
+
+/// One Terminal in the strip.
+pub struct StripItem {
+    pub id: TerminalId,
+    pub name: String,
+    /// The Terminal the pane is showing.
+    pub active: bool,
+    pub exited: bool,
+    /// The text being typed while this Terminal is renamed.
+    pub editing: Option<String>,
+}
+
+/// An ask-first dialog for closing a busy Terminal or quitting with one.
+pub fn confirm_modal<'a>(
+    title: &'a str,
+    body: String,
+    confirm_label: &'a str,
+    confirm: Message,
+) -> Element<'a, Message> {
+    let content = column![]
+        .spacing(16)
+        .push(text(title).size(18).color(t::text_primary()))
+        .push(text(body).size(14).color(t::text_secondary()))
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text(confirm_label).size(14).color(Color::WHITE))
+                        .on_press(confirm)
+                        .padding([8, 24])
+                        .style(|_theme: &Theme, _status| button::Style {
+                            background: Some(iced::Background::Color(t::danger())),
+                            text_color: Color::WHITE,
+                            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
+                )
+                .push(
+                    button(text("Cancel").size(14))
+                        .on_press(Message::CloseModal)
+                        .padding([8, 24])
+                        .style(button::secondary),
+                ),
+        );
+    let card = container(content).padding(28).style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_modal())),
+        border: iced::Border { color: t::border(), width: 1.0, radius: 8.0.into() },
+        ..Default::default()
+    });
+    container(card)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.7))),
+            ..Default::default()
+        })
+        .into()
+}
+
+pub fn rename_input_id() -> text_input::Id {
+    text_input::Id::new("terminal-rename")
+}
+
+fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
+    if let Some(draft) = item.editing {
+        return text_input("Name", &draft)
+            .id(rename_input_id())
+            .size(12)
+            .width(140)
+            .padding([1, 6])
+            .on_input(|s| Message::Terminal(TerminalMessage::RenameInput(s)))
+            .on_submit(Message::Terminal(TerminalMessage::RenameSubmit))
+            .into();
+    }
+    let label = if item.exited { format!("{} (exited)", item.name) } else { item.name };
+    let (active, id) = (item.active, item.id);
+    button(text(label).size(12))
+        .padding([2, 8])
+        // Choosing the Terminal already shown renames it.
+        .on_press(Message::Terminal(if active {
+            TerminalMessage::RenameStart(id)
+        } else {
+            TerminalMessage::Select(id)
+        }))
+        .style(move |_theme: &Theme, _status| button::Style {
+            background: active.then(|| iced::Background::Color(t::bg_card_focused())),
+            text_color: if active { t::text_primary() } else { t::text_secondary() },
+            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// "Shell exited" over the bottom of the last screen, with Restart and Close.
+fn exited_bar<'a>(id: TerminalId, kind: PaneNotice) -> Element<'a, Message> {
+    let (message, restart) = match kind {
+        PaneNotice::Exited => ("Shell exited", true),
+        PaneNotice::Dead => ("This Terminal stopped working. Close it and open a new one", false),
+    };
+    let mut actions = row![text(message).size(12).color(t::text_primary())]
+        .spacing(10)
         .align_y(iced::Alignment::Center);
+    if restart {
+        actions = actions.push(
+            button(text("Restart").size(12))
+                .padding([2, 10])
+                .on_press(Message::Terminal(TerminalMessage::Restart(id)))
+                .style(button::secondary),
+        );
+    }
+    actions = actions.push(
+        button(text("Close").size(12))
+            .padding([2, 10])
+            .on_press(Message::Terminal(TerminalMessage::CloseConfirmed(id)))
+            .style(button::secondary),
+    );
+    let bar = container(actions)
+    .padding([6, 12])
+    .width(Length::Fill)
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_menu())),
+        border: iced::Border { color: t::border(), width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+    container(bar).align_bottom(Length::Fill).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// One pane: its canvas (with the exited bar over it), or the picker for an
+/// empty pane. A focused pane in a multi-pane layout has an accent outline.
+fn pane_body<'a>(pv: PaneView<'a>) -> Element<'a, Message> {
+    let slot = pv.slot;
+    let inner: Element<'a, Message> = match pv.pane {
+        Some(_) if pv.too_small => container(text("Too small").size(12).color(t::text_muted()))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into(),
+        Some(pane) => {
+            let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
+            match pv.notice {
+                Some((id, kind)) => iced::widget::stack![canvas, exited_bar(id, kind)].into(),
+                None => canvas.into(),
+            }
+        }
+        None => {
+            let mut picks = column![].spacing(6).align_x(iced::Alignment::Center);
+            for (id, name) in pv.offer {
+                picks = picks.push(
+                    button(text(name).size(13))
+                        .padding([6, 14])
+                        .on_press(Message::Terminal(TerminalMessage::Pick(slot, id)))
+                        .style(button::secondary),
+                );
+            }
+            picks = picks.push(
+                button(text("New Terminal").size(13))
+                    .padding([6, 14])
+                    .on_press(Message::Terminal(TerminalMessage::NewIn(slot))),
+            );
+            container(picks).center_x(Length::Fill).center_y(Length::Fill).into()
+        }
+    };
+    let focused = pv.focused;
+    container(inner)
+        .width(Length::FillPortion(1))
+        .height(Length::Fill)
+        .style(move |_theme: &Theme| container::Style {
+            border: iced::Border {
+                color: if focused { t::accent() } else { iced::Color::TRANSPARENT },
+                width: if focused { 1.0 } else { 0.0 },
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
+    let mut strip = row![].spacing(6).align_y(iced::Alignment::Center);
+    for item in p.items {
+        let id = item.id;
+        let editing = item.editing.is_some();
+        strip = strip.push(strip_button(item));
+        if !editing {
+            strip = strip.push(
+                button(text("\u{00d7}").size(13))
+                    .padding([0, 4])
+                    .on_press(Message::Terminal(TerminalMessage::Close(id)))
+                    .style(button::text),
+            );
+        }
+    }
+    strip = strip.push(
+        button(text("+").size(13))
+            .padding([0, 8])
+            .on_press(Message::Terminal(TerminalMessage::New))
+            .style(button::text),
+    );
+    for (layout, label) in [(Layout::Single, "1"), (Layout::Columns, "1\u{00d7}2"), (Layout::Grid, "2\u{00d7}2")] {
+        let on = layout == p.layout;
+        strip = strip.push(
+            button(text(label).size(11))
+                .padding([2, 6])
+                .on_press(Message::Terminal(TerminalMessage::SetLayout(layout)))
+                .style(move |_theme: &Theme, _status| button::Style {
+                    background: on.then(|| iced::Background::Color(t::bg_card_focused())),
+                    text_color: if on { t::text_primary() } else { t::text_secondary() },
+                    border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                    ..Default::default()
+                }),
+        );
+    }
     if let Some(note) = p.note {
         strip = strip.push(text(note).size(12).color(t::text_muted()));
     }
     strip = strip
         .push(Space::with_width(Length::Fill))
+        .push(
+            button(
+                text(match p.dir_label {
+                    Some(d) => format!("Folder: {d}"),
+                    None => "Folder".to_string(),
+                })
+                .size(11),
+            )
+            .padding([2, 8])
+            .on_press(Message::Terminal(TerminalMessage::PickDir))
+            .style(button::text),
+        )
         .push(text("Cmd+J").size(11).color(t::text_muted()));
     let strip = container(strip)
         .padding([0, 10])
@@ -494,17 +786,27 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             ..Default::default()
         });
 
-    let body: Element<'a, Message> = match p.pane {
-        Some(pane) => Canvas::new(pane).width(Length::Fill).height(Length::Fill).into(),
-        None => container(
-            button(text("New Terminal").size(13))
-                .padding([6, 14])
-                .on_press(Message::Terminal(TerminalMessage::New)),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into(),
-    };
+    // Dragging the strip resizes the panel (JRST-397).
+    let strip = iced::widget::mouse_area(strip)
+        .on_press(Message::Terminal(TerminalMessage::DragStart))
+        .interaction(mouse::Interaction::ResizingVertically);
+
+    let (cols, _) = p.layout.grid();
+    let mut slots = p.slots.into_iter();
+    let mut grid = column![].spacing(PANE_GAP).width(Length::Fill).height(Length::Fill);
+    loop {
+        let mut line = row![].spacing(PANE_GAP).width(Length::Fill).height(Length::FillPortion(1));
+        let mut any = false;
+        for pv in slots.by_ref().take(cols) {
+            line = line.push(pane_body(pv));
+            any = true;
+        }
+        if !any {
+            break;
+        }
+        grid = grid.push(line);
+    }
+    let body: Element<'a, Message> = grid.into();
     column![strip, body]
         .width(Length::Fill)
         .height(Length::Fixed(p.height))

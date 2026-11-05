@@ -80,6 +80,13 @@ pub struct Config {
     /// launch, so changes apply after a restart.
     #[serde(default = "default_font")]
     pub font: String,
+    /// Terminal font key (a monospace entry of `crate::fonts`). Device-wide,
+    /// local-only, applied live and separate from the UI font.
+    #[serde(default = "default_terminal_font")]
+    pub terminal_font: String,
+    /// Terminal font size in points. Device-wide, local-only, applied live.
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: f32,
     /// Post native macOS banners for new inbox notifications when the window
     /// is unfocused. Local-only, never synced.
     #[serde(default = "default_true")]
@@ -96,6 +103,14 @@ fn default_theme() -> String {
 
 fn default_font() -> String {
     crate::fonts::DEFAULT_FONT_KEY.to_string()
+}
+
+fn default_terminal_font() -> String {
+    crate::fonts::DEFAULT_TERMINAL_FONT_KEY.to_string()
+}
+
+fn default_terminal_font_size() -> f32 {
+    crate::fonts::DEFAULT_TERMINAL_SIZE
 }
 
 fn default_api_base_url() -> String {
@@ -118,6 +133,8 @@ impl Default for Config {
             my_issues_filters: None,
             theme: default_theme(),
             font: default_font(),
+            terminal_font: default_terminal_font(),
+            terminal_font_size: default_terminal_font_size(),
             native_notifications: true,
         }
     }
@@ -312,6 +329,28 @@ mod tests {
         cfg.native_notifications = false;
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert!(!back.native_notifications);
+    }
+
+    #[test]
+    fn terminal_font_round_trips_and_old_config_defaults_to_jetbrains_mono() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.terminal_font, "jetbrains-mono");
+        cfg.terminal_font = "fira-code".into();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.terminal_font, "fira-code");
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert_eq!(old.terminal_font, "jetbrains-mono");
+    }
+
+    #[test]
+    fn terminal_size_round_trips_and_old_config_defaults_to_13() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.terminal_font_size, 13.0);
+        cfg.terminal_font_size = 16.0;
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.terminal_font_size, 16.0);
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert_eq!(old.terminal_font_size, 13.0);
     }
 
     #[test]

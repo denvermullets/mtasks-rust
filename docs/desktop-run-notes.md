@@ -38,9 +38,11 @@ first sync. A dev build seeds a local "My Project" team instead, so it stays usa
 
 ## Building and launching the `.app` bundle (macOS)
 
-One-time: `cargo install cargo-bundle --locked`
+One-time: `mise install`. `mise.toml` pins both Zig (the Terminal engine's build step needs it) and
+`cargo-bundle`, so there is no separate `cargo install`.
 
-Build: `cargo bundle --release`
+Build: `mise exec -- cargo bundle --release`. Without `mise exec` (or mise activated in the shell)
+Zig is not on `PATH` and the Ghostty build step fails. The first build fetches Ghostty from GitHub.
 
 Output: `target/release/bundle/osx/JAIT.app` (cargo-bundle also writes a `.dmg` beside it).
 Launch: `open target/release/bundle/osx/JAIT.app`
@@ -49,6 +51,10 @@ Launch: `open target/release/bundle/osx/JAIT.app`
   notification permission off it, so do not change it.
 - The bundle is a release build, so it uses prod and the `JAIT` folder, not your dev data.
 - This plain bundle is not signed or notarised. For a signed build, see below.
+- Verified (JRST-378): `cargo bundle --release` runs the Zig step and produces the `.app`. `libghostty-vt`
+  links statically, so `otool -L target/release/bundle/osx/JAIT.app/Contents/MacOS/mtasks-rusty` lists
+  only `/System/Library/Frameworks/*` and `/usr/lib/*`: no Ghostty, Zig or Homebrew libraries. Re-run
+  that check after any dependency change, and never run the release app against your real HOME.
 - Check the id: `/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" target/release/bundle/osx/JAIT.app/Contents/Info.plist`
 
 ## Signed release build (macOS)

@@ -17,4 +17,4 @@ A git-main pin with an exact compiler version is surprising and hard to reverse,
 - Its types are `!Send` and `!Sync`, so each Terminal needs an owner thread plus a PTY reader and writer thread, and the UI sees only plain-data frames. Dropping a Terminal isn't enough to stop it, because the threads hold each other's channels. It must be closed explicitly (the spike leaked 150 threads, 50 shells and 150 file descriptors over 50 spawns).
 - A crash in the Zig code takes down the app and every shell. A Rust panic on an owner thread marks only that Terminal as dead. We accept this risk.
 - Drawing, fonts, selection and links are ours to build.
-- Not yet verified: `cargo bundle` with the Zig build step, and `PATH` on a true Finder launch.
+- `cargo bundle --release` works with the Zig build step, and the binary links only system libraries (see docs/desktop-run-notes.md). Not yet verified: `PATH` on a true Finder launch.

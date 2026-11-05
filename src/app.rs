@@ -380,6 +380,8 @@ pub enum Message {
     SettingsThemeChanged(t::ThemeChoice),
     /// Font picked in Settings: saves to config; applies after restart.
     SettingsFontChanged(fonts::FontChoice),
+    SettingsTerminalFontChanged(fonts::FontChoice),
+    SettingsTerminalSizeChanged(u16),
     SettingsNativeNotificationsToggled(bool),
     TestConnection,
     TestConnectionResult(Result<usize, String>),
@@ -396,6 +398,10 @@ pub enum Message {
     WindowUnfocused,
     /// The one entry to quitting: the window's close button and Cmd+Q both send it.
     QuitRequested,
+    /// The quit ask was confirmed: close every Terminal, then exit.
+    QuitConfirmed,
+    /// Every Terminal has closed (or the wait ran out): exit.
+    QuitReady,
     /// Once, at startup: send the native Quit menu item to `QuitRequested`.
     RouteMenuQuit,
     SyncCompleted(FullSyncReport),
@@ -523,11 +529,19 @@ struct CommentDrafts<'a> {
     files: &'a mut crate::views::issue_detail::ComposerFiles,
 }
 
+/// Longest the app waits for Terminals to close on quit: the 2 second
+/// grace, the 5 second kill wait, and some slack.
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
     None,
     IssueForm,
     DeleteConfirm(String),
+    /// Ask before closing a busy Terminal.
+    TerminalCloseConfirm(crate::terminal::TerminalId),
+    /// Ask before quitting with a busy Terminal.
+    QuitConfirm,
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -976,6 +990,14 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
+            terminal_focus: self.terminals.palette_focus(crate::terminal::panel_team(
+                &self.view,
+                self.selected_team_id.as_deref(),
+            )),
+            terminal_panel_showing: self.terminals.panel_showing(crate::terminal::panel_team(
+                &self.view,
+                self.selected_team_id.as_deref(),
+            )),
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -3155,7 +3177,13 @@ impl App {
             window_width: 1100.0,
             tab_bar_offset: 0.0,
             tab_projects: HashMap::new(),
-            terminals: crate::terminal::TerminalState::new(),
+            terminals: {
+                let mut terminals = crate::terminal::TerminalState::new();
+                if let Ok(dirs) = connection::open().and_then(|c| crate::db::terminal_dirs::all(&c)) {
+                    terminals.set_team_dirs(dirs);
+                }
+                terminals
+            },
             parked_tabs: Default::default(),
             open_view: None,
             save_view_name: String::new(),
@@ -3174,6 +3202,8 @@ impl App {
             next_toast_id: 0,
             sync_paused_auth: false,
         };
+
+        app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
 
         // Restore the stored Tabs and focus the Home page's. Doing this before
         // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
@@ -3204,7 +3234,34 @@ impl App {
     /// (JRST-410): return `Task::none()` to stay open, and send `iced::exit()`
     /// once the user confirms.
     fn quit(&mut self) -> Task<Message> {
-        iced::exit()
+        self.quit_with(false)
+    }
+
+    /// Quit: ask first if any Terminal is busy (any team, shown or hidden),
+    /// then close every Terminal and exit as soon as they have all gone,
+    /// waiting at most `QUIT_WAIT` so a stuck process can't keep the app open.
+    fn quit_with(&mut self, confirmed: bool) -> Task<Message> {
+        use crate::terminal::panel::QuitPlan;
+        match self.terminals.quit_plan(confirmed) {
+            QuitPlan::Ignore => Task::none(),
+            QuitPlan::Ask => {
+                self.modal = Modal::QuitConfirm;
+                Task::none()
+            }
+            QuitPlan::Shutdown => {
+                self.modal = Modal::None;
+                let closings = self.terminals.begin_shutdown();
+                if closings.is_empty() {
+                    return iced::exit();
+                }
+                let (tx, rx) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    crate::terminal::wait_all(closings, QUIT_WAIT);
+                    let _ = tx.send(());
+                });
+                Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady)
+            }
+        }
     }
 
     pub fn title(&self) -> String {
@@ -4096,7 +4153,24 @@ impl App {
             }
 
             Message::Tab(m) => return self.update_tab(m),
+            Message::Terminal(crate::terminal::TerminalMessage::Close(id))
+                if self.terminals.close_needs_confirm(id) =>
+            {
+                self.modal = Modal::TerminalCloseConfirm(id);
+            }
+            Message::Terminal(crate::terminal::TerminalMessage::DirPicked(Some(dir))) => {
+                if let Some(team) = crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()) {
+                    let team = team.to_string();
+                    match crate::db::terminal_dirs::set(&self.db(), &team, &dir) {
+                        Ok(()) => self.terminals.set_team_dir(&team, Some(dir)),
+                        Err(e) => self.push_toast(format!("Could not save the folder: {e}"), ToastKind::Error, false),
+                    }
+                }
+            }
             Message::Terminal(m) => {
+                if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {
+                    self.modal = Modal::None;
+                }
                 let team =
                     crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref());
                 return self.terminals.update(m, team);
@@ -5386,6 +5460,15 @@ impl App {
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
+                    PaletteNav::FocusTerminal => {
+                        return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusTerminal))
+                    }
+                    PaletteNav::HidePanel => {
+                        return self.update(Message::Terminal(crate::terminal::TerminalMessage::Hide))
+                    }
+                    PaletteNav::FocusApp => {
+                        return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusApp))
+                    }
                     PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
@@ -5444,6 +5527,27 @@ impl App {
                     form.font = choice;
                 }
                 // No live apply: Iced fixes the default font at launch.
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SettingsTerminalFontChanged(choice) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.terminal_font = choice.key.to_string();
+                if let Some(ref mut form) = self.settings_form {
+                    form.terminal_font = choice;
+                }
+                // Applied live: the Terminals re-measure and resize on the next sync.
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&choice.key, self.config.terminal_font_size));
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SettingsTerminalSizeChanged(size) => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.terminal_font_size = size as f32;
+                if let Some(ref mut form) = self.settings_form {
+                    form.terminal_size = size;
+                }
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&new_cfg.terminal_font, new_cfg.terminal_font_size));
                 self.save_config_change(new_cfg);
             }
 
@@ -5904,6 +6008,8 @@ impl App {
             Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
             Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
             Message::QuitRequested => return self.quit(),
+            Message::QuitConfirmed => return self.quit_with(true),
+            Message::QuitReady => return iced::exit(),
             Message::RouteMenuQuit => crate::quit::route_menu_quit_to_close(),
             Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
@@ -6711,7 +6817,14 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let open_terminals: HashMap<String, usize> = self
+            .teams
+            .iter()
+            .map(|t| (t.id.clone(), self.terminals.open_count(&t.id)))
+            .filter(|(_, n)| *n > 0)
+            .collect();
         let team_sidebar = team_list::view(team_list::SidebarState {
+            open_terminals,
             teams: &self.teams,
             selected_team_id: self.selected_team_id.as_deref(),
             expanded_teams: &self.expanded_teams,
@@ -7067,6 +7180,25 @@ impl App {
                     .unwrap_or("this issue");
 
                 let confirm = delete_confirm_modal(issue_title);
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::QuitConfirm => {
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Quit JAIT?",
+                    "A program is still running in a Terminal. Quitting will stop it.".to_string(),
+                    "Quit",
+                    Message::QuitConfirmed,
+                );
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::TerminalCloseConfirm(id) => {
+                let name = self.terminals.name_of(*id).unwrap_or_else(|| "this Terminal".into());
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Close Terminal?",
+                    format!("A program is still running in \"{name}\". Closing it will stop the program."),
+                    "Close",
+                    Message::Terminal(crate::terminal::TerminalMessage::CloseConfirmed(*id)),
+                );
                 iced::widget::stack![base, confirm].into()
             }
             Modal::Settings => {

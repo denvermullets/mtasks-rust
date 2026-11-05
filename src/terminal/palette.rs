@@ -76,6 +76,43 @@ pub fn active_term_theme() -> TermTheme {
     term_theme(theme::tok())
 }
 
+/// The draw-time contrast floor (JRST-393): below this, a cell's text colour moves.
+pub const CONTRAST_FLOOR: f32 = 3.0;
+
+fn lum(c: Rgb) -> f32 {
+    let l = |x: u8| {
+        let x = x as f32 / 255.0;
+        if x <= 0.03928 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * l(c[0]) + 0.7152 * l(c[1]) + 0.0722 * l(c[2])
+}
+
+fn ratio(a: Rgb, b: Rgb) -> f32 {
+    let (a, b) = (lum(a), lum(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// `fg` unchanged if it reads against `bg` at `floor`, otherwise moved toward
+/// white or black (whichever contrasts more with `bg`) in 10% steps until it does.
+pub fn min_contrast(fg: Rgb, bg: Rgb, floor: f32) -> Rgb {
+    if ratio(fg, bg) >= floor {
+        return fg;
+    }
+    let to: Rgb = if ratio([255; 3], bg) >= ratio([0; 3], bg) { [255; 3] } else { [0; 3] };
+    for i in 1..=10 {
+        let m = i as f32 / 10.0;
+        let c = [0, 1, 2].map(|n| (fg[n] as f32 + (to[n] as f32 - fg[n] as f32) * m) as u8);
+        if ratio(c, bg) >= floor {
+            return c;
+        }
+    }
+    to
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +190,42 @@ mod tests {
                 assert!(c[0] > c[1] && c[0] > c[2], "{} red is not red", t.key);
             }
         }
+    }
+
+    #[test]
+    fn floor_leaves_readable_colours_alone() {
+        assert_eq!(min_contrast([255; 3], [0; 3], 3.0), [255; 3]);
+        assert_eq!(min_contrast([200, 50, 50], [250, 250, 250], 3.0), [200, 50, 50]);
+    }
+
+    #[test]
+    fn floor_darkens_white_on_a_light_background() {
+        // 256-colour 231 is white: about 1.1:1 on a light theme.
+        let bg = [250, 247, 240];
+        let out = min_contrast([255; 3], bg, CONTRAST_FLOOR);
+        assert!(ratio(out, bg) >= CONTRAST_FLOOR);
+        assert!(out[0] < 200, "moved toward black: {out:?}");
+    }
+
+    #[test]
+    fn floor_lightens_black_on_a_dark_background() {
+        let bg = [20, 22, 30];
+        let out = min_contrast([0; 3], bg, CONTRAST_FLOOR);
+        assert!(ratio(out, bg) >= CONTRAST_FLOOR);
+        assert!(out[0] > 40, "moved toward white: {out:?}");
+    }
+
+    #[test]
+    fn floor_ends_at_the_extreme_when_nothing_reaches_it() {
+        // Mid-grey background: neither extreme reaches 21:1.
+        assert_eq!(min_contrast([128; 3], [128; 3], 21.0), [0; 3]);
+    }
+
+    #[test]
+    fn floor_keeps_the_hue_direction_by_blending() {
+        let bg = [255; 3];
+        let out = min_contrast([255, 255, 100], bg, CONTRAST_FLOOR);
+        assert!(ratio(out, bg) >= CONTRAST_FLOOR);
+        assert!(out[0] == out[1], "blended toward black, so channels stay in proportion");
     }
 }
