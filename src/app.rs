@@ -4202,6 +4202,10 @@ impl App {
                 if let Some(team_id) = self.team_tab_for_navigation(&view) {
                     return self.update_inner(Message::SelectTeamView(team_id, view));
                 }
+                // Cross-team pages each have their own Tab.
+                if let Some(key) = crate::tab_state::cross_team_key(&view) {
+                    self.focus_tab(key);
+                }
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;

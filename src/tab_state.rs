@@ -74,15 +74,24 @@ pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
 
 /// The view a Tab parks under `key`. An open issue or project detail has no
 /// buffers parked yet, so it parks as the Tab's root: the team's Board, the
-/// project, or the cross-team page. Other views park as they are.
+/// project, or the cross-team page. A team Tab's other views park as they are.
 pub fn parked_view(key: &TabKey, view: View) -> View {
+    match (key, view) {
+        (TabKey::Team(_), View::IssueDetail(_) | View::ProjectDetail(_)) => View::Board,
+        (TabKey::Team(_), other) => other,
+        // Project and cross-team Tabs have one page of their own. Whatever
+        // was opened from it (an issue, which may have switched the live
+        // view to the issue's team) parks as that page.
+        (key, _) => root_view(key),
+    }
+}
+
+/// The Tab a view opens in when it is a cross-team page; `None` for views
+/// that stay inside the current team or project Tab.
+pub fn cross_team_key(view: &View) -> Option<TabKey> {
     match view {
-        View::IssueDetail(_) | View::ProjectDetail(_)
-            if view != root_view(key) =>
-        {
-            root_view(key)
-        }
-        other => other,
+        View::MyIssues => Some(TabKey::MyIssues),
+        _ => None,
     }
 }
 
@@ -177,6 +186,25 @@ mod tests {
             parked_view(&project, View::ProjectDetail("p".into())),
             View::ProjectDetail("p".into())
         );
+    }
+
+    #[test]
+    fn a_cross_team_tab_parks_as_its_page_even_when_the_live_view_moved_to_a_team() {
+        // Opening an issue from My Issues switches the live view to that
+        // issue's team; the Tab still parks as My Issues.
+        assert_eq!(parked_view(&TabKey::MyIssues, View::Board), View::MyIssues);
+        assert_eq!(
+            parked_view(&TabKey::Dashboard("d".into()), View::Board),
+            View::Dashboard("d".into())
+        );
+    }
+
+    #[test]
+    fn cross_team_views_open_their_own_tab_and_team_views_do_not() {
+        assert_eq!(cross_team_key(&View::MyIssues), Some(TabKey::MyIssues));
+        for view in [View::Board, View::ProjectList, View::Roadmap, View::RecurringIssues] {
+            assert_eq!(cross_team_key(&view), None);
+        }
     }
 
     #[test]
