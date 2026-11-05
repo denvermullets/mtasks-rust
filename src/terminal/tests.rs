@@ -8,6 +8,8 @@ fn theme() -> TermTheme {
         fg: [200; 3],
         bg: [20; 3],
         cursor: [200; 3],
+        selection: [60; 3],
+        light: false,
         ansi: [[128; 3]; 16],
     }
 }
@@ -376,4 +378,47 @@ fn only_the_engine_file_touches_the_engine_crates() {
     scan(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut hits);
     assert_eq!(hits.len(), 1, "files naming the engine crates: {hits:?}");
     assert!(hits[0].ends_with("src/terminal/engine.rs"), "{hits:?}");
+}
+
+/// A shell that asks `CSI ?996n`, then prints the 9-byte reply as plain characters.
+fn scheme_query_config(light: bool) -> SpawnConfig {
+    let mut cfg = sh_config("t1");
+    cfg.theme.light = light;
+    let script = "stty -echo -icanon; printf '\\033[?996n'; \
+                  r=$(dd bs=1 count=9 2>/dev/null | od -An -c | tr -d ' '); echo \"reply=$r\"";
+    cfg.program = Some(("/bin/sh".into(), vec!["-c".into(), script.into()]));
+    cfg
+}
+
+#[test]
+fn csi_996n_gets_the_dark_reply_under_a_dark_theme() {
+    let mut t = terminals();
+    let id = t.spawn(scheme_query_config(false)).unwrap();
+    wait_for(&t, id, "dark reply", |f| f.contains_line("reply=033[?997;1n"));
+    close_all(t);
+}
+
+#[test]
+fn csi_996n_gets_the_light_reply_under_a_light_theme() {
+    let mut t = terminals();
+    let id = t.spawn(scheme_query_config(true)).unwrap();
+    wait_for(&t, id, "light reply", |f| f.contains_line("reply=033[?997;2n"));
+    close_all(t);
+}
+
+#[test]
+fn mode_2031_pushes_a_report_when_the_theme_changes() {
+    // The program enables 2031 and waits for 9 bytes it never asked for.
+    let mut cfg = sh_config("t1");
+    let script = "stty -echo -icanon; printf '\\033[?2031h'; printf 'ready\\n'; \
+                  r=$(dd bs=1 count=9 2>/dev/null | od -An -c | tr -d ' '); echo \"push=$r\"";
+    cfg.program = Some(("/bin/sh".into(), vec!["-c".into(), script.into()]));
+    let mut t = terminals();
+    let id = t.spawn(cfg).unwrap();
+    wait_for(&t, id, "ready", |f| f.contains_line("ready"));
+    let mut light = theme();
+    light.light = true;
+    t.set_theme(id, light);
+    wait_for(&t, id, "pushed light report", |f| f.contains_line("push=033[?997;2n"));
+    close_all(t);
 }
