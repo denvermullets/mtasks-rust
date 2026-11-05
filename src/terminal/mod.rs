@@ -14,8 +14,10 @@
 
 mod engine;
 mod input;
+pub mod links;
 mod palette;
 pub mod panel;
+pub mod pointer;
 mod roster;
 mod state;
 mod types;
@@ -91,6 +93,16 @@ pub struct Terminals {
     wake: Arc<Wake>,
 }
 
+/// A pending `selected_text` answer from a Terminal's owner thread.
+pub struct SelectionRequest(std::sync::mpsc::Receiver<Option<String>>);
+
+impl SelectionRequest {
+    /// The selected text; `None` for no selection, or no answer within 500 ms.
+    pub fn wait(self) -> Option<String> {
+        self.0.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten()
+    }
+}
+
 impl Terminals {
     /// `notify` is called from an owner thread when a frame is ready and no
     /// earlier wake is still pending. It must be cheap and must not block.
@@ -123,6 +135,39 @@ impl Terminals {
     pub fn send_key(&self, id: TerminalId, key: KeyInput) {
         if let Some(e) = self.entries.get(&id) {
             e.engine.send(engine::Cmd::Key(key));
+        }
+    }
+
+    /// A pointer event. It goes to the program only while the program tracks the mouse.
+    pub fn mouse(&self, id: TerminalId, event: MouseInput) {
+        if let Some(e) = self.entries.get(&id) {
+            e.engine.send(engine::Cmd::Mouse(event));
+        }
+    }
+
+    /// The text under the current selection, or `None` when nothing is selected.
+    /// Soft-wrapped lines are joined and trailing blanks trimmed, as when copying
+    /// from any terminal. It asks the Terminal's owner thread, so it waits
+    /// briefly (at most half a second): off the UI thread, use `selection_request`.
+    pub fn selected_text(&self, id: TerminalId) -> Option<String> {
+        self.selection_request(id)?.wait()
+    }
+
+    /// Ask for the selected text without waiting. Cmd+C (JRST-386) takes the
+    /// answer on a blocking thread, so a stuck Terminal never stalls `update`.
+    pub fn selection_request(&self, id: TerminalId) -> Option<SelectionRequest> {
+        let e = self.entries.get(&id)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        e.engine.send(engine::Cmd::SelectedText(tx));
+        Some(SelectionRequest(rx))
+    }
+
+    /// Wheel or trackpad movement: goes to a program that tracks the mouse, as
+    /// arrow keys to a full-screen program that doesn't, and otherwise scrolls
+    /// back through output.
+    pub fn wheel(&self, id: TerminalId, event: WheelInput) {
+        if let Some(e) = self.entries.get(&id) {
+            e.engine.send(engine::Cmd::Wheel(event));
         }
     }
 

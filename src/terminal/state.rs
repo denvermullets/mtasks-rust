@@ -18,10 +18,14 @@ use iced::keyboard::{self, key::Physical};
 use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
+use super::links::Link;
 use super::panel::{self, Layout, PanelState, Toggle, MAX_PANES};
 use super::roster::Roster;
 use crate::db::panel_states::StoredPanel;
-use super::{active_term_theme, Closing, SpawnConfig, TerminalId, Terminals};
+use super::{
+    active_term_theme, Closing, MouseAction, MouseInput, SpawnConfig, TerminalId, Terminals,
+    WheelInput,
+};
 use crate::app::Message;
 use crate::theme as t;
 use crate::views::terminal_panel::{self, Pane, PaneView, PanelView, StripItem, TermFont};
@@ -36,6 +40,14 @@ pub enum TerminalMessage {
     ToggleFocus,
     /// A click on the pane in this slot.
     Focus(usize),
+    /// A pointer event over the pane in this slot. A press also focuses it.
+    Mouse(usize, MouseInput),
+    /// Wheel or trackpad movement over the pane in this slot.
+    Wheel(usize, WheelInput),
+    /// The link under Cmd+hover in this slot changed (or Cmd was let go).
+    Hover(usize, Option<Link>),
+    /// Cmd+click on a link.
+    OpenLink { url: String, explicit: bool },
     /// Palette: show the panel if needed and give the Terminal the keyboard.
     FocusTerminal,
     /// Palette: give the keyboard back to the app.
@@ -81,6 +93,8 @@ pub enum TerminalMessage {
     DirPicked(Option<std::path::PathBuf>),
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
+    /// The selected text, back from the Terminal (JRST-386); `None` copies nothing.
+    Copied(Option<String>),
 }
 
 static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new();
@@ -200,6 +214,29 @@ impl TerminalState {
                         }
                     }
                     Toggle::SetFocus(f) => self.focused = f,
+                }
+            }
+            TerminalMessage::Hover(slot, link) => {
+                if let Some(pane) = self.panes.get_mut(slot) {
+                    pane.set_hover(link);
+                }
+            }
+            TerminalMessage::OpenLink { url, explicit } => {
+                // `open` re-checks the scheme: nothing but http(s), or a safe explicit link, opens.
+                super::links::open(&url, explicit);
+            }
+            TerminalMessage::Wheel(slot, w) => {
+                if let Some(id) = self.shown.get(slot).copied().flatten() {
+                    self.terminals.wheel(id, w);
+                }
+            }
+            TerminalMessage::Mouse(slot, m) => {
+                if matches!(m.action, MouseAction::Press(_)) {
+                    self.focus_slot(slot);
+                    self.focused = true;
+                }
+                if let Some(id) = self.shown.get(slot).copied().flatten() {
+                    self.terminals.mouse(id, m);
                 }
             }
             TerminalMessage::Focus(slot) => {
@@ -325,10 +362,24 @@ impl TerminalState {
                         return iced::clipboard::read()
                             .map(|s| Message::Terminal(TerminalMessage::Pasted(s)))
                     }
+                    Route::CyclePane(delta) => self.panel.cycle_focus(delta),
+                    // The answer comes from the Terminal's owner thread, which
+                    // can take up to 500 ms if it is stuck: wait on a blocking
+                    // thread so `update` returns at once. No selection copies
+                    // nothing, and nothing is sent to the program either way.
+                    Route::Copy => {
+                        let Some(req) = self.focused_terminal().and_then(|id| self.terminals.selection_request(id))
+                        else {
+                            return Task::none();
+                        };
+                        return Task::perform(
+                            async move { tokio::task::spawn_blocking(move || req.wait()).await.ok().flatten() },
+                            |text| Message::Terminal(TerminalMessage::Copied(text)),
+                        );
+                    }
                     // The app's own Tab switch. Focus follows `sync`: it stays
                     // with the Terminal while the new Tab shows a panel, and
                     // falls to the app on a page without one.
-                    Route::CyclePane(delta) => self.panel.cycle_focus(delta),
                     Route::Tab(i) => {
                         return Task::done(Message::Tab(crate::app::TabMessage::Focus(i)))
                     }
@@ -347,6 +398,10 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Pasted(None) => {}
+            TerminalMessage::Copied(Some(text)) if !text.is_empty() => {
+                return iced::clipboard::write(text);
+            }
+            TerminalMessage::Copied(_) => {}
         }
         Task::none()
     }

@@ -12,7 +12,14 @@ use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator}
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{ColorScheme, Mode, ScrollViewport};
-use libghostty_vt::{key, paste, RenderState, Terminal};
+use libghostty_vt::fmt::Format;
+use libghostty_vt::selection::gesture::{
+    Autoscroll, AutoscrollTickEvent, DragEvent, Geometry as SelectionGeometry, Gesture,
+    PressEvent, ReleaseEvent,
+};
+use libghostty_vt::selection::FormatOptions;
+use libghostty_vt::terminal::{Point, PointCoordinate};
+use libghostty_vt::{key, mouse, paste, RenderState, Terminal};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -30,6 +37,9 @@ pub(super) enum Cmd {
     Exited,
     Key(KeyInput),
     Paste(String),
+    Mouse(MouseInput),
+    Wheel(WheelInput),
+    SelectedText(Sender<Option<String>>),
     Resize { cols: u16, rows: u16, cell_w: f32, cell_h: f32 },
     Theme(TermTheme),
     Visible(bool),
@@ -391,6 +401,182 @@ fn map_key(k: TermKey) -> (key::Key, char) {
     }
 }
 
+/// How often a drag held outside the pane scrolls it by a row.
+const AUTOSCROLL: Duration = Duration::from_millis(50);
+/// Two presses this close in time (and space) count as a double click.
+const REPEAT_CLICK: Duration = Duration::from_millis(500);
+
+/// Mouse-driven selection, using the engine's selection gestures: a click clears,
+/// a drag selects, a double click selects a word and a triple click a line. The
+/// engine owns the selection; it follows the text as output scrolls.
+struct Selector {
+    gesture: Gesture<'static>,
+    press: PressEvent<'static>,
+    drag: DragEvent<'static>,
+    release: ReleaseEvent<'static>,
+    tick: AutoscrollTickEvent<'static>,
+    start: Instant,
+    active: bool,
+    scroll: Autoscroll,
+    /// Where the pointer last was, for the timed scroll.
+    pos: (i32, i32),
+    /// Cell the drag began on.
+    anchor: (i32, i32),
+    last_tick: Instant,
+}
+
+impl Selector {
+    fn new() -> Self {
+        Selector {
+            gesture: Gesture::new().unwrap(),
+            press: PressEvent::new().unwrap(),
+            drag: DragEvent::new().unwrap(),
+            release: ReleaseEvent::new().unwrap(),
+            tick: AutoscrollTickEvent::new().unwrap(),
+            start: Instant::now(),
+            active: false,
+            scroll: Autoscroll::None,
+            pos: (0, 0),
+            anchor: (0, 0),
+            last_tick: Instant::now(),
+        }
+    }
+
+    /// A drag is being held outside the pane, so the viewport needs timed scrolling.
+    fn autoscrolling(&self) -> bool {
+        self.active && self.scroll != Autoscroll::None
+    }
+
+    fn geometry(sz: (u16, u16, u32, u32)) -> SelectionGeometry {
+        SelectionGeometry {
+            columns: sz.0 as u32,
+            cell_width: sz.2,
+            padding_left: 0,
+            screen_height: sz.1 as u32 * sz.3,
+        }
+    }
+
+    fn coord(sz: (u16, u16, u32, u32), col: i32, row: i32) -> PointCoordinate {
+        PointCoordinate {
+            x: col.clamp(0, sz.0 as i32 - 1) as u16,
+            y: row.clamp(0, sz.1 as i32 - 1) as u32,
+        }
+    }
+
+    /// Surface position inside a cell, `frac` of the way across it; outside the
+    /// pane for a drag that left it. The engine includes a cell in a selection only
+    /// when the pointer is on the near side of its edge, so the start of a drag sits
+    /// at the cell's left (frac 0.25) and an end past the start at its right (0.75).
+    fn pixel(sz: (u16, u16, u32, u32), col: i32, row: i32, frac: f64) -> (f64, f64) {
+        ((col as f64 + frac) * sz.2 as f64, (row as f64 + 0.5) * sz.3 as f64)
+    }
+
+    /// Which side of its cell the pointer should count as, given where the drag began.
+    fn end_frac(&self, col: i32, row: i32) -> f64 {
+        if (row, col) >= (self.anchor.1, self.anchor.0) {
+            0.75
+        } else {
+            0.25
+        }
+    }
+
+    fn handle(&mut self, term: &Terminal<'static, 'static>, m: MouseInput, sz: (u16, u16, u32, u32)) {
+        let frac = match m.action {
+            MouseAction::Press(_) => 0.25,
+            _ => self.end_frac(m.col, m.row),
+        };
+        let (px, py) = Self::pixel(sz, m.col, m.row, frac);
+        let at = Point::Viewport(Self::coord(sz, m.col, m.row));
+        match m.action {
+            MouseAction::Press(MouseButton::Left) => {
+                let Ok(r) = term.grid_ref(at) else { return };
+                let _ = self.press.set_position(px, py);
+                let _ = self.press.set_repeat_distance(sz.2 as f64);
+                let _ = self.press.set_time(self.start.elapsed());
+                let _ = self.press.set_repeat_interval(REPEAT_CLICK);
+                // A plain click yields no selection, which also clears the old one.
+                let sel = self.press.apply(&mut self.gesture, term, r).ok().flatten();
+                let _ = term.set_selection(sel.as_ref());
+                self.active = true;
+                self.anchor = (m.col, m.row);
+                self.scroll = Autoscroll::None;
+            }
+            MouseAction::Move if self.active => {
+                self.pos = (m.col, m.row);
+                let Ok(r) = term.grid_ref(at) else { return };
+                let _ = self.drag.set_position(px, py);
+                let sel = self.drag.apply(&mut self.gesture, term, r, Self::geometry(sz)).ok().flatten();
+                if sel.is_some() {
+                    let _ = term.set_selection(sel.as_ref());
+                }
+                self.scroll = self.gesture.autoscroll(term).unwrap_or(Autoscroll::None);
+                self.last_tick = Instant::now();
+            }
+            MouseAction::Release(MouseButton::Left) if self.active => {
+                let r = term.grid_ref(at).ok();
+                let _ = self.release.apply(&mut self.gesture, term, r);
+                self.active = false;
+                self.scroll = Autoscroll::None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Scroll a row toward where the held drag is and extend the selection.
+    fn autoscroll(&mut self, term: &mut Terminal<'static, 'static>, sz: (u16, u16, u32, u32)) {
+        let pos = self.pos;
+        let delta = match self.scroll {
+            Autoscroll::Up => -1,
+            Autoscroll::Down => 1,
+            Autoscroll::None => return,
+            _ => return,
+        };
+        term.scroll_viewport(ScrollViewport::Delta(delta));
+        let (px, py) = Self::pixel(sz, pos.0, pos.1, self.end_frac(pos.0, pos.1));
+        let _ = self.tick.set_position(px, py);
+        let sel = self
+            .tick
+            .apply(&mut self.gesture, term, Self::coord(sz, pos.0, pos.1), Self::geometry(sz))
+            .ok()
+            .flatten();
+        if sel.is_some() {
+            let _ = term.set_selection(sel.as_ref());
+        }
+        self.last_tick = Instant::now();
+    }
+}
+
+/// Encoder options from the terminal's current mouse modes and cell size.
+fn sync_mouse(
+    e: &mut mouse::Encoder<'_>,
+    term: &Terminal<'_, '_>,
+    size: (u16, u16, u32, u32),
+    any_pressed: bool,
+) {
+    let (cols, rows, cw, ch) = size;
+    e.set_options_from_terminal(term)
+        .set_size(mouse::EncoderSize {
+            screen_width: cols as u32 * cw,
+            screen_height: rows as u32 * ch,
+            cell_width: cw,
+            cell_height: ch,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_left: 0,
+            padding_right: 0,
+        })
+        .set_any_button_pressed(any_pressed)
+        .set_track_last_cell(true);
+}
+
+fn map_button(b: MouseButton) -> mouse::Button {
+    match b {
+        MouseButton::Left => mouse::Button::Left,
+        MouseButton::Middle => mouse::Button::Middle,
+        MouseButton::Right => mouse::Button::Right,
+    }
+}
+
 fn map_mods(m: KeyMods) -> key::Mods {
     let mut out = key::Mods::empty();
     if m.shift {
@@ -474,6 +660,15 @@ fn owner(
     let mut cell_it = CellIterator::new().unwrap();
     let mut key_enc = key::Encoder::new().unwrap();
     let mut key_ev = key::Event::new().unwrap();
+    let mut mouse_enc = mouse::Encoder::new().unwrap();
+    let mut mouse_ev = mouse::Event::new().unwrap();
+    let mut held: Option<MouseButton> = None;
+    let mut grab: Option<pointer::PointerTarget> = None;
+    let mut wheel_acc = pointer::WheelAccum::default();
+    let mut selector = Selector::new();
+    let mut published_modes = (false, false);
+    let mut had_selection = false;
+    let mut sel_bg = theme.selection;
 
     let mut prev: Vec<Arc<RowData>> = vec![];
     let mut exited = false;
@@ -486,8 +681,16 @@ fn owner(
         // Block until there's work, or until the pending frame is due. A hidden
         // Terminal has no frame to wait for.
         let waiting_for_frame = dirty && visible;
-        let first = if waiting_for_frame {
-            match rx.recv_timeout(FRAME.saturating_sub(last_frame.elapsed())) {
+        // A drag held outside the pane also wakes the loop to scroll it.
+        let timeout = [
+            waiting_for_frame.then(|| FRAME.saturating_sub(last_frame.elapsed())),
+            selector.autoscrolling().then(|| AUTOSCROLL.saturating_sub(selector.last_tick.elapsed())),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let first = if let Some(wait) = timeout {
+            match rx.recv_timeout(wait) {
                 Ok(c) => Some(c),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -549,6 +752,114 @@ fn owner(
                         let _ = wtx.send(out);
                     }
                 }
+                Cmd::Mouse(m) => {
+                    // A gesture belongs to whoever it started with, even if Shift changes.
+                    let target = match (m.action, grab) {
+                        (MouseAction::Press(_), _) | (_, None) => {
+                            pointer::route(term.is_mouse_tracking().unwrap_or(false), m.mods.shift)
+                        }
+                        (_, Some(t)) => t,
+                    };
+                    grab = match m.action {
+                        MouseAction::Press(_) => Some(target),
+                        MouseAction::Release(_) => None,
+                        MouseAction::Move => grab,
+                    };
+                    if target == pointer::PointerTarget::Program {
+                        let (action, button) = match m.action {
+                            MouseAction::Press(b) => {
+                                held = Some(b);
+                                (mouse::Action::Press, Some(b))
+                            }
+                            MouseAction::Release(b) => {
+                                held = None;
+                                (mouse::Action::Release, Some(b))
+                            }
+                            MouseAction::Move => (mouse::Action::Motion, held),
+                        };
+                        let sz = *size.lock().unwrap();
+                        // Report the middle of the cell, clamped to the grid.
+                        let col = m.col.clamp(0, sz.0 as i32 - 1) as f32;
+                        let row = m.row.clamp(0, sz.1 as i32 - 1) as f32;
+                        mouse_ev
+                            .set_action(action)
+                            .set_button(button.map(map_button))
+                            .set_mods(map_mods(m.mods))
+                            .set_position(mouse::Position {
+                                x: (col + 0.5) * sz.2 as f32,
+                                y: (row + 0.5) * sz.3 as f32,
+                            });
+                        sync_mouse(&mut mouse_enc, &term, sz, held.is_some());
+                        let mut out = Vec::new();
+                        if mouse_enc.encode_to_vec(&mouse_ev, &mut out).is_ok() && !out.is_empty() {
+                            let _ = wtx.send(out);
+                        }
+                    } else {
+                        let sz = *size.lock().unwrap();
+                        selector.handle(&term, m, sz);
+                    }
+                }
+                Cmd::SelectedText(reply) => {
+                    let options = FormatOptions::new()
+                        .with_emit_format(Format::Plain)
+                        .with_unwrap(true)
+                        .with_trim(true);
+                    let text = term
+                        .format_selection_alloc(None, options)
+                        .ok()
+                        .flatten()
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .filter(|s| !s.is_empty());
+                    let _ = reply.send(text);
+                }
+                Cmd::Wheel(w) => {
+                    let n = wheel_acc.push(w.rows);
+                    if n != 0 {
+                        let tracking = term.is_mouse_tracking().unwrap_or(false);
+                        let alt = term.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false)
+                            || term.mode(Mode::ALT_SCREEN).unwrap_or(false)
+                            || term.mode(Mode::ALT_SCREEN_LEGACY).unwrap_or(false);
+                        match pointer::wheel_target(tracking, alt) {
+                            pointer::WheelTarget::Program => {
+                                let sz = *size.lock().unwrap();
+                                sync_mouse(&mut mouse_enc, &term, sz, false);
+                                let col = w.col.clamp(0, sz.0 as i32 - 1) as f32;
+                                let row = w.row.clamp(0, sz.1 as i32 - 1) as f32;
+                                let button =
+                                    if n > 0 { mouse::Button::Four } else { mouse::Button::Five };
+                                mouse_ev.set_button(Some(button)).set_mods(map_mods(w.mods)).set_position(
+                                    mouse::Position {
+                                        x: (col + 0.5) * sz.2 as f32,
+                                        y: (row + 0.5) * sz.3 as f32,
+                                    },
+                                );
+                                let mut out = Vec::new();
+                                for _ in 0..n.unsigned_abs() {
+                                    mouse_ev.set_action(mouse::Action::Press);
+                                    let _ = mouse_enc.encode_to_vec(&mouse_ev, &mut out);
+                                    mouse_ev.set_action(mouse::Action::Release);
+                                    let _ = mouse_enc.encode_to_vec(&mouse_ev, &mut out);
+                                }
+                                if !out.is_empty() {
+                                    let _ = wtx.send(out);
+                                }
+                            }
+                            pointer::WheelTarget::Arrows => {
+                                let app = term.mode(Mode::DECCKM).unwrap_or(false);
+                                let seq: &[u8] = match (n > 0, app) {
+                                    (true, true) => b"\x1bOA",
+                                    (true, false) => b"\x1b[A",
+                                    (false, true) => b"\x1bOB",
+                                    (false, false) => b"\x1b[B",
+                                };
+                                let _ = wtx.send(seq.repeat(n.unsigned_abs() as usize));
+                            }
+                            pointer::WheelTarget::Scrollback => {
+                                term.scroll_viewport(ScrollViewport::Delta(-(n as isize)));
+                            }
+                        }
+                    }
+                }
                 Cmd::Paste(s) => {
                     term.scroll_viewport(ScrollViewport::Bottom);
                     let bracketed = term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
@@ -575,6 +886,7 @@ fn owner(
                 }
                 Cmd::Theme(t) => {
                     apply_theme(&mut term, &t);
+                    sel_bg = t.selection;
                     light.store(t.light, Relaxed);
                     // Mode 2031: a program that asked is told when the scheme changes.
                     if term.mode(Mode::COLOR_SCHEME_REPORT).unwrap_or(false) {
@@ -602,8 +914,35 @@ fn owner(
             }
         }
 
+        // A program turning mouse tracking or the alternate screen on or off changes no
+        // cell, so the render state stays clean; the frame still has to say so.
+        let modes = (
+            term.is_mouse_tracking().unwrap_or(false),
+            term.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false),
+        );
+        if modes != published_modes {
+            published_modes = modes;
+            force_full = true;
+        }
+
+        if selector.autoscrolling() && selector.last_tick.elapsed() >= AUTOSCROLL {
+            let sz = *size.lock().unwrap();
+            selector.autoscroll(&mut term, sz);
+            dirty = true;
+        }
+
         if dirty && visible && last_frame.elapsed() >= FRAME {
-            let frame = build_frame(&term, &mut rs, &mut row_it, &mut cell_it, &mut prev, force_full, exited);
+            let frame = build_frame(
+                &term,
+                &mut rs,
+                &mut row_it,
+                &mut cell_it,
+                &mut prev,
+                force_full,
+                exited,
+                &mut had_selection,
+                sel_bg,
+            );
             if let Some(f) = frame {
                 // Only a real frame starts the 16 ms budget (a spike bug restarted it on empty checks).
                 last_frame = Instant::now();
@@ -652,13 +991,20 @@ fn build_frame(
     prev: &mut Vec<Arc<RowData>>,
     force_full: bool,
     exited: bool,
+    had_selection: &mut bool,
+    selection_bg: Rgb,
 ) -> Option<Frame> {
     let snap = rs.update(term).ok()?;
     let dirty = snap.dirty().ok()?;
-    if dirty == Dirty::Clean && !force_full {
+    // Rows are cached by pointer, so while a selection exists (and on the frame
+    // after it goes) every row is rebuilt: the selection can change without the
+    // rows underneath it being marked dirty.
+    let has_selection = term.selection().ok().flatten().is_some();
+    let selection_in_play = has_selection || std::mem::replace(had_selection, has_selection);
+    if dirty == Dirty::Clean && !force_full && !selection_in_play {
         return None;
     }
-    let full = force_full || dirty == Dirty::Full;
+    let full = force_full || selection_in_play || dirty == Dirty::Full;
     let colors = snap.colors().ok()?;
     let (cols, nrows) = (snap.cols().ok()?, snap.rows().ok()? as usize);
 
@@ -673,6 +1019,11 @@ fn build_frame(
             rows.push(prev[y].clone());
         } else {
             let mut data = RowData::default();
+            data.selected = row.selection().ok().flatten().map(|s| (s.start_x, s.end_x));
+            let raw_row = row.raw_row().ok();
+            data.wrapped = raw_row.and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
+            // Only a row that says it has links is worth a lookup per cell.
+            let row_has_links = raw_row.and_then(|r| r.has_hyperlink().ok()).unwrap_or(false);
             let mut cells = cell_it.update(row).ok()?;
             let mut col = 0u16;
             while let Some(cell) = cells.next() {
@@ -684,6 +1035,21 @@ fn build_frame(
                     continue;
                 }
                 let width = if wide == CellWide::Wide { 2 } else { 1 };
+                if row_has_links && raw.has_hyperlink().unwrap_or(false) {
+                    let at = Point::Viewport(PointCoordinate { x: this, y: y as u32 });
+                    let mut buf = [0u8; 2048];
+                    let uri = term
+                        .grid_ref(at)
+                        .and_then(|g| g.hyperlink_uri(&mut buf))
+                        .ok()
+                        .and_then(|n| std::str::from_utf8(&buf[..n]).ok());
+                    if let Some(uri) = uri.filter(|u| !u.is_empty()) {
+                        match data.links.last_mut() {
+                            Some(l) if l.uri == uri && l.col + l.len == this => l.len += width,
+                            _ => data.links.push(LinkSpan { col: this, len: width, uri: uri.to_string() }),
+                        }
+                    }
+                }
                 let style = if raw.has_styling().unwrap_or(false) { cell.style().ok() } else { None };
                 let mut fg = cell.fg_color().ok().flatten().map(rgb);
                 let mut bg = cell.bg_color().ok().flatten().map(rgb);
@@ -808,6 +1174,7 @@ fn build_frame(
         rows,
         bg: rgb(colors.background),
         fg: rgb(colors.foreground),
+        selection_bg,
         cursor,
         title: String::from_utf8_lossy(term.title().unwrap_or(b"")).into_owned(),
         scrollback: term.scrollback_rows().unwrap_or(0),
@@ -843,7 +1210,8 @@ mod cost {
             let n = 200;
             let t0 = Instant::now();
             for _ in 0..n {
-                build_frame(&term, &mut rs, &mut row_it, &mut cell_it, &mut prev, true, false).unwrap();
+                build_frame(&term, &mut rs, &mut row_it, &mut cell_it, &mut prev, true, false, &mut false, [0; 3])
+                    .unwrap();
             }
             let per = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
             println!("{label:28} floor {:3}: {per:8.1} us per full frame", if off { "off" } else { "on" });

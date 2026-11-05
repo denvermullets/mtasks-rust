@@ -34,6 +34,20 @@ pub struct BgRun {
 pub struct RowData {
     pub runs: Vec<Run>,
     pub bgs: Vec<BgRun>,
+    /// Selected cells on this row, as an inclusive column range.
+    pub selected: Option<(u16, u16)>,
+    /// The text soft-wraps onto the next row (one logical line over several rows).
+    pub wrapped: bool,
+    /// Links the program marked itself (OSC 8).
+    pub links: Vec<LinkSpan>,
+}
+
+/// Cells of one row that an OSC 8 link covers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkSpan {
+    pub col: u16,
+    pub len: u16,
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +73,8 @@ pub struct Frame {
     pub rows: Vec<Arc<RowData>>,
     pub bg: Rgb,
     pub fg: Rgb,
+    /// Colour behind selected cells (the theme's selection colour).
+    pub selection_bg: Rgb,
     pub cursor: Option<CursorData>,
     pub title: String,
     pub scrollback: usize,
@@ -103,7 +119,7 @@ pub struct TermTheme {
     pub fg: Rgb,
     pub bg: Rgb,
     pub cursor: Rgb,
-    /// Selection highlight; drawn by the pane once selection exists.
+    /// Selection highlight, drawn behind selected cells.
     pub selection: Rgb,
     /// A light theme: answers `CSI ?996n`.
     pub light: bool,
@@ -150,6 +166,40 @@ pub struct KeyInput {
     pub text: Option<String>,
     /// Treat Option as Alt.
     pub option_as_alt: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    Press(MouseButton),
+    Release(MouseButton),
+    Move,
+}
+
+/// A pointer event over a pane, in cells. `col` and `row` are signed because a
+/// drag can leave the pane; reporting clamps them to the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseInput {
+    pub action: MouseAction,
+    pub col: i32,
+    pub row: i32,
+    pub mods: KeyMods,
+}
+
+/// Wheel or trackpad movement over a pane. `rows` is positive toward older
+/// output and may be fractional; the engine adds up fractions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WheelInput {
+    pub rows: f32,
+    pub col: i32,
+    pub row: i32,
+    pub mods: KeyMods,
 }
 
 /// What `close` did, once it finished.
