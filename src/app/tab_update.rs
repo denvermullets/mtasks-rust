@@ -724,3 +724,71 @@ impl App {
         }
     }
 }
+
+/// Whether a removed team's Tab refuses this message. That Tab keeps only the
+/// team's Terminals; its board is gone, so anything that creates, edits or
+/// moves an issue or project, or steps through the board, would act on a team
+/// that no longer exists (and could enqueue a write for it). Panel keys,
+/// Terminal messages, Tab switching and a plain sync are untouched.
+pub(super) fn blocked_on_removed_team(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::CreateIssue
+            | Message::CreateSubIssue(_)
+            | Message::EditFocusedIssue
+            | Message::ConfirmDeleteFocusedIssue
+            | Message::MoveIssueNextLane
+            | Message::MoveIssuePrevLane
+            | Message::MoveFocusedIssueToTeam
+            | Message::SetFocusedPriority(_)
+            | Message::FocusNextIssue
+            | Message::FocusPrevIssue
+            | Message::FocusNextLane
+            | Message::FocusPrevLane
+            | Message::ToggleViewMode
+            | Message::ToggleFocusedSection
+            | Message::CreateProject
+            | Message::NewRecurringIssue
+            | Message::OpenLabels
+    )
+}
+
+#[cfg(test)]
+mod removed_team_guard {
+    use super::*;
+    use crate::terminal::TerminalMessage;
+
+    #[test]
+    fn board_and_issue_actions_are_blocked_on_a_removed_teams_tab() {
+        for m in [
+            Message::CreateIssue,
+            Message::EditFocusedIssue,
+            Message::ConfirmDeleteFocusedIssue,
+            Message::MoveIssueNextLane,
+            Message::MoveIssuePrevLane,
+            Message::MoveFocusedIssueToTeam,
+            Message::SetFocusedPriority(2),
+            Message::FocusNextIssue,
+            Message::FocusPrevLane,
+            Message::CreateProject,
+        ] {
+            assert!(blocked_on_removed_team(&m), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_actions_tab_switching_and_sync_still_work() {
+        for m in [
+            Message::Terminal(TerminalMessage::New),
+            Message::Terminal(TerminalMessage::ToggleFocus),
+            Message::Terminal(TerminalMessage::Close(crate::terminal::TerminalId(1))),
+            Message::Tab(TabMessage::Focus(0)),
+            Message::Tab(TabMessage::Close(0)),
+            Message::SyncNow,
+            Message::OpenCommandPalette,
+            Message::CloseModal,
+        ] {
+            assert!(!blocked_on_removed_team(&m), "{m:?}");
+        }
+    }
+}

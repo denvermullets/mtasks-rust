@@ -3557,6 +3557,11 @@ impl App {
         {
             return Task::none();
         }
+        // A removed team's Tab holds only its Terminals: no board or issue
+        // action may act on the team that is gone.
+        if tab_update::blocked_on_removed_team(&message) && self.removed_team_tab() {
+            return Task::none();
+        }
         match message {
             Message::KeyPressed(key, modifiers) => {
                 // Esc in the strip's rename field cancels the rename.
