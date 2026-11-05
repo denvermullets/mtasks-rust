@@ -3651,15 +3651,14 @@ impl App {
 
             Message::SelectTeamRow(team_id) => {
                 self.expanded_teams.insert(team_id.clone());
-                // Focus the Tab as it was left. A team Tab that is showing a
-                // cross-team page has nothing of the team's to return to, so
-                // that case goes to the team's Board.
-                if self.selected_team_id.as_deref() == Some(team_id.as_str())
-                    && self.view.is_cross_team()
-                {
-                    return self.update_inner(Message::SelectTeamView(team_id, View::Board));
-                }
-                return self.focus_team_tab(&team_id);
+                // Focus the Tab as it was left. A team's Tab never shows a
+                // cross-team page (those are Tabs of their own), so there is
+                // always something of the team's to return to.
+                let task = self.focus_team_tab(&team_id);
+                // Open Terminals are why a click may need to show the panel:
+                // this row is the way back to shells with no Tab open.
+                self.terminals.reveal_for_click(&team_id);
+                return task;
             }
 
             Message::OpenSavedView(view_id) => {

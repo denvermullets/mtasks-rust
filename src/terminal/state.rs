@@ -668,6 +668,14 @@ impl TerminalState {
         self.shown = self.panel.panes;
     }
 
+    /// A click on `team`'s sidebar row has just focused its Tab: show that
+    /// Tab's panel if the team has an open Terminal. The keyboard stays with
+    /// the app.
+    pub fn reveal_for_click(&mut self, team: &str) {
+        self.panel.visible =
+            panel::visible_after_click(self.terminals.open_count(team), self.panel.visible);
+    }
+
     /// The page is a removed team's, whose panel can't be hidden.
     pub fn set_pinned(&mut self, pinned: bool) {
         self.pinned = pinned;
@@ -913,6 +921,15 @@ mod tests {
         };
         assert_eq!(of(&team_tab), of(&project_tab));
         assert_eq!(of(&team_tab).map(|ids| ids.len()), Some(2));
+    }
+
+    #[test]
+    fn a_click_on_a_team_with_no_open_terminals_leaves_the_panel_alone() {
+        let mut t = TerminalState::new();
+        // Restored and not started: in the strip, but not open.
+        t.restore_records(vec![record("k1", "a")]);
+        t.reveal_for_click("a");
+        assert!(!t.stored_panel().visible);
     }
 
     #[test]

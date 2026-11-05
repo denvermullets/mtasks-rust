@@ -271,6 +271,12 @@ pub fn keys_go_to_terminal(focused: bool, panel_visible: bool, modal_open: bool)
     focused && panel_visible && !modal_open
 }
 
+/// Whether a click on a team's sidebar row shows its panel: it does when the
+/// team has an open Terminal, and otherwise leaves the panel as it was.
+pub fn visible_after_click(open_terminals: usize, visible: bool) -> bool {
+    visible || open_terminals > 0
+}
+
 /// What a pane says over its last screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneNotice {
@@ -478,6 +484,14 @@ mod tests {
         stored.panes[1] = Some("key5".into());
         let back = PanelState::from_stored(&stored, id_of);
         assert_eq!(back.panes, [Some(TerminalId(5)), None, None, None]);
+    }
+
+    #[test]
+    fn a_click_shows_the_panel_only_for_a_team_with_open_terminals() {
+        assert!(visible_after_click(2, false), "hidden panel is shown");
+        assert!(visible_after_click(1, true));
+        assert!(!visible_after_click(0, false), "nothing open: unchanged");
+        assert!(visible_after_click(0, true), "and never hidden");
     }
 
     #[test]
