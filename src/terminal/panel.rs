@@ -11,14 +11,118 @@ pub const STRIP_HEIGHT: f32 = 28.0;
 /// Width of the left sidebar, which the panel doesn't cover.
 pub const SIDEBAR_WIDTH: f32 = 220.0;
 
-/// What one Tab remembers about its panel. Terminals themselves live outside.
+/// Gap between panes, in pixels.
+pub const PANE_GAP: f32 = 1.0;
+/// Most panes any layout has.
+pub const MAX_PANES: usize = 4;
+
+/// How the panel divides into panes. Fixed layouts only, no custom splits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Layout {
+    #[default]
+    Single,
+    /// Two panes side by side.
+    Columns,
+}
+
+impl Layout {
+    /// Panes the layout shows.
+    pub fn slots(self) -> usize {
+        match self {
+            Layout::Single => 1,
+            Layout::Columns => 2,
+        }
+    }
+
+    /// Columns and rows of panes.
+    pub fn grid(self) -> (usize, usize) {
+        match self {
+            Layout::Single => (1, 1),
+            Layout::Columns => (2, 1),
+        }
+    }
+}
+
+/// The Terminal in each pane, by slot. Slots past the layout are hidden: they
+/// keep their Terminal so growing the layout again brings it back.
+pub type Panes = [Option<TerminalId>; MAX_PANES];
+
+/// What one Tab remembers about its panel: whether it shows, how tall, the
+/// layout, which Terminal fills each pane and which pane has focus. Terminals
+/// themselves live outside. JRST-417 parks this per Tab.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PanelState {
     pub visible: bool,
     /// `None` means the default, a third of the window.
     pub height: Option<f32>,
-    /// The Terminal in the one pane (layouts come later).
-    pub pane: Option<TerminalId>,
+    pub layout: Layout,
+    pub panes: Panes,
+    /// Slot of the pane that has focus. Always inside the layout.
+    pub focused_pane: usize,
+}
+
+impl PanelState {
+    /// The Terminal in the focused pane.
+    pub fn focused_terminal(&self) -> Option<TerminalId> {
+        self.panes[self.focused_pane.min(self.layout.slots() - 1)]
+    }
+
+    /// Move focus to the next (`1`) or previous (`-1`) pane, wrapping.
+    /// This is what Cmd+] and Cmd+[ call (JRST-405).
+    pub fn cycle_focus(&mut self, delta: i32) {
+        self.focused_pane = next_slot(self.focused_pane, self.layout, delta);
+    }
+}
+
+/// Put `id` in `slot`. A Terminal fills one pane per Tab, so it leaves any
+/// pane it was in, which is left empty.
+pub fn assign(panes: &mut Panes, slot: usize, id: TerminalId) {
+    for p in panes.iter_mut() {
+        if *p == Some(id) {
+            *p = None;
+        }
+    }
+    panes[slot] = Some(id);
+}
+
+/// The panes after the team's Terminals changed: Terminals it no longer owns
+/// or that appear twice are dropped, and a panel with every visible pane
+/// empty shows the team's first Terminal in the first pane.
+pub fn reconcile(panes: &Panes, owned_by_team: &[TerminalId], layout: Layout) -> Panes {
+    let mut out: Panes = [None; MAX_PANES];
+    for (i, p) in panes.iter().enumerate() {
+        let Some(id) = p.filter(|id| owned_by_team.contains(id)) else { continue };
+        if !out.contains(&Some(id)) {
+            out[i] = Some(id);
+        }
+    }
+    if out[..layout.slots()].iter().all(Option::is_none) {
+        if let Some(first) = owned_by_team.first() {
+            assign(&mut out, 0, *first);
+        }
+    }
+    out
+}
+
+/// The team's Terminals no visible pane shows: what an empty pane offers.
+pub fn unshown(owned_by_team: &[TerminalId], panes: &Panes, layout: Layout) -> Vec<TerminalId> {
+    let shown = &panes[..layout.slots()];
+    owned_by_team.iter().copied().filter(|id| !shown.contains(&Some(*id))).collect()
+}
+
+/// The pane `delta` steps from `current`, wrapping within the layout.
+pub fn next_slot(current: usize, layout: Layout, delta: i32) -> usize {
+    let n = layout.slots() as i32;
+    ((current.min(layout.slots() - 1) as i32 + delta).rem_euclid(n)) as usize
+}
+
+/// Where "New Terminal" puts its shell: the first empty visible pane, else
+/// the focused one.
+pub fn slot_for_new(panes: &Panes, layout: Layout, focused: usize) -> usize {
+    panes[..layout.slots()]
+        .iter()
+        .position(Option::is_none)
+        .unwrap_or_else(|| focused.min(layout.slots() - 1))
 }
 
 /// Panel height for a window: the requested height, else a third, kept between
@@ -29,11 +133,21 @@ pub fn panel_height(window_h: f32, requested: Option<f32>) -> f32 {
     wanted.clamp(MIN_HEIGHT, max)
 }
 
-/// Pixels available to the one pane for this window.
+/// Pixels available to the whole panel body (every pane) for this window.
 pub fn pane_pixels(window_w: f32, window_h: f32, requested: Option<f32>) -> (f32, f32) {
     let w = (window_w - SIDEBAR_WIDTH).max(0.0);
     let h = (panel_height(window_h, requested) - STRIP_HEIGHT).max(0.0);
     (w, h)
+}
+
+/// Pixels available to each pane of `layout`, which divides the panel evenly.
+pub fn pane_size(window_w: f32, window_h: f32, requested: Option<f32>, layout: Layout) -> (f32, f32) {
+    let (w, h) = pane_pixels(window_w, window_h, requested);
+    let (cols, rows) = layout.grid();
+    (
+        (w - PANE_GAP * (cols - 1) as f32) / cols as f32,
+        (h - PANE_GAP * (rows - 1) as f32) / rows as f32,
+    )
 }
 
 /// Whole cells that fit, never below 1x1.
@@ -41,17 +155,6 @@ pub fn grid_for(width: f32, height: f32, cell_w: f32, cell_h: f32) -> (u16, u16)
     let cols = (width / cell_w).floor().clamp(1.0, u16::MAX as f32) as u16;
     let rows = (height / cell_h).floor().clamp(1.0, u16::MAX as f32) as u16;
     (cols, rows)
-}
-
-/// The Terminal a pane shows: its own pick if the team still owns it,
-/// otherwise the team's first.
-pub fn resolve_shown(
-    preferred: Option<TerminalId>,
-    owned_by_team: &[TerminalId],
-) -> Option<TerminalId> {
-    preferred
-        .filter(|id| owned_by_team.contains(id))
-        .or_else(|| owned_by_team.first().copied())
 }
 
 /// What a pane says over its last screen.
@@ -138,13 +241,72 @@ mod tests {
         assert_eq!(pane_pixels(1100.0, 900.0, None), (880.0, 272.0));
     }
 
+    fn ids() -> (TerminalId, TerminalId, TerminalId) {
+        (TerminalId(1), TerminalId(2), TerminalId(3))
+    }
+
     #[test]
-    fn a_pane_shows_its_pick_only_while_the_team_owns_it() {
-        let (a, b, c) = (TerminalId(1), TerminalId(2), TerminalId(3));
-        assert_eq!(resolve_shown(Some(b), &[a, b]), Some(b));
-        assert_eq!(resolve_shown(Some(c), &[a, b]), Some(a));
-        assert_eq!(resolve_shown(None, &[b]), Some(b));
-        assert_eq!(resolve_shown(Some(a), &[]), None);
+    fn picking_a_terminal_shown_in_another_pane_moves_it() {
+        let (a, b, _) = ids();
+        let mut panes: Panes = [Some(a), Some(b), None, None];
+        assign(&mut panes, 1, a);
+        assert_eq!(panes, [None, Some(a), None, None]);
+    }
+
+    #[test]
+    fn picking_into_a_filled_pane_replaces_it_without_losing_the_terminal() {
+        let (a, b, c) = ids();
+        let mut panes: Panes = [Some(a), Some(b), None, None];
+        assign(&mut panes, 0, c);
+        assert_eq!(panes, [Some(c), Some(b), None, None]);
+    }
+
+    #[test]
+    fn a_pane_keeps_only_terminals_the_team_owns_and_none_twice() {
+        let (a, b, c) = ids();
+        let panes: Panes = [Some(c), Some(b), None, None];
+        assert_eq!(reconcile(&panes, &[a, b], Layout::Columns), [None, Some(b), None, None]);
+        let twice: Panes = [Some(a), Some(a), None, None];
+        assert_eq!(reconcile(&twice, &[a], Layout::Columns), [Some(a), None, None, None]);
+    }
+
+    #[test]
+    fn an_empty_panel_shows_the_teams_first_terminal_in_the_first_pane() {
+        let (a, b, _) = ids();
+        assert_eq!(reconcile(&[None; MAX_PANES], &[a, b], Layout::Columns), [Some(a), None, None, None]);
+        // A move that empties pane 0 leaves it empty: pane 1 is still filled.
+        assert_eq!(reconcile(&[None, Some(a), None, None], &[a, b], Layout::Columns), [None, Some(a), None, None]);
+    }
+
+    #[test]
+    fn an_empty_pane_offers_the_terminals_no_pane_shows() {
+        let (a, b, c) = ids();
+        let panes: Panes = [Some(a), None, None, None];
+        assert_eq!(unshown(&[a, b, c], &panes, Layout::Columns), vec![b, c]);
+    }
+
+    #[test]
+    fn panes_cycle_both_ways_and_wrap() {
+        assert_eq!(next_slot(0, Layout::Columns, 1), 1);
+        assert_eq!(next_slot(1, Layout::Columns, 1), 0);
+        assert_eq!(next_slot(0, Layout::Columns, -1), 1);
+        assert_eq!(next_slot(0, Layout::Single, 1), 0);
+        // A slot past the layout (after shrinking) lands inside it.
+        assert_eq!(next_slot(3, Layout::Single, 1), 0);
+    }
+
+    #[test]
+    fn two_columns_split_the_width_and_leave_a_gap() {
+        assert_eq!(pane_size(1100.0, 900.0, None, Layout::Single), (880.0, 272.0));
+        assert_eq!(pane_size(1100.0, 900.0, None, Layout::Columns), (439.5, 272.0));
+    }
+
+    #[test]
+    fn a_new_terminal_takes_an_empty_pane_before_replacing_the_focused_one() {
+        let (a, b, _) = ids();
+        assert_eq!(slot_for_new(&[Some(a), None, None, None], Layout::Columns, 0), 1);
+        assert_eq!(slot_for_new(&[Some(a), Some(b), None, None], Layout::Columns, 1), 1);
+        assert_eq!(slot_for_new(&[None, Some(b), None, None], Layout::Columns, 1), 0);
     }
 
     #[test]
