@@ -73,6 +73,18 @@ impl Closing {
     }
 }
 
+/// Wait for closes to finish, but never longer than `limit` in all. Returns the
+/// reports of the closes that finished; one still running at the limit is
+/// left to finish on its own thread (the caller is about to exit). A close
+/// whose owner thread panicked still reports, because the engine catches it.
+pub fn wait_all(closings: Vec<Closing>, limit: std::time::Duration) -> Vec<CloseReport> {
+    let deadline = std::time::Instant::now() + limit;
+    while !closings.iter().all(Closing::is_done) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    closings.into_iter().filter(Closing::is_done).map(Closing::wait).collect()
+}
+
 pub struct Terminals {
     next_id: u64,
     entries: HashMap<TerminalId, Entry>,
@@ -196,6 +208,12 @@ impl Terminals {
             .spawn(move || entry.engine.shutdown())
             .ok()?;
         Some(Closing { handle })
+    }
+
+    /// Close every Terminal on every team with the explicit close.
+    pub fn close_all(&mut self) -> Vec<Closing> {
+        let ids = self.ids();
+        ids.into_iter().filter_map(|id| self.close(id)).collect()
     }
 
     /// Test hook: make the owner thread panic.

@@ -396,6 +396,10 @@ pub enum Message {
     WindowUnfocused,
     /// The one entry to quitting: the window's close button and Cmd+Q both send it.
     QuitRequested,
+    /// The quit ask was confirmed: close every Terminal, then exit.
+    QuitConfirmed,
+    /// Every Terminal has closed (or the wait ran out): exit.
+    QuitReady,
     /// Once, at startup: send the native Quit menu item to `QuitRequested`.
     RouteMenuQuit,
     SyncCompleted(FullSyncReport),
@@ -523,6 +527,10 @@ struct CommentDrafts<'a> {
     files: &'a mut crate::views::issue_detail::ComposerFiles,
 }
 
+/// Longest the app waits for Terminals to close on quit: the 2 second
+/// grace, the 5 second kill wait, and some slack.
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
     None,
@@ -530,6 +538,8 @@ pub enum Modal {
     DeleteConfirm(String),
     /// Ask before closing a busy Terminal.
     TerminalCloseConfirm(crate::terminal::TerminalId),
+    /// Ask before quitting with a busy Terminal.
+    QuitConfirm,
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -3212,7 +3222,34 @@ impl App {
     /// (JRST-410): return `Task::none()` to stay open, and send `iced::exit()`
     /// once the user confirms.
     fn quit(&mut self) -> Task<Message> {
-        iced::exit()
+        self.quit_with(false)
+    }
+
+    /// Quit: ask first if any Terminal is busy (any team, shown or hidden),
+    /// then close every Terminal and exit as soon as they have all gone,
+    /// waiting at most `QUIT_WAIT` so a stuck process can't keep the app open.
+    fn quit_with(&mut self, confirmed: bool) -> Task<Message> {
+        use crate::terminal::panel::QuitPlan;
+        match self.terminals.quit_plan(confirmed) {
+            QuitPlan::Ignore => Task::none(),
+            QuitPlan::Ask => {
+                self.modal = Modal::QuitConfirm;
+                Task::none()
+            }
+            QuitPlan::Shutdown => {
+                self.modal = Modal::None;
+                let closings = self.terminals.begin_shutdown();
+                if closings.is_empty() {
+                    return iced::exit();
+                }
+                let (tx, rx) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    crate::terminal::wait_all(closings, QUIT_WAIT);
+                    let _ = tx.send(());
+                });
+                Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady)
+            }
+        }
     }
 
     pub fn title(&self) -> String {
@@ -5929,6 +5966,8 @@ impl App {
             Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
             Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
             Message::QuitRequested => return self.quit(),
+            Message::QuitConfirmed => return self.quit_with(true),
+            Message::QuitReady => return iced::exit(),
             Message::RouteMenuQuit => crate::quit::route_menu_quit_to_close(),
             Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
@@ -7099,6 +7138,15 @@ impl App {
                     .unwrap_or("this issue");
 
                 let confirm = delete_confirm_modal(issue_title);
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::QuitConfirm => {
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Quit JAIT?",
+                    "A program is still running in a Terminal. Quitting will stop it.".to_string(),
+                    "Quit",
+                    Message::QuitConfirmed,
+                );
                 iced::widget::stack![base, confirm].into()
             }
             Modal::TerminalCloseConfirm(id) => {

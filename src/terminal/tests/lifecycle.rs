@@ -94,3 +94,69 @@ fn a_program_setting_its_title_does_not_change_the_terminals_name() {
     assert_eq!(roster.get(id).unwrap().name, "Terminal 1");
     close_all(t);
 }
+
+fn spawn_idle(t: &mut Terminals, team: &str) -> (TerminalId, u32) {
+    let id = t.spawn(sh_config(team)).unwrap();
+    wait_for(t, id, "a prompt", |f| f.lines().iter().any(|l| l.contains('$')));
+    (id, t.pid(id).unwrap())
+}
+
+#[test]
+fn a_busy_terminal_on_any_team_makes_the_set_busy_hidden_or_not() {
+    let mut t = terminals();
+    let (_a, _) = spawn_idle(&mut t, "team-a");
+    let (b, _) = spawn_idle(&mut t, "team-b");
+    assert!(!t.any_busy());
+    t.set_visible(b, false);
+    type_line(&t, b, "sleep 100");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !t.any_busy() {
+        assert!(Instant::now() < deadline, "never busy");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    close_all(t);
+}
+
+#[test]
+fn closing_everything_is_prompt_when_the_shells_exit_quickly() {
+    let mut t = terminals();
+    let pids: Vec<u32> = (0..6).map(|n| spawn_idle(&mut t, &format!("team-{}", n % 3)).1).collect();
+    let started = Instant::now();
+    let closings = t.close_all();
+    assert_eq!(closings.len(), 6);
+    let reports = wait_all(closings, Duration::from_secs(8));
+    // Well under the 2 second SIGKILL grace.
+    assert!(started.elapsed() < Duration::from_millis(1500), "took {:?}", started.elapsed());
+    assert_eq!(reports.len(), 6);
+    assert!(reports.iter().all(|r| r.reaped && !r.escalated_to_sigkill && r.threads_exited == 3));
+    assert!(pids.iter().all(|&p| !process_exists(p)));
+    assert!(t.ids().is_empty());
+}
+
+#[test]
+fn a_panicked_owner_does_not_hold_up_closing_everything() {
+    let mut t = terminals();
+    let (doomed, doomed_pid) = spawn_idle(&mut t, "t1");
+    let (_ok, ok_pid) = spawn_idle(&mut t, "t1");
+    t.crash_owner(doomed);
+    wait_for(&t, doomed, "dead", |f| f.dead);
+    let started = Instant::now();
+    let reports = wait_all(t.close_all(), Duration::from_secs(8));
+    assert!(started.elapsed() < Duration::from_millis(1500), "took {:?}", started.elapsed());
+    assert_eq!(reports.len(), 2);
+    assert!(!process_exists(doomed_pid) && !process_exists(ok_pid));
+}
+
+#[test]
+fn waiting_gives_up_at_the_limit_instead_of_hanging() {
+    let mut t = terminals();
+    // Ignores SIGHUP, so the close takes the full 2 second grace.
+    let mut cfg = sh_config("t1");
+    cfg.program = Some(("/bin/sh".into(), vec!["-c".into(), "trap '' HUP; echo up; while :; do sleep 1; done".into()]));
+    let id = t.spawn(cfg).unwrap();
+    wait_for(&t, id, "up", |f| f.contains_line("up"));
+    let started = Instant::now();
+    let reports = wait_all(t.close_all(), Duration::from_millis(300));
+    assert!(started.elapsed() < Duration::from_millis(1500));
+    assert!(reports.is_empty(), "not finished yet, so no report");
+}

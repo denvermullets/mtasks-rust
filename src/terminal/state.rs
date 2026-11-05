@@ -66,6 +66,7 @@ pub struct TerminalState {
     renaming: Option<(TerminalId, String)>,
     /// Closes in flight; quit waits for them.
     closing: Vec<Closing>,
+    shutting_down: bool,
     /// Each team's starting directory; unset means home.
     team_dirs: HashMap<String, std::path::PathBuf>,
     panel: PanelState,
@@ -91,6 +92,7 @@ impl TerminalState {
             roster: Roster::default(),
             renaming: None,
             closing: Vec::new(),
+            shutting_down: false,
             team_dirs: HashMap::new(),
             panel: PanelState::default(),
             focused: false,
@@ -354,6 +356,25 @@ impl TerminalState {
             Some(d) => self.team_dirs.insert(team.to_string(), d),
             None => self.team_dirs.remove(team),
         };
+    }
+
+    /// Whether any Terminal, on any team and shown or hidden, is busy.
+    pub fn any_busy(&self) -> bool {
+        self.terminals.any_busy()
+    }
+
+    pub fn quit_plan(&self, confirmed: bool) -> panel::QuitPlan {
+        panel::quit_plan(self.any_busy(), confirmed, self.shutting_down)
+    }
+
+    /// Close every Terminal for quitting, and hand back every close in flight
+    /// (earlier closes included) for the caller to wait on.
+    pub fn begin_shutdown(&mut self) -> Vec<Closing> {
+        self.shutting_down = true;
+        self.focused = false;
+        let mut all = std::mem::take(&mut self.closing);
+        all.extend(self.terminals.close_all());
+        all
     }
 
     /// Closing a busy Terminal asks first; an idle or exited one doesn't.
