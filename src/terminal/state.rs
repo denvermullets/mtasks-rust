@@ -61,7 +61,7 @@ pub enum TerminalMessage {
     Pick(usize, TerminalId),
     /// A layout chosen in the strip.
     SetLayout(Layout),
-    /// Focus the next or previous pane (Cmd+] and Cmd+[, JRST-405).
+    /// Focus the next or previous pane (Cmd+] and Cmd+[).
     CyclePane(i32),
     /// The shown Terminal's name was clicked.
     RenameStart(TerminalId),
@@ -301,6 +301,7 @@ impl TerminalState {
                     // The app's own Tab switch. Focus follows `sync`: it stays
                     // with the Terminal while the new Tab shows a panel, and
                     // falls to the app on a page without one.
+                    Route::CyclePane(delta) => self.panel.cycle_focus(delta),
                     Route::Tab(i) => {
                         return Task::done(Message::Tab(crate::app::TabMessage::Focus(i)))
                     }

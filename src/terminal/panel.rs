@@ -72,9 +72,9 @@ impl PanelState {
     }
 
     /// Move focus to the next (`1`) or previous (`-1`) pane, wrapping.
-    /// This is what Cmd+] and Cmd+[ call (JRST-405).
+    /// This is what Cmd+] and Cmd+[ call. Empty panes are skipped.
     pub fn cycle_focus(&mut self, delta: i32) {
-        self.focused_pane = next_slot(self.focused_pane, self.layout, delta);
+        self.focused_pane = next_pane(&self.panes, self.layout, self.focused_pane, delta);
     }
 }
 
@@ -114,8 +114,22 @@ pub fn unshown(owned_by_team: &[TerminalId], panes: &Panes, layout: Layout) -> V
     owned_by_team.iter().copied().filter(|id| !shown.contains(&Some(*id))).collect()
 }
 
+/// The nearest pane holding a Terminal, `delta` steps (1 or -1) from
+/// `current` and wrapping within the layout. With no other pane to go to,
+/// focus stays where it is.
+pub fn next_pane(panes: &Panes, layout: Layout, current: usize, delta: i32) -> usize {
+    let mut slot = current.min(layout.slots() - 1);
+    for _ in 0..layout.slots() {
+        slot = next_slot(slot, layout, delta);
+        if panes[slot].is_some() {
+            return slot;
+        }
+    }
+    current.min(layout.slots() - 1)
+}
+
 /// The pane `delta` steps from `current`, wrapping within the layout.
-pub fn next_slot(current: usize, layout: Layout, delta: i32) -> usize {
+fn next_slot(current: usize, layout: Layout, delta: i32) -> usize {
     let n = layout.slots() as i32;
     ((current.min(layout.slots() - 1) as i32 + delta).rem_euclid(n)) as usize
 }
@@ -354,14 +368,39 @@ mod tests {
         assert_eq!(unshown(&[a, b, c], &panes, Layout::Columns), vec![b, c]);
     }
 
+    fn full() -> Panes {
+        [Some(TerminalId(1)), Some(TerminalId(2)), Some(TerminalId(3)), Some(TerminalId(4))]
+    }
+
     #[test]
     fn panes_cycle_both_ways_and_wrap() {
-        assert_eq!(next_slot(0, Layout::Columns, 1), 1);
-        assert_eq!(next_slot(1, Layout::Columns, 1), 0);
-        assert_eq!(next_slot(0, Layout::Columns, -1), 1);
-        assert_eq!(next_slot(0, Layout::Single, 1), 0);
+        let p = full();
+        assert_eq!(next_pane(&p, Layout::Columns, 0, 1), 1);
+        assert_eq!(next_pane(&p, Layout::Columns, 1, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Columns, 0, -1), 1);
         // A slot past the layout (after shrinking) lands inside it.
-        assert_eq!(next_slot(3, Layout::Single, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Columns, 3, 1), 0);
+    }
+
+    #[test]
+    fn cycling_with_one_pane_stays_put() {
+        let p = full();
+        assert_eq!(next_pane(&p, Layout::Single, 0, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Single, 0, -1), 0);
+        assert_eq!(next_pane(&p, Layout::Single, 3, 1), 0);
+    }
+
+    #[test]
+    fn cycling_skips_empty_panes_and_stays_when_none_other_has_a_terminal() {
+        let a = Some(TerminalId(1));
+        let b = Some(TerminalId(2));
+        let p: Panes = [a, None, None, b];
+        assert_eq!(next_pane(&p, Layout::Grid, 0, 1), 3);
+        assert_eq!(next_pane(&p, Layout::Grid, 3, 1), 0);
+        assert_eq!(next_pane(&p, Layout::Grid, 0, -1), 3);
+        let lone: Panes = [None, a, None, None];
+        assert_eq!(next_pane(&lone, Layout::Grid, 1, 1), 1);
+        assert_eq!(next_pane(&[None; MAX_PANES], Layout::Columns, 0, 1), 0);
     }
 
     #[test]
@@ -415,8 +454,8 @@ mod tests {
     #[test]
     fn a_grid_has_four_panes_that_cycle_and_a_quarter_of_the_panel_each() {
         assert_eq!(Layout::Grid.slots(), 4);
-        assert_eq!(next_slot(3, Layout::Grid, 1), 0);
-        assert_eq!(next_slot(0, Layout::Grid, -1), 3);
+        assert_eq!(next_pane(&full(), Layout::Grid, 3, 1), 0);
+        assert_eq!(next_pane(&full(), Layout::Grid, 0, -1), 3);
         assert_eq!(pane_size(1100.0, 900.0, None, Layout::Grid), (439.5, 135.5));
         assert_eq!(slot_for_new(&[Some(TerminalId(1)), Some(TerminalId(2)), None, None], Layout::Grid, 0), 2);
     }
