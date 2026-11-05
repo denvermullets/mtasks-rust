@@ -1,4 +1,4 @@
-//! The team's Terminals as the strip lists them: names and order, with no
+//! Each strip's Terminals (a team's own, or a project's: `Scope`): names and order, with no
 //! engine. A name is the user's, never the program's title (JRST-399).
 //! JRST-413 stores one record per entry: team, name, working directory.
 //!
@@ -7,7 +7,7 @@
 //! nothing of the database.
 use std::path::PathBuf;
 
-use super::TerminalId;
+use super::{Scope, TerminalId};
 use crate::db::terminal_records::{Change, Stored};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,6 +16,8 @@ pub struct Record {
     pub key: String,
     pub id: TerminalId,
     pub team: String,
+    /// The project whose strip it is in; `None` is the team's own strip.
+    pub project: Option<String>,
     pub name: String,
     /// The directory the shell was started in; Restart reuses it.
     pub cwd: Option<PathBuf>,
@@ -48,20 +50,29 @@ pub fn default_name(taken: &[&str]) -> String {
 }
 
 impl Roster {
-    /// Add a Terminal to its team's strip; returns the default name it got.
-    pub fn add(&mut self, id: TerminalId, team: &str, cwd: Option<PathBuf>) -> String {
+    /// Add a Terminal to the strip of `scope`; returns the default name it got.
+    pub fn add(&mut self, id: TerminalId, scope: &Scope, cwd: Option<PathBuf>) -> String {
         let name = {
-            let taken: Vec<&str> = self.of_team(team).map(|r| r.name.as_str()).collect();
+            let taken: Vec<&str> = self.of_scope(scope).map(|r| r.name.as_str()).collect();
             default_name(&taken)
         };
         let key = uuid::Uuid::new_v4().to_string();
         self.changes.push(Change::Added(Stored {
             key: key.clone(),
-            team_id: team.to_string(),
+            team_id: scope.team.clone(),
+            project_id: scope.project.clone(),
             name: name.clone(),
             cwd: cwd.clone(),
         }));
-        self.records.push(Record { key, id, team: team.to_string(), name: name.clone(), cwd, shell: true });
+        self.records.push(Record {
+            key,
+            id,
+            team: scope.team.clone(),
+            project: scope.project.clone(),
+            name: name.clone(),
+            cwd,
+            shell: true,
+        });
         name
     }
 
@@ -76,6 +87,7 @@ impl Roster {
                 key: s.key,
                 id,
                 team: s.team_id,
+                project: s.project_id,
                 name: s.name,
                 cwd: s.cwd,
                 shell: false,
@@ -115,12 +127,22 @@ impl Roster {
         self.records.iter().find(|r| r.key == key).map(|r| r.id)
     }
 
+    /// Every Terminal of the team, its projects' included.
     pub fn of_team<'a>(&'a self, team: &'a str) -> impl Iterator<Item = &'a Record> {
         self.records.iter().filter(move |r| r.team == team)
     }
 
     pub fn ids_of_team(&self, team: &str) -> Vec<TerminalId> {
         self.of_team(team).map(|r| r.id).collect()
+    }
+
+    /// The Terminals in one strip: the team's own, or one project's.
+    pub fn of_scope<'a>(&'a self, scope: &'a Scope) -> impl Iterator<Item = &'a Record> {
+        self.records.iter().filter(move |r| r.team == scope.team && r.project == scope.project)
+    }
+
+    pub fn ids_of_scope(&self, scope: &Scope) -> Vec<TerminalId> {
+        self.of_scope(scope).map(|r| r.id).collect()
     }
 
     /// Rename; an empty (or blank) name is refused and the old one kept.
@@ -157,37 +179,37 @@ mod tests {
     #[test]
     fn names_count_up_per_team() {
         let mut r = Roster::default();
-        assert_eq!(r.add(id(1), "a", None), "Terminal 1");
-        assert_eq!(r.add(id(2), "a", None), "Terminal 2");
-        assert_eq!(r.add(id(3), "b", None), "Terminal 1");
+        assert_eq!(r.add(id(1), &Scope::team("a"), None), "Terminal 1");
+        assert_eq!(r.add(id(2), &Scope::team("a"), None), "Terminal 2");
+        assert_eq!(r.add(id(3), &Scope::team("b"), None), "Terminal 1");
     }
 
     #[test]
     fn a_freed_number_is_reused_lowest_first() {
         let mut r = Roster::default();
         for n in 1..=3 {
-            r.add(id(n), "a", None);
+            r.add(id(n), &Scope::team("a"), None);
         }
         r.remove(id(1));
         r.remove(id(2));
-        assert_eq!(r.add(id(4), "a", None), "Terminal 1");
-        assert_eq!(r.add(id(5), "a", None), "Terminal 2");
-        assert_eq!(r.add(id(6), "a", None), "Terminal 4");
+        assert_eq!(r.add(id(4), &Scope::team("a"), None), "Terminal 1");
+        assert_eq!(r.add(id(5), &Scope::team("a"), None), "Terminal 2");
+        assert_eq!(r.add(id(6), &Scope::team("a"), None), "Terminal 4");
     }
 
     #[test]
     fn a_renamed_terminal_frees_its_number_and_keeps_the_new_name() {
         let mut r = Roster::default();
-        r.add(id(1), "a", None);
+        r.add(id(1), &Scope::team("a"), None);
         assert!(r.rename(id(1), "  claude "));
         assert_eq!(r.get(id(1)).unwrap().name, "claude");
-        assert_eq!(r.add(id(2), "a", None), "Terminal 1");
+        assert_eq!(r.add(id(2), &Scope::team("a"), None), "Terminal 1");
     }
 
     #[test]
     fn an_empty_name_is_refused() {
         let mut r = Roster::default();
-        r.add(id(1), "a", None);
+        r.add(id(1), &Scope::team("a"), None);
         assert!(!r.rename(id(1), "   "));
         assert_eq!(r.get(id(1)).unwrap().name, "Terminal 1");
     }
@@ -195,8 +217,8 @@ mod tests {
     #[test]
     fn a_restarted_terminal_keeps_name_place_and_directory() {
         let mut r = Roster::default();
-        r.add(id(1), "a", Some("/tmp".into()));
-        r.add(id(2), "a", None);
+        r.add(id(1), &Scope::team("a"), Some("/tmp".into()));
+        r.add(id(2), &Scope::team("a"), None);
         r.rename(id(1), "api");
         r.replace_id(id(1), id(9));
         assert_eq!(r.ids_of_team("a"), vec![id(9), id(2)]);
@@ -207,7 +229,7 @@ mod tests {
     #[test]
     fn adding_renaming_and_removing_are_reported_once_in_order() {
         let mut r = Roster::default();
-        r.add(id(1), "a", Some("/tmp".into()));
+        r.add(id(1), &Scope::team("a"), Some("/tmp".into()));
         r.rename(id(1), "api");
         r.rename(id(1), "api"); // no change, nothing reported
         r.remove(id(1));
@@ -227,7 +249,7 @@ mod tests {
     #[test]
     fn a_restart_keeps_the_stored_record() {
         let mut r = Roster::default();
-        r.add(id(1), "a", None);
+        r.add(id(1), &Scope::team("a"), None);
         let key = r.get(id(1)).unwrap().key.clone();
         r.take_changes();
         r.replace_id(id(1), id(2));
@@ -236,7 +258,32 @@ mod tests {
     }
 
     fn stored(key: &str, team: &str, name: &str, cwd: Option<&str>) -> Stored {
-        Stored { key: key.into(), team_id: team.into(), name: name.into(), cwd: cwd.map(Into::into) }
+        Stored { key: key.into(), team_id: team.into(), project_id: None, name: name.into(), cwd: cwd.map(Into::into) }
+    }
+
+    #[test]
+    fn a_project_strip_is_apart_from_its_teams_but_both_count_for_the_team() {
+        let mut r = Roster::default();
+        let team = Scope::team("a");
+        let proj = Scope::project("a", "p");
+        assert_eq!(r.add(id(1), &team, None), "Terminal 1");
+        assert_eq!(r.add(id(2), &proj, None), "Terminal 1");
+        assert_eq!(r.add(id(3), &Scope::project("a", "q"), None), "Terminal 1");
+        assert_eq!(r.ids_of_scope(&team), vec![id(1)]);
+        assert_eq!(r.ids_of_scope(&proj), vec![id(2)]);
+        assert_eq!(r.ids_of_team("a"), vec![id(1), id(2), id(3)]);
+        match &r.take_changes()[1] {
+            Change::Added(s) => assert_eq!(s.project_id.as_deref(), Some("p")),
+            other => panic!("unexpected change {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_restored_project_record_goes_back_in_its_projects_strip() {
+        let mut r = Roster::default();
+        r.restore(vec![Stored { project_id: Some("p".into()), ..stored("k1", "a", "api", None) }]);
+        assert_eq!(r.of_scope(&Scope::project("a", "p")).count(), 1);
+        assert_eq!(r.of_scope(&Scope::team("a")).count(), 0);
     }
 
     #[test]
@@ -273,7 +320,7 @@ mod tests {
         let mut r = Roster::default();
         r.restore(vec![stored("k1", "a", "Terminal 1", None)]);
         let placeholder = r.ids_of_team("a")[0];
-        assert_eq!(r.add(id(1), "a", None), "Terminal 2");
+        assert_eq!(r.add(id(1), &Scope::team("a"), None), "Terminal 2");
         assert_ne!(placeholder, id(1));
     }
 

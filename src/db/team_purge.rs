@@ -150,6 +150,11 @@ fn purge(conn: &Connection, team_id: &str, remote_id: i64) -> Result<Vec<PathBuf
     )?;
 
     // Comments, events, labels links and activity cascade from these.
+    conn.execute(
+        "DELETE FROM project_terminal_dirs
+         WHERE project_id IN (SELECT id FROM projects WHERE team_id = ?1)",
+        params![team_id],
+    )?;
     for table in ["issues", "recurring_issues", "projects", "labels", "lanes", "saved_views"] {
         conn.execute(&format!("DELETE FROM {table} WHERE team_id = ?1"), params![team_id])?;
     }
@@ -337,12 +342,33 @@ mod tests {
     }
 
     #[test]
+    fn purging_a_team_removes_its_projects_terminal_directories_and_only_theirs() {
+        let c = mem();
+        team(&c, "gone", 1);
+        team(&c, "kept", 2);
+        for (id, t) in [("gone-p", "gone"), ("kept-p", "kept")] {
+            c.execute(
+                "INSERT INTO projects (id, team_id, name, created_at, updated_at)
+                 VALUES (?1, ?2, 'P', ?3, ?3)",
+                params![id, t, NOW],
+            )
+            .unwrap();
+            crate::db::terminal_dirs::set_project(&c, id, std::path::Path::new("/a")).unwrap();
+        }
+
+        reconcile_listed_teams(&c, &[2]).unwrap();
+
+        let dirs = crate::db::terminal_dirs::all_projects(&c).unwrap();
+        assert_eq!(dirs.keys().collect::<Vec<_>>(), vec!["kept-p"]);
+    }
+
+    #[test]
     fn purging_a_team_removes_its_terminal_records_and_enqueues_nothing() {
         use crate::db::terminal_records::{all, apply, Change, Stored};
         let c = mem();
         team(&c, "gone", 1);
         team(&c, "kept", 2);
-        let rec = |k: &str, t: &str| Stored { key: k.into(), team_id: t.into(), name: k.into(), cwd: None };
+        let rec = |k: &str, t: &str| Stored { key: k.into(), team_id: t.into(), project_id: None, name: k.into(), cwd: None };
         apply(&c, &[Change::Added(rec("a", "gone")), Change::Added(rec("b", "kept"))]).unwrap();
         let before = count(&c, "sync_queue");
 

@@ -1,5 +1,6 @@
 //! The Terminals in each team's strip, saved locally so a later launch can list
-//! them again (JRST-414). A record is a name and a working directory: never a
+//! them again (JRST-414). A record started on a project carries its
+//! `project_id` and lists in that project's strip only (ADR 0003). A record is a name and a working directory: never a
 //! process or scrollback. A local table only: nothing here is ever enqueued
 //! for Data sync, and a team's records go with the team.
 //!
@@ -15,6 +16,8 @@ use rusqlite::{params, Connection, Result};
 pub struct Stored {
     pub key: String,
     pub team_id: String,
+    /// The project it was started on (local id); `None` is the team's own.
+    pub project_id: Option<String>,
     pub name: String,
     pub cwd: Option<PathBuf>,
 }
@@ -36,11 +39,17 @@ pub fn apply(conn: &Connection, changes: &[Change]) -> Result<()> {
         match change {
             Change::Added(s) => {
                 tx.execute(
-                    "INSERT OR IGNORE INTO terminal_records (id, team_id, name, cwd, position)
+                    "INSERT OR IGNORE INTO terminal_records (id, team_id, name, cwd, position, project_id)
                      SELECT ?1, id, ?3, ?4,
-                            (SELECT COALESCE(MAX(position) + 1, 0) FROM terminal_records)
+                            (SELECT COALESCE(MAX(position) + 1, 0) FROM terminal_records), ?5
                      FROM teams WHERE id = ?2",
-                    params![s.key, s.team_id, s.name, s.cwd.as_ref().map(|p| p.to_string_lossy())],
+                    params![
+                        s.key,
+                        s.team_id,
+                        s.name,
+                        s.cwd.as_ref().map(|p| p.to_string_lossy()),
+                        s.project_id
+                    ],
                 )?;
             }
             Change::Renamed { key, name } => {
@@ -57,13 +66,14 @@ pub fn apply(conn: &Connection, changes: &[Change]) -> Result<()> {
 /// Every stored Terminal, in the order they were added. Read at launch.
 pub fn all(conn: &Connection) -> Result<Vec<Stored>> {
     let mut stmt = conn
-        .prepare("SELECT id, team_id, name, cwd FROM terminal_records ORDER BY position, id")?;
+        .prepare("SELECT id, team_id, name, cwd, project_id FROM terminal_records ORDER BY position, id")?;
     let rows = stmt.query_map([], |r| {
         Ok(Stored {
             key: r.get(0)?,
             team_id: r.get(1)?,
             name: r.get(2)?,
             cwd: r.get::<_, Option<String>>(3)?.map(PathBuf::from),
+            project_id: r.get(4)?,
         })
     })?;
     rows.collect()
@@ -91,7 +101,22 @@ mod tests {
     }
 
     fn stored(key: &str, team: &str, name: &str, cwd: Option<&str>) -> Stored {
-        Stored { key: key.into(), team_id: team.into(), name: name.into(), cwd: cwd.map(PathBuf::from) }
+        Stored {
+            key: key.into(),
+            team_id: team.into(),
+            project_id: None,
+            name: name.into(),
+            cwd: cwd.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn a_project_terminal_keeps_its_project() {
+        let c = mem();
+        team(&c, "t1");
+        let rec = Stored { project_id: Some("p1".into()), ..stored("k1", "t1", "Terminal 1", None) };
+        apply(&c, &[Change::Added(rec.clone())]).unwrap();
+        assert_eq!(all(&c).unwrap(), vec![rec]);
     }
 
     #[test]

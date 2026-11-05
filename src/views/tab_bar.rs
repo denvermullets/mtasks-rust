@@ -1,7 +1,7 @@
 //! The tab bar across the top of the main area. Takes plain labels so other
 //! Tab kinds only change what the caller passes in.
 
-use iced::widget::{button, container, row, scrollable, text};
+use iced::widget::{button, container, row, scrollable, text, tooltip};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{Message, TabMessage};
@@ -67,17 +67,29 @@ pub fn view<'a>(tabs: &[(String, bool)], window_width: f32) -> Element<'a, Messa
     let mut bar = row![].spacing(TAB_SPACING).padding([4.0, BAR_PADDING]);
     for (i, (label, active)) in tabs.iter().enumerate() {
         let active = *active;
-        let label_button = button(
-            text(label.clone())
-                .size(13)
-                .wrapping(iced::widget::text::Wrapping::None)
-                .color(if active { t::text_strong() } else { t::text_secondary() }),
-        )
+        let label_button = button(crate::views::truncated::truncated(
+            label.clone(),
+            13.0,
+            if active { t::text_strong() } else { t::text_secondary() },
+        ))
         .width(Length::Fill)
         .clip(true)
         .padding(iced::Padding { top: 5.0, right: 4.0, bottom: 5.0, left: 12.0 })
         .on_press(Message::Tab(TabMessage::Focus(i)))
         .style(|_theme: &Theme, _status| button::Style::default());
+        // The label is cut to one line; hovering shows the full title.
+        let label_button = tooltip(
+            label_button,
+            container(text(label.clone()).size(12).color(t::text_strong()))
+                .padding([4, 8])
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(t::bg_menu())),
+                    border: Border { color: t::border(), width: 1.0, radius: 4.0.into() },
+                    ..Default::default()
+                }),
+            tooltip::Position::Bottom,
+        )
+        .gap(4);
         let close = button(text("\u{00D7}").size(14).color(t::text_muted()))
             .padding([3, 8])
             .on_press(Message::Tab(TabMessage::Close(i)))
@@ -92,7 +104,7 @@ pub fn view<'a>(tabs: &[(String, bool)], window_width: f32) -> Element<'a, Messa
             .padding([0, 4])
             .style(move |_theme: &Theme| container::Style {
                 background: active.then(|| iced::Background::Color(t::bg_secondary())),
-                border: Border { radius: 6.0.into(), ..Default::default() },
+                border: Border { color: t::border(), width: 1.0, radius: 6.0.into() },
                 ..Default::default()
             });
         bar = bar.push(tab);

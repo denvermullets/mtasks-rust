@@ -329,20 +329,29 @@ impl App {
         }
     }
 
-    /// The team whose Terminals the active Tab shows: a team Tab's team, or a
-    /// project Tab's. A cross-team Tab shows none, whatever page it is on (an
+    /// The Terminal strip the active Tab shows (ADR 0003): a project Tab's
+    /// project's; a team Tab's team's own, or a project's while its page is
+    /// open there. A cross-team Tab shows none, whatever page it is on (an
     /// issue opened there from another team included). Before the Tab set
     /// exists, the page decides.
-    pub(super) fn panel_team(&self) -> Option<&str> {
+    pub(super) fn panel_scope(&self) -> Option<crate::terminal::Scope> {
         match self.active_tab_key() {
             Some(key) => {
                 let project_team = match key {
                     TabKey::Project(id) => self.tab_projects.get(id).map(|(_, team)| team.as_str()),
                     _ => None,
                 };
-                tab_state::panel_team(key, project_team.or(self.selected_team_id.as_deref()))
+                let viewed_project = match &self.view {
+                    View::ProjectDetail(id) => Some(id.as_str()),
+                    _ => None,
+                };
+                tab_state::panel_scope(
+                    key,
+                    project_team.or(self.selected_team_id.as_deref()),
+                    viewed_project,
+                )
             }
-            None => crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()),
+            None => crate::terminal::panel_scope(&self.view, self.selected_team_id.as_deref()),
         }
     }
 

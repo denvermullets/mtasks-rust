@@ -857,6 +857,22 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 41,
+        name: "project_terminals",
+        up: "
+            -- A Terminal started on a project belongs to that project (local
+            -- id); NULL is a team's own. No foreign key: project rows are
+            -- rewritten by Data sync, and a team purge clears these itself.
+            ALTER TABLE terminal_records ADD COLUMN project_id TEXT;
+            -- Where a project's new Terminals start; unset falls back to the
+            -- team's folder. Local only: never queued for Data sync.
+            CREATE TABLE project_terminal_dirs (
+                project_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL
+            );
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with

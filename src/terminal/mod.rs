@@ -23,7 +23,7 @@ mod state;
 mod types;
 
 pub use palette::active_term_theme;
-pub use state::{panel_team, TerminalMessage, TerminalState};
+pub use state::{panel_scope, TerminalMessage, TerminalState};
 pub use types::*;
 
 use std::collections::HashMap;

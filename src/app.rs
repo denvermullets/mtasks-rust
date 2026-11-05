@@ -997,8 +997,8 @@ impl App {
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
             on_project_detail: matches!(self.view, View::ProjectDetail(_)),
-            terminal_focus: self.terminals.palette_focus(self.panel_team()),
-            terminal_panel_showing: self.terminals.panel_showing(self.panel_team()),
+            terminal_focus: self.terminals.palette_focus(self.panel_scope().as_ref()),
+            terminal_panel_showing: self.terminals.panel_showing(self.panel_scope().as_ref()),
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -3170,6 +3170,9 @@ impl App {
                 if let Ok(dirs) = connection::open().and_then(|c| crate::db::terminal_dirs::all(&c)) {
                     terminals.set_team_dirs(dirs);
                 }
+                if let Ok(dirs) = connection::open().and_then(|c| crate::db::terminal_dirs::all_projects(&c)) {
+                    terminals.set_project_dirs(dirs);
+                }
                 match connection::open().and_then(|c| crate::db::terminal_records::all(&c)) {
                     Ok(stored) => terminals.restore_records(stored),
                     Err(e) => eprintln!("could not load Terminal records: {e}"),
@@ -3502,9 +3505,9 @@ impl App {
         self.save_tabs();
         self.save_terminal_records();
         self.save_panel();
-        let panel_team = self.panel_team().map(str::to_string);
+        let panel_scope = self.panel_scope();
         self.terminals.set_pinned(self.removed_team_tab());
-        self.terminals.sync(panel_team.as_deref());
+        self.terminals.sync(panel_scope.as_ref());
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
@@ -4201,17 +4204,25 @@ impl App {
                 self.modal = Modal::TerminalCloseConfirm(id);
             }
             Message::Terminal(crate::terminal::TerminalMessage::DirPicked(Some(dir))) => {
-                if let Some(team) = self.panel_team().map(str::to_string) {
-                    match crate::db::terminal_dirs::set(&self.db(), &team, &dir) {
-                        Ok(()) => self.terminals.set_team_dir(&team, Some(dir)),
+                if let Some(scope) = self.panel_scope() {
+                    let stored = match &scope.project {
+                        Some(p) => crate::db::terminal_dirs::set_project(&self.db(), p, &dir),
+                        None => crate::db::terminal_dirs::set(&self.db(), &scope.team, &dir),
+                    };
+                    match stored {
+                        Ok(()) => self.terminals.set_dir(&scope, Some(dir)),
                         Err(e) => self.push_toast(format!("Could not save the folder: {e}"), ToastKind::Error, false),
                     }
                 }
             }
             Message::Terminal(crate::terminal::TerminalMessage::ClearDir) => {
-                if let Some(team) = self.panel_team().map(str::to_string) {
-                    match crate::db::terminal_dirs::clear(&self.db(), &team) {
-                        Ok(()) => self.terminals.set_team_dir(&team, None),
+                if let Some(scope) = self.panel_scope() {
+                    let cleared = match &scope.project {
+                        Some(p) => crate::db::terminal_dirs::clear_project(&self.db(), p),
+                        None => crate::db::terminal_dirs::clear(&self.db(), &scope.team),
+                    };
+                    match cleared {
+                        Ok(()) => self.terminals.set_dir(&scope, None),
                         Err(e) => self.push_toast(format!("Could not clear the folder: {e}"), ToastKind::Error, false),
                     }
                 }
@@ -4220,14 +4231,14 @@ impl App {
                 if matches!(m, crate::terminal::TerminalMessage::CloseConfirmed(_)) {
                     self.modal = Modal::None;
                 }
-                let team = self.panel_team().map(str::to_string);
+                let scope = self.panel_scope();
                 // Closing a removed team's last Terminal closes its Tab.
                 let closes = matches!(
                     m,
                     crate::terminal::TerminalMessage::Close(_)
                         | crate::terminal::TerminalMessage::CloseConfirmed(_)
                 );
-                let task = self.terminals.update(m, team.as_deref());
+                let task = self.terminals.update(m, scope.as_ref());
                 return if closes {
                     Task::batch([task, self.close_removed_tabs()])
                 } else {
@@ -7173,7 +7184,7 @@ impl App {
             .push(tab_bar::view(&self.tab_labels(), self.window_width))
             .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
-            .push_maybe(self.terminals.panel_view(self.panel_team()))
+            .push_maybe(self.terminals.panel_view(self.panel_scope().as_ref()))
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);

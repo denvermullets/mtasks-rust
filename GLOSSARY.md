@@ -112,11 +112,11 @@ _Avoid_: Disabled, inactive, stopped
 ### Terminals
 
 **Terminal**:
-An interactive shell session that belongs to a team and runs only on this device. Any tab on that team can show it, and its contents never reach the server.
+An interactive shell session that runs only on this device, and whose contents never reach the server. It belongs to a team, in that team's own strip or in one of its projects' strips: one started on a project (in the project's tab, or on its page in a team tab) stays with that project. A project's tab shows only that project's Terminals, and a team tab shows the team's own, or a project's while that project's page is open (ADR 0003).
 _Avoid_: Console, shell, agent session
 
 **Open**:
-The state of a Terminal whose shell is still alive, even if it's sitting at a prompt. A team's sidebar row counts its open Terminals.
+The state of a Terminal whose shell is still alive, even if it's sitting at a prompt. A team's sidebar row counts its open Terminals, its projects' included.
 _Avoid_: Running, active
 
 **Busy**:
@@ -124,5 +124,5 @@ The state of an open Terminal with a program other than the shell in the foregro
 _Avoid_: Running, active
 
 **Stopped**:
-The state of a Terminal that isn't Open: its shell has exited, or it was restored on launch and hasn't started yet. It stays in its team's strip and keeps its name and working directory. A restored Terminal starts when a pane first shows it, and Restart starts a new shell in an exited one.
+The state of a Terminal that isn't Open: its shell has exited, or it was restored on launch and hasn't started yet. It stays in its strip and keeps its name and working directory. A restored Terminal starts when a pane first shows it, and Restart starts a new shell in an exited one.
 _Avoid_: Closed (closing removes the Terminal), Dead (a Rust-side failure of the Terminal itself), Not started (only one way to be stopped)
