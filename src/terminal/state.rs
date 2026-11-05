@@ -269,7 +269,10 @@ impl TerminalState {
         Some(terminal_panel::view(PanelView {
             pane,
             items,
-            notice: self.shown.filter(|_| panel::pane_notice(self.pane_exited()).is_some()),
+            notice: self.shown.and_then(|id| {
+                let dead = self.terminals.frame(id).is_some_and(|f| f.dead);
+                panel::pane_notice(self.terminals.is_exited(id), dead).map(|n| (id, n))
+            }),
             note,
             height: panel::panel_height(self.window.height, self.panel.height),
         }))

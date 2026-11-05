@@ -16,7 +16,7 @@ use iced::widget::{button, column, container, row, text, text_input, Space};
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
-use crate::terminal::panel::STRIP_HEIGHT;
+use crate::terminal::panel::{PaneNotice, STRIP_HEIGHT};
 use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalId, TerminalMessage};
 use crate::theme as t;
 
@@ -308,7 +308,7 @@ pub struct PanelView<'a> {
     /// A line for the strip, such as an exited notice or a spawn error.
     pub note: Option<String>,
     /// The Terminal whose shell exited, to say so over its last screen.
-    pub notice: Option<TerminalId>,
+    pub notice: Option<(TerminalId, PaneNotice)>,
     pub height: f32,
 }
 
@@ -407,22 +407,29 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
 }
 
 /// "Shell exited" over the bottom of the last screen, with Restart and Close.
-fn exited_bar<'a>(id: TerminalId) -> Element<'a, Message> {
-    let bar = container(
-        row![
-            text("Shell exited").size(12).color(t::text_primary()),
+fn exited_bar<'a>(id: TerminalId, kind: PaneNotice) -> Element<'a, Message> {
+    let (message, restart) = match kind {
+        PaneNotice::Exited => ("Shell exited", true),
+        PaneNotice::Dead => ("This Terminal stopped working. Close it and open a new one", false),
+    };
+    let mut actions = row![text(message).size(12).color(t::text_primary())]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+    if restart {
+        actions = actions.push(
             button(text("Restart").size(12))
                 .padding([2, 10])
                 .on_press(Message::Terminal(TerminalMessage::Restart(id)))
                 .style(button::secondary),
-            button(text("Close").size(12))
-                .padding([2, 10])
-                .on_press(Message::Terminal(TerminalMessage::CloseConfirmed(id)))
-                .style(button::secondary),
-        ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
-    )
+        );
+    }
+    actions = actions.push(
+        button(text("Close").size(12))
+            .padding([2, 10])
+            .on_press(Message::Terminal(TerminalMessage::CloseConfirmed(id)))
+            .style(button::secondary),
+    );
+    let bar = container(actions)
     .padding([6, 12])
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
@@ -475,7 +482,7 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         Some(pane) => {
             let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
             match p.notice {
-                Some(id) => iced::widget::stack![canvas, exited_bar(id)].into(),
+                Some((id, kind)) => iced::widget::stack![canvas, exited_bar(id, kind)].into(),
                 None => canvas.into(),
             }
         }

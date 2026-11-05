@@ -59,11 +59,17 @@ pub fn resolve_shown(
 pub enum PaneNotice {
     /// The shell exited: Restart or Close.
     Exited,
+    /// The Terminal's owner thread panicked: Close only.
+    Dead,
 }
 
 /// The notice for the Terminal a pane shows, from its latest frame.
-pub fn pane_notice(exited: bool) -> Option<PaneNotice> {
-    exited.then_some(PaneNotice::Exited)
+pub fn pane_notice(exited: bool, dead: bool) -> Option<PaneNotice> {
+    if dead {
+        Some(PaneNotice::Dead)
+    } else {
+        exited.then_some(PaneNotice::Exited)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,9 +127,14 @@ mod tests {
     }
 
     #[test]
-    fn only_an_exited_shell_gets_a_notice() {
-        assert_eq!(pane_notice(true), Some(PaneNotice::Exited));
-        assert_eq!(pane_notice(false), None);
+    fn an_exited_shell_gets_a_notice_and_a_live_one_none() {
+        assert_eq!(pane_notice(true, false), Some(PaneNotice::Exited));
+        assert_eq!(pane_notice(false, false), None);
+    }
+
+    #[test]
+    fn a_dead_terminal_says_so_even_though_it_also_counts_as_exited() {
+        assert_eq!(pane_notice(true, true), Some(PaneNotice::Dead));
     }
 
     #[test]
