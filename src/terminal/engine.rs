@@ -49,6 +49,8 @@ pub(super) struct Engine {
     pid: u32,
     child: Box<dyn Child + Send + Sync>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// Lets `shutdown` read the master even when the reader thread is gone.
+    drain_fd: OwnedFd,
     /// Writing a byte here wakes the reader out of `poll` so it can exit.
     stop_w: OwnedFd,
     stop: Arc<AtomicBool>,
@@ -59,6 +61,9 @@ pub(super) struct Engine {
 const MAX_INFLIGHT: u64 = 4 << 20;
 /// How long a shell gets to obey SIGHUP before SIGKILL.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
+/// How long to keep waiting for the shell to be reaped after SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(5);
+const OPENPTY_RETRIES: u32 = 8;
 const FRAME: Duration = Duration::from_millis(16);
 
 fn dup_cloexec(fd: RawFd) -> std::io::Result<OwnedFd> {
@@ -67,6 +72,38 @@ fn dup_cloexec(fd: RawFd) -> std::io::Result<OwnedFd> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(n) })
+}
+
+/// `open("/dev/ptmx")` fails now and then with errno -6 (not a real errno) when other
+/// threads or processes open PTYs at the same moment. The same call succeeds a moment
+/// later, so retry a few times before reporting an error.
+fn open_pty_with_retry(size: PtySize) -> Result<portable_pty::PtyPair, anyhow_like::Error> {
+    let mut attempt = 0;
+    loop {
+        match native_pty_system().openpty(size) {
+            Ok(pair) => return Ok(pair),
+            Err(e) if attempt < OPENPTY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(5 * attempt as u64));
+                drop(e);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Throw away whatever the shell has written that nobody has read. Never blocks.
+fn drain_master(fd: RawFd) {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        if unsafe { libc::poll(&mut p, 1, 0) } <= 0 || p.revents & libc::POLLIN == 0 {
+            return;
+        }
+        if unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } <= 0 {
+            return;
+        }
+    }
 }
 
 fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
@@ -83,9 +120,8 @@ fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
 impl Engine {
     pub(super) fn spawn(config: SpawnConfig, wake: Arc<Wake>) -> std::io::Result<Engine> {
         let io = |e: anyhow_like::Error| std::io::Error::other(e.0);
-        let pty = native_pty_system()
-            .openpty(PtySize { rows: config.rows, cols: config.cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| io(e.into()))?;
+        let size = PtySize { rows: config.rows, cols: config.cols, pixel_width: 0, pixel_height: 0 };
+        let pty = open_pty_with_retry(size).map_err(|e| io(e.into()))?;
         let master_fd = pty.master.as_raw_fd().ok_or_else(|| std::io::Error::other("no pty fd"))?;
         // portable-pty doesn't set IUTF8; without it the line editor erases bytes, not characters.
         unsafe {
@@ -118,6 +154,7 @@ impl Engine {
 
         let read_fd = dup_cloexec(master_fd)?;
         let write_fd = dup_cloexec(master_fd)?;
+        let drain_fd = dup_cloexec(master_fd)?;
         let (stop_r, stop_w) = cloexec_pipe()?;
         let stop = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Shared {
@@ -168,7 +205,7 @@ impl Engine {
                 }
             })?);
         }
-        Ok(Engine { tx, shared, pid, child, master, stop_w, stop, threads })
+        Ok(Engine { tx, shared, pid, child, master, drain_fd, stop_w, stop, threads })
     }
 
     pub(super) fn send(&self, cmd: Cmd) {
@@ -200,19 +237,28 @@ impl Engine {
         };
         signal_all(libc::SIGHUP);
         signal_all(libc::SIGCONT);
-        let deadline = Instant::now() + CLOSE_GRACE;
+        let mut deadline = Instant::now() + CLOSE_GRACE;
         let mut escalated = false;
+        let mut reaped = true;
         loop {
+            // macOS keeps an exiting process in the kernel until the PTY's output
+            // queue drains into the master, so keep reading while we wait.
+            drain_master(self.drain_fd.as_raw_fd());
             match self.child.try_wait() {
                 Ok(Some(_)) | Err(_) => break,
                 Ok(None) => {}
             }
             if Instant::now() >= deadline {
-                escalated = true;
-                signal_all(libc::SIGKILL);
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-                let _ = self.child.wait();
-                break;
+                if !escalated {
+                    escalated = true;
+                    signal_all(libc::SIGKILL);
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    deadline = Instant::now() + KILL_GRACE;
+                } else {
+                    // Never block the app on a process the kernel won't release.
+                    reaped = false;
+                    break;
+                }
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -224,7 +270,7 @@ impl Engine {
         unsafe { libc::write(self.stop_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
         drop(self.tx);
         let threads_exited = self.threads.drain(..).filter_map(|t| t.join().ok()).count();
-        CloseReport { escalated_to_sigkill: escalated, threads_exited }
+        CloseReport { escalated_to_sigkill: escalated, threads_exited, reaped }
     }
 }
 
