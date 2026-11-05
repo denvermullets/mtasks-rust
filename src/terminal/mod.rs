@@ -22,7 +22,7 @@ mod roster;
 mod state;
 mod types;
 
-pub use palette::{active_term_theme, term_theme};
+pub use palette::active_term_theme;
 pub use state::{panel_team, TerminalMessage, TerminalState};
 pub use types::*;
 
