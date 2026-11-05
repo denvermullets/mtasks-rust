@@ -896,6 +896,20 @@ mod tests {
     }
 
     #[test]
+    fn a_team_and_its_project_tab_list_the_same_terminals() {
+        use crate::tabs::TabKey;
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "a"), record("k2", "a"), record("k3", "b")]);
+        let team_tab = TabKey::Team("a".into());
+        let project_tab = TabKey::Project("p".into());
+        let of = |key: &TabKey| {
+            crate::tab_state::panel_team(key, Some("a")).map(|team| t.owned_by(team))
+        };
+        assert_eq!(of(&team_tab), of(&project_tab));
+        assert_eq!(of(&team_tab).map(|ids| ids.len()), Some(2));
+    }
+
+    #[test]
     fn a_change_is_reported_once() {
         let mut t = TerminalState::new();
         t.restore_records(vec![record("k1", "a")]);

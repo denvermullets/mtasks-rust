@@ -159,13 +159,14 @@ impl ParkedTab {
 }
 
 /// The team whose Terminals the Tab `key` shows. A team Tab shows its own
-/// team's; a project Tab its project's team, `selected_team_id`. A cross-team
-/// Tab shows none, whatever page it is on: an issue opened there from another
-/// team switches `selected_team_id`, and must not bring that team's panel.
-pub fn panel_team<'a>(key: &'a TabKey, selected_team_id: Option<&'a str>) -> Option<&'a str> {
+/// team's; a project Tab its project's team (`project_team`), so both Tabs list
+/// the same Terminals and a new one belongs to the team. A cross-team Tab
+/// shows none, whatever page it is on: an issue opened there from another
+/// team switches the selected team, and must not bring that team's panel.
+pub fn panel_team<'a>(key: &'a TabKey, project_team: Option<&'a str>) -> Option<&'a str> {
     match key {
         TabKey::Team(id) => Some(id.as_str()),
-        TabKey::Project(_) => selected_team_id,
+        TabKey::Project(_) => project_team,
         TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_) => None,
     }
 }
