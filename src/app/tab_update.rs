@@ -4,7 +4,8 @@
 
 use iced::Task;
 
-use super::{App, Message, View};
+use super::{project_detail, App, Message, View};
+use crate::db::queries;
 use crate::tab_state::{self, ParkedTab, Switch};
 use crate::tabs::{TabKey, TabSet};
 
@@ -39,11 +40,46 @@ impl App {
 
     /// Focus (or open) a team's Tab, for navigation into that team.
     pub(super) fn focus_team_tab(&mut self, team_id: &str) {
+        self.focus_tab(TabKey::Team(team_id.to_string()));
+    }
+
+    /// Focus the Tab for `key`, opening it at the end of the bar if it isn't
+    /// open. This is how every Tab kind is opened. On a move, the live state
+    /// is stashed and the target restored, with its data reloaded.
+    pub(super) fn focus_tab(&mut self, key: TabKey) {
         self.ensure_tab_set();
         if let Some(set) = self.tab_set.as_mut() {
-            let switch = tab_state::focus_team(set, team_id);
+            let switch = tab_state::focus_key(set, key);
             self.apply_switch(switch);
         }
+    }
+
+    /// Navigating to a team-level page (Board, Projects, Roadmap, Recurring
+    /// issues) from a project or cross-team Tab belongs to a team's Tab: the
+    /// team to go to, or `None` when the page is fine where it is.
+    pub(super) fn team_tab_for_navigation(&self, view: &View) -> Option<String> {
+        let team_page = matches!(
+            view,
+            View::Board | View::ProjectList | View::Roadmap | View::RecurringIssues
+        );
+        match self.active_tab_key()? {
+            TabKey::Team(_) => None,
+            _ if !team_page => None,
+            TabKey::Project(_) => self.selected_team_id.clone(),
+            _ => {
+                let first = self.teams.first().map(|t| t.id.as_str());
+                self.tab_set
+                    .as_ref()
+                    .and_then(|set| set.new_issue_team(first))
+                    .map(str::to_string)
+                    .or_else(|| self.selected_team_id.clone())
+            }
+        }
+    }
+
+    /// The active Tab's key, once the set exists.
+    pub(super) fn active_tab_key(&self) -> Option<&TabKey> {
+        self.tab_set.as_ref().map(|set| set.active())
     }
 
     fn apply_switch(&mut self, switch: Switch) {
@@ -60,10 +96,9 @@ impl App {
 
     /// Park the live per-Tab fields under `key`. Add new per-Tab fields here.
     pub(super) fn stash_active_tab(&mut self, key: TabKey) {
-        self.parked_tabs.save(
-            key,
-            ParkedTab::new(self.view.clone(), self.selected_team_id.clone()),
-        );
+        let view = tab_state::parked_view(&key, self.view.clone());
+        self.parked_tabs
+            .save(key, ParkedTab::new(view, self.selected_team_id.clone()));
     }
 
     /// Make `key`'s Tab live: apply its parked fields (or defaults on first
@@ -75,9 +110,15 @@ impl App {
         let (view, team) = match parked {
             Some(p) => (p.view, p.selected_team_id),
             None => (
-                View::Board,
+                tab_state::root_view(key),
                 match key {
                     TabKey::Team(id) => Some(id.clone()),
+                    // A project's Tab shows its own team's data.
+                    TabKey::Project(id) => queries::get_project(&self.db(), id)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.team_id)
+                        .or_else(|| self.selected_team_id.clone()),
                     _ => self.selected_team_id.clone(),
                 },
             ),
@@ -103,6 +144,21 @@ impl App {
             self.reload_recurring(&conn);
         }
         self.restore_dashboard_session();
+        self.restore_project_detail();
+    }
+
+    /// A project Tab's root is the project page: rebuild its buffers from the
+    /// reloaded project (they aren't parked; edits committed on leaving).
+    fn restore_project_detail(&mut self) {
+        let View::ProjectDetail(id) = &self.view else {
+            return;
+        };
+        let Some(project) = self.projects.iter().find(|p| p.id == *id) else {
+            return;
+        };
+        self.project_detail = Some(project_detail::ProjectDetailState::from_project(project));
+        let conn = self.db();
+        self.load_detail_dependencies(&conn);
     }
 
     /// Bar labels in order, with whether each is the active Tab.

@@ -19,15 +19,10 @@ pub struct ParkedTab {
 }
 
 impl ParkedTab {
-    /// Park `view` and the selected team. An open issue or project detail
-    /// parks as the team's Board: its buffers aren't parked yet (a later
-    /// ticket adds `issue_detail`/`project_detail`), so the detail couldn't
-    /// render on return.
+    /// Park `view` and the selected team. The caller maps an open detail to
+    /// its Tab's root first (see [`parked_view`]): detail buffers aren't
+    /// parked yet, so a detail couldn't render on return.
     pub fn new(view: View, selected_team_id: Option<String>) -> Self {
-        let view = match view {
-            View::IssueDetail(_) | View::ProjectDetail(_) => View::Board,
-            other => other,
-        };
         Self { view, selected_team_id }
     }
 }
@@ -61,15 +56,45 @@ pub enum Switch {
     Moved { from: TabKey, to: TabKey },
 }
 
-/// Focus the team's Tab, opening it if needed. A team never gets a second Tab.
-pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
+/// Focus the Tab for `to`, opening it if needed. No key ever gets a second Tab.
+/// This is how every Tab kind is opened.
+pub fn focus_key(set: &mut TabSet, to: TabKey) -> Switch {
     let from = set.active().clone();
-    let to = TabKey::Team(team_id.to_string());
     if from == to {
         return Switch::Stay;
     }
     set.open(to.clone());
     Switch::Moved { from, to }
+}
+
+/// Focus the team's Tab, opening it if needed. A team never gets a second Tab.
+pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
+    focus_key(set, TabKey::Team(team_id.to_string()))
+}
+
+/// The view a Tab parks under `key`. An open issue or project detail has no
+/// buffers parked yet, so it parks as the Tab's root: the team's Board, the
+/// project, or the cross-team page. Other views park as they are.
+pub fn parked_view(key: &TabKey, view: View) -> View {
+    match view {
+        View::IssueDetail(_) | View::ProjectDetail(_)
+            if view != root_view(key) =>
+        {
+            root_view(key)
+        }
+        other => other,
+    }
+}
+
+/// The view a Tab starts on, and returns to when it has nothing better.
+pub fn root_view(key: &TabKey) -> View {
+    match key {
+        TabKey::Team(_) => View::Board,
+        TabKey::Project(id) => View::ProjectDetail(id.clone()),
+        TabKey::MyIssues => View::MyIssues,
+        TabKey::Inbox => View::Inbox,
+        TabKey::Dashboard(id) => View::Dashboard(id.clone()),
+    }
 }
 
 /// Focus the Tab at `index`. Out of range, or already active, stays.
@@ -134,11 +159,39 @@ mod tests {
     }
 
     #[test]
-    fn details_park_as_the_board() {
-        let tab = ParkedTab::new(View::IssueDetail("i".into()), Some("a".into()));
-        assert_eq!(tab.view, View::Board);
-        let tab = ParkedTab::new(View::ProjectDetail("p".into()), None);
-        assert_eq!(tab.view, View::Board);
-        assert_eq!(ParkedTab::new(View::RecurringIssues, None).view, View::RecurringIssues);
+    fn a_detail_parks_as_its_tabs_root() {
+        let detail = View::IssueDetail("i".into());
+        let project = TabKey::Project("p".into());
+        assert_eq!(parked_view(&team("a"), detail.clone()), View::Board);
+        assert_eq!(parked_view(&team("a"), View::ProjectDetail("p".into())), View::Board);
+        assert_eq!(parked_view(&project, detail.clone()), View::ProjectDetail("p".into()));
+        assert_eq!(parked_view(&TabKey::MyIssues, detail.clone()), View::MyIssues);
+        assert_eq!(parked_view(&TabKey::Inbox, detail.clone()), View::Inbox);
+        assert_eq!(
+            parked_view(&TabKey::Dashboard("d".into()), detail),
+            View::Dashboard("d".into())
+        );
+        // Team-level pages and a project Tab's own page park as they are.
+        assert_eq!(parked_view(&team("a"), View::RecurringIssues), View::RecurringIssues);
+        assert_eq!(
+            parked_view(&project, View::ProjectDetail("p".into())),
+            View::ProjectDetail("p".into())
+        );
+    }
+
+    #[test]
+    fn focus_key_opens_each_kind_once_and_reports_the_move() {
+        let mut set = TabSet::new(team("a"));
+        for key in [TabKey::Project("p".into()), TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            let from = set.active().clone();
+            assert_eq!(focus_key(&mut set, key.clone()), Switch::Moved { from, to: key.clone() });
+            assert_eq!(focus_key(&mut set, key), Switch::Stay);
+        }
+        assert_eq!(set.tabs().len(), 5);
+        assert_eq!(
+            focus_key(&mut set, TabKey::MyIssues),
+            Switch::Moved { from: TabKey::Dashboard("d".into()), to: TabKey::MyIssues }
+        );
+        assert_eq!(set.tabs().len(), 5);
     }
 }

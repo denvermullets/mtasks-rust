@@ -4197,6 +4197,11 @@ impl App {
             }
 
             Message::NavigateToView(view) => {
+                // A team page asked for from a Tab that isn't a team's goes
+                // to that team's Tab, so a Tab never leaves its own root.
+                if let Some(team_id) = self.team_tab_for_navigation(&view) {
+                    return self.update_inner(Message::SelectTeamView(team_id, view));
+                }
                 self.commit_issue_detail();
                 self.commit_project_detail();
                 self.detail_from_my_issues = false;
@@ -5214,14 +5219,9 @@ impl App {
                         // open_issue_detail commits any open detail edits first.
                         return Task::batch([select, self.open_issue_detail(&issue)]);
                     }
-                    PaletteNav::Project { project_id, team_id } => {
-                        // The switch reloads the team's data, so the project is
-                        // in memory when its detail opens.
-                        let select = self.select_team_for_palette(&team_id);
-                        return Task::batch([
-                            select,
-                            self.update(Message::OpenProjectDetail(project_id)),
-                        ]);
+                    PaletteNav::Project { project_id, .. } => {
+                        // The project's Tab loads its own team's data.
+                        return self.update(Message::OpenProjectDetail(project_id));
                     }
                 }
             }
@@ -5948,9 +5948,12 @@ impl App {
 
             // --- Projects table (list view) ---
             Message::OpenProjectDetail(project_id) => {
-                if let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() {
-                    return self.open_project_detail(&project);
-                }
+                // The project's own Tab: focused if open, else opened.
+                let Ok(Some(project)) = queries::get_project(&self.db(), &project_id) else {
+                    return Task::none();
+                };
+                self.focus_tab(crate::tabs::TabKey::Project(project_id));
+                return self.open_project_detail(&project);
             }
             Message::ProjectSortChanged(sort) => {
                 if self.project_sort == sort {
@@ -6671,6 +6674,8 @@ impl App {
                     (Some(project), Some(detail)) if detail.project_id == *project_id => {
                         project_detail::view(
                             project,
+                            // A project Tab's root is the project: no Back.
+                            !matches!(self.active_tab_key(), Some(crate::tabs::TabKey::Project(_))),
                             detail,
                             self.detail_team(),
                             &self.detail_members,
