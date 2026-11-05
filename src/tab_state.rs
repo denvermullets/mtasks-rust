@@ -91,6 +91,7 @@ pub fn parked_view(key: &TabKey, view: View) -> View {
 pub fn cross_team_key(view: &View) -> Option<TabKey> {
     match view {
         View::MyIssues => Some(TabKey::MyIssues),
+        View::Inbox => Some(TabKey::Inbox),
         _ => None,
     }
 }
@@ -202,6 +203,7 @@ mod tests {
     #[test]
     fn cross_team_views_open_their_own_tab_and_team_views_do_not() {
         assert_eq!(cross_team_key(&View::MyIssues), Some(TabKey::MyIssues));
+        assert_eq!(cross_team_key(&View::Inbox), Some(TabKey::Inbox));
         for view in [View::Board, View::ProjectList, View::Roadmap, View::RecurringIssues] {
             assert_eq!(cross_team_key(&view), None);
         }

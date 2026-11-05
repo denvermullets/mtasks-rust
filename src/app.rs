@@ -4060,6 +4060,7 @@ impl App {
                 self.detail_from_my_issues = false;
                 self.detail_from_inbox = false;
                 self.detail_from_dashboard = None;
+                self.focus_tab(crate::tabs::TabKey::Inbox);
                 self.switch_view(View::Inbox);
                 let crate::db::notifications::BannerTarget::Notification(remote_id) = target else {
                     return Task::batch([focus, self.scroll_inbox_to_selection()]);
