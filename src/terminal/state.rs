@@ -38,6 +38,10 @@ pub enum TerminalMessage {
     Mouse(MouseInput),
     /// Wheel or trackpad movement over the pane.
     Wheel(WheelInput),
+    /// The link under Cmd+hover changed (or Cmd was let go).
+    Hover(Option<super::links::Link>),
+    /// Cmd+click on a link.
+    OpenLink { url: String, explicit: bool },
     /// "New Terminal" on an empty panel.
     New,
     Key(Physical, keyboard::Modifiers, Option<String>),
@@ -108,6 +112,11 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Focus => self.focused = true,
+            TerminalMessage::Hover(link) => self.pane.set_hover(link),
+            TerminalMessage::OpenLink { url, explicit } => {
+                // `open` re-checks the scheme: nothing but http(s), or a safe explicit link, opens.
+                super::links::open(&url, explicit);
+            }
             TerminalMessage::Wheel(w) => {
                 if let Some(id) = self.shown {
                     self.terminals.wheel(id, w);

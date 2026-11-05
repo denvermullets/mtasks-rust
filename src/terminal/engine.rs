@@ -991,6 +991,10 @@ fn build_frame(
         } else {
             let mut data = RowData::default();
             data.selected = row.selection().ok().flatten().map(|s| (s.start_x, s.end_x));
+            let raw_row = row.raw_row().ok();
+            data.wrapped = raw_row.and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
+            // Only a row that says it has links is worth a lookup per cell.
+            let row_has_links = raw_row.and_then(|r| r.has_hyperlink().ok()).unwrap_or(false);
             let mut cells = cell_it.update(row).ok()?;
             let mut col = 0u16;
             while let Some(cell) = cells.next() {
@@ -1002,6 +1006,21 @@ fn build_frame(
                     continue;
                 }
                 let width = if wide == CellWide::Wide { 2 } else { 1 };
+                if row_has_links && raw.has_hyperlink().unwrap_or(false) {
+                    let at = Point::Viewport(PointCoordinate { x: this, y: y as u32 });
+                    let mut buf = [0u8; 2048];
+                    let uri = term
+                        .grid_ref(at)
+                        .and_then(|g| g.hyperlink_uri(&mut buf))
+                        .ok()
+                        .and_then(|n| std::str::from_utf8(&buf[..n]).ok());
+                    if let Some(uri) = uri.filter(|u| !u.is_empty()) {
+                        match data.links.last_mut() {
+                            Some(l) if l.uri == uri && l.col + l.len == this => l.len += width,
+                            _ => data.links.push(LinkSpan { col: this, len: width, uri: uri.to_string() }),
+                        }
+                    }
+                }
                 let style = if raw.has_styling().unwrap_or(false) { cell.style().ok() } else { None };
                 let mut fg = cell.fg_color().ok().flatten().map(rgb);
                 let mut bg = cell.bg_color().ok().flatten().map(rgb);

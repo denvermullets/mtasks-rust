@@ -14,6 +14,7 @@
 
 mod engine;
 mod input;
+pub mod links;
 mod palette;
 pub mod panel;
 pub mod pointer;

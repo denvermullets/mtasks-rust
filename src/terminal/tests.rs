@@ -465,6 +465,7 @@ fn mode_2031_pushes_a_report_when_the_theme_changes() {
 }
 
 mod hidden;
+mod links;
 mod load;
 mod mouse;
 mod resize;

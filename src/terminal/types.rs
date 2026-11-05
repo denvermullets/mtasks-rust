@@ -36,6 +36,18 @@ pub struct RowData {
     pub bgs: Vec<BgRun>,
     /// Selected cells on this row, as an inclusive column range.
     pub selected: Option<(u16, u16)>,
+    /// The text soft-wraps onto the next row (one logical line over several rows).
+    pub wrapped: bool,
+    /// Links the program marked itself (OSC 8).
+    pub links: Vec<LinkSpan>,
+}
+
+/// Cells of one row that an OSC 8 link covers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkSpan {
+    pub col: u16,
+    pub len: u16,
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

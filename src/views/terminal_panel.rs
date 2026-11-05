@@ -19,7 +19,7 @@ use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Rendere
 use crate::app::Message;
 use crate::terminal::panel::STRIP_HEIGHT;
 use crate::terminal::{
-    pointer, CursorShape, Frame, KeyMods, MouseAction, MouseButton, MouseInput, Rgb, RowData, Run,
+    links::Link, pointer, CursorShape, Frame, KeyMods, MouseAction, MouseButton, MouseInput, Rgb, RowData, Run,
     TerminalMessage, WheelInput,
 };
 use crate::theme as t;
@@ -72,6 +72,9 @@ pub struct Pane {
     last: Vec<Arc<RowData>>,
     bg: Cache,
     cursor: Cache,
+    /// The link under a Cmd+hover, underlined over the rows.
+    hover: Option<Link>,
+    hover_cache: Cache,
     cell: (f32, f32),
     focused: bool,
 }
@@ -84,6 +87,8 @@ impl Pane {
             last: Vec::new(),
             bg: Cache::new(),
             cursor: Cache::new(),
+            hover: None,
+            hover_cache: Cache::new(),
             cell: (FONT_SIZE * 0.6, (FONT_SIZE * 1.25).ceil()),
             focused: false,
         }
@@ -102,6 +107,11 @@ impl Pane {
             self.bg.clear();
         }
         self.cursor.clear();
+        // The text under an underline may have moved; the next pointer event finds it again.
+        if self.hover.is_some() && !changed_rows(&self.last, &frame.rows).is_empty() {
+            self.hover = None;
+            self.hover_cache.clear();
+        }
         self.last = frame.rows.clone();
         self.frame = frame;
     }
@@ -113,7 +123,26 @@ impl Pane {
         }
         self.bg.clear();
         self.cursor.clear();
+        self.hover = None;
+        self.hover_cache.clear();
         self.last.clear();
+    }
+
+    /// Underline this link (Cmd+hover), or clear the underline.
+    pub fn set_hover(&mut self, link: Option<Link>) {
+        if link != self.hover {
+            self.hover = link;
+            self.hover_cache.clear();
+        }
+    }
+
+    /// The link a Cmd+hover would find at a position inside the pane.
+    fn link_under(&self, p: Point) -> Option<Link> {
+        let (c, r) = pointer::cell_at(p.x, p.y, self.cell.0, self.cell.1);
+        if c < 0 || r < 0 {
+            return None;
+        }
+        self.frame.link_at(r as usize, c as u16)
     }
 
     pub fn set_cell(&mut self, cell: (f32, f32)) {
@@ -155,6 +184,11 @@ impl canvas::Program<Message> for Pane {
         use canvas::event::Status::{Captured, Ignored};
         if let canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
             state.mods = m;
+            // Cmd going down or up over a link underlines it or not.
+            let link = cursor.position_in(bounds).filter(|_| m.logo()).and_then(|p| self.link_under(p));
+            if link != self.hover {
+                return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(link))));
+            }
             return (Ignored, None);
         }
         let canvas::Event::Mouse(ev) = event else {
@@ -174,6 +208,18 @@ impl canvas::Program<Message> for Pane {
                 let Some(button) = map_button(b) else {
                     return (Ignored, None);
                 };
+                // Cmd+click opens a link and does nothing else; a plain click never does.
+                if b == mouse::Button::Left && state.mods.logo() {
+                    if let Some(link) = self.link_under(p) {
+                        return (
+                            Captured,
+                            Some(Message::Terminal(TerminalMessage::OpenLink {
+                                url: link.url,
+                                explicit: link.explicit,
+                            })),
+                        );
+                    }
+                }
                 state.pressed = true;
                 let (col, row) = at(bounds.position() + iced::Vector::new(p.x, p.y));
                 (
@@ -193,6 +239,14 @@ impl canvas::Program<Message> for Pane {
                     Captured,
                     send(MouseInput { action: MouseAction::Release(button), col, row, mods }),
                 )
+            }
+            mouse::Event::CursorMoved { position } if state.mods.logo() && !state.pressed => {
+                let inside = Point::new(position.x - bounds.x, position.y - bounds.y);
+                let link = bounds.contains(position).then(|| self.link_under(inside)).flatten();
+                if link != self.hover {
+                    return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(link))));
+                }
+                (Ignored, None)
             }
             mouse::Event::CursorMoved { position } => {
                 // Moves matter to a program tracking the mouse, and to a drag in
@@ -268,6 +322,18 @@ impl canvas::Program<Message> for Pane {
                 }
             }));
         }
+        out.push(self.hover_cache.draw(renderer, size, |fr| {
+            let Some(link) = &self.hover else {
+                return;
+            };
+            for &(row, from, len) in &link.spans {
+                fr.fill_rectangle(
+                    Point::new(from as f32 * cw, row as f32 * ch + ch - 2.0),
+                    Size::new(len as f32 * cw, 1.0),
+                    col(f.fg),
+                );
+            }
+        }));
         out.push(self.cursor.draw(renderer, size, |fr| {
             let Some(c) = f.cursor else {
                 return;
@@ -319,7 +385,9 @@ impl canvas::Program<Message> for Pane {
     }
 
     fn mouse_interaction(&self, _s: &PaneState, bounds: Rectangle, cursor: Cursor) -> mouse::Interaction {
-        if cursor.is_over(bounds) {
+        if self.hover.is_some() && cursor.is_over(bounds) {
+            mouse::Interaction::Pointer
+        } else if cursor.is_over(bounds) {
             mouse::Interaction::Text
         } else {
             mouse::Interaction::default()
@@ -462,7 +530,7 @@ mod tests {
                 ascii: true,
             }],
             bgs: vec![],
-            selected: None,
+            ..Default::default()
         })
     }
 
