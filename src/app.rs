@@ -50,6 +50,8 @@ pub enum Message {
     // Navigation
     /// Toggle a team's sidebar expansion (chevron / team-header click).
     ToggleTeamExpanded(String),
+    /// Click on a sidebar team row outside its chevron.
+    SelectTeamRow(String),
     /// Select a team and switch the right pane to `view` (team sub-row click).
     SelectTeamView(String, View),
     /// Tab bar actions; handled in `app/tab_update.rs`.
@@ -962,6 +964,11 @@ impl App {
                 })
                 .collect(),
             on_issue_detail: matches!(self.view, View::IssueDetail(_)),
+            tabs: self
+                .tab_labels()
+                .into_iter()
+                .map(|(label, active)| crate::palette_results::SearchableTab { label, active })
+                .collect(),
         }
     }
 
@@ -3434,6 +3441,19 @@ impl App {
                 }
             }
 
+            Message::SelectTeamRow(team_id) => {
+                self.expanded_teams.insert(team_id.clone());
+                // Focus the Tab as it was left. A team Tab that is showing a
+                // cross-team page has nothing of the team's to return to, so
+                // that case goes to the team's Board.
+                if self.selected_team_id.as_deref() == Some(team_id.as_str())
+                    && self.view.is_cross_team()
+                {
+                    return self.update_inner(Message::SelectTeamView(team_id, View::Board));
+                }
+                return self.focus_team_tab(&team_id);
+            }
+
             Message::OpenSavedView(view_id) => {
                 let found = self
                     .saved_views
@@ -5217,6 +5237,7 @@ impl App {
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
+                    PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
