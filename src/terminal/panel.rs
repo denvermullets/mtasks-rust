@@ -54,6 +54,12 @@ pub fn resolve_shown(
         .or_else(|| owned_by_team.first().copied())
 }
 
+/// Whether the keyboard belongs to the Terminal. A modal takes it while open;
+/// focus itself is kept, so closing the modal hands the keyboard back.
+pub fn keys_go_to_terminal(focused: bool, panel_visible: bool, modal_open: bool) -> bool {
+    focused && panel_visible && !modal_open
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toggle {
     /// Nothing to do (a cross-team page).
@@ -106,6 +112,14 @@ mod tests {
         assert_eq!(resolve_shown(Some(c), &[a, b]), Some(a));
         assert_eq!(resolve_shown(None, &[b]), Some(b));
         assert_eq!(resolve_shown(Some(a), &[]), None);
+    }
+
+    #[test]
+    fn a_modal_takes_the_keyboard_and_gives_it_back() {
+        assert!(keys_go_to_terminal(true, true, false));
+        assert!(!keys_go_to_terminal(true, true, true), "modal open: nothing to the shell");
+        assert!(!keys_go_to_terminal(false, true, false));
+        assert!(!keys_go_to_terminal(true, false, false));
     }
 
     #[test]

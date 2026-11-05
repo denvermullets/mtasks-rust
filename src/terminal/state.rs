@@ -187,7 +187,7 @@ impl TerminalState {
 
     /// Whether key presses go to the Terminal instead of the app's shortcuts.
     pub fn takes_keys(&self, modal_open: bool) -> bool {
-        self.focused && self.panel.visible && !modal_open
+        panel::keys_go_to_terminal(self.focused, self.panel.visible, modal_open)
     }
 
     /// The panel for the current team, if it is showing.
