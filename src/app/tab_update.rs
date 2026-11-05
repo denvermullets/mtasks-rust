@@ -17,6 +17,8 @@ pub enum TabMessage {
     Close(usize),
     /// Back from an issue opened in a project Tab to the project, its root.
     BackToRoot,
+    /// The tab bar scrolled sideways to this offset.
+    BarScrolled(f32),
 }
 
 impl App {
@@ -31,6 +33,7 @@ impl App {
             }
             TabMessage::Close(index) => return self.close_tab(index),
             TabMessage::BackToRoot => return self.back_to_tab_root(),
+            TabMessage::BarScrolled(x) => self.tab_bar_offset = x,
         }
         Task::none()
     }
@@ -474,6 +477,34 @@ impl App {
                 }
             });
         Task::batch(tasks)
+    }
+
+    /// Scroll the tab bar so the active Tab is in view, when the active Tab or
+    /// the number of Tabs changed since `before` (index, count).
+    pub(super) fn reveal_active_tab(&mut self, before: (usize, usize)) -> Task<Message> {
+        use crate::views::tab_bar;
+        let Some(set) = &self.tab_set else {
+            return Task::none();
+        };
+        let now = (set.active_index(), set.tabs().len());
+        if now == before {
+            return Task::none();
+        }
+        let viewport = tab_bar::tab_viewport(self.window_width);
+        let w = tab_bar::tab_width(now.1, viewport);
+        let x = tab_bar::reveal_offset(now.0, now.1, w, viewport, self.tab_bar_offset);
+        self.tab_bar_offset = x;
+        iced::widget::scrollable::scroll_to(
+            tab_bar::scroll_id(),
+            iced::widget::scrollable::AbsoluteOffset { x, y: 0.0 },
+        )
+    }
+
+    /// Active index and Tab count, for `reveal_active_tab`.
+    pub(super) fn tab_position(&self) -> (usize, usize) {
+        self.tab_set
+            .as_ref()
+            .map_or((0, 0), |s| (s.active_index(), s.tabs().len()))
     }
 
     /// Bar labels in order, with whether each is the active Tab.
