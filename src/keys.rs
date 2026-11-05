@@ -1,6 +1,6 @@
 use iced::keyboard::{self, Key, Modifiers};
 
-use crate::app::{Message, View};
+use crate::app::{Message, TabMessage, View};
 
 pub fn handle_key_press(
     key: Key,
@@ -34,6 +34,12 @@ pub fn handle_key_press(
             "," if modifiers.is_empty() => Some(Message::OpenSettings),
             "?" | "/" if modifiers.shift() || modifiers.is_empty() => Some(Message::ToggleHelp),
 
+            // Cmd+1-9 focuses the Nth Tab (a missing one does nothing; the
+            // modal case already returned above).
+            d if modifiers.command() && tab_position(d).is_some() => {
+                tab_position(d).map(|i| Message::Tab(TabMessage::Focus(i)))
+            }
+
             // Board-only shortcuts — ignored on other views.
             "v" if on_board && modifiers.is_empty() => Some(Message::ToggleViewMode),
             "c" if on_board && modifiers.is_empty() => Some(Message::ToggleFocusedSection),
@@ -64,6 +70,12 @@ pub fn handle_key_press(
         },
         _ => None,
     }
+}
+
+/// "1".."9" as a zero-based Tab position.
+fn tab_position(c: &str) -> Option<usize> {
+    let n: usize = c.parse().ok()?;
+    (1..=9).contains(&n).then(|| n - 1)
 }
 
 /// Keys bound only while a dashboard is showing: j/k and the arrows walk rows
@@ -347,6 +359,36 @@ mod tests {
             false,
             on_board,
         )
+    }
+
+    fn press_with(c: &str, modifiers: Modifiers, modal_open: bool) -> Option<Message> {
+        handle_key_press(Key::Character(c.into()), modifiers, modal_open, false, true)
+    }
+
+    #[test]
+    fn cmd_digit_focuses_that_tab() {
+        for (c, i) in [("1", 0), ("5", 4), ("9", 8)] {
+            assert!(matches!(
+                press_with(c, Modifiers::COMMAND, false),
+                Some(Message::Tab(TabMessage::Focus(n))) if n == i
+            ));
+        }
+        assert!(press_with("0", Modifiers::COMMAND, false).is_none());
+    }
+
+    #[test]
+    fn cmd_digit_does_nothing_while_a_modal_is_open() {
+        assert!(press_with("1", Modifiers::COMMAND, true).is_none());
+        assert!(press_with("9", Modifiers::COMMAND, true).is_none());
+    }
+
+    #[test]
+    fn bare_digits_still_set_priority() {
+        assert!(matches!(press("1", false, true), Some(Message::SetFocusedPriority(0))));
+        assert!(matches!(press("4", false, true), Some(Message::SetFocusedPriority(3))));
+        assert!(press("5", false, true).is_none());
+        // Off the board a bare digit is still inert.
+        assert!(press("1", false, false).is_none());
     }
 
     #[test]
