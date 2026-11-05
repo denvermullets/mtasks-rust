@@ -25,6 +25,7 @@ mod schedule_summary;
 mod scroll;
 mod search_match;
 mod sync;
+mod terminal;
 mod theme;
 mod views;
 
