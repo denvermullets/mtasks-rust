@@ -17,7 +17,7 @@ use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Rendere
 
 use crate::app::Message;
 use crate::terminal::panel::STRIP_HEIGHT;
-use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalMessage};
+use crate::terminal::{CursorShape, Frame, Rgb, Run, RowData, TerminalId, TerminalMessage};
 use crate::theme as t;
 
 /// Family name inside the bundled JetBrains Mono files.
@@ -303,16 +303,48 @@ pub fn measure_cell() -> (f32, f32) {
 pub struct PanelView<'a> {
     /// The pane to draw, or `None` for a team with no Terminal yet.
     pub pane: Option<&'a Pane>,
-    pub title: String,
+    /// The team's Terminals, in strip order.
+    pub items: Vec<StripItem>,
     /// A line for the strip, such as an exited notice or a spawn error.
     pub note: Option<String>,
     pub height: f32,
 }
 
+/// One Terminal in the strip.
+pub struct StripItem {
+    pub id: TerminalId,
+    pub name: String,
+    /// The Terminal the pane is showing.
+    pub active: bool,
+    pub exited: bool,
+}
+
+fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
+    let label = if item.exited { format!("{} (exited)", item.name) } else { item.name };
+    let (active, id) = (item.active, item.id);
+    button(text(label).size(12))
+        .padding([2, 8])
+        .on_press(Message::Terminal(TerminalMessage::Select(id)))
+        .style(move |_theme: &Theme, _status| button::Style {
+            background: active.then(|| iced::Background::Color(t::bg_card_focused())),
+            text_color: if active { t::text_primary() } else { t::text_secondary() },
+            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .into()
+}
+
 pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
-    let mut strip = row![text(p.title).size(12).color(t::text_secondary())]
-        .spacing(12)
-        .align_y(iced::Alignment::Center);
+    let mut strip = row![].spacing(6).align_y(iced::Alignment::Center);
+    for item in p.items {
+        strip = strip.push(strip_button(item));
+    }
+    strip = strip.push(
+        button(text("+").size(13))
+            .padding([0, 8])
+            .on_press(Message::Terminal(TerminalMessage::New))
+            .style(button::text),
+    );
     if let Some(note) = p.note {
         strip = strip.push(text(note).size(12).color(t::text_muted()));
     }

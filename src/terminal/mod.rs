@@ -16,6 +16,7 @@ mod engine;
 mod input;
 mod palette;
 pub mod panel;
+mod roster;
 mod state;
 mod types;
 

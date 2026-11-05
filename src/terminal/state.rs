@@ -19,10 +19,11 @@ use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
 use super::panel::{self, PanelState, Toggle};
+use super::roster::Roster;
 use super::{active_term_theme, SpawnConfig, TerminalId, Terminals};
 use crate::app::Message;
 use crate::theme as t;
-use crate::views::terminal_panel::{self, Pane, PanelView};
+use crate::views::terminal_panel::{self, Pane, PanelView, StripItem};
 
 #[derive(Debug, Clone)]
 pub enum TerminalMessage {
@@ -34,8 +35,10 @@ pub enum TerminalMessage {
     ToggleFocus,
     /// A click on the pane.
     Focus,
-    /// "New Terminal" on an empty panel.
+    /// "New Terminal", from the strip or an empty panel.
     New,
+    /// A Terminal chosen in the strip.
+    Select(TerminalId),
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
 }
@@ -44,8 +47,7 @@ static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new()
 
 pub struct TerminalState {
     terminals: Terminals,
-    owners: HashMap<TerminalId, String>,
-    names: HashMap<TerminalId, String>,
+    roster: Roster,
     panel: PanelState,
     focused: bool,
     window: Size,
@@ -66,8 +68,7 @@ impl TerminalState {
             terminals: Terminals::new(move || {
                 let _ = tx.unbounded_send(());
             }),
-            owners: HashMap::new(),
-            names: HashMap::new(),
+            roster: Roster::default(),
             panel: PanelState::default(),
             focused: false,
             window: Size::new(1100.0, 700.0),
@@ -109,6 +110,12 @@ impl TerminalState {
                     self.panel.visible = true;
                     self.focused = true;
                     self.create(team);
+                }
+            }
+            TerminalMessage::Select(id) => {
+                if team.is_some_and(|t| self.owned_by(t).contains(&id)) {
+                    self.panel.pane = Some(id);
+                    self.focused = true;
                 }
             }
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
@@ -195,10 +202,16 @@ impl TerminalState {
             return None;
         }
         let pane = self.shown.map(|_| &self.pane);
-        let title = self
-            .shown
-            .and_then(|id| self.names.get(&id).cloned())
-            .unwrap_or_else(|| "Terminals".to_string());
+        let items = self
+            .roster
+            .of_team(team)
+            .map(|r| StripItem {
+                id: r.id,
+                name: r.name.clone(),
+                active: Some(r.id) == self.shown,
+                exited: self.terminals.is_exited(r.id),
+            })
+            .collect();
         let note = self
             .error
             .clone()
@@ -206,7 +219,7 @@ impl TerminalState {
             .or_else(|| (pane.is_none() && self.owned_by(team).is_empty()).then(|| "none open".to_string()));
         Some(terminal_panel::view(PanelView {
             pane,
-            title,
+            items,
             note,
             height: panel::panel_height(self.window.height, self.panel.height),
         }))
@@ -251,11 +264,12 @@ impl TerminalState {
     }
 
     fn owned_by(&self, team: &str) -> Vec<TerminalId> {
-        self.terminals
-            .ids()
-            .into_iter()
-            .filter(|id| self.owners.get(id).is_some_and(|o| o == team))
-            .collect()
+        self.roster.ids_of_team(team)
+    }
+
+    /// How many of the team's Terminals have a live shell.
+    pub fn open_count(&self, team: &str) -> usize {
+        self.terminals.open_count(team)
     }
 
     fn pane_exited(&self) -> bool {
@@ -282,9 +296,7 @@ impl TerminalState {
         match self.terminals.spawn(config) {
             Ok(id) => {
                 self.error = None;
-                self.owners.insert(id, team.to_string());
-                let n = self.owned_by(team).len();
-                self.names.insert(id, format!("Terminal {n}"));
+                self.roster.add(id, team, None);
                 self.sent_size.insert(id, (cols, rows));
                 self.panel.pane = Some(id);
             }
