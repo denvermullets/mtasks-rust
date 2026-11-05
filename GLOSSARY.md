@@ -114,3 +114,11 @@ _Avoid_: Disabled, inactive, stopped
 **Terminal**:
 An interactive shell session that belongs to a team and runs only on this device. Any tab on that team can show it, and its contents never reach the server.
 _Avoid_: Console, shell, agent session
+
+**Open**:
+The state of a Terminal whose shell is still alive, even if it's sitting at a prompt. A team's sidebar row counts its open Terminals.
+_Avoid_: Running, active
+
+**Busy**:
+The state of an open Terminal with a program other than the shell in the foreground. Closing a busy Terminal or quitting the app asks first.
+_Avoid_: Running, active
