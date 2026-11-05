@@ -2,6 +2,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +20,15 @@ const DEFAULT_API_BASE_URL: &str = "https://justanotherissuetracker.com";
 /// config, database and files: local rows are matched to the server by
 /// `remote_id`, so one database must never sync against two servers.
 pub const APP_DIR: &str = if cfg!(debug_assertions) { "mtasks-rusty" } else { "JAIT" };
+
+/// Whose display options (and filters) a board reads and writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardScope {
+    /// No team of its own (cross-team pages): the global set.
+    Global,
+    /// One team's board, by local team id.
+    Team(String),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -36,8 +47,14 @@ pub struct Config {
     #[serde(default)]
     pub current_user_name: Option<String>,
     /// Board display options (group/sub-group/order/completed/card properties).
+    /// The global set: what a team without its own entry in `team_display`
+    /// starts from, and what cross-team pages use.
     #[serde(default)]
     pub display: DisplayOptions,
+    /// Per-team display options, by local team id. A team gets an entry the
+    /// first time its options change, copied from the global set.
+    #[serde(default)]
+    pub team_display: BTreeMap<String, DisplayOptions>,
     /// Board issue filters. Global, not per team (v1).
     #[serde(default)]
     pub filters: Filters,
@@ -79,10 +96,36 @@ impl Default for Config {
             current_user_remote_id: None,
             current_user_name: None,
             display: DisplayOptions::default(),
+            team_display: BTreeMap::new(),
             filters: Filters::default(),
             theme: default_theme(),
             font: default_font(),
             native_notifications: true,
+        }
+    }
+}
+
+impl Config {
+    /// The display options for a board. A team with no entry reads the global
+    /// set, so an upgraded config shows nothing different.
+    pub fn display_for(&self, scope: &BoardScope) -> &DisplayOptions {
+        match scope {
+            BoardScope::Global => &self.display,
+            BoardScope::Team(id) => self.team_display.get(id).unwrap_or(&self.display),
+        }
+    }
+
+    /// Mutable display options for a board. A team with no entry gets one,
+    /// seeded from the global set, so the edit touches only that team.
+    pub fn display_for_mut(&mut self, scope: &BoardScope) -> &mut DisplayOptions {
+        match scope {
+            BoardScope::Global => &mut self.display,
+            BoardScope::Team(id) => {
+                let seed = &self.display;
+                self.team_display
+                    .entry(id.clone())
+                    .or_insert_with(|| seed.clone())
+            }
         }
     }
 }
@@ -240,5 +283,37 @@ mod tests {
         cfg.theme = "warm-paper".to_string();
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.theme, "warm-paper");
+    }
+
+    #[test]
+    fn team_without_entry_reads_the_global_display() {
+        let mut cfg = Config::default();
+        cfg.display.group_by = GroupBy::Assignee;
+        let a = BoardScope::Team("a".into());
+        assert_eq!(cfg.display_for(&a), &cfg.display);
+        assert!(cfg.team_display.is_empty());
+    }
+
+    #[test]
+    fn editing_one_team_seeds_from_global_and_leaves_others_alone() {
+        let mut cfg = Config::default();
+        cfg.display.order_by = OrderBy::DueDate;
+        let a = BoardScope::Team("a".into());
+        let b = BoardScope::Team("b".into());
+        cfg.display_for_mut(&a).group_by = GroupBy::Priority;
+        assert_eq!(cfg.display_for(&a).group_by, GroupBy::Priority);
+        assert_eq!(cfg.display_for(&a).order_by, OrderBy::DueDate);
+        assert_eq!(cfg.display_for(&b), &cfg.display);
+        assert_ne!(cfg.display.group_by, GroupBy::Priority);
+    }
+
+    #[test]
+    fn team_display_round_trips_and_old_config_has_none() {
+        let mut cfg = Config::default();
+        cfg.display_for_mut(&BoardScope::Team("3f2a-uuid".into())).group_by = GroupBy::Assignee;
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.team_display, cfg.team_display);
+        let old: Config = toml::from_str("[display]\ngroup_by = \"priority\"\n").unwrap();
+        assert!(old.team_display.is_empty());
     }
 }

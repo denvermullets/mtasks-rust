@@ -1594,14 +1594,24 @@ impl App {
     fn board_display(&self) -> &DisplayOptions {
         match &self.open_view {
             Some(v) => &v.state.display,
-            None => &self.config.display,
+            None => self.config.display_for(&self.board_scope()),
         }
     }
 
     fn board_display_mut(&mut self) -> &mut DisplayOptions {
+        let scope = self.board_scope();
         match &mut self.open_view {
             Some(v) => &mut v.state.display,
-            None => &mut self.config.display,
+            None => self.config.display_for_mut(&scope),
+        }
+    }
+
+    /// Whose display options the active board uses: the selected team's, or
+    /// the global set on cross-team pages.
+    fn board_scope(&self) -> config::BoardScope {
+        match &self.selected_team_id {
+            Some(id) if !self.view.is_cross_team() => config::BoardScope::Team(id.clone()),
+            _ => config::BoardScope::Global,
         }
     }
 
@@ -1650,8 +1660,12 @@ impl App {
                     labels: &self.labels,
                     projects: &self.projects,
                 };
+                let scope = match &self.selected_team_id {
+                    Some(id) => config::BoardScope::Team(id.clone()),
+                    None => config::BoardScope::Global,
+                };
                 let local = crate::saved_view::BoardState {
-                    display: self.config.display.clone(),
+                    display: self.config.display_for(&scope).clone(),
                     filters: self.config.filters.clone(),
                     search: String::new(),
                 };
@@ -3412,7 +3426,10 @@ impl App {
                     Task::none()
                 };
                 let local = crate::saved_view::BoardState {
-                    display: self.config.display.clone(),
+                    display: self
+                        .config
+                        .display_for(&config::BoardScope::Team(sv.team_id.clone()))
+                        .clone(),
                     filters: self.config.filters.clone(),
                     search: board_search,
                 };
