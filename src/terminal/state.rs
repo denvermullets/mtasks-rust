@@ -38,6 +38,11 @@ pub enum TerminalMessage {
     FocusTerminal,
     /// Palette: give the keyboard back to the app.
     FocusApp,
+    /// The pointer moved (window point). Sent only while a Terminal has focus.
+    Moved(f32, f32),
+    /// A left press anywhere, sent only while a Terminal has focus. One
+    /// outside the panel, at the last pointer position, moves focus to the app.
+    PressedAt,
     /// The pointer pressed the strip.
     DragStart,
     /// The pointer moved (window y) while dragging.
@@ -62,6 +67,7 @@ struct Drag {
 
 pub struct TerminalState {
     drag: Option<Drag>,
+    pointer: Option<(f32, f32)>,
     terminals: Terminals,
     owners: HashMap<TerminalId, String>,
     names: HashMap<TerminalId, String>,
@@ -86,6 +92,7 @@ impl TerminalState {
                 let _ = tx.unbounded_send(());
             }),
             drag: None,
+            pointer: None,
             owners: HashMap::new(),
             names: HashMap::new(),
             panel: PanelState::default(),
@@ -130,6 +137,16 @@ impl TerminalState {
                 }
             }
             TerminalMessage::FocusApp => self.focused = false,
+            TerminalMessage::Moved(x, y) => self.pointer = Some((x, y)),
+            TerminalMessage::PressedAt => {
+                // Unknown until the pointer moves after focus was taken.
+                let leaves = self.pointer.is_some_and(|(x, y)| {
+                    panel::press_leaves_panel(self.window.height, self.panel.height, x, y)
+                });
+                if leaves {
+                    self.focused = false;
+                }
+            }
             TerminalMessage::DragStart => {
                 self.drag = Some(Drag { start_y: None, start_height: self.height() });
             }
@@ -228,6 +245,10 @@ impl TerminalState {
             }
             self.pane.reset();
         }
+        if !self.focused {
+            // A position seen before focus began may be stale by the time of a press.
+            self.pointer = None;
+        }
         self.pane.set_focused(self.focused);
     }
 
@@ -307,6 +328,16 @@ impl TerminalState {
             }));
         }
         if self.takes_keys(modal_open) {
+            // Needs the cursor position, which a press event doesn't carry.
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Terminal(TerminalMessage::Moved(position.x, position.y)))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                    Some(Message::Terminal(TerminalMessage::PressedAt))
+                }
+                _ => None,
+            }));
             subs.push(event::listen_with(|e, _status, _id| match e {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     physical_key,

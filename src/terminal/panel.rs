@@ -35,6 +35,20 @@ pub fn drag_height(window_h: f32, start_height: f32, start_y: f32, y: f32) -> f3
     panel_height(window_h, Some(start_height + (start_y - y)))
 }
 
+/// Approximate height of the status bar under the panel. Only clicks within a
+/// few pixels of the panel's bottom edge depend on it being exact.
+pub const STATUS_HEIGHT: f32 = 28.0;
+
+/// Whether a left press at window point (`x`, `y`) lands outside the panel,
+/// so keyboard focus belongs to the app. The panel spans the window right of
+/// the sidebar, from its top edge down to the status bar. A press inside it
+/// is the pane's or strip's own business.
+pub fn press_leaves_panel(window_h: f32, requested: Option<f32>, x: f32, y: f32) -> bool {
+    let bottom = window_h - STATUS_HEIGHT;
+    let top = bottom - panel_height(window_h, requested);
+    x < SIDEBAR_WIDTH || y < top || y > bottom
+}
+
 /// Pixels available to the one pane for this window.
 pub fn pane_pixels(window_w: f32, window_h: f32, requested: Option<f32>) -> (f32, f32) {
     let w = (window_w - SIDEBAR_WIDTH).max(0.0);
@@ -109,6 +123,19 @@ mod tests {
         // 800x500 window.
         assert_eq!(drag_height(500.0, 166.0, 300.0, 0.0), 300.0);
         assert_eq!(drag_height(500.0, 166.0, 300.0, 500.0), MIN_HEIGHT);
+    }
+
+    #[test]
+    fn a_press_outside_the_panel_moves_focus_to_the_app() {
+        // 1100x900 window: panel is 300 high, above a 28 high status bar.
+        let outside = |x, y| press_leaves_panel(900.0, None, x, y);
+        assert!(!outside(600.0, 700.0), "on the pane");
+        assert!(!outside(600.0, 575.0), "on the strip");
+        assert!(outside(600.0, 300.0), "on the board");
+        assert!(outside(100.0, 700.0), "on the sidebar");
+        assert!(outside(600.0, 895.0), "on the status bar");
+        // A dragged height moves the top edge.
+        assert!(!press_leaves_panel(900.0, Some(500.0), 600.0, 400.0));
     }
 
     #[test]
