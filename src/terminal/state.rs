@@ -161,8 +161,12 @@ impl TerminalState {
                         return iced::clipboard::read()
                             .map(|s| Message::Terminal(TerminalMessage::Pasted(s)))
                     }
-                    // Wired by JRST-420.
-                    Route::Tab(_) => {}
+                    // The app's own Tab switch. Focus follows `sync`: it stays
+                    // with the Terminal while the new Tab shows a panel, and
+                    // falls to the app on a page without one.
+                    Route::Tab(i) => {
+                        return Task::done(Message::Tab(crate::app::TabMessage::Focus(i)))
+                    }
                     Route::Send(key) => {
                         if let Some(id) = self.shown {
                             self.terminals.send_key(id, key);
