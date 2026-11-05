@@ -14,8 +14,10 @@
 
 mod engine;
 mod input;
+pub mod links;
 mod palette;
 pub mod panel;
+pub mod pointer;
 mod roster;
 mod state;
 mod types;
@@ -123,6 +125,33 @@ impl Terminals {
     pub fn send_key(&self, id: TerminalId, key: KeyInput) {
         if let Some(e) = self.entries.get(&id) {
             e.engine.send(engine::Cmd::Key(key));
+        }
+    }
+
+    /// A pointer event. It goes to the program only while the program tracks the mouse.
+    pub fn mouse(&self, id: TerminalId, event: MouseInput) {
+        if let Some(e) = self.entries.get(&id) {
+            e.engine.send(engine::Cmd::Mouse(event));
+        }
+    }
+
+    /// The text under the current selection, or `None` when nothing is selected.
+    /// Soft-wrapped lines are joined and trailing blanks trimmed, as when copying
+    /// from any terminal. This is what Cmd+C (JRST-386) copies. It asks the
+    /// Terminal's owner thread, so it waits briefly (at most half a second).
+    pub fn selected_text(&self, id: TerminalId) -> Option<String> {
+        let e = self.entries.get(&id)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        e.engine.send(engine::Cmd::SelectedText(tx));
+        rx.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten()
+    }
+
+    /// Wheel or trackpad movement: goes to a program that tracks the mouse, as
+    /// arrow keys to a full-screen program that doesn't, and otherwise scrolls
+    /// back through output.
+    pub fn wheel(&self, id: TerminalId, event: WheelInput) {
+        if let Some(e) = self.entries.get(&id) {
+            e.engine.send(engine::Cmd::Wheel(event));
         }
     }
 

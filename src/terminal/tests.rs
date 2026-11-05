@@ -57,7 +57,18 @@ fn type_line(t: &Terminals, id: TerminalId, line: &str) {
 
 /// Poll until `check` holds for the latest frame, or panic after `secs`.
 fn wait_for(t: &Terminals, id: TerminalId, what: &str, check: impl Fn(&Frame) -> bool) -> Arc<Frame> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Generous: the 20,000-line scrollback test keeps every core busy for a while.
+    wait_for_secs(30, t, id, what, check)
+}
+
+fn wait_for_secs(
+    secs: u64,
+    t: &Terminals,
+    id: TerminalId,
+    what: &str,
+    check: impl Fn(&Frame) -> bool,
+) -> Arc<Frame> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
         if let Some(f) = t.frame(id) {
             if check(&f) {
@@ -456,7 +467,11 @@ fn mode_2031_pushes_a_report_when_the_theme_changes() {
 mod hidden;
 mod keys;
 mod lifecycle;
+mod links;
 mod load;
+mod mouse;
 mod resize;
+mod scroll;
+mod select;
 mod theme;
 mod wake;

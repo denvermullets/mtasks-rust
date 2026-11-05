@@ -18,9 +18,13 @@ use iced::keyboard::{self, key::Physical};
 use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
+use super::links::Link;
 use super::panel::{self, Layout, PanelState, Toggle, MAX_PANES};
 use super::roster::Roster;
-use super::{active_term_theme, Closing, SpawnConfig, TerminalId, Terminals};
+use super::{
+    active_term_theme, Closing, MouseAction, MouseInput, SpawnConfig, TerminalId, Terminals,
+    WheelInput,
+};
 use crate::app::Message;
 use crate::theme as t;
 use crate::views::terminal_panel::{self, Pane, PaneView, PanelView, StripItem, TermFont};
@@ -35,6 +39,14 @@ pub enum TerminalMessage {
     ToggleFocus,
     /// A click on the pane in this slot.
     Focus(usize),
+    /// A pointer event over the pane in this slot. A press also focuses it.
+    Mouse(usize, MouseInput),
+    /// Wheel or trackpad movement over the pane in this slot.
+    Wheel(usize, WheelInput),
+    /// The link under Cmd+hover in this slot changed (or Cmd was let go).
+    Hover(usize, Option<Link>),
+    /// Cmd+click on a link.
+    OpenLink { url: String, explicit: bool },
     /// Palette: show the panel if needed and give the Terminal the keyboard.
     FocusTerminal,
     /// Palette: give the keyboard back to the app.
@@ -175,6 +187,29 @@ impl TerminalState {
                         }
                     }
                     Toggle::SetFocus(f) => self.focused = f,
+                }
+            }
+            TerminalMessage::Hover(slot, link) => {
+                if let Some(pane) = self.panes.get_mut(slot) {
+                    pane.set_hover(link);
+                }
+            }
+            TerminalMessage::OpenLink { url, explicit } => {
+                // `open` re-checks the scheme: nothing but http(s), or a safe explicit link, opens.
+                super::links::open(&url, explicit);
+            }
+            TerminalMessage::Wheel(slot, w) => {
+                if let Some(id) = self.shown.get(slot).copied().flatten() {
+                    self.terminals.wheel(id, w);
+                }
+            }
+            TerminalMessage::Mouse(slot, m) => {
+                if matches!(m.action, MouseAction::Press(_)) {
+                    self.focus_slot(slot);
+                    self.focused = true;
+                }
+                if let Some(id) = self.shown.get(slot).copied().flatten() {
+                    self.terminals.mouse(id, m);
                 }
             }
             TerminalMessage::Focus(slot) => {
