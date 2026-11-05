@@ -25,6 +25,13 @@ png = "0.17"
 pulldown-cmark = { version = "0.13", default-features = false }
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 
+# Only to retarget the native Quit menu item at the window's close request
+# (src/quit.rs). Versions match the ones winit 0.30 already pulls in.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", default-features = false, features = ["NSApplication", "NSResponder", "NSMenu", "NSMenuItem"] }
+objc2-foundation = { version = "0.2", default-features = false }
+
 # Bundle metadata for `cargo bundle` (cargo-bundle). The identifier is fixed:
 # macOS keys notification permission and settings off it. Do not change it.
 [package.metadata.bundle]
