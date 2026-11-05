@@ -1606,8 +1606,8 @@ impl App {
         }
     }
 
-    /// Whose display options the active board uses: the selected team's, or
-    /// the global set on cross-team pages.
+    /// Whose display options and filters the active board uses: the selected
+    /// team's, or the global set on cross-team pages.
     fn board_scope(&self) -> config::BoardScope {
         match &self.selected_team_id {
             Some(id) if !self.view.is_cross_team() => config::BoardScope::Team(id.clone()),
@@ -1618,14 +1618,15 @@ impl App {
     fn board_filters(&self) -> &Filters {
         match &self.open_view {
             Some(v) => &v.state.filters,
-            None => &self.config.filters,
+            None => self.config.filters_for(&self.board_scope()),
         }
     }
 
     fn board_filters_mut(&mut self) -> &mut Filters {
+        let scope = self.board_scope();
         match &mut self.open_view {
             Some(v) => &mut v.state.filters,
-            None => &mut self.config.filters,
+            None => self.config.filters_for_mut(&scope),
         }
     }
 
@@ -1666,7 +1667,7 @@ impl App {
                 };
                 let local = crate::saved_view::BoardState {
                     display: self.config.display_for(&scope).clone(),
-                    filters: self.config.filters.clone(),
+                    filters: self.config.filters_for(&scope).clone(),
                     search: String::new(),
                 };
                 v.refresh(sv, &mirror, &local);
@@ -1696,7 +1697,9 @@ impl App {
                 .prune(&self.members, &self.labels, &self.lanes, &self.projects);
             return false;
         }
-        self.config.filters.prune(
+        let scope = self.board_scope();
+        self.config.prune_filters_for(
+            &scope,
             &self.members,
             &self.labels,
             &self.lanes,
@@ -3430,7 +3433,10 @@ impl App {
                         .config
                         .display_for(&config::BoardScope::Team(sv.team_id.clone()))
                         .clone(),
-                    filters: self.config.filters.clone(),
+                    filters: self
+                        .config
+                        .filters_for(&config::BoardScope::Team(sv.team_id.clone()))
+                        .clone(),
                     search: board_search,
                 };
                 let mirror = crate::saved_view::Mirror {

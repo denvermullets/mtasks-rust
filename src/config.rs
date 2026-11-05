@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{DisplayOptions, Filters};
 
 /// Default API server. Only dev builds know about localhost; release builds talk
@@ -55,9 +56,14 @@ pub struct Config {
     /// first time its options change, copied from the global set.
     #[serde(default)]
     pub team_display: BTreeMap<String, DisplayOptions>,
-    /// Board issue filters. Global, not per team (v1).
+    /// Global board issue filters: what a team without its own entry in
+    /// `team_filters` starts from, and what cross-team pages use.
     #[serde(default)]
     pub filters: Filters,
+    /// Per-team filters, by local team id. A team gets an entry the first time
+    /// its filters change or are pruned, copied from the global set.
+    #[serde(default)]
+    pub team_filters: BTreeMap<String, Filters>,
     /// Key of the selected color theme (see `theme::THEMES`).
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -98,6 +104,7 @@ impl Default for Config {
             display: DisplayOptions::default(),
             team_display: BTreeMap::new(),
             filters: Filters::default(),
+            team_filters: BTreeMap::new(),
             theme: default_theme(),
             font: default_font(),
             native_notifications: true,
@@ -127,6 +134,49 @@ impl Config {
                     .or_insert_with(|| seed.clone())
             }
         }
+    }
+}
+
+impl Config {
+    /// The filters for a board. A team with no entry reads the global set.
+    pub fn filters_for(&self, scope: &BoardScope) -> &Filters {
+        match scope {
+            BoardScope::Global => &self.filters,
+            BoardScope::Team(id) => self.team_filters.get(id).unwrap_or(&self.filters),
+        }
+    }
+
+    /// Mutable filters for a board. A team with no entry gets one, seeded from
+    /// the global set.
+    pub fn filters_for_mut(&mut self, scope: &BoardScope) -> &mut Filters {
+        match scope {
+            BoardScope::Global => &mut self.filters,
+            BoardScope::Team(id) => {
+                let seed = &self.filters;
+                self.team_filters
+                    .entry(id.clone())
+                    .or_insert_with(|| seed.clone())
+            }
+        }
+    }
+
+    /// Drop filter ids the loaded data doesn't contain from one board's
+    /// filters only. A team with no entry keeps reading the global set unless
+    /// pruning changes its copy. True if anything changed.
+    pub fn prune_filters_for(
+        &mut self,
+        scope: &BoardScope,
+        members: &[Member],
+        labels: &[Label],
+        lanes: &[Lane],
+        projects: &[Project],
+    ) -> bool {
+        let mut working = self.filters_for(scope).clone();
+        if !working.prune(members, labels, lanes, projects) {
+            return false;
+        }
+        *self.filters_for_mut(scope) = working;
+        true
     }
 }
 
@@ -315,5 +365,74 @@ mod tests {
         assert_eq!(back.team_display, cfg.team_display);
         let old: Config = toml::from_str("[display]\ngroup_by = \"priority\"\n").unwrap();
         assert!(old.team_display.is_empty());
+    }
+
+    fn lane(id: &str) -> Lane {
+        Lane {
+            id: id.into(),
+            name: String::new(),
+            color: None,
+            position: 0,
+            team_id: "t".into(),
+            remote_id: None,
+            category: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn team_filters_seed_from_global_and_are_independent() {
+        let mut cfg = Config::default();
+        cfg.filters.toggle(FilterField::Priority, "1");
+        let a = BoardScope::Team("a".into());
+        let b = BoardScope::Team("b".into());
+        assert_eq!(cfg.filters_for(&a), &cfg.filters);
+        cfg.filters_for_mut(&a).toggle(FilterField::Priority, "2");
+        assert_eq!(cfg.filters_for(&a).priorities, vec!["1", "2"]);
+        assert_eq!(cfg.filters_for(&b).priorities, vec!["1"]);
+        assert_eq!(cfg.filters.priorities, vec!["1"]);
+    }
+
+    #[test]
+    fn pruning_only_touches_the_team_it_belongs_to() {
+        let mut cfg = Config::default();
+        let a = BoardScope::Team("a".into());
+        let b = BoardScope::Team("b".into());
+        cfg.filters_for_mut(&a).toggle(FilterField::Status, "lane-a");
+        cfg.filters_for_mut(&b).toggle(FilterField::Status, "lane-b");
+        cfg.filters.toggle(FilterField::Status, "lane-b");
+        // Team b's data: only lane-b exists.
+        let lanes = [lane("lane-b")];
+        assert!(!cfg.prune_filters_for(&b, &[], &[], &lanes, &[]));
+        assert_eq!(cfg.filters_for(&b).statuses, vec!["lane-b"]);
+        assert_eq!(cfg.filters_for(&a).statuses, vec!["lane-a"]);
+        // Team a's data lacks lane-a: only a's set drops it; global is untouched.
+        assert!(cfg.prune_filters_for(&a, &[], &[], &lanes, &[]));
+        assert!(cfg.filters_for(&a).statuses.is_empty());
+        assert_eq!(cfg.filters_for(&b).statuses, vec!["lane-b"]);
+        assert_eq!(cfg.filters.statuses, vec!["lane-b"]);
+    }
+
+    #[test]
+    fn pruning_a_seeded_team_copies_instead_of_editing_global() {
+        let mut cfg = Config::default();
+        cfg.filters.toggle(FilterField::Status, "other-team-lane");
+        let c = BoardScope::Team("c".into());
+        assert!(cfg.prune_filters_for(&c, &[], &[], &[], &[]));
+        assert!(cfg.filters_for(&c).statuses.is_empty());
+        assert_eq!(cfg.filters.statuses, vec!["other-team-lane"]);
+    }
+
+    #[test]
+    fn team_filters_round_trip_and_old_config_has_none() {
+        let mut cfg = Config::default();
+        cfg.filters_for_mut(&BoardScope::Team("t-1".into()))
+            .toggle(FilterField::Priority, "3");
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.team_filters, cfg.team_filters);
+        let old: Config = toml::from_str("[filters]\npriorities = [\"1\"]\n").unwrap();
+        assert!(old.team_filters.is_empty());
+        assert_eq!(old.filters.priorities, vec!["1"]);
     }
 }
