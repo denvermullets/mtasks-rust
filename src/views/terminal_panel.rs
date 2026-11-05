@@ -12,7 +12,7 @@ use iced::advanced::text::{self as adv_text, Paragraph as _};
 use iced::alignment::{Horizontal, Vertical};
 use iced::mouse::{self, Cursor};
 use iced::widget::canvas::{self, Cache, Canvas, Geometry, Text};
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{button, column, container, row, text, text_input, Space};
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
@@ -317,14 +317,35 @@ pub struct StripItem {
     /// The Terminal the pane is showing.
     pub active: bool,
     pub exited: bool,
+    /// The text being typed while this Terminal is renamed.
+    pub editing: Option<String>,
+}
+
+pub fn rename_input_id() -> text_input::Id {
+    text_input::Id::new("terminal-rename")
 }
 
 fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
+    if let Some(draft) = item.editing {
+        return text_input("Name", &draft)
+            .id(rename_input_id())
+            .size(12)
+            .width(140)
+            .padding([1, 6])
+            .on_input(|s| Message::Terminal(TerminalMessage::RenameInput(s)))
+            .on_submit(Message::Terminal(TerminalMessage::RenameSubmit))
+            .into();
+    }
     let label = if item.exited { format!("{} (exited)", item.name) } else { item.name };
     let (active, id) = (item.active, item.id);
     button(text(label).size(12))
         .padding([2, 8])
-        .on_press(Message::Terminal(TerminalMessage::Select(id)))
+        // Choosing the Terminal already shown renames it.
+        .on_press(Message::Terminal(if active {
+            TerminalMessage::RenameStart(id)
+        } else {
+            TerminalMessage::Select(id)
+        }))
         .style(move |_theme: &Theme, _status| button::Style {
             background: active.then(|| iced::Background::Color(t::bg_card_focused())),
             text_color: if active { t::text_primary() } else { t::text_secondary() },

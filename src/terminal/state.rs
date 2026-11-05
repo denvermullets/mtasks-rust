@@ -39,6 +39,11 @@ pub enum TerminalMessage {
     New,
     /// A Terminal chosen in the strip.
     Select(TerminalId),
+    /// The shown Terminal's name was clicked.
+    RenameStart(TerminalId),
+    RenameInput(String),
+    /// Enter: an empty name is refused and the old one kept.
+    RenameSubmit,
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
 }
@@ -48,6 +53,7 @@ static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new()
 pub struct TerminalState {
     terminals: Terminals,
     roster: Roster,
+    renaming: Option<(TerminalId, String)>,
     panel: PanelState,
     focused: bool,
     window: Size,
@@ -69,6 +75,7 @@ impl TerminalState {
                 let _ = tx.unbounded_send(());
             }),
             roster: Roster::default(),
+            renaming: None,
             panel: PanelState::default(),
             focused: false,
             window: Size::new(1100.0, 700.0),
@@ -113,8 +120,28 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Select(id) => {
+                self.renaming = None;
                 if team.is_some_and(|t| self.owned_by(t).contains(&id)) {
                     self.panel.pane = Some(id);
+                    self.focused = true;
+                }
+            }
+            TerminalMessage::RenameStart(id) => {
+                if let Some(r) = self.roster.get(id) {
+                    self.renaming = Some((id, r.name.clone()));
+                    // The text field takes the keyboard, not the shell.
+                    self.focused = false;
+                    return iced::widget::text_input::focus(terminal_panel::rename_input_id());
+                }
+            }
+            TerminalMessage::RenameInput(s) => {
+                if let Some((_, draft)) = self.renaming.as_mut() {
+                    *draft = s;
+                }
+            }
+            TerminalMessage::RenameSubmit => {
+                if let Some((id, draft)) = self.renaming.take() {
+                    self.roster.rename(id, &draft);
                     self.focused = true;
                 }
             }
@@ -210,6 +237,11 @@ impl TerminalState {
                 name: r.name.clone(),
                 active: Some(r.id) == self.shown,
                 exited: self.terminals.is_exited(r.id),
+                editing: self
+                    .renaming
+                    .as_ref()
+                    .filter(|(id, _)| *id == r.id)
+                    .map(|(_, draft)| draft.clone()),
             })
             .collect();
         let note = self
