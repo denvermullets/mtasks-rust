@@ -220,6 +220,12 @@ impl Engine {
         self.pid
     }
 
+    /// The PTY's foreground process group isn't the shell's own.
+    pub(super) fn busy(&self) -> bool {
+        let fg = self.master.lock().ok().and_then(|m| m.process_group_leader());
+        fg.is_some_and(|fg| fg != self.pid as libc::pid_t)
+    }
+
     pub(super) fn exited(&self) -> bool {
         self.shared.exited.load(Acquire)
     }
