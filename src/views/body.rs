@@ -347,15 +347,16 @@ fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>,
 /// one line. The header row is filled with the context-foreground token.
 fn table_block<'a>(table: &document::Table, size: f32, plain: Color, ctx: &BodyCtx<'a>, parsed: &Parsed) -> Element<'a, Message> {
     let cells = |cells: &[Vec<Block>], header: bool| -> Element<'a, Message> {
-        // Cells are `Fill` x `Fill` inside a `Shrink` row: the row is as tall
-        // as its tallest wrapped cell and every cell stretches to it.
-        let mut r = row![].spacing(1).height(iced::Length::Shrink);
+        // `equal_row`, not `row`: the row is as tall as its tallest wrapped
+        // cell and every `Fill`-height cell stretches to it. A plain `row`
+        // turns `Fill` when a child is `Fill`, filling the scrollable.
+        let mut r: Vec<Element<'a, Message>> = Vec::with_capacity(cells.len());
         for cell in cells {
             let mut content = column![].spacing(t::space::S1);
             for b in cell {
                 content = content.push(block(b, size, plain, ctx, parsed));
             }
-            r = r.push(
+            r.push(
                 container(content)
                     .padding([t::space::S1, t::space::S2])
                     .width(iced::Length::Fill)
@@ -363,10 +364,11 @@ fn table_block<'a>(table: &document::Table, size: f32, plain: Color, ctx: &BodyC
                     .style(move |_| container::Style {
                         background: Some(if header { t::bg_card() } else { t::bg_primary() }.into()),
                         ..Default::default()
-                    }),
+                    })
+                    .into(),
             );
         }
-        r.into()
+        crate::views::equal_row::equal_row(r, 1.0).into()
     };
     let mut grid = column![].spacing(1);
     grid = grid.push(cells(&table.header, true));
