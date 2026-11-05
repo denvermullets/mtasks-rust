@@ -531,6 +531,11 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             ..Default::default()
         });
 
+    // Dragging the strip resizes the panel (JRST-397).
+    let strip = iced::widget::mouse_area(strip)
+        .on_press(Message::Terminal(TerminalMessage::DragStart))
+        .interaction(mouse::Interaction::ResizingVertically);
+
     let body: Element<'a, Message> = match p.pane {
         Some(pane) => {
             let canvas = Canvas::new(pane).width(Length::Fill).height(Length::Fill);
