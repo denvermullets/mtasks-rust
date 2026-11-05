@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::app::View;
 use crate::db::attachments::Attachment;
 use crate::saved_view::OpenView;
-use crate::tabs::{TabKey, TabSet};
+use crate::tabs::{Page, TabKey, TabSet};
 use crate::views::{
     board, inbox, issue_detail, issue_list, project_detail, projects, recurring_issues, roadmap,
 };
@@ -196,6 +196,11 @@ impl Parked {
         self.0.remove(key)
     }
 
+    /// A parked Tab's state, without taking it.
+    pub fn get(&self, key: &TabKey) -> Option<&ParkedTab> {
+        self.0.get(key)
+    }
+
     /// Forget a closed Tab's state. Returns it so the caller can discard what
     /// it owned, such as a comment draft's staged files.
     pub fn forget(&mut self, key: &TabKey) -> Option<ParkedTab> {
@@ -305,6 +310,37 @@ pub fn root_view(key: &TabKey) -> View {
         TabKey::MyIssues => View::MyIssues,
         TabKey::Inbox => View::Inbox,
         TabKey::Dashboard(id) => View::Dashboard(id.clone()),
+    }
+}
+
+/// The page to store for a Tab so a relaunch can return to it: a team-level
+/// page, or the Tab's open Saved view on its board. An issue or project
+/// detail, and every page of a project or cross-team Tab, is the root (a
+/// team's Board, or the project or page itself).
+pub fn stored_page(key: &TabKey, view: &View, open_view: Option<&OpenView>) -> Page {
+    if !matches!(key, TabKey::Team(_)) {
+        return Page::Root;
+    }
+    match view {
+        View::Board => open_view.map_or(Page::Board, |v| Page::SavedView(v.view_id.clone())),
+        View::ProjectList => Page::Projects,
+        View::Roadmap => Page::Roadmap,
+        View::RecurringIssues => Page::Recurring,
+        _ => Page::Board,
+    }
+}
+
+/// The view a relaunched Tab opens on for its stored `page`. A Saved view
+/// opens on the board; the caller opens the view itself.
+pub fn page_view(key: &TabKey, page: &Page) -> View {
+    if !matches!(key, TabKey::Team(_)) {
+        return root_view(key);
+    }
+    match page {
+        Page::Projects => View::ProjectList,
+        Page::Roadmap => View::Roadmap,
+        Page::Recurring => View::RecurringIssues,
+        Page::Root | Page::Board | Page::SavedView(_) => View::Board,
     }
 }
 
@@ -816,5 +852,82 @@ mod tests {
         let gone = parked.forget(&team("a")).unwrap().comment_draft.unwrap();
         assert_eq!(gone.owner_ids(), ["c".to_string(), "r".to_string()]);
         assert!(parked.take(&team("a")).is_none());
+    }
+
+    fn saved_view(id: &str) -> crate::saved_view::OpenView {
+        use crate::saved_view::{BoardState, OpenView, RawQuery};
+        OpenView {
+            view_id: id.into(),
+            team_id: "a".into(),
+            name: "Mine".into(),
+            state: BoardState::default(),
+            raw: RawQuery::new(),
+            baseline: BoardState::default(),
+        }
+    }
+
+    #[test]
+    fn each_team_level_page_is_stored_and_comes_back() {
+        for (view, page) in [
+            (View::Board, Page::Board),
+            (View::ProjectList, Page::Projects),
+            (View::Roadmap, Page::Roadmap),
+            (View::RecurringIssues, Page::Recurring),
+        ] {
+            assert_eq!(stored_page(&team("a"), &view, None), page);
+            assert_eq!(page_view(&team("a"), &page), view);
+        }
+    }
+
+    #[test]
+    fn an_open_saved_view_is_stored_and_comes_back_on_the_board() {
+        let open = saved_view("v1");
+        let page = stored_page(&team("a"), &View::Board, Some(&open));
+        assert_eq!(page, Page::SavedView("v1".into()));
+        assert_eq!(page_view(&team("a"), &page), View::Board);
+    }
+
+    #[test]
+    fn an_issue_or_project_detail_in_a_team_tab_reopens_as_the_board() {
+        for view in [View::IssueDetail("i".into()), View::ProjectDetail("p".into())] {
+            assert_eq!(stored_page(&team("a"), &view, None), Page::Board);
+        }
+        let open = saved_view("v1");
+        assert_eq!(
+            stored_page(&team("a"), &View::IssueDetail("i".into()), Some(&open)),
+            Page::Board
+        );
+    }
+
+    #[test]
+    fn project_and_cross_team_tabs_always_return_to_their_root() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(stored_page(&project, &View::IssueDetail("i".into()), None), Page::Root);
+        assert_eq!(page_view(&project, &Page::Roadmap), View::ProjectDetail("p".into()));
+        for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
+            assert_eq!(stored_page(&key, &View::Board, None), Page::Root);
+            assert_eq!(page_view(&key, &Page::Board), root_view(&key));
+        }
+    }
+
+    #[test]
+    fn a_team_tab_stored_as_the_root_opens_on_the_board() {
+        assert_eq!(page_view(&team("a"), &Page::Root), View::Board);
+    }
+
+    #[test]
+    fn pages_survive_their_stored_text_and_unknown_text_is_the_root() {
+        for page in [
+            Page::Root,
+            Page::Board,
+            Page::Projects,
+            Page::Roadmap,
+            Page::Recurring,
+            Page::SavedView("v:1".into()),
+        ] {
+            assert_eq!(Page::decode(page.encode().as_deref()), page);
+        }
+        assert_eq!(Page::decode(Some("hologram")), Page::Root);
+        assert_eq!(Page::decode(Some("view:")), Page::Root);
     }
 }

@@ -788,6 +788,11 @@ pub struct App {
     /// Open Tabs (ADR 0001). The active Tab's state is this struct's live
     /// fields; the others are in `parked_tabs`. None until a team exists.
     tab_set: Option<crate::tabs::TabSet>,
+    /// The Tabs last written to the local database, so a change is saved once.
+    saved_tabs: Option<(crate::tabs::TabSet, Vec<crate::tabs::Page>)>,
+    /// Pages restored at launch for Tabs not focused yet; a Tab takes its
+    /// entry the first time it becomes live.
+    restored_pages: HashMap<crate::tabs::TabKey, crate::tabs::Page>,
     /// Window width and the tab bar's sideways scroll, for keeping the active
     /// Tab in view. Neither is per Tab.
     window_width: f32,
@@ -3145,6 +3150,8 @@ impl App {
             collapsed_dashboard_groups: Default::default(),
             dashboard_sessions: Default::default(),
             tab_set: None,
+            saved_tabs: None,
+            restored_pages: HashMap::new(),
             window_width: 1100.0,
             tab_bar_offset: 0.0,
             tab_projects: HashMap::new(),
@@ -3168,11 +3175,18 @@ impl App {
             sync_paused_auth: false,
         };
 
-        let task = match (launch_view, launch_dashboard) {
+        // Restore the stored Tabs and focus the Home page's. Doing this before
+        // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
+        let restored = app.launch_tabs();
+        if let Some(id) = app.selected_team_id.clone() {
+            app.expanded_teams.insert(id);
+        }
+        let opened = match (launch_view, launch_dashboard) {
             (Some(view_id), _) => app.update_inner(Message::OpenSavedView(view_id)),
             (None, Some(id)) => app.update_inner(Message::OpenDashboard(id)),
             _ => Task::none(),
         };
+        let task = Task::batch([restored, opened]);
         // A release build does nothing without a token, so ask for one up front.
         if !cfg!(debug_assertions) && app.config.api_token.is_none() {
             app.settings_form = Some(settings::SettingsFormState::from_config(&app.config));
@@ -3436,6 +3450,7 @@ impl App {
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
+        self.save_tabs();
         self.terminals
             .sync(crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()));
         let task = Task::batch([task, self.request_visible_images()]);
@@ -5972,6 +5987,8 @@ impl App {
                 }
                 self.pending_sync_count = sync_queue::pending_count(&self.db()).unwrap_or(0);
                 self.reload_data();
+                // Tabs whose team, project or Dashboard the pull removed.
+                let removed_tabs = self.close_removed_tabs();
 
                 if auth_failed {
                     self.pause_for_auth();
@@ -6011,9 +6028,10 @@ impl App {
                         finish,
                         self.drive_sync(SchedEvent::AuthPaused(true)),
                         refetch,
+                        removed_tabs,
                     ]);
                 }
-                return Task::batch([finish, refetch]);
+                return Task::batch([finish, refetch, removed_tabs]);
             }
 
             Message::NotifPollCompleted(outcome) => {

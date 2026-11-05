@@ -797,6 +797,15 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 37,
+        name: "open_tabs_page",
+        up: "
+            -- The page a Tab returns to on relaunch: NULL is the Tab's root,
+            -- else board, projects, roadmap, recurring or view:<saved view id>.
+            ALTER TABLE open_tabs ADD COLUMN page TEXT;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1306,6 +1315,31 @@ mod tests {
         assert!(table_exists(&conn, "open_tabs"));
         let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
         assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v36_adds_the_page_column_and_keeps_stored_tabs() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 37) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO open_tabs (position, kind, ref_id, is_active) VALUES (0, 'team', 't1', 1)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let page: Option<String> = conn
+            .query_row("SELECT page FROM open_tabs WHERE position = 0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(page, None);
     }
 
     #[test]

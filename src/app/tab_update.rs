@@ -7,7 +7,7 @@ use iced::Task;
 use super::{project_detail, App, Message, View};
 use crate::db::queries;
 use crate::tab_state::{self, CommentDraft, DetailFrom, ParkedTab, Switch};
-use crate::tabs::{TabKey, TabSet};
+use crate::tabs::{Page, TabKey, TabSet};
 
 #[derive(Debug, Clone)]
 pub enum TabMessage {
@@ -21,6 +21,22 @@ pub enum TabMessage {
     BackToPage(View),
     /// The tab bar scrolled sideways to this offset.
     BarScrolled(f32),
+}
+
+/// Whether a Tab's team, project or Dashboard is still in the local mirror.
+/// An archived team still exists.
+fn tab_subject_exists(
+    teams: &[crate::db::models::Team],
+    dashboards: &[crate::db::dashboards::Dashboard],
+    conn: &rusqlite::Connection,
+    key: &TabKey,
+) -> bool {
+    match key {
+        TabKey::Team(id) => teams.iter().any(|t| t.id == *id),
+        TabKey::Project(id) => matches!(queries::get_project(conn, id), Ok(Some(_))),
+        TabKey::Dashboard(id) => dashboards.iter().any(|d| d.id == *id),
+        TabKey::MyIssues | TabKey::Inbox => true,
+    }
 }
 
 impl App {
@@ -95,8 +111,43 @@ impl App {
         self.restore_scroll()
     }
 
-    /// The Tab the Home page opens, falling back to the first team's.
-    fn home_tab_key(&self) -> TabKey {
+    /// Close the Tabs whose team, project or Dashboard a pull removed. An
+    /// archived team still exists, so it keeps its Tab. Run after the mirror
+    /// is reloaded. When the active Tab goes, a neighbour (or the Home page)
+    /// takes over and its parked state is restored.
+    pub(super) fn close_removed_tabs(&mut self) -> Task<Message> {
+        let home = self.home_tab_key();
+        let conn = self.db();
+        let Some(set) = self.tab_set.as_mut() else {
+            return Task::none();
+        };
+        let (teams, dashboards) = (&self.teams, &self.dashboards);
+        let pruned = set.prune(
+            |key| tab_subject_exists(teams, dashboards, &conn, key),
+            // A removed team with running Terminals keeps its Tab (JRST-421).
+            |_| false,
+            &home,
+        );
+        if pruned.closed.is_empty() {
+            return Task::none();
+        }
+        let active = set.active().clone();
+        for key in &pruned.closed {
+            if let Some(draft) = self.parked_tabs.forget(key).and_then(|p| p.comment_draft) {
+                self.drop_drafts(&draft.owner_ids());
+            }
+        }
+        if !pruned.active_changed {
+            return Task::none();
+        }
+        // The removed Tab's live state goes with it; edits can't commit to a
+        // row that no longer exists.
+        self.discard_live_composers();
+        self.restore_tab(&active)
+    }
+
+    /// The Tab the Home page opens, or `None` when it doesn't resolve.
+    fn resolved_home_key(&self) -> Option<TabKey> {
         use crate::db::home_page::{launch_target, LaunchTarget};
         let launch = launch_target(
             self.home_page.as_ref(),
@@ -104,20 +155,87 @@ impl App {
             &self.saved_views,
             &self.dashboards,
         );
-        let team = match launch {
-            LaunchTarget::Team(id) => Some(id),
-            LaunchTarget::View { team_id, .. } => Some(team_id),
-            LaunchTarget::Dashboard(id) => return TabKey::Dashboard(id),
+        match launch {
+            LaunchTarget::Team(id) => Some(TabKey::Team(id)),
+            LaunchTarget::View { team_id, .. } => Some(TabKey::Team(team_id)),
+            LaunchTarget::Dashboard(id) => Some(TabKey::Dashboard(id)),
             LaunchTarget::Default => None,
+        }
+    }
+
+    /// The Tab shown when nothing else decides: the first team's, else My Issues.
+    fn fallback_tab_key(&self) -> TabKey {
+        self.teams
+            .iter()
+            .find(|t| t.archived_at.is_none())
+            .or_else(|| self.teams.first())
+            .map(|t| t.id.clone())
+            .map_or(TabKey::MyIssues, TabKey::Team)
+    }
+
+    /// The Tab the Home page opens, falling back to the first team's.
+    fn home_tab_key(&self) -> TabKey {
+        self.resolved_home_key().unwrap_or_else(|| self.fallback_tab_key())
+    }
+
+    /// Write the open Tabs to the local database when they changed since the
+    /// last write, so a relaunch can bring them back. Local only: nothing is
+    /// queued for Data sync.
+    pub(super) fn save_tabs(&mut self) {
+        let Some(set) = self.tab_set.clone() else {
+            return;
         };
-        team.or_else(|| {
-            self.teams
-                .iter()
-                .find(|t| t.archived_at.is_none())
-                .or_else(|| self.teams.first())
-                .map(|t| t.id.clone())
-        })
-        .map_or(TabKey::MyIssues, TabKey::Team)
+        let pages = self.tab_pages(&set);
+        if self.saved_tabs.as_ref().is_some_and(|(s, p)| *s == set && *p == pages) {
+            return;
+        }
+        if crate::db::open_tabs::save(&self.db(), &set, &pages).is_ok() {
+            self.saved_tabs = Some((set, pages));
+        }
+    }
+
+    /// The page each Tab would return to on relaunch, in bar order. The
+    /// active Tab reads the live view; a parked one its parked view; a Tab
+    /// restored but not focused yet keeps the page it was stored with.
+    fn tab_pages(&self, set: &TabSet) -> Vec<Page> {
+        set.tabs()
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                if i == set.active_index() {
+                    tab_state::stored_page(key, &self.view, self.open_view.as_ref())
+                } else if let Some(p) = self.parked_tabs.get(key) {
+                    tab_state::stored_page(key, &p.view, p.open_view.as_ref())
+                } else {
+                    self.restored_pages.get(key).cloned().unwrap_or(Page::Root)
+                }
+            })
+            .collect()
+    }
+
+    /// Launch: restore the stored Tabs (those whose subject still exists),
+    /// focus the Home page's Tab (opening it if absent) and make it live. With
+    /// no teams yet there's nothing to show and no set is made. Returns the
+    /// task that scrolls the view into place.
+    pub(super) fn launch_tabs(&mut self) -> Task<Message> {
+        if self.teams.is_empty() {
+            return Task::none();
+        }
+        let conn = self.db();
+        let fallback = self.fallback_tab_key();
+        let stored = crate::db::open_tabs::load(&conn, &fallback).ok().flatten();
+        let (stored_set, pages) = match stored {
+            Some(s) => (Some(s.tabs), s.pages),
+            None => (None, Default::default()),
+        };
+        let (teams, dashboards) = (&self.teams, &self.dashboards);
+        let set = TabSet::for_launch(stored_set, self.resolved_home_key(), &fallback, |key| {
+            tab_subject_exists(teams, dashboards, &conn, key)
+        });
+        let active = set.active().clone();
+        self.tab_set = Some(set);
+        self.restored_pages = pages;
+        self.restore_tab(&active)
     }
 
     /// The set starts with the selected team's Tab once a team exists.
@@ -331,6 +449,8 @@ impl App {
     /// the Tab's offset (see `tab_state::scroll_keys`).
     pub(super) fn restore_tab(&mut self, key: &TabKey) -> Task<Message> {
         let parked = self.parked_tabs.take(key);
+        // A Tab restored at launch returns to its stored page on first focus.
+        let restored = self.restored_pages.remove(key).filter(|_| parked.is_none());
         let (view, team, scroll_state, search, focus, collapsed, open_view, draft, detail_from) = match parked {
             Some(p) => (
                 p.view,
@@ -344,7 +464,10 @@ impl App {
                 p.detail_from,
             ),
             None => (
-                tab_state::root_view(key),
+                restored.as_ref().map_or_else(
+                    || tab_state::root_view(key),
+                    |page| tab_state::page_view(key, page),
+                ),
                 match key {
                     TabKey::Team(id) => Some(id.clone()),
                     // A project's Tab shows its own team's data.
@@ -417,7 +540,13 @@ impl App {
         }
         self.restore_dashboard_session();
         self.restore_project_detail();
-        self.restore_scroll()
+        // A Saved view reopens fresh: Modified changes aren't restored. A
+        // view deleted meanwhile leaves the Tab on its board.
+        let opened = match restored {
+            Some(Page::SavedView(id)) => self.update_inner(Message::OpenSavedView(id)),
+            _ => Task::none(),
+        };
+        Task::batch([self.restore_scroll(), opened])
     }
 
     /// A parked Tab's open issue: rebuild its buffers from the local
