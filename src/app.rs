@@ -3500,6 +3500,7 @@ impl App {
         self.retain_open_view();
         self.discard_dead_composers();
         self.save_tabs();
+        self.save_terminal_records();
         self.terminals
             .sync(crate::terminal::panel_team(&self.view, self.selected_team_id.as_deref()));
         let task = Task::batch([task, self.request_visible_images()]);
@@ -3507,6 +3508,17 @@ impl App {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
         }
         task
+    }
+
+    /// Store what changed in the Terminal strips since the last message.
+    fn save_terminal_records(&mut self) {
+        let changes = self.terminals.take_record_changes();
+        if changes.is_empty() {
+            return;
+        }
+        if let Err(e) = crate::db::terminal_records::apply(&self.db(), &changes) {
+            eprintln!("could not save Terminal records: {e}");
+        }
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {

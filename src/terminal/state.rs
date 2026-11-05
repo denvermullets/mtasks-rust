@@ -365,6 +365,11 @@ impl TerminalState {
         self.roster.ids_of_team(team)
     }
 
+    /// Strip changes since the last call, for the app to store.
+    pub fn take_record_changes(&mut self) -> Vec<crate::db::terminal_records::Change> {
+        self.roster.take_changes()
+    }
+
     pub fn set_team_dirs(&mut self, dirs: HashMap<String, std::path::PathBuf>) {
         self.team_dirs = dirs;
     }
