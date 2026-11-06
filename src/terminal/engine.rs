@@ -943,6 +943,9 @@ fn owner(
                 Cmd::Paste(s) => {
                     term.scroll_viewport(ScrollViewport::Bottom);
                     let bracketed = term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
+                    if s.is_empty() && !bracketed {
+                        continue;
+                    }
                     let mut data = s.into_bytes();
                     let mut buf = vec![0u8; data.len() * 2 + 32];
                     if let Ok(n) = paste::encode(&mut data, bracketed, &mut buf) {

@@ -200,7 +200,7 @@ pub fn view<'a>(
                 card_layout(page_width(window_width, properties_open))
             },
             burndown(project, issues),
-            issues_section(visible, display, team, lanes, members, terminal_showing),
+            issues_section(visible, display, team, lanes, terminal_showing),
         ))
         .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
@@ -540,7 +540,6 @@ fn issues_section<'a>(
     display: &'a DisplayOptions,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
-    members: &'a [Member],
     terminal_showing: bool,
 ) -> Element<'a, Message> {
     let heading = format!("Issues ({})", scoped.len());
@@ -550,7 +549,7 @@ fn issues_section<'a>(
         col = col.push(text("No issues to show").size(type_scale::SM).color(t::text_muted()));
     } else {
         for issue in scoped {
-            col = col.push(issue_row(issue, display, team, lanes, members, terminal_showing));
+            col = col.push(issue_row(issue, display, team, lanes, terminal_showing));
         }
     }
 
@@ -566,7 +565,6 @@ fn issue_row<'a>(
     d: &DisplayOptions,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
-    members: &'a [Member],
     terminal_showing: bool,
 ) -> Element<'a, Message> {
     let mut content = row![].spacing(space::S3).align_y(Alignment::Center);
@@ -603,20 +601,9 @@ fn issue_row<'a>(
     );
     // Right-hand facts, only the enabled ones.
     let mut facts: Vec<String> = Vec::new();
-    if d.shows(CardProperty::Status) {
-        if let Some(l) = lanes.iter().find(|l| l.id == issue.lane_id) {
-            facts.push(l.name.clone());
-        }
-    }
-    if d.shows(CardProperty::Assignee) {
-        facts.push(
-            issue
-                .assignee_id
-                .as_ref()
-                .and_then(|aid| members.iter().find(|m| &m.id == aid))
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| "Unassigned".to_string()),
-        );
+    // A project's list is about progress: status always shows, assignee never.
+    if let Some(l) = lanes.iter().find(|l| l.id == issue.lane_id) {
+        facts.push(l.name.clone());
     }
     if d.shows(CardProperty::DueDate) {
         if let Some(due) = issue.due_date.as_deref() {

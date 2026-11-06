@@ -441,12 +441,15 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Key(..) => {}
-            TerminalMessage::Pasted(Some(text)) => {
+            // No text on the clipboard (an image, say) still goes through as an
+            // empty paste: a bracketed-paste program sees `ESC[200~ESC[201~` and
+            // can read the clipboard itself, the way Claude Code pulls in an
+            // image. Without bracketed paste nothing is sent.
+            TerminalMessage::Pasted(text) => {
                 if let Some(id) = self.focused_terminal() {
-                    self.terminals.paste(id, text);
+                    self.terminals.paste(id, text.unwrap_or_default());
                 }
             }
-            TerminalMessage::Pasted(None) => {}
             TerminalMessage::Copied(Some(text)) if !text.is_empty() => {
                 return iced::clipboard::write(text);
             }
