@@ -100,7 +100,8 @@ pub fn view<'a>(
     window_width: f32,
     properties_open: bool,
     stack_cards: bool,
-    // Width a right-docked Terminal panel takes from the page (0 when none).
+    // Width a right-docked Terminal panel takes from the page (0 when none);
+    // any width stacks the Burndown and Issues cards.
     terminal_width: f32,
     // The right-docked Terminal panel, placed between the page and Properties.
     terminal: Option<Element<'a, Message>>,
@@ -189,10 +190,12 @@ pub fn view<'a>(
         .push(description)
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push(cards(
-            if stack_cards {
+            if stack_cards || terminal_width > 0.0 {
+                // A right-docked Terminal leaves the page a tall, narrow
+                // column: stack whatever the leftover width.
                 CardLayout::Stacked
             } else {
-                card_layout(page_width(window_width - terminal_width, properties_open))
+                card_layout(page_width(window_width, properties_open))
             },
             burndown(project, issues),
             issues_section(visible, display, team, lanes, members),

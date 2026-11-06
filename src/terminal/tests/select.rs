@@ -53,6 +53,19 @@ fn a_click_clears_the_selection() {
 }
 
 #[test]
+fn a_click_that_wobbles_within_its_cell_selects_nothing() {
+    let (t, id, f) = with_three_lines();
+    let r = row_of(&f, "one");
+    drag(&t, id, (10, r), (10, r));
+    // Any later output proves the engine handled the click before this frame.
+    type_line(&t, id, "echo after");
+    let f = wait_for(&t, id, "after", |f| f.contains_line("after"));
+    assert!(f.rows.iter().all(|r| r.selected.is_none()), "a one-cell selection was left behind");
+    assert_eq!(t.selected_text(id), None);
+    close_all(t);
+}
+
+#[test]
 fn a_drag_past_the_top_scrolls_into_scrollback_and_keeps_selecting() {
     let mut t = terminals();
     let id = t.spawn(sh_config("t1")).unwrap();

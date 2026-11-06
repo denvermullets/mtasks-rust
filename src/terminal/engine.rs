@@ -548,8 +548,12 @@ impl Selector {
     }
 
     /// Which side of its cell the pointer should count as, given where the drag began.
+    /// Still on the anchor cell it is where the press was, so a click whose pointer
+    /// jitters within the cell selects nothing rather than that one cell.
     fn end_frac(&self, col: i32, row: i32) -> f64 {
-        if (row, col) >= (self.anchor.1, self.anchor.0) {
+        if (row, col) == (self.anchor.1, self.anchor.0) {
+            0.25
+        } else if (row, col) > (self.anchor.1, self.anchor.0) {
             0.75
         } else {
             0.25

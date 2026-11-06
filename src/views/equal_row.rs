@@ -4,8 +4,10 @@
 //! `Fill` when a child is `Fill`, so `Fill`-height cells make the row (and its
 //! parent column) fill. Inside a scrollable that stretches each table row to
 //! the viewport. Here each cell is measured at its natural height first, then
-//! laid out again at exactly the tallest height, so `Fill`-height cell
-//! backgrounds stretch to the row and nothing else does.
+//! laid out again at exactly the tallest height. Children must be
+//! `Shrink`-height: pass 2's exact limits stretch a `Shrink` container's
+//! background to the row. A `Fill` child would measure unbounded in pass 1, so
+//! non-finite measurements are ignored rather than poisoning the row.
 
 use iced::advanced::layout;
 use iced::advanced::mouse;
@@ -57,6 +59,7 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for EqualRow<'a, Me
             .iter()
             .zip(tree.children.iter_mut())
             .map(|(c, t)| c.as_widget().layout(t, renderer, &measure).size().height)
+            .filter(|h| h.is_finite())
             .fold(0.0_f32, f32::max);
         // Pass 2: every cell at exactly the tallest height.
         let exact = layout::Limits::new(Size::new(w, h), Size::new(w, h));

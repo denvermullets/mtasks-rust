@@ -348,8 +348,9 @@ fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>,
 fn table_block<'a>(table: &document::Table, size: f32, plain: Color, ctx: &BodyCtx<'a>, parsed: &Parsed) -> Element<'a, Message> {
     let cells = |cells: &[Vec<Block>], header: bool| -> Element<'a, Message> {
         // `equal_row`, not `row`: the row is as tall as its tallest wrapped
-        // cell and every `Fill`-height cell stretches to it. A plain `row`
-        // turns `Fill` when a child is `Fill`, filling the scrollable.
+        // cell and every cell stretches to it. Cells must stay `Shrink`
+        // height — `equal_row` measures them unbounded, so a `Fill` cell
+        // measures infinite and blanks the whole scrollable.
         let mut r: Vec<Element<'a, Message>> = Vec::with_capacity(cells.len());
         for cell in cells {
             let mut content = column![].spacing(t::space::S1);
@@ -360,7 +361,6 @@ fn table_block<'a>(table: &document::Table, size: f32, plain: Color, ctx: &BodyC
                 container(content)
                     .padding([t::space::S1, t::space::S2])
                     .width(iced::Length::Fill)
-                    .height(iced::Length::Fill)
                     .style(move |_| container::Style {
                         background: Some(if header { t::bg_card() } else { t::bg_primary() }.into()),
                         ..Default::default()
