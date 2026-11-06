@@ -1903,7 +1903,6 @@ impl App {
                 | View::MyIssues
                 | View::Dashboard(_)
                 | View::ProjectList
-                | View::ProjectDetail(_)
                 | View::Roadmap
         )
     }
@@ -7290,12 +7289,10 @@ impl App {
         } else {
             header::view(
             self.breadcrumb(),
+            !matches!(self.view, View::ProjectDetail(_)),
             search,
             self.search_enabled(),
-            matches!(
-                self.view,
-                View::Board | View::MyIssues | View::ProjectDetail(_)
-            )
+            matches!(self.view, View::Board | View::MyIssues)
             .then(|| self.active_filter_count()),
             self.new_action(),
             self.back_message(),
