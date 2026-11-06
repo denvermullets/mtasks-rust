@@ -1,7 +1,13 @@
-<!-- last-sha: 15ef35d28c8a106cf77b71136dc38285ac461624 -->
-**Version: v0.2.0**
+<!-- last-sha: 10f06e2a46b38714a7ef06399406e5ac1559f765 -->
+**Version: v0.3.0**
 
 # What's new
+
+## 2026-11-06
+- **Quick property pickers.** Hover a card or list row (or open an issue) and press `s` for status, `p` for priority, `j` for project or `l` for labels to open a searchable picker right beside it. Use ↑/↓ and Enter to choose, Escape to close; labels can be toggled several at a time, and you can create a new label straight from the search box.
+- **Shortcuts match the web app.** Board shortcuts now line up with JAIT on the web: `c` creates an issue, Shift+D deletes, Shift+C collapses a section, and Shift+P / Shift+S create a project and sync. The old `h`/`j`/`k`/`l` board navigation keys are gone; use the arrow keys instead.
+- **Send an issue to Claude.** With a terminal open on a project page, each issue row gets a "▶ Claude" button that types a ready-made prompt for that issue into your focused terminal.
+- **Project page and terminal polish.** Project pages stack their cards neatly when the terminal panel is open and hide the search, filter and display controls that didn't apply there. A click in a terminal that jitters slightly no longer selects a stray character.
 
 ## 2026-11-05
 - **Tabs.** Keep teams, projects, My Issues, the Inbox and dashboards open side by side in tabs. Switch with Cmd+1–9 or the Command palette. Each tab remembers its scroll position, search, focus, open issue, Back history and unsent comment drafts, and your tabs come back when you relaunch.
