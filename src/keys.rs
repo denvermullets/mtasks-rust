@@ -1,6 +1,7 @@
 use iced::keyboard::{self, Key, Modifiers};
 
 use crate::app::{Message, TabMessage, View};
+use crate::views::property_picker::Field;
 
 pub fn handle_key_press(
     key: Key,
@@ -22,10 +23,15 @@ pub fn handle_key_press(
         };
     }
 
+    // Shift+letter arrives as the uppercase character on most layouts, but
+    // match both cases so a held Caps Lock or odd layout still works.
+    let shifted = modifiers.shift() && !modifiers.command() && !modifiers.control() && !modifiers.alt();
+    let plain = modifiers.is_empty();
+
     match key {
         Key::Character(ref c) => match c.as_str() {
             // Global shortcuts — active on any view.
-            "f" if modifiers.command() => Some(Message::FocusSearch),
+            "f" | "F" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
             "j" | "J" if modifiers.command() && modifiers.shift() => Some(Message::Terminal(
                 crate::terminal::TerminalMessage::Hide,
@@ -33,12 +39,12 @@ pub fn handle_key_press(
             "j" if modifiers.command() => Some(Message::Terminal(
                 crate::terminal::TerminalMessage::ToggleFocus,
             )),
-            "L" | "l" if modifiers.shift() => Some(Message::OpenLabels),
-            "I" | "i" if modifiers.shift() => Some(Message::NavigateToView(View::Inbox)),
-            "p" if modifiers.is_empty() => Some(Message::CreateProject),
-            "s" if modifiers.is_empty() => Some(Message::SyncNow),
-            "," if modifiers.is_empty() => Some(Message::OpenSettings),
-            "?" | "/" if modifiers.shift() || modifiers.is_empty() => Some(Message::ToggleHelp),
+            "L" | "l" if shifted => Some(Message::OpenLabels),
+            "I" | "i" if shifted => Some(Message::NavigateToView(View::Inbox)),
+            "P" | "p" if shifted => Some(Message::CreateProject),
+            "S" | "s" if shifted => Some(Message::SyncNow),
+            "," if plain => Some(Message::OpenSettings),
+            "?" | "/" if modifiers.shift() || plain => Some(Message::ToggleHelp),
 
             // Cmd+1-9 focuses the Nth Tab (a missing one does nothing; the
             // modal case already returned above).
@@ -46,23 +52,25 @@ pub fn handle_key_press(
                 tab_position(d).map(|i| Message::Tab(TabMessage::Focus(i)))
             }
 
-            // Board-only shortcuts — ignored on other views.
-            "v" if on_board && modifiers.is_empty() => Some(Message::ToggleViewMode),
-            "c" if on_board && modifiers.is_empty() => Some(Message::ToggleFocusedSection),
-            "n" if on_board && modifiers.is_empty() => Some(Message::CreateIssue),
-            "e" if on_board && modifiers.is_empty() => Some(Message::EditFocusedIssue),
-            "d" if on_board && modifiers.is_empty() => Some(Message::ConfirmDeleteFocusedIssue),
-            "j" if on_board && modifiers.is_empty() => Some(Message::FocusNextIssue),
-            "k" if on_board && modifiers.is_empty() => Some(Message::FocusPrevIssue),
-            "h" if on_board && modifiers.is_empty() => Some(Message::FocusPrevLane),
-            "l" if on_board && modifiers.is_empty() => Some(Message::FocusNextLane),
-            "m" if on_board && modifiers.is_empty() => Some(Message::MoveIssueNextLane),
-            "M" | "m" if on_board && modifiers.shift() => Some(Message::MoveIssuePrevLane),
-            "t" if on_board && modifiers.is_empty() => Some(Message::MoveFocusedIssueToTeam),
-            "1" if on_board && modifiers.is_empty() => Some(Message::SetFocusedPriority(0)),
-            "2" if on_board && modifiers.is_empty() => Some(Message::SetFocusedPriority(1)),
-            "3" if on_board && modifiers.is_empty() => Some(Message::SetFocusedPriority(2)),
-            "4" if on_board && modifiers.is_empty() => Some(Message::SetFocusedPriority(3)),
+            // Board-only shortcuts — ignored on other views. The card letters
+            // (c/l/s/p/j) match the Rails board; the rest are desktop extras.
+            "c" if on_board && plain => Some(Message::CreateIssue),
+            "l" if on_board && plain => Some(Message::OpenPropertyPicker(Field::Labels)),
+            "s" if on_board && plain => Some(Message::OpenPropertyPicker(Field::Status)),
+            "p" if on_board && plain => Some(Message::OpenPropertyPicker(Field::Priority)),
+            "j" if on_board && plain => Some(Message::OpenPropertyPicker(Field::Project)),
+            "n" if on_board && plain => Some(Message::CreateIssue),
+            "e" if on_board && plain => Some(Message::EditFocusedIssue),
+            "v" if on_board && plain => Some(Message::ToggleViewMode),
+            "C" | "c" if on_board && shifted => Some(Message::ToggleFocusedSection),
+            "D" | "d" if on_board && shifted => Some(Message::ConfirmDeleteFocusedIssue),
+            "m" if on_board && plain => Some(Message::MoveIssueNextLane),
+            "M" | "m" if on_board && shifted => Some(Message::MoveIssuePrevLane),
+            "t" if on_board && plain => Some(Message::MoveFocusedIssueToTeam),
+            "1" if on_board && plain => Some(Message::SetFocusedPriority(0)),
+            "2" if on_board && plain => Some(Message::SetFocusedPriority(1)),
+            "3" if on_board && plain => Some(Message::SetFocusedPriority(2)),
+            "4" if on_board && plain => Some(Message::SetFocusedPriority(3)),
             _ => None,
         },
         Key::Named(named) => match named {
@@ -74,6 +82,20 @@ pub fn handle_key_press(
             keyboard::key::Named::ArrowRight if on_board => Some(Message::FocusNextLane),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// Keys bound while the card picker popover is open: ↑/↓ move,
+/// Enter picks. `None` falls through (Esc closes via the modal branch).
+pub fn handle_property_picker_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match key {
+        Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::PropertyPickerMove(1)),
+        Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::PropertyPickerMove(-1)),
+        Key::Named(keyboard::key::Named::Enter) => Some(Message::PropertyPickerSubmit),
         _ => None,
     }
 }
@@ -168,9 +190,15 @@ pub fn handle_issue_detail_key(
         Message::EditIssueDescription,
     )
     .or_else(|| match key {
-        Key::Character(c) if modifiers.is_empty() && c.as_str() == "a" => {
-            Some(Message::PickAttachmentFiles)
-        }
+        Key::Character(c) if modifiers.is_empty() => match c.as_str() {
+            "a" => Some(Message::PickAttachmentFiles),
+            // Rails' issue-sidebar keys.
+            "l" => Some(Message::OpenPropertyPicker(Field::Labels)),
+            "s" => Some(Message::OpenPropertyPicker(Field::Status)),
+            "p" => Some(Message::OpenPropertyPicker(Field::Priority)),
+            "j" => Some(Message::OpenPropertyPicker(Field::Project)),
+            _ => None,
+        },
         _ => None,
     })
 }
@@ -390,6 +418,93 @@ mod tests {
         ));
     }
 
+    fn shift(c: &str, on_board: bool) -> Option<Message> {
+        handle_key_press(Key::Character(c.into()), Modifiers::SHIFT, false, false, on_board)
+    }
+
+    #[test]
+    fn rails_card_letters_open_pickers_on_the_board() {
+        assert!(matches!(press("c", false, true), Some(Message::CreateIssue)));
+        assert!(matches!(
+            press("l", false, true),
+            Some(Message::OpenPropertyPicker(Field::Labels))
+        ));
+        assert!(matches!(
+            press("s", false, true),
+            Some(Message::OpenPropertyPicker(Field::Status))
+        ));
+        assert!(matches!(
+            press("p", false, true),
+            Some(Message::OpenPropertyPicker(Field::Priority))
+        ));
+        assert!(matches!(
+            press("j", false, true),
+            Some(Message::OpenPropertyPicker(Field::Project))
+        ));
+        // `n` stays as a second create key.
+        assert!(matches!(press("n", false, true), Some(Message::CreateIssue)));
+    }
+
+    #[test]
+    fn rails_card_letters_are_inert_off_the_board() {
+        for c in ["c", "l", "s", "p", "j", "d"] {
+            assert!(press(c, false, false).is_none(), "{c}");
+        }
+    }
+
+    #[test]
+    fn plain_d_and_vim_keys_are_unbound_on_the_board() {
+        for c in ["d", "h", "k"] {
+            assert!(press(c, false, true).is_none(), "{c}");
+        }
+    }
+
+    #[test]
+    fn displaced_actions_move_to_shift() {
+        assert!(matches!(shift("D", true), Some(Message::ConfirmDeleteFocusedIssue)));
+        assert!(matches!(shift("C", true), Some(Message::ToggleFocusedSection)));
+        assert!(shift("D", false).is_none());
+        for on_board in [true, false] {
+            assert!(matches!(shift("S", on_board), Some(Message::SyncNow)));
+            assert!(matches!(shift("P", on_board), Some(Message::CreateProject)));
+            assert!(matches!(shift("L", on_board), Some(Message::OpenLabels)));
+        }
+    }
+
+    #[test]
+    fn cmd_shift_f_focuses_search() {
+        assert!(matches!(
+            handle_key_press(
+                Key::Character("F".into()),
+                Modifiers::COMMAND | Modifiers::SHIFT,
+                false,
+                false,
+                true
+            ),
+            Some(Message::FocusSearch)
+        ));
+    }
+
+    #[test]
+    fn issue_detail_has_rails_sidebar_keys() {
+        let k = |c: &str| handle_issue_detail_key(&Key::Character(c.into()), Modifiers::empty(), false);
+        assert!(matches!(k("l"), Some(Message::OpenPropertyPicker(Field::Labels))));
+        assert!(matches!(k("s"), Some(Message::OpenPropertyPicker(Field::Status))));
+        assert!(matches!(k("p"), Some(Message::OpenPropertyPicker(Field::Priority))));
+        assert!(matches!(k("j"), Some(Message::OpenPropertyPicker(Field::Project))));
+        assert!(handle_issue_detail_key(&Key::Character("s".into()), Modifiers::COMMAND, false).is_none());
+    }
+
+    #[test]
+    fn property_picker_keys() {
+        use keyboard::key::Named;
+        let k = |n: Named| handle_property_picker_key(&Key::Named(n), Modifiers::empty());
+        assert!(matches!(k(Named::ArrowDown), Some(Message::PropertyPickerMove(1))));
+        assert!(matches!(k(Named::ArrowUp), Some(Message::PropertyPickerMove(-1))));
+        assert!(matches!(k(Named::Enter), Some(Message::PropertyPickerSubmit)));
+        assert!(k(Named::Escape).is_none());
+    }
+
     #[test]
     fn jk_do_nothing_outside_the_inbox() {
         // The global handler never binds j/k off the board.
@@ -511,9 +626,15 @@ mod tests {
     }
 
     #[test]
-    fn plain_k_still_moves_focus_on_board() {
+    fn arrows_move_focus_on_board() {
         assert!(matches!(
-            press("k", false, true),
+            handle_key_press(
+                Key::Named(keyboard::key::Named::ArrowUp),
+                Modifiers::empty(),
+                false,
+                false,
+                true
+            ),
             Some(Message::FocusPrevIssue)
         ));
     }

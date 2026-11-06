@@ -30,7 +30,7 @@ use crate::views::toast::{Toast, ToastKind};
 use crate::views::{
     board, command_palette, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
-    project_detail, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
+    project_detail, property_picker, projects as projects_view, roadmap as roadmap_view, settings, status_bar,
     tab_bar, team_list, team_members, team_picker, toast,
 };
 
@@ -48,7 +48,7 @@ pub enum Message {
     SelectTeamView(String, View),
     /// Tab bar actions; handled in `app/tab_update.rs`.
     Tab(TabMessage),
-    WindowResized(f32),
+    WindowResized(iced::Size),
     /// Terminal panel and keys; handled in `terminal/state.rs`.
     Terminal(crate::terminal::TerminalMessage),
     /// Open a Saved view (local id) on its team's board.
@@ -292,6 +292,11 @@ pub enum Message {
     /// A click on a board card at (lane_idx, issue_idx). The handler decides
     /// whether to treat as a single-click (focus) or double-click (open edit).
     CardPressed(usize, usize),
+    /// The pointer entered (`Some`: local issue id, window rectangle) or left
+    /// (`None`) a board card or list row; the id is the reporting widget's
+    /// owner (`views::row_hover`). Rails' card shortcuts act on the hovered
+    /// card and anchor their picker beside it.
+    CardHover(u64, Option<(String, iced::Rectangle)>),
 
     // UI
     CloseModal,
@@ -315,6 +320,19 @@ pub enum Message {
     PaletteMove(i32),
     /// Enter in the palette: choose the highlighted row, if any.
     PaletteSubmit,
+    /// Rails' `s`/`p`/`j`/`l`: open the status/priority/project/labels
+    /// popover on the key target (see `key_target`).
+    OpenPropertyPicker(property_picker::Field),
+    /// The popover's search box changed.
+    PropertyPickerQuery(String),
+    /// Up/Down in the property picker.
+    PropertyPickerMove(i32),
+    /// Enter in the property picker: apply the highlighted row.
+    PropertyPickerSubmit,
+    /// A property picker row was clicked (index into its items).
+    PropertyPickerChoose(usize),
+    /// The project popover's "New Project" footer.
+    PropertyPickerNewProject,
 
     // Header bar
     /// Header search box changed; filters the current view's items.
@@ -598,6 +616,8 @@ pub enum Modal {
     FilterPanel,
     /// Command palette (Cmd+K); see `command_palette`.
     CommandPalette(PaletteState),
+    /// Status/priority/project/labels popover for one issue; see `property_picker`.
+    PropertyPicker(property_picker::PickerState),
 }
 
 /// Sections of the Rails team settings page (`/teams/:id/edit?section=…`).
@@ -790,6 +810,15 @@ pub struct GroupForm {
     pub error: Option<&'static str>,
 }
 
+/// The board card or list row under the pointer, with its window rectangle
+/// (the picker popover anchors to it).
+#[derive(Debug, Clone)]
+struct HoveredCard {
+    owner: u64,
+    issue_id: String,
+    rect: iced::Rectangle,
+}
+
 pub struct App {
     teams: Vec<Team>,
     /// Mirrored dashboards for the sidebar (reloaded with the rest after a sync).
@@ -823,6 +852,7 @@ pub struct App {
     /// Window width and the tab bar's sideways scroll, for keeping the active
     /// Tab in view. Neither is per Tab.
     window_width: f32,
+    window_height: f32,
     tab_bar_offset: f32,
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
@@ -907,6 +937,8 @@ pub struct App {
     issue_picker: Option<issue_picker::IssuePickerState>,
     focused_lane: usize,
     focused_issue: usize,
+    /// Board card or list row under the pointer.
+    hovered_card: Option<HoveredCard>,
     /// List-mode sections (by title) whose rows are hidden.
     collapsed_sections: HashSet<String>,
     /// Last reported (offset, viewport size) per scrollable. Drives
@@ -2121,6 +2153,7 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
+                    hovered: None,
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
                 (ScrollKey::Lane(self.focused_lane), top, h)
@@ -2760,6 +2793,169 @@ impl App {
             Some(d) => d.issue_id.clone(),
             None => return,
         };
+        self.update_issue_by_id(&id, mutate);
+    }
+
+    /// The issue a card shortcut (Rails' `l`/`s`/`p`/`j`) acts on, and the
+    /// card to anchor its popover to: the open issue on its detail page; on
+    /// the board, the card under the pointer (as Rails does), falling back to
+    /// the keyboard-focused card (unanchored).
+    fn key_target(&self) -> Option<(&Issue, Option<property_picker::Anchor>)> {
+        if matches!(self.view, View::IssueDetail(_)) {
+            let id = &self.issue_detail.as_ref()?.issue_id;
+            return self.issues.iter().find(|i| i.id == *id).map(|i| (i, None));
+        }
+        if matches!(self.view, View::Board | View::MyIssues) {
+            let hovered = self.hovered_card.as_ref().and_then(|h| {
+                let on_board = self
+                    .board_columns()
+                    .into_iter()
+                    .flat_map(|c| c.issues)
+                    .any(|i| i.id == h.issue_id);
+                on_board.then(|| (h.issue_id.clone(), h.rect))
+            });
+            if let Some((id, rect)) = hovered {
+                return self
+                    .issues
+                    .iter()
+                    .find(|i| i.id == id)
+                    .map(|i| (i, Some(property_picker::Anchor { rect })));
+            }
+            return self.focused_issue().map(|i| (i, None));
+        }
+        None
+    }
+
+    /// Build the popover for `field` on `issue`, loading the candidates for
+    /// the issue's own team (My Issues mixes teams).
+    fn property_picker_state(
+        &self,
+        issue: &Issue,
+        field: property_picker::Field,
+        anchor: Option<property_picker::Anchor>,
+    ) -> property_picker::PickerState {
+        use property_picker::{Choice, Field};
+        let conn = self.db();
+        let team_id = issue.team_id.clone();
+        let lanes = queries::lanes_for_team(&conn, &team_id).unwrap_or_default();
+        let projects = queries::projects_for_team(&conn, &team_id).unwrap_or_default();
+        let (labels, usage, current) = if field == Field::Labels {
+            let labels = queries::labels_for_team(&conn, &team_id).unwrap_or_default();
+            let mut usage: HashMap<String, usize> = HashMap::new();
+            for (_, label) in queries::issue_labels_for_team(&conn, &team_id).unwrap_or_default() {
+                *usage.entry(label.id).or_default() += 1;
+            }
+            let current = queries::label_ids_for_issue(&conn, &issue.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(Choice::Label)
+                .collect();
+            (labels, usage, current)
+        } else {
+            let current = match field {
+                Field::Status => Choice::Lane(issue.lane_id.clone()),
+                Field::Priority => Choice::Priority(issue.priority),
+                _ => Choice::Project(issue.project_id.clone()),
+            };
+            (Vec::new(), HashMap::new(), vec![current])
+        };
+        let ident = match self.teams.iter().find(|t| t.id == team_id) {
+            Some(team) => format!("{}-{}", team.identifier, issue.team_number.unwrap_or(0)),
+            None => format!("#{}", issue.team_number.unwrap_or(0)),
+        };
+        property_picker::PickerState::new(
+            issue.id.clone(),
+            team_id,
+            field,
+            property_picker::header(&ident, &issue.title),
+            anchor,
+            current,
+            property_picker::Source {
+                lanes: &lanes,
+                projects: &projects,
+                labels: &labels,
+                label_usage: &usage,
+            },
+        )
+    }
+
+    /// Apply popover row `i`. Status, priority and project write and close;
+    /// a label toggles (or is created and added) and the popover stays open.
+    fn choose_property(&mut self, i: usize) -> Task<Message> {
+        use property_picker::Choice;
+        let Modal::PropertyPicker(ref state) = self.modal else {
+            return Task::none();
+        };
+        let Some(choice) = state.items().get(i).map(|o| o.choice.clone()) else {
+            return Task::none();
+        };
+        let issue_id = state.issue_id.clone();
+        let team_id = state.team_id.clone();
+        let label_id = match choice {
+            Choice::Lane(id) => {
+                self.modal = Modal::None;
+                self.update_issue_by_id(&issue_id, |issue| issue.lane_id = id);
+                return Task::none();
+            }
+            Choice::Priority(p) => {
+                self.modal = Modal::None;
+                self.update_issue_by_id(&issue_id, |issue| issue.priority = p);
+                return Task::none();
+            }
+            Choice::Project(id) => {
+                self.modal = Modal::None;
+                self.update_issue_by_id(&issue_id, |issue| issue.project_id = id);
+                return Task::none();
+            }
+            Choice::Label(id) => id,
+            Choice::CreateLabel(name) => {
+                // A random palette colour, like Rails' `randomColor`.
+                let id = uuid::Uuid::new_v4();
+                let palette = labels_view::PALETTE;
+                let color = palette[id.as_bytes()[0] as usize % palette.len()];
+                let now = crate::db::now_iso();
+                let label = Label {
+                    id: id.to_string(),
+                    remote_id: None,
+                    team_id: team_id.clone(),
+                    name,
+                    color: Some(color.to_string()),
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                if queries::insert_label(&self.db(), &label).is_err() {
+                    self.push_toast("Couldn't create the label", ToastKind::Error, false);
+                    return Task::none();
+                }
+                self.enqueue_sync("label", &label.id, "create", None);
+                label.id
+            }
+        };
+        let Modal::PropertyPicker(ref mut state) = self.modal else {
+            return Task::none();
+        };
+        let created = !state.options.iter().any(|o| o.choice == Choice::Label(label_id.clone()));
+        state.toggle_label(&label_id);
+        let ids = state.label_ids();
+        let conn = self.db();
+        let _ = queries::edit_issue_queued(&conn, &issue_id, "update", None, |c| {
+            queries::set_issue_labels(c, &issue_id, &ids)
+        });
+        self.reload_data();
+        if created {
+            // Rebuild so the new label is listed (checked), keeping the anchor.
+            if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
+                if let Modal::PropertyPicker(ref old) = self.modal {
+                    let state = self.property_picker_state(&issue, old.field, old.anchor);
+                    self.modal = Modal::PropertyPicker(state);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Mutate one issue, persist it and enqueue its sync.
+    fn update_issue_by_id(&mut self, id: &str, mutate: impl FnOnce(&mut Issue)) {
         if let Some(mut issue) = self.issues.iter().find(|i| i.id == id).cloned() {
             mutate(&mut issue);
             issue.updated_at = crate::db::now_iso();
@@ -3132,6 +3328,7 @@ impl App {
             issue_picker: None,
             focused_lane: 0,
             focused_issue: 0,
+            hovered_card: None,
             collapsed_sections: HashSet::new(),
             scroll_state: HashMap::new(),
             modal: Modal::None,
@@ -3172,6 +3369,7 @@ impl App {
             saved_panels: None,
             restored_panels: HashMap::new(),
             window_width: 1100.0,
+            window_height: 700.0,
             tab_bar_offset: 0.0,
             tab_projects: HashMap::new(),
             terminals: {
@@ -3331,7 +3529,7 @@ impl App {
         });
 
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
-        let resizes = iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width));
+        let resizes = iced::window::resize_events().map(|(_, size)| Message::WindowResized(size));
         let close_requests = iced::window::close_requests().map(|_| Message::QuitRequested);
 
         // While a Terminal has focus its key listener replaces the shortcuts.
@@ -3510,6 +3708,9 @@ impl App {
             let effect = self.body_hover.event(crate::hover_card::Event::ViewChanged);
             task = Task::batch([task, Self::hover_timer(effect)]);
         }
+        if self.view != view_before {
+            self.hovered_card = None;
+        }
         self.stash_dashboard_session();
         self.retain_open_view();
         self.discard_dead_composers();
@@ -3636,6 +3837,11 @@ impl App {
                 {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
                 }
+                if let Modal::PropertyPicker(_) = self.modal {
+                    if let Some(msg) = keys::handle_property_picker_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
                 if let Modal::Lightbox(_) = self.modal {
                     if let Some(msg) = keys::handle_lightbox_key(&key, modifiers) {
                         return self.update(msg);
@@ -3670,8 +3876,9 @@ impl App {
                 }
                 if matches!(self.view, View::Dashboard(_))
                     && !modal_open
-                    && modifiers.is_empty()
-                    && matches!(&key, iced::keyboard::Key::Character(c) if c.as_str() == "c")
+                    && modifiers.shift()
+                    && !modifiers.command()
+                    && matches!(&key, iced::keyboard::Key::Character(c) if c.as_str().eq_ignore_ascii_case("c"))
                 {
                     return self.update(Message::ToggleFocusedSection);
                 }
@@ -5545,6 +5752,55 @@ impl App {
                     palette.move_selection(delta);
                 }
             }
+            // An open popover owns the hover context (Rails' `pickerOpen`):
+            // reaching for its rows drags the pointer across other cards.
+            Message::CardHover(..) if matches!(self.modal, Modal::PropertyPicker(_)) => {}
+            Message::CardHover(owner, Some((issue_id, rect))) => {
+                self.hovered_card = Some(HoveredCard { owner, issue_id, rect });
+            }
+            Message::CardHover(owner, None) => {
+                // Moving between cards can deliver the next enter first.
+                if self.hovered_card.as_ref().is_some_and(|h| h.owner == owner) {
+                    self.hovered_card = None;
+                }
+            }
+            Message::OpenPropertyPicker(field) => {
+                if self.modal != Modal::None {
+                    return Task::none();
+                }
+                if let Some((issue, anchor)) = self.key_target() {
+                    let issue = issue.clone();
+                    let state = self.property_picker_state(&issue, field, anchor);
+                    let focus = state.has_search();
+                    self.modal = Modal::PropertyPicker(state);
+                    if focus {
+                        return text_input::focus(property_picker::search_id());
+                    }
+                }
+            }
+            Message::PropertyPickerQuery(query) => {
+                if let Modal::PropertyPicker(ref mut state) = self.modal {
+                    state.set_query(query);
+                }
+            }
+            Message::PropertyPickerMove(delta) => {
+                if let Modal::PropertyPicker(ref mut state) = self.modal {
+                    state.move_focus(delta);
+                }
+            }
+            Message::PropertyPickerSubmit => {
+                // Enter does nothing until a row is highlighted, as in Rails.
+                if let Modal::PropertyPicker(ref state) = self.modal {
+                    if let Some(i) = state.focus {
+                        return self.update(Message::PropertyPickerChoose(i));
+                    }
+                }
+            }
+            Message::PropertyPickerChoose(i) => return self.choose_property(i),
+            Message::PropertyPickerNewProject => {
+                self.modal = Modal::None;
+                return self.update(Message::CreateProject);
+            }
             Message::PaletteSubmit => {
                 let nav = match self.modal {
                     Modal::CommandPalette(ref palette) => palette.chosen(),
@@ -6170,7 +6426,10 @@ impl App {
 
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
             Message::UserInput => return self.drive_sync(SchedEvent::Input),
-            Message::WindowResized(width) => self.window_width = width,
+            Message::WindowResized(size) => {
+                self.window_width = size.width;
+                self.window_height = size.height;
+            }
             Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
             Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
             Message::QuitRequested => return self.quit(),
@@ -7083,6 +7342,7 @@ impl App {
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: self.board_display(),
+                        hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
                     },
                     &self.collapsed_sections,
                     self.focused_lane,
@@ -7098,6 +7358,7 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
+                    hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
                 },
                 self.focused_lane,
                 self.focused_issue,
@@ -7229,6 +7490,7 @@ impl App {
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: DisplayOptions::dashboard_rows(),
+                        hovered: None,
                     },
                     self.dashboard_header.clone(),
                     &crate::views::dashboard::ViewState {
@@ -7590,6 +7852,10 @@ impl App {
                 }
                 _ => base,
             },
+            Modal::PropertyPicker(state) => {
+                let window = iced::Size::new(self.window_width, self.window_height);
+                iced::widget::stack![base, property_picker::view(state, window)].into()
+            }
             Modal::MoveTeam(issue_id) => {
                 let source = self
                     .issues

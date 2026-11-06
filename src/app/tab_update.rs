@@ -759,6 +759,9 @@ pub(super) fn blocked_on_removed_team(message: &Message) -> bool {
             | Message::CreateProject
             | Message::NewRecurringIssue
             | Message::OpenLabels
+            | Message::OpenPropertyPicker(_)
+            | Message::PropertyPickerChoose(_)
+            | Message::PropertyPickerSubmit
     )
 }
 
