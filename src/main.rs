@@ -18,6 +18,7 @@ mod inbox;
 mod issue_match;
 mod keys;
 mod lane_icon;
+mod mcp_prompt;
 mod mentions;
 mod palette_results;
 mod quit;

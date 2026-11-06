@@ -911,6 +911,18 @@ impl TerminalState {
         self.terminals.open_count(team)
     }
 
+    /// Paste `text` into the focused pane's Terminal (no Enter) and give it the
+    /// keyboard. False when the panel is hidden or the pane is empty or exited.
+    pub fn type_into_focused(&mut self, text: String) -> bool {
+        let Some(id) = self.focused_terminal().filter(|&id| self.panel.visible && !self.terminals.is_exited(id))
+        else {
+            return false;
+        };
+        self.terminals.paste(id, text);
+        self.focused = true;
+        true
+    }
+
     fn focused_terminal(&self) -> Option<TerminalId> {
         self.shown[self.panel.focused_pane.min(self.panel.layout.slots() - 1)]
     }

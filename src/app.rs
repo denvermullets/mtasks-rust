@@ -300,6 +300,9 @@ pub enum Message {
     ToggleProjectProperties,
     /// Palette, project page: always stack Burndown above Issues, or not.
     ToggleProjectCardsStacked,
+    /// Project page, Terminal showing: type this issue's jait MCP prompt into
+    /// the focused Terminal (no Enter).
+    SendIssuePrompt(String),
     /// Palette: dock the Terminal panel at the bottom or down the right.
     ToggleTerminalDock,
     /// Cmd+K: open the command palette.
@@ -5609,6 +5612,32 @@ impl App {
                 }
             }
 
+            Message::SendIssuePrompt(issue_id) => {
+                let Some(issue) = self.issues.iter().find(|i| i.id == issue_id) else {
+                    return Task::none();
+                };
+                let team = self.teams.iter().find(|t| t.id == issue.team_id);
+                let project_remote = issue
+                    .project_id
+                    .as_ref()
+                    .and_then(|pid| self.projects.iter().find(|p| p.id == *pid))
+                    .and_then(|p| p.remote_id);
+                let prompt = match (team.and_then(|t| t.remote_id.map(|r| (t, r))), issue.team_number) {
+                    (Some((team, team_remote)), Some(n)) => crate::mcp_prompt::for_issue(
+                        team_remote,
+                        project_remote,
+                        &format!("{}-{n}", team.identifier),
+                    ),
+                    _ => {
+                        self.push_toast("This issue hasn't synced yet, so JAIT can't find it", ToastKind::Error, false);
+                        return Task::none();
+                    }
+                };
+                if !self.terminals.type_into_focused(prompt) {
+                    self.push_toast("Open a Terminal in the panel first", ToastKind::Error, false);
+                }
+            }
+
             Message::ToggleProjectCardsStacked => {
                 let mut new_cfg = self.config.clone();
                 new_cfg.project_cards_stacked = !new_cfg.project_cards_stacked;
@@ -7124,6 +7153,7 @@ impl App {
                             self.config.project_properties_open,
                             self.config.project_cards_stacked,
                             terminal_width,
+                            self.terminals.panel_showing(panel_scope.as_ref()),
                             right_panel.take(),
                         )
                     }

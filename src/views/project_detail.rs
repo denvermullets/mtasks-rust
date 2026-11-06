@@ -103,6 +103,8 @@ pub fn view<'a>(
     // Width a right-docked Terminal panel takes from the page (0 when none);
     // any width stacks the Burndown and Issues cards.
     terminal_width: f32,
+    // The Terminal panel is on screen: issue rows offer to send their prompt.
+    terminal_showing: bool,
     // The right-docked Terminal panel, placed between the page and Properties.
     terminal: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
@@ -198,7 +200,7 @@ pub fn view<'a>(
                 card_layout(page_width(window_width, properties_open))
             },
             burndown(project, issues),
-            issues_section(visible, display, team, lanes, members),
+            issues_section(visible, display, team, lanes, members, terminal_showing),
         ))
         .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
@@ -539,6 +541,7 @@ fn issues_section<'a>(
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     members: &'a [Member],
+    terminal_showing: bool,
 ) -> Element<'a, Message> {
     let heading = format!("Issues ({})", scoped.len());
     let mut col = column![].spacing(space::S1);
@@ -547,7 +550,7 @@ fn issues_section<'a>(
         col = col.push(text("No issues to show").size(type_scale::SM).color(t::text_muted()));
     } else {
         for issue in scoped {
-            col = col.push(issue_row(issue, display, team, lanes, members));
+            col = col.push(issue_row(issue, display, team, lanes, members, terminal_showing));
         }
     }
 
@@ -564,6 +567,7 @@ fn issue_row<'a>(
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     members: &'a [Member],
+    terminal_showing: bool,
 ) -> Element<'a, Message> {
     let mut content = row![].spacing(space::S3).align_y(Alignment::Center);
     if d.shows(CardProperty::Id) {
@@ -633,6 +637,10 @@ fn issue_row<'a>(
     for f in facts {
         content = content.push(text(f).size(type_scale::XS).color(t::text_secondary()));
     }
+    // Inside the row's button, so it takes the click before the row does.
+    if terminal_showing {
+        content = content.push(send_prompt_button(&issue.id));
+    }
 
     button(content)
         .on_press(Message::OpenIssueDetail(issue.id.clone()))
@@ -652,6 +660,30 @@ fn issue_row<'a>(
         .into()
 }
 
+/// Types the issue's jait MCP prompt into the focused Terminal.
+fn send_prompt_button<'a>(issue_id: &str) -> Element<'a, Message> {
+    let tip = container(text("Type this issue's prompt into the Terminal").size(type_scale::XS).color(t::text_strong()))
+        .padding([space::S1, space::S2])
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_menu())),
+            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
+            ..Default::default()
+        });
+    let btn = button(text("\u{25B6} Claude").size(type_scale::XS))
+        .padding([2.0, space::S2])
+        .on_press(Message::SendIssuePrompt(issue_id.to_string()))
+        .style(|_theme: &Theme, status| button::Style {
+            background: Some(iced::Background::Color(if status == button::Status::Hovered {
+                t::bg_card_focused()
+            } else {
+                t::bg_secondary()
+            })),
+            text_color: t::text_secondary(),
+            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
+            ..Default::default()
+        });
+    iced::widget::tooltip(btn, tip, iced::widget::tooltip::Position::Left).gap(4).into()
+}
 
 fn placeholder_value<'a>() -> Element<'a, Message> {
     text("—").size(type_scale::SM).color(t::text_muted()).into()
