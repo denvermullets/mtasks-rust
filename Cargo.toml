@@ -1,6 +1,6 @@
 [package]
 name = "mtasks-rusty"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -45,6 +45,6 @@ objc2-foundation = { version = "0.2", default-features = false }
 [package.metadata.bundle]
 name = "JAIT"
 identifier = "com.jait.desktop"
-version = "0.1.0"
+version = "0.2.0"
 short_description = "JAIT desktop companion"
 category = "public.app-category.productivity"
