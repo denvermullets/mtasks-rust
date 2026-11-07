@@ -8,7 +8,7 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::issue_detail::{new_comment_composer, push_thread, CommentAttachments, ThreadCtx};
-use crate::display::{CardProperty, DisplayOptions};
+use crate::display::{CardProperty, DisplayOptions, ProjectIssueSort};
 use crate::views::util;
 use crate::views::progress_chart;
 use crate::views::projects::MemberOption;
@@ -177,6 +177,7 @@ pub fn view<'a>(
     issues: &'a [Issue],
     visible: Vec<&'a Issue>,
     display: &'a DisplayOptions,
+    issue_sort: ProjectIssueSort,
     lanes: &'a [Lane],
     teams: &'a [Team],
     comments: &'a [Comment],
@@ -288,7 +289,7 @@ pub fn view<'a>(
                 card_layout(page_width(window_width, properties_open))
             },
             burndown(project, issues),
-            issues_section(visible, display, team, lanes, terminal_showing),
+            issues_section(visible, display, issue_sort, team, lanes, terminal_showing),
         ))
         .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
@@ -694,16 +695,28 @@ fn legend_item<'a>(label: &'a str, color: iced::Color) -> Element<'a, Message> {
         .into()
 }
 
-/// This project's issues (already scoped, filtered and ordered by the caller
-/// with the board's display options), each a clickable row that opens detail.
+/// This project's issues (already scoped and filtered by the caller with the
+/// board's display options, and ordered by `sort`), each a clickable row that
+/// opens detail. The heading carries Rails' "Sort:" chips.
 fn issues_section<'a>(
     scoped: Vec<&'a Issue>,
     display: &'a DisplayOptions,
+    sort: ProjectIssueSort,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     terminal_showing: bool,
 ) -> Element<'a, Message> {
-    let heading = format!("Issues ({})", scoped.len());
+    let heading = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(
+            text(format!("Issues ({})", scoped.len()))
+                .size(type_scale::SM)
+                .font(crate::fonts::bold_active())
+                .color(t::text_secondary()),
+        )
+        .push(iced::widget::horizontal_space())
+        .push(sort_chips(sort));
     let mut col = column![].spacing(space::S1);
 
     if scoped.is_empty() {
@@ -714,11 +727,43 @@ fn issues_section<'a>(
         }
     }
 
-    container(util::with_heading(heading, col))
+    container(column![].spacing(space::S4).push(heading).push(col))
         .width(Length::Fill)
         .padding(space::S4)
         .style(card_style)
         .into()
+}
+
+/// "Sort: Newest ID Status Updated Priority", the active one boxed (as on the
+/// Projects table's sort row).
+fn sort_chips<'a>(active_sort: ProjectIssueSort) -> Element<'a, Message> {
+    let mut chips = row![]
+        .spacing(space::S1)
+        .align_y(Alignment::Center)
+        .push(text("Sort:").size(type_scale::XS).color(t::text_muted()));
+    for option in ProjectIssueSort::ALL {
+        let active = option == active_sort;
+        chips = chips.push(
+            button(text(option.label()).size(type_scale::XS).color(if active {
+                t::text_strong()
+            } else {
+                t::text_secondary()
+            }))
+            .on_press(Message::ProjectIssueSortChanged(option))
+            .padding([space::S0_5, space::S2])
+            .style(move |_theme: &Theme, _status| button::Style {
+                background: active.then_some(iced::Background::Color(t::bg_card_focused())),
+                text_color: t::text_primary(),
+                border: Border {
+                    color: if active { t::border() } else { iced::Color::TRANSPARENT },
+                    width: 1.0,
+                    radius: radius::SM.into(),
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    chips.into()
 }
 
 fn issue_row<'a>(

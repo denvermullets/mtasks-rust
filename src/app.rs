@@ -464,6 +464,8 @@ pub enum Message {
     OpenProjectDetail(String),
     /// Change the table sort key; re-selecting the active key flips direction.
     ProjectSortChanged(ProjectSort),
+    /// Change how a project page's Issues list is sorted.
+    ProjectIssueSortChanged(display::ProjectIssueSort),
     /// Toggle the "Hide completed" filter.
     ToggleHideCompletedProjects,
 
@@ -963,6 +965,8 @@ pub struct App {
     /// Projects table sort key + direction (session-only).
     project_sort: ProjectSort,
     project_sort_dir: SortDir,
+    /// Project page Issues list sort (session-only; Rails defaults to ID).
+    project_issue_sort: display::ProjectIssueSort,
     /// "Hide completed" filter for the Projects table; defaults on, matching Rails.
     hide_completed_projects: bool,
     /// Header search text and the view it was typed on. The filter only applies
@@ -2024,7 +2028,7 @@ impl App {
         };
         let mut filters = self.board_filters().clone();
         filters.projects.clear();
-        display::visible_from(
+        let mut out = display::visible_from(
             self.issues
                 .iter()
                 .filter(|i| i.project_id.as_deref() == Some(project_id)),
@@ -2032,7 +2036,10 @@ impl App {
             self.board_display(),
             &filters,
             needle,
-        )
+        );
+        // The project page has its own sort (Rails' chips), not the board's.
+        display::sort_project_issues(&mut out, self.project_issue_sort, &self.lanes);
+        out
     }
 
     /// Issues in the focused column, in on-screen order (sub-groups flattened).
@@ -3336,6 +3343,7 @@ impl App {
             project_detail: None,
             project_sort: ProjectSort::Created,
             project_sort_dir: SortDir::Asc,
+            project_issue_sort: display::ProjectIssueSort::default(),
             hide_completed_projects: true,
             search_query: String::new(),
             search_view: View::Board,
@@ -6709,6 +6717,9 @@ impl App {
                     self.project_sort_dir = SortDir::Asc;
                 }
             }
+            Message::ProjectIssueSortChanged(sort) => {
+                self.project_issue_sort = sort;
+            }
             Message::ToggleHideCompletedProjects => {
                 self.hide_completed_projects = !self.hide_completed_projects;
             }
@@ -7435,6 +7446,7 @@ impl App {
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
                             self.board_display(),
+                            self.project_issue_sort,
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,

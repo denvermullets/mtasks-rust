@@ -534,6 +534,68 @@ pub fn order_issues(issues: &mut [&Issue], order: OrderBy) {
     }
 }
 
+/// Sort for a project page's Issues list: Rails' project "Sort:" chips
+/// (`ProjectSorting#sorted_project_issues`). `Id` is the default there and here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectIssueSort {
+    Newest,
+    #[default]
+    Id,
+    Status,
+    Updated,
+    Priority,
+}
+
+impl ProjectIssueSort {
+    /// In Rails' chip order.
+    pub const ALL: [ProjectIssueSort; 5] = [
+        ProjectIssueSort::Newest,
+        ProjectIssueSort::Id,
+        ProjectIssueSort::Status,
+        ProjectIssueSort::Updated,
+        ProjectIssueSort::Priority,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProjectIssueSort::Newest => "Newest",
+            ProjectIssueSort::Id => "ID",
+            ProjectIssueSort::Status => "Status",
+            ProjectIssueSort::Updated => "Updated",
+            ProjectIssueSort::Priority => "Priority",
+        }
+    }
+}
+
+/// Sort a project's issues in place the way Rails does:
+/// Newest = created desc; ID = team number asc; Status = lane position asc,
+/// then created desc; Updated = updated desc; Priority = priority asc, then
+/// created desc. Issues whose lane isn't in `lanes` sort after the known ones.
+pub fn sort_project_issues(issues: &mut [&Issue], sort: ProjectIssueSort, lanes: &[Lane]) {
+    use std::cmp::Reverse;
+    match sort {
+        ProjectIssueSort::Newest => issues.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        ProjectIssueSort::Id => issues.sort_by_key(|i| i.team_number.unwrap_or(i32::MAX)),
+        ProjectIssueSort::Status => {
+            let pos = |i: &Issue| {
+                lanes
+                    .iter()
+                    .find(|l| l.id == i.lane_id)
+                    .map_or(i32::MAX, |l| l.position)
+            };
+            issues.sort_by(|a, b| {
+                pos(a)
+                    .cmp(&pos(b))
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+            });
+        }
+        ProjectIssueSort::Updated => issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+        ProjectIssueSort::Priority => {
+            issues.sort_by_key(|i| (i.priority, Reverse(i.created_at.clone())))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Axis {
     Status,
@@ -1072,6 +1134,37 @@ mod tests {
         assert_eq!(v[0].id, "2");
         order_issues(&mut v, OrderBy::Created);
         assert_eq!(v[0].id, "2"); // created 2026-01-02, newest first
+    }
+
+    #[test]
+    fn project_issue_sorts() {
+        let lanes = [lane("todo", "Todo", 1), lane("done", "Done", 0)];
+        let mut a = issue("a", "todo", 3);
+        let mut b = issue("b", "done", 1);
+        let mut c = issue("c", "todo", 1);
+        a.team_number = Some(2);
+        b.team_number = Some(3);
+        c.team_number = Some(1);
+        a.created_at = "2026-01-01".into();
+        b.created_at = "2026-01-02".into();
+        c.created_at = "2026-01-03".into();
+        a.updated_at = "2026-02-03".into();
+        b.updated_at = "2026-02-01".into();
+        c.updated_at = "2026-02-02".into();
+        let ids = |v: &[&Issue]| v.iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+        let mut v = vec![&a, &b, &c];
+
+        sort_project_issues(&mut v, ProjectIssueSort::Id, &lanes);
+        assert_eq!(ids(&v), ["c", "a", "b"]);
+        sort_project_issues(&mut v, ProjectIssueSort::Newest, &lanes);
+        assert_eq!(ids(&v), ["c", "b", "a"]);
+        sort_project_issues(&mut v, ProjectIssueSort::Status, &lanes);
+        assert_eq!(ids(&v), ["b", "c", "a"]); // Done lane first, then newest
+        sort_project_issues(&mut v, ProjectIssueSort::Updated, &lanes);
+        assert_eq!(ids(&v), ["a", "c", "b"]);
+        sort_project_issues(&mut v, ProjectIssueSort::Priority, &lanes);
+        assert_eq!(ids(&v), ["c", "b", "a"]); // priority 1s, newest first
+        assert_eq!(ProjectIssueSort::default(), ProjectIssueSort::Id);
     }
 
     #[test]
