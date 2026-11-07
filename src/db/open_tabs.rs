@@ -110,6 +110,18 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_tab_comes_back_in_its_new_place_with_the_same_active_tab() {
+        let conn = mem();
+        let mut tabs = TabSet::from_parts(all_kinds(), 1, &home());
+        tabs.move_tab(1, 4);
+        save(&conn, &tabs, &[]).unwrap();
+        let back = load(&conn, &home()).unwrap().unwrap().tabs;
+        assert_eq!(back.tabs()[4], TabKey::Project("p1".into()));
+        assert_eq!(back.active(), &TabKey::Project("p1".into()));
+        assert_eq!(back, tabs);
+    }
+
+    #[test]
     fn nothing_stored_loads_as_none() {
         assert_eq!(load(&mem(), &home()).unwrap(), None);
     }

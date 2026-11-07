@@ -445,6 +445,7 @@ mod tests {
             identifier: "PROJ".into(),
             remote_id: None,
             archived_at: None,
+            role: None,
             created_at: String::new(),
             updated_at: String::new(),
         };

@@ -635,6 +635,7 @@ mod tests {
             identifier: id.to_uppercase(),
             remote_id: Some(remote),
             archived_at: archived.then(|| "2026-01-01".to_string()),
+            role: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

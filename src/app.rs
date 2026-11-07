@@ -118,6 +118,8 @@ pub enum Message {
     SetDashboardAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
+    /// Collapse or expand a sidebar group (Rails group id).
+    ToggleSidebarGroup(String),
     /// Open the read-only members panel for a team (local UUID).
     OpenTeamMembers(String),
     /// Open a team's Rails settings page in the browser. Teams and lanes have
@@ -817,6 +819,8 @@ pub struct App {
     /// Tab in view. Neither is per Tab.
     window_width: f32,
     tab_bar_offset: f32,
+    /// A Tab pressed in the bar, until the pointer is released.
+    tab_drag: Option<tab_update::TabDrag>,
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
     tab_projects: HashMap<String, (String, String)>,
@@ -834,6 +838,10 @@ pub struct App {
     save_view_from_open: bool,
     /// The user's Home page as last reported by the server (see `db::home_page`).
     home_page: Option<crate::db::home_page::HomePage>,
+    /// Sidebar groups and team order as last reported by the server, loaded
+    /// from the local store so launch works offline (see `db::sidebar_layout`).
+    /// `None` until a pull has reported one.
+    sidebar: Option<crate::db::sidebar_layout::StoredSidebar>,
     selected_team_id: Option<String>,
     /// Current right-pane screen.
     view: View,
@@ -1087,6 +1095,7 @@ impl App {
         self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         self.dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        self.sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();
 
         let kept = self.view.clone().without_missing_dashboard(&self.dashboards);
         if kept != self.view {
@@ -3054,6 +3063,7 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        let sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();
         let dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         // Open the stored Home page; anything unresolvable falls back to the
         // first team's board.
@@ -3164,6 +3174,7 @@ impl App {
             restored_panels: HashMap::new(),
             window_width: 1100.0,
             tab_bar_offset: 0.0,
+            tab_drag: None,
             tab_projects: HashMap::new(),
             terminals: {
                 let mut terminals = crate::terminal::TerminalState::new();
@@ -3182,6 +3193,7 @@ impl App {
             save_view_error: None,
             save_view_from_open: false,
             home_page,
+            sidebar,
             last_notif_poll: None,
             inbox: Default::default(),
             recurring_rows: Vec::new(),
@@ -3335,6 +3347,18 @@ impl App {
             resizes,
             self.terminals.subscription(modal_open),
         ];
+        // A pressed Tab follows the pointer until release.
+        if self.tab_drag.is_some() {
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Tab(TabMessage::DragMove(position.x)))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
+                    Some(Message::Tab(TabMessage::DragEnd))
+                }
+                _ => None,
+            }));
+        }
         // Only listen for wheel events while a card is pending or showing.
         if self.body_hover.is_active() {
             subs.push(scrolls);
@@ -4575,6 +4599,28 @@ impl App {
 
             Message::ToggleShowArchivedTeams => {
                 self.show_archived_teams = !self.show_archived_teams;
+            }
+
+            Message::ToggleSidebarGroup(group_id) => {
+                let collapsed = self
+                    .sidebar
+                    .as_ref()
+                    .and_then(|s| s.groups.iter().find(|g| g.id == group_id))
+                    .map(|g| g.collapsed);
+                if let Some(collapsed) = collapsed {
+                    let conn = self.db();
+                    // A read-only token can't push: the toggle stays local and
+                    // the next pull resets it.
+                    if let Err(e) = crate::db::sidebar_layout::toggle_local(
+                        &conn,
+                        &group_id,
+                        !collapsed,
+                        !self.sync_read_only,
+                    ) {
+                        eprintln!("[sidebar] collapse failed: {e}");
+                    }
+                    self.sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();
+                }
             }
 
             Message::OpenTeamMembers(team_id) => {
@@ -6906,6 +6952,7 @@ impl App {
             saved_views: &self.saved_views,
             open_view_id: self.open_view.as_ref().map(|v| v.view_id.as_str()),
             home: self.home_page.as_ref(),
+            sidebar: self.sidebar.as_ref(),
             dashboards: &self.dashboards,
             open_dashboard_id: match &self.view {
                 View::Dashboard(id) => Some(id.as_str()),
@@ -7170,7 +7217,11 @@ impl App {
         };
 
         let main_content = column![]
-            .push(tab_bar::view(&self.tab_labels(), self.window_width))
+            .push(tab_bar::view(
+                &self.tab_labels(),
+                self.window_width,
+                self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
+            ))
             .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
             .push_maybe(self.terminals.panel_view(self.panel_team()))
@@ -7991,6 +8042,7 @@ mod tests {
             identifier: id.into(),
             remote_id: None,
             archived_at: archived.then(|| "2026-01-01T00:00:00.000Z".into()),
+            role: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

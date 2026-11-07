@@ -857,6 +857,50 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 42,
+        name: "sidebar_layout",
+        up: "
+            -- The user's sidebar groups and team order as last reported by
+            -- GET /me, kept so launch can lay out the sidebar offline. Team ids
+            -- are remote ids and need not be mirrored locally. Replaced
+            -- wholesale on each pull; local only otherwise.
+            CREATE TABLE sidebar_groups (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                collapsed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE sidebar_group_teams (
+                group_id TEXT NOT NULL REFERENCES sidebar_groups(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                team_remote_id INTEGER NOT NULL,
+                PRIMARY KEY (group_id, position)
+            );
+            CREATE TABLE sidebar_team_order (
+                scope TEXT NOT NULL CHECK (scope IN ('owned', 'joined')),
+                position INTEGER NOT NULL,
+                team_remote_id INTEGER NOT NULL,
+                PRIMARY KEY (scope, position)
+            );
+            -- One row once a pull has reported a sidebar (even an empty one);
+            -- no row means the server never did, so the sidebar stays as before.
+            CREATE TABLE sidebar_layout_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1)
+            );
+        ",
+    },
+    Migration {
+        version: 43,
+        name: "teams_role",
+        up: "
+            -- 43, not 41: feat/project-terminals already uses 41
+            -- (project_terminals), and dev DBs that ran it skipped this.
+            -- The signed-in user's role on the team from GET /teams: owner,
+            -- admin or member. NULL until a pull carries it (read as member).
+            ALTER TABLE teams ADD COLUMN role TEXT;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1464,6 +1508,59 @@ mod tests {
         run(&conn).unwrap();
 
         assert!(table_exists(&conn, "panel_states"));
+        let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
+        assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v42_adds_the_team_role_column_and_keeps_teams() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 43) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let role: Option<String> = conn
+            .query_row("SELECT role FROM teams WHERE id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(role, None);
+    }
+
+    #[test]
+    fn upgrade_from_v40_adds_the_sidebar_layout_tables_and_keeps_data() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 42) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        for table in ["sidebar_groups", "sidebar_group_teams", "sidebar_team_order", "sidebar_layout_state"] {
+            assert!(table_exists(&conn, table), "{table} missing");
+        }
         let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
         assert_eq!(teams, 1);
     }
