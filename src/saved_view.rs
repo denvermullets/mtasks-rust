@@ -175,6 +175,9 @@ pub fn decode(query: &RawQuery, mirror: &Mirror, local: &BoardState) -> Decoded 
     if let Some(v) = get("show_empty_groups").and_then(boolean) {
         s.display.show_empty_groups = v;
     }
+    if let Some(v) = get("show_empty_rows").and_then(boolean) {
+        s.display.show_empty_rows = v;
+    }
     if let Some(v) = get("visible_properties") {
         s.display.properties = csv(v).into_iter().filter_map(card_property).collect();
     }
@@ -336,7 +339,7 @@ fn card_property(v: &str) -> Option<CardProperty> {
 }
 
 /// The query keys the desktop models (everything else is passed through).
-pub const MODELLED_KEYS: [&str; 14] = [
+pub const MODELLED_KEYS: [&str; 15] = [
     "view_mode",
     "group_by",
     "sub_group_by",
@@ -344,6 +347,7 @@ pub const MODELLED_KEYS: [&str; 14] = [
     "completed_filter",
     "show_sub_issues",
     "show_empty_groups",
+    "show_empty_rows",
     "visible_properties",
     "lane_ids",
     "assignee_ids",
@@ -377,6 +381,7 @@ pub fn encode(state: &BoardState, raw: &RawQuery, mirror: &Mirror) -> RawQuery {
     for (key, val) in [
         ("show_sub_issues", d.show_sub_issues),
         ("show_empty_groups", d.show_empty_groups),
+        ("show_empty_rows", d.show_empty_rows),
     ] {
         let s = match raw_get(key) {
             Some(r) if boolean(r) == Some(val) => r.to_string(),
@@ -962,6 +967,7 @@ mod tests {
             ("completed_filter", "past_week"),
             ("show_sub_issues", "false"),
             ("show_empty_groups", "true"),
+            ("show_empty_rows", "true"),
             ("visible_properties", "id,labels,due_date"),
             ("lane_ids", "10,11"),
             ("assignee_ids", "21"),

@@ -101,7 +101,7 @@ fn chips<'a, T: Copy + PartialEq + 'a>(
     col.into()
 }
 
-/// The "Display" dropdown: group by / sub-group / order / completed / properties.
+/// The "Display" dropdown: columns / rows / order / completed / properties.
 /// `save_blocked` is the reason "Save view…" is unavailable, if it is.
 pub fn display_view<'a>(
     opts: &'a DisplayOptions,
@@ -117,6 +117,7 @@ pub fn display_view<'a>(
         );
     }
 
+    let board = opts.view_mode == ViewMode::Board;
     let body = column![]
         .spacing(12)
         .push(text("Display").size(14).color(t::text_primary()))
@@ -128,7 +129,9 @@ pub fn display_view<'a>(
             2,
             |_| false,
         ))
-        .push(heading("GROUP BY (COLUMNS / SECTIONS)"))
+        // Rails' names: "Columns" on the board, "Grouping" in the list; the
+        // "Rows" sub-grouping only exists on the board.
+        .push(heading(if board { "COLUMNS" } else { "GROUPING" }))
         .push(chips(
             &GroupBy::ALL,
             opts.group_by,
@@ -136,14 +139,16 @@ pub fn display_view<'a>(
             4,
             |_| false,
         ))
-        .push(heading("SUB-GROUP"))
-        .push(chips(
-            &SubGroup::ALL,
-            opts.sub_group,
-            Message::SetSubGroup,
-            3,
-            |s| opts.sub_group_conflicts(s),
-        ))
+        .push_maybe(board.then(|| heading("ROWS")))
+        .push_maybe(board.then(|| {
+            chips(
+                &SubGroup::ALL,
+                opts.sub_group,
+                Message::SetSubGroup,
+                3,
+                |s| opts.sub_group_conflicts(s),
+            )
+        }))
         .push(heading("ORDER BY"))
         .push(chips(
             &OrderBy::ALL,
@@ -167,9 +172,16 @@ pub fn display_view<'a>(
                 .size(14)
                 .text_size(12),
         )
+        .push(heading("BOARD OPTIONS"))
         .push(
-            checkbox("Show empty groups", opts.show_empty_groups)
+            checkbox("Show empty columns", opts.show_empty_groups)
                 .on_toggle(|_| Message::ToggleShowEmptyGroups)
+                .size(14)
+                .text_size(12),
+        )
+        .push(
+            checkbox("Show empty rows", opts.show_empty_rows)
+                .on_toggle(|_| Message::ToggleShowEmptyRows)
                 .size(14)
                 .text_size(12),
         )

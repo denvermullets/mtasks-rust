@@ -387,7 +387,10 @@ pub enum Message {
     ToggleSection(String),
     /// Collapse/expand a dashboard group (its local id) on the open dashboard.
     ToggleDashboardGroup(String),
-    /// List mode `c`: collapse/expand the focused section.
+    /// Board sub-group row (swimlane) with this title: collapse/expand it
+    /// (row header click).
+    ToggleSwimlane(String),
+    /// `C`: collapse/expand the focused list section, or the focused board row.
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
     Scrolled(ScrollKey, f32, f32),
@@ -397,6 +400,7 @@ pub enum Message {
     SetCompletedFilter(display::CompletedFilter),
     ToggleShowSubIssues,
     ToggleShowEmptyGroups,
+    ToggleShowEmptyRows,
     ToggleCardProperty(CardProperty),
     ToggleFilter(FilterField, String),
     ClearFilters,
@@ -949,7 +953,8 @@ pub struct App {
     focused_issue: usize,
     /// Board card or list row under the pointer.
     hovered_card: Option<HoveredCard>,
-    /// List-mode sections (by title) whose rows are hidden.
+    /// List-mode sections (by title) whose rows are hidden, plus board
+    /// sub-group rows flipped from their default (see `swimlane_key`).
     collapsed_sections: HashSet<String>,
     /// Last reported (offset, viewport size) per scrollable. Drives
     /// scroll-to-focus.
@@ -2058,6 +2063,63 @@ impl App {
         matches!(self.view, View::Dashboard(_)) || self.board_display().view_mode == ViewMode::List
     }
 
+    /// Whether the board draws sub-group rows (swimlanes): board mode on a
+    /// board view with a sub-group set.
+    fn swimlanes_active(&self) -> bool {
+        matches!(self.view, View::Board | View::MyIssues)
+            && self.board_display().view_mode == ViewMode::Board
+            && self.board_display().sub_group != SubGroup::None
+    }
+
+    /// Collapsed flag per board row of `columns`. Empty rows start collapsed;
+    /// a row whose title is toggled in `collapsed_sections` flips that.
+    fn swimlane_collapsed(&self, columns: &[display::Column<'_>]) -> Vec<bool> {
+        display::board_rows(columns)
+            .iter()
+            .map(|r| {
+                let toggled = self.collapsed_sections.contains(&swimlane_key(&r.title));
+                display::board_row_collapsed(r, toggled)
+            })
+            .collect()
+    }
+
+    /// Board j/k/h/l with sub-group rows: walk on-screen cards, skipping
+    /// collapsed rows, and keep the row when changing column.
+    fn swimlane_nav(&mut self, message: &Message) {
+        let next = {
+            let columns = self.board_columns();
+            let collapsed = self.swimlane_collapsed(&columns);
+            let Some(col) = columns.get(self.focused_lane) else {
+                return;
+            };
+            match message {
+                Message::FocusNextIssue | Message::FocusPrevIssue => {
+                    let forward = matches!(message, Message::FocusNextIssue);
+                    let issue = display::swimlane_step(
+                        &col.sections,
+                        &collapsed,
+                        self.focused_issue,
+                        forward,
+                    );
+                    (self.focused_lane, issue)
+                }
+                _ => {
+                    let target = if matches!(message, Message::FocusNextLane) {
+                        self.focused_lane + 1
+                    } else {
+                        self.focused_lane.wrapping_sub(1)
+                    };
+                    let Some(next) = columns.get(target) else {
+                        return;
+                    };
+                    let row = display::swimlane_row_of(&col.sections, self.focused_issue);
+                    (target, display::swimlane_enter(&next.sections, &collapsed, row))
+                }
+            }
+        };
+        (self.focused_lane, self.focused_issue) = next;
+    }
+
     /// Per-section counts for list-mode navigation: collapsed sections count
     /// as empty so j/k and h/l skip their hidden rows.
     fn list_nav_counts(&self) -> Vec<usize> {
@@ -2157,6 +2219,7 @@ impl App {
             return Task::none();
         }
         let list = self.board_display().view_mode == ViewMode::List;
+        let swimlanes = self.swimlanes_active();
         let (key, top, height) = {
             let columns = self.board_columns();
             let Some(col) = columns.get(self.focused_lane) else {
@@ -2176,6 +2239,27 @@ impl App {
                     self.focused_issue,
                 );
                 (ScrollKey::IssueList, top, h)
+            } else if swimlanes {
+                let collapsed = self.swimlane_collapsed(&columns);
+                let data = board::CardData {
+                    teams: &self.teams,
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    projects: &self.projects,
+                    issue_labels: &self.issue_labels,
+                    display: self.board_display(),
+                    hovered: None,
+                };
+                let Some((top, h)) = board::swimlane_focused_span(
+                    &columns,
+                    &collapsed,
+                    &data,
+                    self.focused_lane,
+                    self.focused_issue,
+                ) else {
+                    return Task::none();
+                };
+                (ScrollKey::Swimlanes, top, h)
             } else {
                 let data = board::CardData {
                     teams: &self.teams,
@@ -2235,6 +2319,16 @@ impl App {
             .collect();
         (self.focused_lane, self.focused_issue) =
             clamped_focus(&counts, self.focused_lane, self.focused_issue);
+        // Sub-group rows: a focus left inside a collapsed row moves to a
+        // card that is on screen.
+        if self.swimlanes_active() {
+            let columns = self.board_columns();
+            let collapsed = self.swimlane_collapsed(&columns);
+            if let Some(col) = columns.get(self.focused_lane) {
+                self.focused_issue =
+                    display::swimlane_snap(&col.sections, &collapsed, self.focused_issue);
+            }
+        }
     }
 
     /// Persist the display/filter settings and re-validate board focus.
@@ -5509,7 +5603,7 @@ impl App {
                 // Lanes are only columns when grouped by status.
                 if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
-                        "Moving between lanes needs Display > Group by: Status",
+                        "Moving between lanes needs Display > Columns: Status",
                         ToastKind::Info,
                         false,
                     );
@@ -5537,7 +5631,7 @@ impl App {
                 // Lanes are only columns when grouped by status.
                 if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
-                        "Moving between lanes needs Display > Group by: Status",
+                        "Moving between lanes needs Display > Columns: Status",
                         ToastKind::Info,
                         false,
                     );
@@ -5571,6 +5665,15 @@ impl App {
                 }
             }
 
+            Message::FocusNextIssue
+            | Message::FocusPrevIssue
+            | Message::FocusNextLane
+            | Message::FocusPrevLane
+                if !self.list_nav_active() && self.swimlanes_active() =>
+            {
+                self.swimlane_nav(&message);
+                return self.scroll_to_focus();
+            }
             Message::FocusNextIssue | Message::FocusPrevIssue
                 if self.list_nav_active() =>
             {
@@ -5670,6 +5773,13 @@ impl App {
                     self.collapsed_sections.insert(title);
                 }
             }
+            Message::ToggleSwimlane(title) => {
+                let key = swimlane_key(&title);
+                if !self.collapsed_sections.remove(&key) {
+                    self.collapsed_sections.insert(key);
+                }
+                self.clamp_focus();
+            }
             Message::ToggleDashboardGroup(group_id) => {
                 if let View::Dashboard(did) = self.view.clone() {
                     crate::views::dashboard::toggle_group(
@@ -5687,6 +5797,19 @@ impl App {
                     .map(|g| g.group.id.clone());
                 if let Some(gid) = gid {
                     return self.update(Message::ToggleDashboardGroup(gid));
+                }
+            }
+            Message::ToggleFocusedSection if self.swimlanes_active() => {
+                let title = {
+                    let columns = self.board_columns();
+                    columns.get(self.focused_lane).and_then(|c| {
+                        display::swimlane_row_of(&c.sections, self.focused_issue)
+                            .map(|r| c.sections[r].title.clone())
+                    })
+                };
+                if let Some(title) = title {
+                    let _ = self.update(Message::ToggleSwimlane(title));
+                    return self.scroll_to_focus();
                 }
             }
             Message::ToggleFocusedSection => {
@@ -5740,6 +5863,11 @@ impl App {
             Message::ToggleShowEmptyGroups => {
                 let d = self.board_display_mut();
                 d.show_empty_groups = !d.show_empty_groups;
+                self.persist_display();
+            }
+            Message::ToggleShowEmptyRows => {
+                let d = self.board_display_mut();
+                d.show_empty_rows = !d.show_empty_rows;
                 self.persist_display();
             }
             Message::ToggleCardProperty(p) => {
@@ -7404,6 +7532,7 @@ impl App {
                     display: self.board_display(),
                     hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
                 },
+                &self.swimlane_collapsed(&columns),
                 self.focused_lane,
                 self.focused_issue,
             ),
@@ -7956,6 +8085,12 @@ impl App {
 
 /// Boot/default team selection: the first non-archived team, falling back to
 /// the first team at all so an all-archived install still shows something.
+/// `collapsed_sections` key for a board sub-group row, kept apart from the
+/// list's section titles that share the set.
+fn swimlane_key(title: &str) -> String {
+    format!("\u{1}row:{title}")
+}
+
 fn default_team_id(teams: &[Team]) -> Option<String> {
     teams
         .iter()

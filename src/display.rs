@@ -28,13 +28,14 @@ pub enum GroupBy {
 
 impl GroupBy {
     pub const ALL: [(GroupBy, &'static str); 7] = [
+        // Rails' order and names.
+        (GroupBy::None, "No grouping"),
         (GroupBy::Status, "Status"),
-        (GroupBy::Priority, "Priority"),
         (GroupBy::Assignee, "Assignee"),
         (GroupBy::Project, "Project"),
+        (GroupBy::Priority, "Priority"),
         (GroupBy::Label, "Label"),
-        (GroupBy::Parent, "Parent"),
-        (GroupBy::None, "None"),
+        (GroupBy::Parent, "Parent issue"),
     ];
 
     fn axis(self) -> Option<Axis> {
@@ -62,11 +63,12 @@ pub enum SubGroup {
 
 impl SubGroup {
     pub const ALL: [(SubGroup, &'static str); 5] = [
+        // Rails' order.
         (SubGroup::None, "None"),
+        (SubGroup::Status, "Status"),
         (SubGroup::Priority, "Priority"),
         (SubGroup::Assignee, "Assignee"),
         (SubGroup::Project, "Project"),
-        (SubGroup::Status, "Status"),
     ];
 
     fn axis(self) -> Option<Axis> {
@@ -215,6 +217,10 @@ pub struct DisplayOptions {
     /// this extends that to the other group-by axes.
     #[serde(default)]
     pub show_empty_groups: bool,
+    /// Board sub-group rows: whether rows with no issues in any column are
+    /// shown (collapsed). Priority rows always all show, as in Rails.
+    #[serde(default)]
+    pub show_empty_rows: bool,
     #[serde(default = "default_properties")]
     pub properties: Vec<CardProperty>,
 }
@@ -250,6 +256,7 @@ impl Default for DisplayOptions {
             completed_within: CompletedWithin::Nothing,
             show_sub_issues: true,
             show_empty_groups: false,
+            show_empty_rows: false,
             properties: default_properties(),
         }
     }
@@ -880,26 +887,6 @@ fn keys_for(issue: &Issue, axis: Axis, data: &Data<'_>) -> Vec<String> {
     }
 }
 
-/// Split `issues` by `axis` into non-empty `(title, issues)` sections in
-/// canonical order.
-fn split_sections<'a>(
-    axis: Axis,
-    data: &Data<'_>,
-    issues: &[&'a Issue],
-) -> Vec<(String, Vec<&'a Issue>)> {
-    buckets(axis, data, issues)
-        .into_iter()
-        .filter_map(|bk| {
-            let members: Vec<&Issue> = issues
-                .iter()
-                .copied()
-                .filter(|i| keys_for(i, axis, data).contains(&bk.key))
-                .collect();
-            (!members.is_empty()).then_some((bk.title, members))
-        })
-        .collect()
-}
-
 /// Build the board columns for the given options. Status and priority grouping
 /// always show every bucket (so empty lanes stay droppable-looking); other axes
 /// show only non-empty buckets to avoid a wall of empty columns.
@@ -910,38 +897,57 @@ pub fn build_columns<'a>(
     needle: &str,
 ) -> Vec<Column<'a>> {
     let visible = visible_issues(data, opts, filters, needle);
-    let sub_axis = opts.sub_group.axis();
+    // Rows (sub-grouping) are a board-only layout, as in Rails: each column
+    // gets the same sections in the same order, empty ones included. The
+    // list ignores them.
+    let rows: Vec<(Axis, Bucket)> = match opts.sub_group.axis() {
+        Some(axis) if opts.view_mode == ViewMode::Board => {
+            let keep_empty = opts.show_empty_rows || matches!(axis, Axis::Priority);
+            buckets(axis, data, &visible)
+                .into_iter()
+                .filter(|bk| {
+                    keep_empty
+                        || visible.iter().any(|i| keys_for(i, axis, data).contains(&bk.key))
+                })
+                .map(|bk| (axis, bk))
+                .collect()
+        }
+        _ => vec![],
+    };
 
     let finish = |title: String,
                   lane_icon: Option<LaneIcon>,
                   issues: Vec<&'a Issue>|
      -> Column<'a> {
-        match sub_axis {
-            None => Column {
+        if rows.is_empty() {
+            return Column {
                 title,
                 lane_icon,
                 issues,
                 sections: vec![],
-            },
-            Some(axis) => {
-                let mut flat = Vec::new();
-                let mut sections = Vec::new();
-                for (stitle, group) in split_sections(axis, data, &issues) {
-                    let start = flat.len();
-                    flat.extend(group);
-                    sections.push(Section {
-                        title: stitle,
-                        start,
-                        end: flat.len(),
-                    });
-                }
-                Column {
-                    title,
-                    lane_icon,
-                    issues: flat,
-                    sections,
-                }
-            }
+            };
+        }
+        let mut flat = Vec::new();
+        let mut sections = Vec::new();
+        for (axis, bk) in &rows {
+            let start = flat.len();
+            flat.extend(
+                issues
+                    .iter()
+                    .copied()
+                    .filter(|i| keys_for(i, *axis, data).contains(&bk.key)),
+            );
+            sections.push(Section {
+                title: bk.title.clone(),
+                start,
+                end: flat.len(),
+            });
+        }
+        Column {
+            title,
+            lane_icon,
+            issues: flat,
+            sections,
         }
     };
 
@@ -961,6 +967,96 @@ pub fn build_columns<'a>(
             (keep_empty || !members.is_empty()).then(|| finish(bk.title, bk.lane_icon, members))
         })
         .collect()
+}
+
+/// One sub-group row of the board, spanning every column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardRow {
+    pub title: String,
+    /// Issues in this row across all columns.
+    pub count: usize,
+}
+
+/// The board's sub-group rows, read off the aligned column sections that
+/// `build_columns` makes in board mode. Empty when there is no sub-group.
+pub fn board_rows(columns: &[Column<'_>]) -> Vec<BoardRow> {
+    let Some(first) = columns.first() else {
+        return vec![];
+    };
+    first
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(r, s)| BoardRow {
+            title: s.title.clone(),
+            count: columns
+                .iter()
+                .filter_map(|c| c.sections.get(r))
+                .map(|s| s.end - s.start)
+                .sum(),
+        })
+        .collect()
+}
+
+/// Whether board row `row` is collapsed: empty rows start collapsed (as in
+/// Rails) and `toggled` flips a row from its default.
+pub fn board_row_collapsed(row: &BoardRow, toggled: bool) -> bool {
+    (row.count == 0) != toggled
+}
+
+/// Flat indices of a sub-grouped board column that are on screen, in order:
+/// the issues of every row that isn't collapsed.
+pub fn swimlane_visible(sections: &[Section], collapsed: &[bool]) -> Vec<usize> {
+    sections
+        .iter()
+        .enumerate()
+        .filter(|(r, _)| !collapsed.get(*r).copied().unwrap_or(false))
+        .flat_map(|(_, s)| s.start..s.end)
+        .collect()
+}
+
+/// The row holding flat index `issue` of a column.
+pub fn swimlane_row_of(sections: &[Section], issue: usize) -> Option<usize> {
+    sections.iter().position(|s| (s.start..s.end).contains(&issue))
+}
+
+/// Board j/k with rows: the next/previous on-screen card in the column,
+/// skipping collapsed rows. A focus inside a collapsed row moves to the first
+/// visible card after it. Stays put at the ends.
+pub fn swimlane_step(sections: &[Section], collapsed: &[bool], issue: usize, forward: bool) -> usize {
+    let vis = swimlane_visible(sections, collapsed);
+    match vis.iter().position(|&i| i == issue) {
+        Some(p) if forward => vis.get(p + 1).copied().unwrap_or(issue),
+        Some(p) => p.checked_sub(1).map_or(issue, |q| vis[q]),
+        None => snap_visible(&vis, issue),
+    }
+}
+
+/// Board h/l with rows: the card to focus in the new column when coming from
+/// row `row` (None = no row): its first card in that row, else the first
+/// visible card in a later row, else the last visible card, else 0.
+pub fn swimlane_enter(sections: &[Section], collapsed: &[bool], row: Option<usize>) -> usize {
+    let vis = swimlane_visible(sections, collapsed);
+    let row = row.unwrap_or(0);
+    vis.iter()
+        .copied()
+        .find(|&i| swimlane_row_of(sections, i).is_some_and(|r| r >= row))
+        .or_else(|| vis.last().copied())
+        .unwrap_or(0)
+}
+
+/// `issue` if it is visible, else the first visible index after it, else the
+/// last visible one, else 0.
+pub fn swimlane_snap(sections: &[Section], collapsed: &[bool], issue: usize) -> usize {
+    snap_visible(&swimlane_visible(sections, collapsed), issue)
+}
+
+fn snap_visible(vis: &[usize], issue: usize) -> usize {
+    vis.iter()
+        .copied()
+        .find(|&i| i >= issue)
+        .or_else(|| vis.last().copied())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1109,16 +1205,109 @@ mod tests {
         let issues = [issue("1", "a", 3), issue("2", "a", 0), issue("3", "a", 3)];
         let il = HashMap::new();
         let d = data(&lanes, &issues, &[], &il);
-        let o = DisplayOptions {
+        let mut o = DisplayOptions {
             sub_group: SubGroup::Priority,
             ..Default::default()
         };
         let cols = build_columns(&d, &o, &Filters::default(), "");
         let c = &cols[0];
-        assert_eq!(c.sections.len(), 2);
+        // Every priority row, in order; Low holds issues 1 and 3.
+        assert_eq!(c.sections.len(), 5);
         assert_eq!(c.sections[0].title, "Urgent");
-        assert_eq!((c.sections[1].start, c.sections[1].end), (1, 3));
+        assert_eq!((c.sections[3].start, c.sections[3].end), (1, 3));
         assert_eq!(c.issues[0].id, "2");
+        // The list has no rows (Rails ignores them there).
+        o.view_mode = ViewMode::List;
+        let cols = build_columns(&d, &o, &Filters::default(), "");
+        assert!(cols[0].sections.is_empty());
+    }
+
+    fn sec(title: &str, start: usize, end: usize) -> Section {
+        Section { title: title.into(), start, end }
+    }
+
+    #[test]
+    fn board_rows_align_across_columns() {
+        let lanes = [lane("a", "Todo", 0), lane("b", "Done", 1)];
+        let mut x = issue("1", "a", 2);
+        x.assignee_id = Some("Ann".into());
+        let y = issue("2", "b", 2);
+        let issues = [x, y];
+        let il = HashMap::new();
+        let mut d = data(&lanes, &issues, &[], &il);
+        let members = [member("Ann", "t", None), member("Bob", "t", None)];
+        d.members = &members;
+        let mut o = DisplayOptions {
+            sub_group: SubGroup::Assignee,
+            ..Default::default()
+        };
+        let cols = build_columns(&d, &o, &Filters::default(), "");
+        // Bob has no issues anywhere, so his row is dropped; both columns get
+        // the same rows even where their cell is empty.
+        for c in &cols {
+            let titles: Vec<&str> = c.sections.iter().map(|s| s.title.as_str()).collect();
+            assert_eq!(titles, ["Ann", "Unassigned"]);
+        }
+        assert_eq!((cols[1].sections[0].start, cols[1].sections[0].end), (0, 0));
+        let rows = board_rows(&cols);
+        assert_eq!(rows.iter().map(|r| r.count).collect::<Vec<_>>(), [1, 1]);
+
+        o.show_empty_rows = true;
+        let cols = build_columns(&d, &o, &Filters::default(), "");
+        let rows = board_rows(&cols);
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["Ann", "Bob", "Unassigned"]);
+        assert_eq!(rows[1].count, 0);
+    }
+
+    #[test]
+    fn priority_rows_always_all_show() {
+        let lanes = [lane("a", "Todo", 0)];
+        let issues = [issue("1", "a", 2)];
+        let il = HashMap::new();
+        let d = data(&lanes, &issues, &[], &il);
+        let o = DisplayOptions {
+            sub_group: SubGroup::Priority,
+            ..Default::default()
+        };
+        let cols = build_columns(&d, &o, &Filters::default(), "");
+        assert_eq!(board_rows(&cols).len(), 5);
+    }
+
+    #[test]
+    fn empty_rows_start_collapsed_and_toggle_flips() {
+        let empty = BoardRow { title: "x".into(), count: 0 };
+        let full = BoardRow { title: "y".into(), count: 2 };
+        assert!(board_row_collapsed(&empty, false));
+        assert!(!board_row_collapsed(&empty, true));
+        assert!(!board_row_collapsed(&full, false));
+        assert!(board_row_collapsed(&full, true));
+    }
+
+    #[test]
+    fn swimlane_step_skips_collapsed_rows() {
+        let s = [sec("a", 0, 2), sec("b", 2, 3), sec("c", 3, 5)];
+        let collapsed = [false, true, false];
+        assert_eq!(swimlane_step(&s, &collapsed, 1, true), 3);
+        assert_eq!(swimlane_step(&s, &collapsed, 3, false), 1);
+        assert_eq!(swimlane_step(&s, &collapsed, 4, true), 4);
+        assert_eq!(swimlane_step(&s, &collapsed, 0, false), 0);
+        // Focus inside a collapsed row snaps forward.
+        assert_eq!(swimlane_step(&s, &collapsed, 2, true), 3);
+    }
+
+    #[test]
+    fn swimlane_enter_keeps_the_row() {
+        let s = [sec("a", 0, 0), sec("b", 0, 2), sec("c", 2, 3)];
+        let open = [false, false, false];
+        assert_eq!(swimlane_enter(&s, &open, Some(1)), 0);
+        assert_eq!(swimlane_enter(&s, &open, Some(2)), 2);
+        // Row 0 is empty here: the next row down.
+        assert_eq!(swimlane_enter(&s, &open, Some(0)), 0);
+        // Nothing at or below the row: the last visible card.
+        let collapsed = [false, false, true];
+        assert_eq!(swimlane_enter(&s, &collapsed, Some(2)), 1);
+        assert_eq!(swimlane_snap(&s, &collapsed, 2), 1);
     }
 
     #[test]
