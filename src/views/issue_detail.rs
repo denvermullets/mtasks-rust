@@ -49,6 +49,20 @@ pub struct IssueDetailState {
     pub suggest: Option<SuggestState>,
     /// Files staged on the new-comment composer.
     pub composer_files: ComposerFiles,
+    /// The buffered fields as last loaded or committed. Only fields that differ
+    /// from this are written on commit, so an untouched buffer never pushes a
+    /// stale copy over a newer pulled value.
+    pub loaded: IssueFields,
+}
+
+/// The buffered issue fields in the form a commit writes them. `estimate` is
+/// the trimmed text; it is parsed only when it was edited.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueFields {
+    pub title: String,
+    pub description: Option<String>,
+    pub due_date: Option<String>,
+    pub estimate: String,
 }
 
 /// Files staged on a comment composer (issue or project detail). They are
@@ -73,6 +87,12 @@ impl Default for ComposerFiles {
 
 impl IssueDetailState {
     pub fn from_issue(issue: &Issue) -> Self {
+        let mut state = Self::buffers_for(issue);
+        state.loaded = state.fields();
+        state
+    }
+
+    fn buffers_for(issue: &Issue) -> Self {
         let body = issue.description.clone().unwrap_or_default();
         Self {
             issue_id: issue.id.clone(),
@@ -96,11 +116,80 @@ impl IssueDetailState {
             reply_composer: text_editor::Content::new(),
             suggest: None,
             composer_files: ComposerFiles::default(),
+            loaded: IssueFields::default(),
         }
     }
 
     pub fn description_text(&self) -> String {
         self.description.text()
+    }
+
+    /// The buffers as a commit would write them.
+    pub fn fields(&self) -> IssueFields {
+        let body = self.description_text();
+        let due = self.due_date.trim();
+        IssueFields {
+            title: self.title.trim().to_string(),
+            description: (!body.trim().is_empty()).then(|| body.trim_end().to_string()),
+            due_date: (!due.is_empty()).then(|| due.to_string()),
+            estimate: self.estimate.trim().to_string(),
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.fields() != self.loaded
+    }
+
+    /// Write only the fields edited since load onto `issue` (the fresh DB
+    /// row). Returns whether anything changed, or the estimate parse error.
+    pub fn apply_edits(&self, issue: &mut Issue) -> Result<bool, String> {
+        let now = self.fields();
+        let was = &self.loaded;
+        let mut changed = false;
+        if now.estimate != was.estimate {
+            issue.estimate = if now.estimate.is_empty() {
+                None
+            } else {
+                Some(now.estimate.parse::<f64>().map_err(|_| "Estimate must be a number".to_string())?)
+            };
+            changed = true;
+        }
+        if now.title != was.title {
+            issue.title = now.title;
+            changed = true;
+        }
+        if now.description != was.description {
+            issue.description = now.description;
+            changed = true;
+        }
+        if now.due_date != was.due_date {
+            issue.due_date = now.due_date;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    /// Record the buffers as committed.
+    pub fn mark_committed(&mut self) {
+        self.loaded = self.fields();
+    }
+
+    /// Take `issue`'s values into the buffers when they hold no unsaved edits
+    /// and `issue` differs from what was loaded (e.g. a pull brought a newer
+    /// copy). Composers and drafts are kept.
+    pub fn refresh_from(&mut self, issue: &Issue) {
+        if self.is_dirty() {
+            return;
+        }
+        let fresh = Self::from_issue(issue);
+        if fresh.loaded == self.loaded {
+            return;
+        }
+        self.title = fresh.title;
+        self.description = fresh.description;
+        self.due_date = fresh.due_date;
+        self.estimate = fresh.estimate;
+        self.loaded = fresh.loaded;
     }
 }
 
@@ -1421,6 +1510,74 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
         placeholder: t::text_muted(),
         value: t::text_strong(),
         selection: t::accent(),
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    fn issue(desc: &str) -> Issue {
+        Issue {
+            id: "i1".into(),
+            title: "Title".into(),
+            description: Some(desc.into()),
+            priority: 0,
+            team_number: Some(1),
+            due_date: None,
+            estimate: Some(2.0),
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
+            lane_id: "l".into(),
+            team_id: "t".into(),
+            project_id: None,
+            parent_issue_id: None,
+            assignee_id: None,
+            creator_id: None,
+            remote_id: Some(1),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_untouched_buffer_writes_nothing() {
+        let state = IssueDetailState::from_issue(&issue("old"));
+        assert!(!state.is_dirty());
+        let mut fresh = issue("new from rails");
+        assert_eq!(state.apply_edits(&mut fresh), Ok(false));
+        assert_eq!(fresh.description.as_deref(), Some("new from rails"));
+    }
+
+    #[test]
+    fn only_edited_fields_are_written() {
+        let mut state = IssueDetailState::from_issue(&issue("old"));
+        state.estimate = "3.5".into();
+        let mut fresh = issue("new from rails");
+        assert_eq!(state.apply_edits(&mut fresh), Ok(true));
+        assert_eq!(fresh.estimate, Some(3.5));
+        assert_eq!(fresh.description.as_deref(), Some("new from rails"));
+    }
+
+    #[test]
+    fn a_bad_estimate_is_an_error() {
+        let mut state = IssueDetailState::from_issue(&issue("old"));
+        state.estimate = "lots".into();
+        assert!(state.apply_edits(&mut issue("old")).is_err());
+    }
+
+    #[test]
+    fn refresh_takes_pulled_values_only_when_clean() {
+        let mut clean = IssueDetailState::from_issue(&issue("old"));
+        clean.refresh_from(&issue("new"));
+        assert_eq!(clean.fields().description.as_deref(), Some("new"));
+
+        let mut dirty = IssueDetailState::from_issue(&issue("old"));
+        dirty.title = "Edited".into();
+        dirty.refresh_from(&issue("new"));
+        assert_eq!(dirty.fields().description.as_deref(), Some("old"));
+        assert_eq!(dirty.title, "Edited");
     }
 }
 

@@ -1170,6 +1170,7 @@ impl App {
         self.reload_dashboard_config(&conn);
         self.reload_recurring(&conn);
         self.reload_detail_origin(&conn);
+        self.refresh_detail_buffers(&conn);
         self.refresh_open_view();
 
         // Filters hold per-team ids; drop the ones this data doesn't contain
@@ -1345,6 +1346,21 @@ impl App {
 
     /// Re-read the selected team's Recurring issue rows from the mirror.
     /// Refresh the open issue detail's "From recurring issue" title.
+    /// Bring the open detail's text buffers up to date with the DB (a pull may
+    /// have changed them) unless they hold unsaved edits.
+    fn refresh_detail_buffers(&mut self, conn: &rusqlite::Connection) {
+        if let Some(d) = self.issue_detail.as_mut() {
+            if let Ok(Some(issue)) = queries::get_issue(conn, &d.issue_id) {
+                d.refresh_from(&issue);
+            }
+        }
+        if let Some(d) = self.project_detail.as_mut() {
+            if let Ok(Some(project)) = queries::get_project(conn, &d.project_id) {
+                d.refresh_from(&project);
+            }
+        }
+    }
+
     fn reload_detail_origin(&mut self, conn: &rusqlite::Connection) {
         self.detail_origin = match &self.view {
             View::IssueDetail(id) => crate::db::recurring_issues::origin_title(conn, id),
@@ -3084,51 +3100,37 @@ impl App {
         if !matches!(self.view, View::IssueDetail(_)) {
             return;
         }
+        let conn = self.db();
         let Some(detail) = self.issue_detail.as_mut() else {
             return;
         };
 
+        // Untouched buffers write nothing: they may be older than a pulled copy.
+        if !detail.is_dirty() {
+            return;
+        }
         if detail.title.trim().is_empty() {
             detail.error = Some("Title can't be blank".into());
             return;
         }
-        let estimate = if detail.estimate.trim().is_empty() {
-            None
-        } else {
-            match detail.estimate.trim().parse::<f64>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    detail.error = Some("Estimate must be a number".into());
-                    return;
-                }
+
+        let Ok(Some(mut issue)) = queries::get_issue(&conn, &detail.issue_id) else {
+            return;
+        };
+        match detail.apply_edits(&mut issue) {
+            Err(e) => {
+                detail.error = Some(e);
+                return;
             }
-        };
-        detail.error = None;
-
-        let id = detail.issue_id.clone();
-        let title = detail.title.trim().to_string();
-        let due_date = if detail.due_date.trim().is_empty() {
-            None
-        } else {
-            Some(detail.due_date.trim().to_string())
-        };
-        let body = detail.description_text();
-        let description = if body.trim().is_empty() {
-            None
-        } else {
-            Some(body.trim_end().to_string())
-        };
-
-        if let Some(mut issue) = self.issues.iter().find(|i| i.id == id).cloned() {
-            issue.title = title;
-            issue.description = description;
-            issue.estimate = estimate;
-            issue.due_date = due_date;
-            issue.updated_at = crate::db::now_iso();
-            let conn = self.db();
-            let _ = queries::update_issue_queued(&conn, &issue);
-            self.reload_data();
+            Ok(false) => return,
+            Ok(true) => {}
         }
+        detail.error = None;
+        detail.mark_committed();
+        issue.updated_at = crate::db::now_iso();
+        let _ = queries::update_issue_queued(&conn, &issue);
+        drop(conn);
+        self.reload_data();
     }
 
     /// Switch the right pane to the detail view for `project`, flushing any open
@@ -3208,46 +3210,33 @@ impl App {
         if !matches!(self.view, View::ProjectDetail(_)) {
             return;
         }
+        let conn = self.db();
         let Some(detail) = self.project_detail.as_mut() else {
             return;
         };
+        // Untouched buffers write nothing: they may be older than a pulled copy.
+        if !detail.is_dirty() {
+            return;
+        }
         if detail.name.trim().is_empty() {
             detail.error = Some("Name can't be blank".into());
             return;
         }
         detail.error = None;
 
-        let id = detail.project_id.clone();
-        let name = detail.name.trim().to_string();
-        let start_date = if detail.start_date.trim().is_empty() {
-            None
-        } else {
-            Some(detail.start_date.trim().to_string())
+        let Ok(Some(mut project)) = queries::get_project(&conn, &detail.project_id) else {
+            return;
         };
-        let due_date = if detail.due_date.trim().is_empty() {
-            None
-        } else {
-            Some(detail.due_date.trim().to_string())
-        };
-        let body = detail.description_text();
-        let description = if body.trim().is_empty() {
-            None
-        } else {
-            Some(body.trim_end().to_string())
-        };
-
-        let conn = self.db();
-        if let Ok(Some(mut project)) = queries::get_project(&conn, &id) {
-            project.name = name;
-            project.description = description;
-            project.start_date = start_date;
-            project.due_date = due_date;
-            project.updated_at = crate::db::now_iso();
-            let _ = queries::update_project(&conn, &project);
-            let payload = serde_json::to_string(&project).ok();
-            self.enqueue_sync("project", &project.id, "update", payload.as_deref());
-            self.reload_data();
+        if !detail.apply_edits(&mut project) {
+            return;
         }
+        detail.mark_committed();
+        project.updated_at = crate::db::now_iso();
+        let _ = queries::update_project(&conn, &project);
+        drop(conn);
+        let payload = serde_json::to_string(&project).ok();
+        self.enqueue_sync("project", &project.id, "update", payload.as_deref());
+        self.reload_data();
     }
 }
 
