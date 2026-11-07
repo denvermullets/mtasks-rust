@@ -118,6 +118,8 @@ pub enum Message {
     SetDashboardAsHome(String),
     /// Show/hide archived teams in the sidebar.
     ToggleShowArchivedTeams,
+    /// Collapse or expand a sidebar group (Rails group id).
+    ToggleSidebarGroup(String),
     /// Open the read-only members panel for a team (local UUID).
     OpenTeamMembers(String),
     /// Open a team's Rails settings page in the browser. Teams and lanes have
@@ -839,7 +841,6 @@ pub struct App {
     /// Sidebar groups and team order as last reported by the server, loaded
     /// from the local store so launch works offline (see `db::sidebar_layout`).
     /// `None` until a pull has reported one.
-    #[allow(dead_code)] // read by the sidebar layout once the sidebar renders it
     sidebar: Option<crate::db::sidebar_layout::StoredSidebar>,
     selected_team_id: Option<String>,
     /// Current right-pane screen.
@@ -4600,6 +4601,28 @@ impl App {
                 self.show_archived_teams = !self.show_archived_teams;
             }
 
+            Message::ToggleSidebarGroup(group_id) => {
+                let collapsed = self
+                    .sidebar
+                    .as_ref()
+                    .and_then(|s| s.groups.iter().find(|g| g.id == group_id))
+                    .map(|g| g.collapsed);
+                if let Some(collapsed) = collapsed {
+                    let conn = self.db();
+                    // A read-only token can't push: the toggle stays local and
+                    // the next pull resets it.
+                    if let Err(e) = crate::db::sidebar_layout::toggle_local(
+                        &conn,
+                        &group_id,
+                        !collapsed,
+                        !self.sync_read_only,
+                    ) {
+                        eprintln!("[sidebar] collapse failed: {e}");
+                    }
+                    self.sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();
+                }
+            }
+
             Message::OpenTeamMembers(team_id) => {
                 self.team_members =
                     queries::members_for_team(&self.db(), &team_id).unwrap_or_default();
@@ -6929,6 +6952,7 @@ impl App {
             saved_views: &self.saved_views,
             open_view_id: self.open_view.as_ref().map(|v| v.view_id.as_str()),
             home: self.home_page.as_ref(),
+            sidebar: self.sidebar.as_ref(),
             dashboards: &self.dashboards,
             open_dashboard_id: match &self.view {
                 View::Dashboard(id) => Some(id.as_str()),

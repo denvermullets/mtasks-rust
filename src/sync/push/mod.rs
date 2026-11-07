@@ -25,6 +25,7 @@ mod project;
 mod reconcile;
 mod recurring;
 mod saved_view;
+mod sidebar_group;
 #[cfg(test)]
 mod fixtures;
 
@@ -52,6 +53,7 @@ use crate::sync::push::project::{project_create, project_update};
 use crate::sync::push::recurring::{
     recurring_issue_create, recurring_issue_delete, recurring_issue_update,
 };
+use crate::sync::push::sidebar_group::sidebar_group_update;
 use crate::sync::push::saved_view::{
     is_legacy_rename_payload, saved_view_create, saved_view_delete, saved_view_update,
 };
@@ -156,6 +158,9 @@ async fn process(
         ("notification", "read") => notification_read(client, &entry.entity_id).await,
         ("notification", "read_all") => notification_read_all(client, entry.payload.as_deref()).await,
         ("home_page", "update") => home_page_set(client, entry.payload.as_deref()).await,
+        (crate::db::sidebar_layout::QUEUE_ENTITY, "update") => {
+            sidebar_group_update(client, &entry.entity_id, entry.payload.as_deref()).await
+        }
         ("saved_view", "create") => saved_view_create(client, &entry.entity_id, entry_id).await,
         ("saved_view", "update") => {
             let legacy_rename = is_legacy_rename_payload(entry.payload.as_deref());

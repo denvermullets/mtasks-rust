@@ -22,8 +22,6 @@
 //! - Teams without a `remote_id` (local-only) can't be matched to a group or
 //!   an order and count as owned.
 
-#![allow(dead_code)] // consumed by the sidebar view (JRST-427)
-
 use std::collections::HashSet;
 
 use crate::db::models::Team;
