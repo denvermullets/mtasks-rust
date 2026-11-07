@@ -11,6 +11,7 @@ pub mod panel_states;
 pub mod queries;
 pub mod recurring_issues;
 pub mod saved_views;
+pub mod sidebar_layout;
 pub mod sync_queue;
 pub mod team_purge;
 pub mod terminal_dirs;

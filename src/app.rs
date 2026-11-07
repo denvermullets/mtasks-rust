@@ -834,6 +834,11 @@ pub struct App {
     save_view_from_open: bool,
     /// The user's Home page as last reported by the server (see `db::home_page`).
     home_page: Option<crate::db::home_page::HomePage>,
+    /// Sidebar groups and team order as last reported by the server, loaded
+    /// from the local store so launch works offline (see `db::sidebar_layout`).
+    /// `None` until a pull has reported one.
+    #[allow(dead_code)] // read by the sidebar layout once the sidebar renders it
+    sidebar: Option<crate::db::sidebar_layout::StoredSidebar>,
     selected_team_id: Option<String>,
     /// Current right-pane screen.
     view: View,
@@ -1087,6 +1092,7 @@ impl App {
         self.saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         self.dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         self.home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        self.sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();
 
         let kept = self.view.clone().without_missing_dashboard(&self.dashboards);
         if kept != self.view {
@@ -3054,6 +3060,7 @@ impl App {
         let teams = queries::all_teams(&conn).unwrap_or_default();
         let saved_views = crate::db::saved_views::grouped_by_team(&conn).unwrap_or_default();
         let home_page = crate::db::home_page::get(&conn).unwrap_or_default();
+        let sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();
         let dashboards = crate::db::dashboards::list(&conn).unwrap_or_default();
         // Open the stored Home page; anything unresolvable falls back to the
         // first team's board.
@@ -3182,6 +3189,7 @@ impl App {
             save_view_error: None,
             save_view_from_open: false,
             home_page,
+            sidebar,
             last_notif_poll: None,
             inbox: Default::default(),
             recurring_rows: Vec::new(),

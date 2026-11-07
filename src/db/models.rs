@@ -24,12 +24,14 @@ pub struct Team {
 
 /// A user's standing on a team. Missing or unknown values read as `Member`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // used by the sidebar layout and ADMIN badge
 pub enum TeamRole {
     Owner,
     Admin,
     Member,
 }
 
+#[allow(dead_code)]
 impl TeamRole {
     pub fn parse(raw: Option<&str>) -> Self {
         match raw {
@@ -40,6 +42,7 @@ impl TeamRole {
     }
 }
 
+#[allow(dead_code)] // role helpers are used by the sidebar layout and ADMIN badge
 impl Team {
     pub fn role(&self) -> TeamRole {
         TeamRole::parse(self.role.as_deref())
