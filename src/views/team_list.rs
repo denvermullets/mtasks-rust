@@ -530,6 +530,7 @@ mod tests {
             identifier: "TM".into(),
             remote_id,
             archived_at: None,
+            role: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

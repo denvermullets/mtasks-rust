@@ -804,6 +804,7 @@ mod tests {
             identifier: "PROJ".into(),
             remote_id: None,
             archived_at: None,
+            role: None,
             created_at: NOW.into(),
             updated_at: NOW.into(),
         }

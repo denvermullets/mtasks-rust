@@ -25,6 +25,7 @@ mod saved_view;
 mod schedule_summary;
 mod scroll;
 mod search_match;
+mod sidebar_layout;
 mod sync;
 mod tab_state;
 mod tabs;

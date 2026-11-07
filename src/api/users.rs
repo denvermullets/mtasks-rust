@@ -13,6 +13,41 @@ pub struct MeDto {
     /// hidden from this token).
     #[serde(default)]
     pub home_page: Option<HomePageDto>,
+    /// The user's sidebar groups and team order; absent when the server does
+    /// not report them (the sidebar keeps its ungrouped layout).
+    #[serde(default)]
+    pub sidebar: Option<SidebarDto>,
+}
+
+/// `sidebar` on `GET /me`. Team ids are remote ids.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct SidebarDto {
+    #[serde(default)]
+    pub groups: Vec<SidebarGroupDto>,
+    #[serde(default)]
+    pub team_order: SidebarTeamOrderDto,
+}
+
+/// One user-defined sidebar group, in display order within `groups`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SidebarGroupDto {
+    /// Opaque string id minted by Rails.
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub team_ids: Vec<i64>,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// Stored team order per scope; teams missing from a list sort after it.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct SidebarTeamOrderDto {
+    #[serde(default)]
+    pub owned: Vec<i64>,
+    #[serde(default)]
+    pub joined: Vec<i64>,
 }
 
 /// `{kind, id}` of the Home page target. `kind` is `team`, `view` or
@@ -93,6 +128,33 @@ mod tests {
     fn decodes_null_or_absent_home_page_as_none() {
         assert_eq!(me(r#","home_page":null"#).home_page, None);
         assert_eq!(me("").home_page, None);
+    }
+
+    #[test]
+    fn decodes_the_sidebar_when_present() {
+        let m = me(
+            r#","sidebar":{"groups":[{"id":"a1b2","name":"Bozo","team_ids":[12,3],"collapsed":true},{"id":"c3"}],"team_order":{"owned":[3,12],"joined":[8,9]}}"#,
+        );
+        let s = m.sidebar.unwrap();
+        assert_eq!(s.groups.len(), 2);
+        assert_eq!(s.groups[0].id, "a1b2");
+        assert_eq!(s.groups[0].name, "Bozo");
+        assert_eq!(s.groups[0].team_ids, vec![12, 3]);
+        assert!(s.groups[0].collapsed);
+        // Sparse groups default rather than failing the whole /me decode.
+        assert_eq!(s.groups[1].team_ids, Vec::<i64>::new());
+        assert!(!s.groups[1].collapsed);
+        assert_eq!(s.team_order.owned, vec![3, 12]);
+        assert_eq!(s.team_order.joined, vec![8, 9]);
+    }
+
+    #[test]
+    fn decodes_an_absent_sidebar_as_none_and_an_empty_one_as_empty() {
+        assert_eq!(me("").sidebar, None);
+        assert_eq!(me(r#","sidebar":null"#).sidebar, None);
+        let empty = me(r#","sidebar":{"groups":[],"team_order":{"owned":[],"joined":[]}}"#);
+        assert_eq!(empty.sidebar, Some(SidebarDto::default()));
+        assert_eq!(me(r#","sidebar":{}"#).sidebar, Some(SidebarDto::default()));
     }
 
     #[test]

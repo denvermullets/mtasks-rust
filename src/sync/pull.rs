@@ -135,6 +135,11 @@ impl SyncEngine {
         if let Err(e) = open().and_then(|c| store_home_page(&c, me).map_err(|e| e.to_string())) {
             sync_log("phase=pull", "home_page", &e);
         }
+        if let Err(e) = open().and_then(|c| {
+            crate::db::sidebar_layout::apply_me(&c, me.sidebar.as_ref()).map_err(|e| e.to_string())
+        }) {
+            sync_log("phase=pull", "sidebar_layout", &e);
+        }
 
         // Phase 2: refresh teams (and discover any new ones the token can see).
         match pull_teams(client).await {

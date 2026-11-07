@@ -14,11 +14,49 @@ pub struct Team {
     /// teams are hidden from the sidebar unless "Show archived" is on.
     #[serde(default)]
     pub archived_at: Option<String>,
+    /// The signed-in user's role on this team as last pulled: "owner", "admin"
+    /// or "member". `None` before the first pull that carried it.
+    #[serde(default)]
+    pub role: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
+/// A user's standing on a team. Missing or unknown values read as `Member`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // used by the sidebar layout and ADMIN badge
+pub enum TeamRole {
+    Owner,
+    Admin,
+    Member,
+}
+
+#[allow(dead_code)]
+impl TeamRole {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("owner") => TeamRole::Owner,
+            Some("admin") => TeamRole::Admin,
+            _ => TeamRole::Member,
+        }
+    }
+}
+
+#[allow(dead_code)] // role helpers are used by the sidebar layout and ADMIN badge
 impl Team {
+    pub fn role(&self) -> TeamRole {
+        TeamRole::parse(self.role.as_deref())
+    }
+
+    pub fn is_owner(&self) -> bool {
+        self.role() == TeamRole::Owner
+    }
+
+    /// The ADMIN badge: an admin who is not the owner.
+    pub fn shows_admin_badge(&self) -> bool {
+        self.role() == TeamRole::Admin
+    }
+
     pub fn from_row(row: &Row<'_>) -> SqlResult<Self> {
         Ok(Self {
             id: row.get("id")?,
@@ -26,6 +64,7 @@ impl Team {
             identifier: row.get("identifier")?,
             remote_id: row.get("remote_id")?,
             archived_at: row.get("archived_at")?,
+            role: row.get("role")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -546,6 +585,42 @@ mod tests {
         );
         assert!(Comment::can_reply_at(3));
         assert!(!Comment::can_reply_at(MAX_NESTING_DEPTH));
+    }
+
+    fn team_with_role(role: Option<&str>) -> Team {
+        Team {
+            id: "t".into(),
+            name: "T".into(),
+            identifier: "T".into(),
+            remote_id: Some(1),
+            archived_at: None,
+            role: role.map(String::from),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn team_role_helpers() {
+        let owner = team_with_role(Some("owner"));
+        assert!(owner.is_owner());
+        assert!(!owner.shows_admin_badge());
+        let admin = team_with_role(Some("admin"));
+        assert!(!admin.is_owner());
+        assert!(admin.shows_admin_badge());
+        let member = team_with_role(Some("member"));
+        assert!(!member.is_owner());
+        assert!(!member.shows_admin_badge());
+    }
+
+    #[test]
+    fn missing_or_unknown_team_role_reads_as_member() {
+        for raw in [None, Some("superuser"), Some("")] {
+            let t = team_with_role(raw);
+            assert_eq!(t.role(), TeamRole::Member);
+            assert!(!t.is_owner());
+            assert!(!t.shows_admin_badge());
+        }
     }
 
     const ALL_PRIORITIES: [Priority; 5] = [

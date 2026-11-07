@@ -31,7 +31,7 @@ pub use issues::IssueParams;
 pub use labels::LabelParams;
 pub use projects::ProjectParams;
 pub use recurring_issues::RecurringIssueParams;
-pub use users::{HomePageDto, MeDto};
+pub use users::{HomePageDto, MeDto, SidebarDto};
 
 /// Percent-encode a query value (timestamps carry `:` and possibly `+`).
 pub(crate) fn encode_query_value(v: &str) -> String {
