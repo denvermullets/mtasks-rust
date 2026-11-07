@@ -99,6 +99,14 @@ pub fn view<'a>(
     pending_paths: &'a crate::views::body::PendingInlineMap,
     window_width: f32,
     properties_open: bool,
+    stack_cards: bool,
+    // Width a right-docked Terminal panel takes from the page (0 when none);
+    // any width stacks the Burndown and Issues cards.
+    terminal_width: f32,
+    // The Terminal panel is on screen: issue rows offer to send their prompt.
+    terminal_showing: bool,
+    // The right-docked Terminal panel, placed between the page and Properties.
+    terminal: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name>" ----
     let mut breadcrumb = row![].spacing(space::S2).align_y(Alignment::Center);
@@ -184,9 +192,15 @@ pub fn view<'a>(
         .push(description)
         .push_maybe(crate::views::attachments::section(attachments, images))
         .push(cards(
-            card_layout(page_width(window_width, properties_open)),
+            if stack_cards || terminal_width > 0.0 {
+                // A right-docked Terminal leaves the page a tall, narrow
+                // column: stack whatever the leftover width.
+                CardLayout::Stacked
+            } else {
+                card_layout(page_width(window_width, properties_open))
+            },
             burndown(project, issues),
-            issues_section(visible, display, team, lanes, members),
+            issues_section(visible, display, team, lanes, terminal_showing),
         ))
         .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
@@ -313,7 +327,8 @@ pub fn view<'a>(
             )
                 .width(Length::Fill)
                 .height(Length::Fill),
-        );
+        )
+        .push_maybe(terminal);
     // Properties are hidden until `/` (or the palette) shows them.
     if properties_open {
         page.push(divider).push(sidebar_panel).into()
@@ -525,7 +540,7 @@ fn issues_section<'a>(
     display: &'a DisplayOptions,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
-    members: &'a [Member],
+    terminal_showing: bool,
 ) -> Element<'a, Message> {
     let heading = format!("Issues ({})", scoped.len());
     let mut col = column![].spacing(space::S1);
@@ -534,7 +549,7 @@ fn issues_section<'a>(
         col = col.push(text("No issues to show").size(type_scale::SM).color(t::text_muted()));
     } else {
         for issue in scoped {
-            col = col.push(issue_row(issue, display, team, lanes, members));
+            col = col.push(issue_row(issue, display, team, lanes, terminal_showing));
         }
     }
 
@@ -550,7 +565,7 @@ fn issue_row<'a>(
     d: &DisplayOptions,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
-    members: &'a [Member],
+    terminal_showing: bool,
 ) -> Element<'a, Message> {
     let mut content = row![].spacing(space::S3).align_y(Alignment::Center);
     if d.shows(CardProperty::Id) {
@@ -586,20 +601,9 @@ fn issue_row<'a>(
     );
     // Right-hand facts, only the enabled ones.
     let mut facts: Vec<String> = Vec::new();
-    if d.shows(CardProperty::Status) {
-        if let Some(l) = lanes.iter().find(|l| l.id == issue.lane_id) {
-            facts.push(l.name.clone());
-        }
-    }
-    if d.shows(CardProperty::Assignee) {
-        facts.push(
-            issue
-                .assignee_id
-                .as_ref()
-                .and_then(|aid| members.iter().find(|m| &m.id == aid))
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| "Unassigned".to_string()),
-        );
+    // A project's list is about progress: status always shows, assignee never.
+    if let Some(l) = lanes.iter().find(|l| l.id == issue.lane_id) {
+        facts.push(l.name.clone());
     }
     if d.shows(CardProperty::DueDate) {
         if let Some(due) = issue.due_date.as_deref() {
@@ -620,6 +624,10 @@ fn issue_row<'a>(
     for f in facts {
         content = content.push(text(f).size(type_scale::XS).color(t::text_secondary()));
     }
+    // Inside the row's button, so it takes the click before the row does.
+    if terminal_showing {
+        content = content.push(send_prompt_button(&issue.id));
+    }
 
     button(content)
         .on_press(Message::OpenIssueDetail(issue.id.clone()))
@@ -639,6 +647,30 @@ fn issue_row<'a>(
         .into()
 }
 
+/// Types the issue's jait MCP prompt into the focused Terminal.
+fn send_prompt_button<'a>(issue_id: &str) -> Element<'a, Message> {
+    let tip = container(text("Type this issue's prompt into the Terminal").size(type_scale::XS).color(t::text_strong()))
+        .padding([space::S1, space::S2])
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_menu())),
+            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
+            ..Default::default()
+        });
+    let btn = button(text("\u{25B6} Claude").size(type_scale::XS))
+        .padding([2.0, space::S2])
+        .on_press(Message::SendIssuePrompt(issue_id.to_string()))
+        .style(|_theme: &Theme, status| button::Style {
+            background: Some(iced::Background::Color(if status == button::Status::Hovered {
+                t::bg_card_focused()
+            } else {
+                t::bg_secondary()
+            })),
+            text_color: t::text_secondary(),
+            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
+            ..Default::default()
+        });
+    iced::widget::tooltip(btn, tip, iced::widget::tooltip::Position::Left).gap(4).into()
+}
 
 fn placeholder_value<'a>() -> Element<'a, Message> {
     text("—").size(type_scale::SM).color(t::text_muted()).into()

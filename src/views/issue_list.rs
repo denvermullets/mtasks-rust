@@ -342,7 +342,8 @@ pub fn issue_row<'a>(
         r = r.push(body_text(util::short_date(&issue.updated_at), W_DATE));
     }
 
-    let bg = if focused {
+    let hovered = data.hovered == Some(issue.id.as_str());
+    let bg = if focused || hovered {
         t::bg_card_focused()
     } else {
         t::bg_primary()
@@ -351,7 +352,7 @@ pub fn issue_row<'a>(
     // header inset don't change with focus.
     let border_color = if focused { t::accent() } else { iced::Color::TRANSPARENT };
 
-    mouse_area(
+    let row = mouse_area(
         container(r)
             .padding([0.0, ROW_PAD_X])
             .center_y(Length::Fixed(scroll::LIST_ROW_H))
@@ -366,6 +367,6 @@ pub fn issue_row<'a>(
                 ..Default::default()
             }),
     )
-    .on_press(Message::CardPressed(col_idx, issue_idx))
-    .into()
+    .on_press(Message::CardPressed(col_idx, issue_idx));
+    crate::views::row_hover::row_hover(row, issue.id.clone(), Message::CardHover).into()
 }

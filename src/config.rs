@@ -95,6 +95,21 @@ pub struct Config {
     /// Device-wide and local-only, hidden by default.
     #[serde(default)]
     pub project_properties_open: bool,
+    /// Whether the project page always stacks Burndown above Issues, at any
+    /// width. Device-wide and local-only; off means side by side when roomy.
+    #[serde(default)]
+    pub project_cards_stacked: bool,
+    /// Where the Terminal panel docks: "bottom" or "right" (see
+    /// `terminal::panel::Dock`). Device-wide and local-only.
+    #[serde(default = "default_terminal_dock")]
+    pub terminal_dock: String,
+    /// Width of the right-docked Terminal panel; `None` is the default.
+    #[serde(default)]
+    pub terminal_panel_width: Option<f32>,
+}
+
+fn default_terminal_dock() -> String {
+    "bottom".to_string()
 }
 
 fn default_true() -> bool {
@@ -141,6 +156,9 @@ impl Default for Config {
             terminal_font_size: default_terminal_font_size(),
             native_notifications: true,
             project_properties_open: false,
+            project_cards_stacked: false,
+            terminal_dock: default_terminal_dock(),
+            terminal_panel_width: None,
         }
     }
 }
@@ -334,6 +352,22 @@ mod tests {
         cfg.native_notifications = false;
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert!(!back.native_notifications);
+    }
+
+    #[test]
+    fn layout_options_default_off_and_round_trip() {
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert!(!old.project_cards_stacked);
+        assert_eq!(old.terminal_dock, "bottom");
+        assert_eq!(old.terminal_panel_width, None);
+        let mut cfg = Config::default();
+        cfg.project_cards_stacked = true;
+        cfg.terminal_dock = "right".into();
+        cfg.terminal_panel_width = Some(512.0);
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(back.project_cards_stacked);
+        assert_eq!(back.terminal_dock, "right");
+        assert_eq!(back.terminal_panel_width, Some(512.0));
     }
 
     #[test]

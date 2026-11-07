@@ -130,9 +130,11 @@ pub fn dashboard_bar<'a>(
 /// "+ New" on the right. `search_enabled` is false on views with nothing to
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
 /// is `Some(active_filter_count)` on the board, where Display and Filter apply,
-/// and `None` elsewhere (the buttons are disabled).
+/// and `None` elsewhere (the buttons are disabled). `show_controls` false drops
+/// Search, Filter, Display and "+ New" entirely (project detail).
 pub fn view<'a>(
     crumbs: Vec<String>,
+    show_controls: bool,
     query: &'a str,
     search_enabled: bool,
     board_controls: Option<usize>,
@@ -239,16 +241,19 @@ pub fn view<'a>(
         new_button = new_button.on_press(msg);
     }
 
-    let content = row![]
+    let mut content = row![]
         .spacing(8)
         .align_y(Alignment::Center)
         .push(trail)
         .push(iced::widget::horizontal_space())
-        .push_maybe(view_actions)
-        .push(search)
-        .push(filter)
-        .push(display)
-        .push(new_button);
+        .push_maybe(view_actions);
+    if show_controls {
+        content = content
+            .push(search)
+            .push(filter)
+            .push(display)
+            .push(new_button);
+    }
 
     container(content)
         .padding([8, 16])

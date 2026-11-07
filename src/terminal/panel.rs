@@ -28,6 +28,32 @@ pub enum Layout {
     Grid,
 }
 
+/// Where the panel sits: under the page, or down its right side.
+/// Device-wide, stored in the config as "bottom" or "right".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Dock {
+    #[default]
+    Bottom,
+    Right,
+}
+
+impl Dock {
+    pub fn name(self) -> &'static str {
+        match self {
+            Dock::Bottom => "bottom",
+            Dock::Right => "right",
+        }
+    }
+
+    /// The dock stored under `name`; anything unknown is `Bottom`.
+    pub fn from_name(name: &str) -> Dock {
+        match name {
+            "right" => Dock::Right,
+            _ => Dock::Bottom,
+        }
+    }
+}
+
 impl Layout {
     /// Panes the layout shows.
     pub fn slots(self) -> usize {
@@ -38,12 +64,25 @@ impl Layout {
         }
     }
 
-    /// Columns and rows of panes.
-    pub fn grid(self) -> (usize, usize) {
-        match self {
-            Layout::Single => (1, 1),
-            Layout::Columns => (2, 1),
-            Layout::Grid => (2, 2),
+    /// Columns and rows of panes. Docked right, the panel is tall and
+    /// narrow, so its panes stack in one column instead.
+    pub fn grid(self, dock: Dock) -> (usize, usize) {
+        match (dock, self) {
+            (_, Layout::Single) => (1, 1),
+            (Dock::Bottom, Layout::Columns) => (2, 1),
+            (Dock::Bottom, Layout::Grid) => (2, 2),
+            (Dock::Right, l) => (1, l.slots()),
+        }
+    }
+
+    /// The strip's button label for this layout.
+    pub fn label(self, dock: Dock) -> &'static str {
+        match (dock, self) {
+            (_, Layout::Single) => "1",
+            (Dock::Bottom, Layout::Columns) => "1\u{00d7}2",
+            (Dock::Bottom, Layout::Grid) => "2\u{00d7}2",
+            (Dock::Right, Layout::Columns) => "2",
+            (Dock::Right, Layout::Grid) => "4",
         }
     }
 }
@@ -212,6 +251,56 @@ pub fn drag_height(window_h: f32, start_height: f32, start_y: f32, y: f32) -> f3
     panel_height(window_h, Some(start_height + (start_y - y)))
 }
 
+/// Narrowest a right-docked panel gets.
+pub const MIN_WIDTH: f32 = 320.0;
+/// Width of the grab handle on a right-docked panel's left edge.
+pub const HANDLE_WIDTH: f32 = 4.0;
+
+/// Right-docked panel width for a window: the requested width, else 45% of
+/// what the sidebar leaves, kept between the minimum and what leaves the page
+/// its minimum. `right_inset` is anything right of the panel (the project
+/// page's Properties).
+pub fn panel_width(window_w: f32, right_inset: f32, requested: Option<f32>) -> f32 {
+    let room = (window_w - SIDEBAR_WIDTH - right_inset).max(0.0);
+    let wanted = requested.unwrap_or(room * 0.45);
+    let max = (room - MAIN_MIN).max(MIN_WIDTH);
+    wanted.clamp(MIN_WIDTH, max)
+}
+
+/// Panel width while dragging its left edge: it grows as the pointer moves
+/// left (`x` shrinks), kept within both limits.
+pub fn drag_width(window_w: f32, right_inset: f32, start_width: f32, start_x: f32, x: f32) -> f32 {
+    panel_width(window_w, right_inset, Some(start_width + (start_x - x)))
+}
+
+/// Whether a left press at (`x`, `y`) lands outside a right-docked panel
+/// whose body measured `body_h` high (strip excluded).
+pub fn press_leaves_right_panel(
+    window_w: f32,
+    window_h: f32,
+    right_inset: f32,
+    width: f32,
+    body_h: f32,
+    x: f32,
+    y: f32,
+) -> bool {
+    let right = window_w - right_inset;
+    let left = right - width;
+    let bottom = window_h - STATUS_HEIGHT;
+    let top = bottom - body_h - STRIP_HEIGHT;
+    x < left || x > right || y < top || y > bottom
+}
+
+/// Pixels each pane of `layout` gets from a panel body of `body` (w, h).
+pub fn split_body(body: (f32, f32), layout: Layout, dock: Dock) -> (f32, f32) {
+    let (w, h) = body;
+    let (cols, rows) = layout.grid(dock);
+    (
+        (w - PANE_GAP * (cols - 1) as f32) / cols as f32,
+        (h - PANE_GAP * (rows - 1) as f32) / rows as f32,
+    )
+}
+
 /// Approximate height of the status bar under the panel. Only clicks within a
 /// few pixels of the panel's bottom edge depend on it being exact.
 pub const STATUS_HEIGHT: f32 = 28.0;
@@ -235,12 +324,7 @@ pub fn pane_pixels(window_w: f32, window_h: f32, requested: Option<f32>) -> (f32
 
 /// Pixels available to each pane of `layout`, which divides the panel evenly.
 pub fn pane_size(window_w: f32, window_h: f32, requested: Option<f32>, layout: Layout) -> (f32, f32) {
-    let (w, h) = pane_pixels(window_w, window_h, requested);
-    let (cols, rows) = layout.grid();
-    (
-        (w - PANE_GAP * (cols - 1) as f32) / cols as f32,
-        (h - PANE_GAP * (rows - 1) as f32) / rows as f32,
-    )
+    split_body(pane_pixels(window_w, window_h, requested), layout, Dock::Bottom)
 }
 
 /// A pane smaller than this many columns by rows says "too small".
@@ -529,6 +613,50 @@ mod tests {
     fn two_columns_split_the_width_and_leave_a_gap() {
         assert_eq!(pane_size(1100.0, 900.0, None, Layout::Single), (880.0, 272.0));
         assert_eq!(pane_size(1100.0, 900.0, None, Layout::Columns), (439.5, 272.0));
+    }
+
+    #[test]
+    fn docked_right_the_panes_stack_in_one_column() {
+        assert_eq!(Layout::Columns.grid(Dock::Right), (1, 2));
+        assert_eq!(Layout::Grid.grid(Dock::Right), (1, 4));
+        assert_eq!(split_body((500.0, 803.0), Layout::Grid, Dock::Right), (500.0, 200.0));
+        assert_eq!(split_body((500.0, 801.0), Layout::Columns, Dock::Right), (500.0, 400.0));
+    }
+
+    #[test]
+    fn width_defaults_to_45_percent_and_respects_both_limits() {
+        // 1220 wide: 1000 right of the sidebar.
+        assert_eq!(panel_width(1220.0, 0.0, None), 450.0);
+        assert_eq!(panel_width(1220.0, 0.0, Some(100.0)), MIN_WIDTH);
+        assert_eq!(panel_width(1220.0, 0.0, Some(950.0)), 800.0);
+        // Properties to the right leave less room.
+        assert_eq!(panel_width(1220.0, 321.0, Some(950.0)), 479.0);
+        // A window too small for both still gives the panel its minimum.
+        assert_eq!(panel_width(800.0, 321.0, None), MIN_WIDTH);
+    }
+
+    #[test]
+    fn dragging_left_widens_the_right_panel() {
+        assert_eq!(drag_width(1220.0, 0.0, 450.0, 770.0, 670.0), 550.0);
+        assert_eq!(drag_width(1220.0, 0.0, 450.0, 770.0, 1200.0), MIN_WIDTH);
+    }
+
+    #[test]
+    fn a_press_outside_the_right_panel_moves_focus_to_the_app() {
+        // 1220x900, 450 wide, Properties (321) at the right, body 800 high.
+        let outside = |x, y| press_leaves_right_panel(1220.0, 900.0, 321.0, 450.0, 800.0, x, y);
+        assert!(!outside(700.0, 400.0), "on a pane");
+        assert!(outside(400.0, 400.0), "on the page");
+        assert!(outside(1000.0, 400.0), "on Properties");
+        assert!(outside(700.0, 895.0), "on the status bar");
+        assert!(outside(700.0, 30.0), "on the tab bar");
+    }
+
+    #[test]
+    fn an_unknown_dock_is_bottom() {
+        assert_eq!(Dock::from_name("right"), Dock::Right);
+        assert_eq!(Dock::from_name("left"), Dock::Bottom);
+        assert_eq!(Dock::from_name(Dock::Right.name()), Dock::Right);
     }
 
     #[test]

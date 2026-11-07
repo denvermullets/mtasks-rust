@@ -36,6 +36,12 @@ pub enum PaletteNav {
     /// Show or hide the project page's Properties sidebar
     /// (`Message::ToggleProjectProperties`).
     ToggleProjectProperties,
+    /// Switch the project page between always-stacked cards and side by side
+    /// when roomy (`Message::ToggleProjectCardsStacked`).
+    ToggleProjectCardsStacked,
+    /// Dock the Terminal panel at the bottom or down the right
+    /// (`Message::ToggleTerminalDock`).
+    ToggleTerminalDock,
     /// Focus the open Tab at this position (`TabMessage::Focus`).
     Tab(usize),
 }
@@ -54,7 +60,9 @@ impl PaletteNav {
             | PaletteNav::FocusTerminal
             | PaletteNav::FocusApp
             | PaletteNav::HidePanel
-            | PaletteNav::ToggleProjectProperties => "Command",
+            | PaletteNav::ToggleProjectProperties
+            | PaletteNav::ToggleProjectCardsStacked
+            | PaletteNav::ToggleTerminalDock => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -123,6 +131,10 @@ pub struct PaletteData {
     pub terminal_focus: TerminalFocus,
     /// The Terminal panel is on screen, so it can be hidden.
     pub terminal_panel_showing: bool,
+    /// The project page stacks its cards at every width.
+    pub project_cards_stacked: bool,
+    /// The Terminal panel is docked right (else at the bottom).
+    pub terminal_dock_right: bool,
 }
 
 /// Most rows the palette ever shows.
@@ -236,6 +248,34 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             secondary: "Shortcut: /".to_string(),
             nav: PaletteNav::ToggleProjectProperties,
         });
+    }
+    if data.on_project_detail {
+        let (name, secondary) = if data.project_cards_stacked {
+            ("Side-by-side project cards", "Burndown and Issues side by side when there's room")
+        } else {
+            ("Stack project cards", "Burndown above Issues at every width")
+        };
+        if name_matches(needle, name) {
+            rows.push(PaletteRow {
+                primary: name.to_string(),
+                secondary: secondary.to_string(),
+                nav: PaletteNav::ToggleProjectCardsStacked,
+            });
+        }
+    }
+    if data.terminal_focus != TerminalFocus::Unavailable {
+        let name = if data.terminal_dock_right {
+            "Dock Terminal panel at the bottom"
+        } else {
+            "Dock Terminal panel on the right"
+        };
+        if name_matches(needle, name) {
+            rows.push(PaletteRow {
+                primary: name.to_string(),
+                secondary: "Every Tab's panel moves".to_string(),
+                nav: PaletteNav::ToggleTerminalDock,
+            });
+        }
     }
     match data.terminal_focus {
         TerminalFocus::App if name_matches(needle, "Focus Terminal") => {
@@ -774,6 +814,30 @@ mod tests {
         assert_eq!(rows[0].nav, PaletteNav::ToggleProjectProperties);
         assert_eq!(rows[0].nav.label(), "Command");
         assert!(palette_results("toggle project", &PaletteData::default()).is_empty());
+    }
+
+    #[test]
+    fn stack_cards_command_only_on_the_project_page_and_names_the_other_layout() {
+        let side = PaletteData { on_project_detail: true, ..PaletteData::default() };
+        let rows = palette_results("project cards", &side);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Stack project cards");
+        assert_eq!(rows[0].nav, PaletteNav::ToggleProjectCardsStacked);
+        let stacked = PaletteData { project_cards_stacked: true, ..side };
+        assert_eq!(palette_results("project cards", &stacked)[0].primary, "Side-by-side project cards");
+        assert!(palette_results("project cards", &PaletteData::default()).is_empty());
+    }
+
+    #[test]
+    fn dock_command_offers_the_other_side_wherever_a_panel_can_show() {
+        let bottom = PaletteData { terminal_focus: TerminalFocus::App, ..PaletteData::default() };
+        let rows = palette_results("dock", &bottom);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Dock Terminal panel on the right");
+        assert_eq!(rows[0].nav, PaletteNav::ToggleTerminalDock);
+        let right = PaletteData { terminal_dock_right: true, ..bottom };
+        assert_eq!(palette_results("dock", &right)[0].primary, "Dock Terminal panel at the bottom");
+        assert!(palette_results("dock", &PaletteData::default()).is_empty());
     }
 
     fn dashboard_data() -> PaletteData {

@@ -6,6 +6,9 @@
 //! panel state is per Tab: `panel` is the active Tab's, and the app parks and
 //! restores it on a switch with `stored_panel` and `restore_panel`.
 //!
+//! Which strip the panel shows is a `Scope`: the team's own Terminals, or a
+//! project's (ADR 0003). The app passes it in with every call.
+//!
 //! The app calls `sync` after every message. It reconciles what the engine is
 //! told (visible, size, theme) with what is on screen, sending only changes.
 
@@ -19,11 +22,11 @@ use iced::{event, window, Element, Size, Subscription, Task};
 
 use super::input::{self, Route};
 use super::links::Link;
-use super::panel::{self, Layout, PanelState, Toggle, MAX_PANES};
+use super::panel::{self, Dock, Layout, PanelState, Toggle, MAX_PANES};
 use super::roster::Roster;
 use crate::db::panel_states::StoredPanel;
 use super::{
-    active_term_theme, Closing, MouseAction, MouseInput, SpawnConfig, TerminalId, Terminals,
+    active_term_theme, Closing, MouseAction, MouseInput, Scope, SpawnConfig, TerminalId, Terminals,
     WheelInput,
 };
 use crate::app::Message;
@@ -57,10 +60,14 @@ pub enum TerminalMessage {
     /// A left press anywhere, sent only while a Terminal has focus. One
     /// outside the panel, at the last pointer position, moves focus to the app.
     PressedAt,
-    /// The pointer pressed the strip.
+    /// The pointer pressed the strip (docked at the bottom) or the left edge
+    /// (docked right).
     DragStart,
-    /// The pointer moved (window y) while dragging.
-    DragMove(f32),
+    /// The pointer moved (window x, y) while dragging.
+    DragMove(f32, f32),
+    /// The right-docked panel's body (every pane, strip excluded) was laid
+    /// out at this size.
+    BodySize(Size),
     DragEnd,
     /// Hide the panel. Every Terminal keeps running; the keyboard goes to the app.
     Hide,
@@ -89,12 +96,14 @@ pub enum TerminalMessage {
     CloseConfirmed(TerminalId),
     /// Start a new shell in an exited Terminal, keeping name and directory.
     Restart(TerminalId),
-    /// "Folder" in the strip: choose where the team's new shells start.
+    /// "Folder" in the strip: choose where the strip's new shells start.
     PickDir,
-    /// The picker's answer; the app stores it (`db::terminal_dirs`).
+    /// The picker's answer; the app stores it (`db::terminal_dirs`) for the
+    /// team, or for the project on a project's strip.
     DirPicked(Option<std::path::PathBuf>),
-    /// The strip's clear button: new shells start in home again. The app
-    /// forgets the stored folder (`db::terminal_dirs::clear`).
+    /// The strip's clear button. The app forgets the stored folder
+    /// (`db::terminal_dirs`): a team's new shells start in home again, a
+    /// project's in the team's folder.
     ClearDir,
     Key(Physical, keyboard::Modifiers, Option<String>),
     Pasted(Option<String>),
@@ -104,11 +113,12 @@ pub enum TerminalMessage {
 
 static WAKE_RX: OnceLock<Mutex<Option<UnboundedReceiver<()>>>> = OnceLock::new();
 
-/// A strip drag in progress. The first pointer move after the press fixes
-/// where the drag started.
+/// A resize drag in progress: the panel's height docked at the bottom, its
+/// width docked right. The first pointer move after the press fixes where the
+/// drag started (y or x).
 struct Drag {
-    start_y: Option<f32>,
-    start_height: f32,
+    start: Option<f32>,
+    start_size: f32,
 }
 
 pub struct TerminalState {
@@ -122,7 +132,18 @@ pub struct TerminalState {
     shutting_down: bool,
     /// Each team's starting directory; unset means home.
     team_dirs: HashMap<String, std::path::PathBuf>,
+    /// Each project's starting directory; unset means its team's.
+    project_dirs: HashMap<String, std::path::PathBuf>,
     panel: PanelState,
+    /// Where the panel sits. Device-wide, set by the app from its config.
+    dock: Dock,
+    /// Docked right: the requested width (`None` is the default). Device-wide.
+    width: Option<f32>,
+    /// Docked right: room taken right of the panel (the project page's
+    /// Properties), set by the app every message.
+    right_inset: f32,
+    /// Docked right: the panel body's laid-out size, once measured.
+    body: Option<Size>,
     /// The page is a removed team's: its panel stays shown (the Terminals have
     /// no other way in) and can't be hidden or add Terminals.
     pinned: bool,
@@ -157,7 +178,12 @@ impl TerminalState {
             closing: Vec::new(),
             shutting_down: false,
             team_dirs: HashMap::new(),
+            project_dirs: HashMap::new(),
             panel: PanelState::default(),
+            dock: Dock::Bottom,
+            width: None,
+            right_inset: 0.0,
+            body: None,
             pinned: false,
             focused: false,
             window: Size::new(1100.0, 700.0),
@@ -199,7 +225,7 @@ impl TerminalState {
         self.drag.is_some()
     }
 
-    pub fn update(&mut self, message: TerminalMessage, team: Option<&str>) -> Task<Message> {
+    pub fn update(&mut self, message: TerminalMessage, scope: Option<&Scope>) -> Task<Message> {
         match message {
             TerminalMessage::Wake => {
                 // Take the wake first: a frame published after this notifies again.
@@ -208,14 +234,14 @@ impl TerminalState {
             }
             TerminalMessage::Window(size) => self.window = size,
             TerminalMessage::ToggleFocus => {
-                let has = team.is_some_and(|t| !self.owned_by(t).is_empty());
-                match panel::toggle(team.is_some(), self.panel.visible, has, self.focused) {
+                let has = scope.is_some_and(|s| !self.owned_by(s).is_empty());
+                match panel::toggle(scope.is_some(), self.panel.visible, has, self.focused) {
                     Toggle::Ignore => {}
                     Toggle::Show { create } => {
                         self.panel.visible = true;
                         self.focused = true;
-                        if let (true, Some(team)) = (create, team) {
-                            self.create(team, self.panel.focused_pane);
+                        if let (true, Some(scope)) = (create, scope) {
+                            self.create(scope, self.panel.focused_pane);
                         }
                     }
                     Toggle::SetFocus(f) => self.focused = f,
@@ -250,30 +276,42 @@ impl TerminalState {
             }
             TerminalMessage::FocusTerminal => {
                 if !self.focused {
-                    return self.update(TerminalMessage::ToggleFocus, team);
+                    return self.update(TerminalMessage::ToggleFocus, scope);
                 }
             }
             TerminalMessage::FocusApp => self.focused = false,
             TerminalMessage::Moved(x, y) => self.pointer = Some((x, y)),
             TerminalMessage::PressedAt => {
                 // Unknown until the pointer moves after focus was taken.
-                let leaves = self.pointer.is_some_and(|(x, y)| {
-                    panel::press_leaves_panel(self.window.height, self.panel.height, x, y)
-                });
+                let leaves = self.pointer.is_some_and(|(x, y)| self.press_leaves(x, y));
                 if leaves {
                     self.focused = false;
                 }
             }
             TerminalMessage::DragStart => {
-                self.drag = Some(Drag { start_y: None, start_height: self.height() });
+                let start_size = match self.dock {
+                    Dock::Bottom => self.height(),
+                    Dock::Right => self.panel_width(),
+                };
+                self.drag = Some(Drag { start: None, start_size });
             }
-            TerminalMessage::DragMove(y) => {
+            TerminalMessage::DragMove(x, y) => {
+                let (window, inset) = (self.window, self.right_inset);
                 if let Some(drag) = &mut self.drag {
-                    let start_y = *drag.start_y.get_or_insert(y);
-                    self.panel.height =
-                        Some(panel::drag_height(self.window.height, drag.start_height, start_y, y));
+                    match self.dock {
+                        Dock::Bottom => {
+                            let start = *drag.start.get_or_insert(y);
+                            self.panel.height =
+                                Some(panel::drag_height(window.height, drag.start_size, start, y));
+                        }
+                        Dock::Right => {
+                            let start = *drag.start.get_or_insert(x);
+                            self.width = Some(panel::drag_width(window.width, inset, drag.start_size, start, x));
+                        }
+                    }
                 }
             }
+            TerminalMessage::BodySize(size) => self.body = Some(size),
             TerminalMessage::DragEnd => self.drag = None,
             TerminalMessage::Hide if self.pinned => {}
             TerminalMessage::New | TerminalMessage::NewIn(_) if self.pinned => {}
@@ -283,29 +321,29 @@ impl TerminalState {
                 self.focused = false;
             }
             TerminalMessage::New => {
-                if let Some(team) = team {
+                if let Some(scope) = scope {
                     self.panel.visible = true;
                     self.focused = true;
                     let slot = panel::slot_for_new(&self.shown, self.panel.layout, self.panel.focused_pane);
-                    self.create(team, slot);
+                    self.create(scope, slot);
                 }
             }
             TerminalMessage::NewIn(slot) => {
-                if let Some(team) = team {
+                if let Some(scope) = scope {
                     self.focused = true;
-                    self.create(team, slot);
+                    self.create(scope, slot);
                 }
             }
             TerminalMessage::Select(id) => {
                 self.renaming = None;
-                if team.is_some_and(|t| self.owned_by(t).contains(&id)) {
+                if scope.is_some_and(|s| self.owned_by(s).contains(&id)) {
                     self.place(self.panel.focused_pane, id);
                     self.focused = true;
                 }
             }
             TerminalMessage::Pick(slot, id) => {
                 self.renaming = None;
-                if team.is_some_and(|t| self.owned_by(t).contains(&id)) {
+                if scope.is_some_and(|s| self.owned_by(s).contains(&id)) {
                     self.focus_slot(slot);
                     self.place(slot, id);
                     self.focused = true;
@@ -362,12 +400,12 @@ impl TerminalState {
                     |dir| Message::Terminal(TerminalMessage::DirPicked(dir)),
                 );
             }
-            // The app stores it first and then calls `set_team_dir`.
+            // The app stores it first and then calls `set_dir`.
             TerminalMessage::DirPicked(_) | TerminalMessage::ClearDir => {}
             TerminalMessage::Key(Physical::Code(code), mods, text) => {
                 match input::route(code, mods, text.as_deref()) {
-                    Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, team),
-                    Route::Hide => return self.update(TerminalMessage::Hide, team),
+                    Route::ToggleFocus => return self.update(TerminalMessage::ToggleFocus, scope),
+                    Route::Hide => return self.update(TerminalMessage::Hide, scope),
                     Route::Palette => return Task::done(Message::OpenCommandPalette),
                     Route::Paste => {
                         return iced::clipboard::read()
@@ -403,12 +441,15 @@ impl TerminalState {
                 }
             }
             TerminalMessage::Key(..) => {}
-            TerminalMessage::Pasted(Some(text)) => {
+            // No text on the clipboard (an image, say) still goes through as an
+            // empty paste: a bracketed-paste program sees `ESC[200~ESC[201~` and
+            // can read the clipboard itself, the way Claude Code pulls in an
+            // image. Without bracketed paste nothing is sent.
+            TerminalMessage::Pasted(text) => {
                 if let Some(id) = self.focused_terminal() {
-                    self.terminals.paste(id, text);
+                    self.terminals.paste(id, text.unwrap_or_default());
                 }
             }
-            TerminalMessage::Pasted(None) => {}
             TerminalMessage::Copied(Some(text)) if !text.is_empty() => {
                 return iced::clipboard::write(text);
             }
@@ -417,19 +458,19 @@ impl TerminalState {
         Task::none()
     }
 
-    /// Reconcile the engine and the canvas with the current team and layout.
+    /// Reconcile the engine and the canvas with the current strip and layout.
     /// Cheap when nothing changed: it sends only differences.
-    pub fn sync(&mut self, team: Option<&str>) {
-        if self.pinned && team.is_some() {
+    pub fn sync(&mut self, scope: Option<&Scope>) {
+        if self.pinned && scope.is_some() {
             self.panel.visible = true;
         }
-        if team.is_none() || !self.panel.visible {
+        if scope.is_none() || !self.panel.visible {
             self.focused = false;
         }
-        let on_screen = team.is_some() && self.panel.visible;
+        let on_screen = scope.is_some() && self.panel.visible;
         let layout = self.panel.layout;
-        let shown = match team {
-            Some(t) => panel::reconcile(&self.panel.panes, &self.owned_by(t), layout),
+        let shown = match scope {
+            Some(s) => panel::reconcile(&self.panel.panes, &self.owned_by(s), layout),
             None => [None; MAX_PANES],
         };
         let mut shown = shown;
@@ -447,7 +488,7 @@ impl TerminalState {
             }
         }
         self.shown = shown;
-        if team.is_some() {
+        if scope.is_some() {
             self.panel.panes = shown;
         }
         // Visibility, for every Terminal: only those in a pane build frames.
@@ -520,9 +561,9 @@ impl TerminalState {
     }
 
     /// Which focus commands the palette offers on this page.
-    pub fn palette_focus(&self, team: Option<&str>) -> crate::palette_results::TerminalFocus {
+    pub fn palette_focus(&self, scope: Option<&Scope>) -> crate::palette_results::TerminalFocus {
         use crate::palette_results::TerminalFocus as F;
-        match (team, self.focused && self.panel.visible) {
+        match (scope, self.focused && self.panel.visible) {
             (None, _) => F::Unavailable,
             (Some(_), true) => F::Terminal,
             (Some(_), false) => F::App,
@@ -530,19 +571,19 @@ impl TerminalState {
     }
 
     /// The panel is on screen for this page.
-    pub fn panel_showing(&self, team: Option<&str>) -> bool {
-        team.is_some() && self.panel.visible
+    pub fn panel_showing(&self, scope: Option<&Scope>) -> bool {
+        scope.is_some() && self.panel.visible
     }
 
-    /// The panel for the current team, if it is showing.
-    pub fn panel_view(&self, team: Option<&str>) -> Option<Element<'_, Message>> {
-        let team = team?;
+    /// The panel for the current strip, if it is showing.
+    pub fn panel_view(&self, scope: Option<&Scope>) -> Option<Element<'_, Message>> {
+        let scope = scope?;
         if !self.panel.visible {
             return None;
         }
         let layout = self.panel.layout;
         let focused_id = self.focused_terminal();
-        let owned = self.owned_by(team);
+        let owned = self.owned_by(scope);
         let offer: Vec<(TerminalId, String)> = panel::unshown(&owned, &self.shown, layout)
             .into_iter()
             .filter_map(|id| Some((id, self.roster.get(id)?.name.clone())))
@@ -569,8 +610,8 @@ impl TerminalState {
             })
             .collect();
         let items = self
-            .roster
-            .of_team(team)
+            .strip(scope)
+            .into_iter()
             .map(|r| StripItem {
                 id: r.id,
                 name: r.name.clone(),
@@ -591,11 +632,13 @@ impl TerminalState {
             layout,
             slots,
             items,
-            dir_label: self.team_dirs.get(team).map(|d| {
+            dir_label: self.dir_for(scope).map(|d| {
                 d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned())
             }),
             note,
+            dock: self.dock,
             height: panel::panel_height(self.window.height, self.panel.height),
+            width: self.panel_width(),
         }))
     }
 
@@ -622,7 +665,7 @@ impl TerminalState {
         if self.drag.is_some() {
             subs.push(event::listen_with(|e, _status, _id| match e {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                    Some(Message::Terminal(TerminalMessage::DragMove(position.y)))
+                    Some(Message::Terminal(TerminalMessage::DragMove(position.x, position.y)))
                 }
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
                     Some(Message::Terminal(TerminalMessage::DragEnd))
@@ -662,8 +705,101 @@ impl TerminalState {
         panel::panel_height(self.window.height, self.panel.height)
     }
 
-    fn owned_by(&self, team: &str) -> Vec<TerminalId> {
-        self.roster.ids_of_team(team)
+    /// Width of the panel docked right.
+    fn panel_width(&self) -> f32 {
+        panel::panel_width(self.window.width, self.right_inset, self.width)
+    }
+
+    /// Whether a left press at window point (`x`, `y`) is outside the panel.
+    fn press_leaves(&self, x: f32, y: f32) -> bool {
+        match self.dock {
+            Dock::Bottom => panel::press_leaves_panel(self.window.height, self.panel.height, x, y),
+            Dock::Right => panel::press_leaves_right_panel(
+                self.window.width,
+                self.window.height,
+                self.right_inset,
+                self.panel_width(),
+                self.body_size().1,
+                x,
+                y,
+            ),
+        }
+    }
+
+    /// Docked right: the panel body (w, h), measured once laid out. Before
+    /// that, a guess: the panel's width less its handle, and the window less
+    /// the title, tab and header bars, the strip and the status bar.
+    fn body_size(&self) -> (f32, f32) {
+        match self.body {
+            Some(b) => (b.width, b.height),
+            None => (
+                self.panel_width() - panel::HANDLE_WIDTH,
+                (self.window.height - 110.0 - panel::STRIP_HEIGHT - panel::STATUS_HEIGHT).max(0.0),
+            ),
+        }
+    }
+
+    pub fn dock(&self) -> Dock {
+        self.dock
+    }
+
+    /// Dock the panel. Every pane changes size, so each Terminal is resized.
+    pub fn set_dock(&mut self, dock: Dock) {
+        if self.dock != dock {
+            self.dock = dock;
+            self.body = None;
+            self.drag = None;
+            self.sent_size.clear();
+        }
+    }
+
+    /// The requested right-docked width, for the app to store.
+    pub fn width(&self) -> Option<f32> {
+        self.width
+    }
+
+    pub fn set_width(&mut self, width: Option<f32>) {
+        self.width = width;
+    }
+
+    /// Room right of a right-docked panel, which moves its left edge.
+    pub fn set_right_inset(&mut self, inset: f32) {
+        self.right_inset = inset;
+    }
+
+    /// Width a right-docked panel takes from the page now (its edge handle
+    /// included), or 0 when it isn't showing there.
+    pub fn right_width(&self, scope: Option<&Scope>) -> f32 {
+        if self.dock == Dock::Right && self.panel_showing(scope) {
+            self.panel_width()
+        } else {
+            0.0
+        }
+    }
+
+    /// The records the strip of `scope` lists. A removed team's pinned panel
+    /// lists all of the team's, its projects' included: their project Tabs
+    /// closed with the team, so it is the only way left to reach them.
+    fn strip<'a>(&'a self, scope: &'a Scope) -> Vec<&'a super::roster::Record> {
+        if self.pinned && scope.project.is_none() {
+            self.roster.of_team(&scope.team).collect()
+        } else {
+            self.roster.of_scope(scope).collect()
+        }
+    }
+
+    fn owned_by(&self, scope: &Scope) -> Vec<TerminalId> {
+        self.strip(scope).into_iter().map(|r| r.id).collect()
+    }
+
+    /// Where new shells in the strip of `scope` start: the project's folder,
+    /// else the team's, else none (home).
+    fn dir_for(&self, scope: &Scope) -> Option<&std::path::PathBuf> {
+        scope
+            .project
+            .as_ref()
+            .and_then(|p| self.project_dirs.get(p))
+            .or_else(|| self.team_dirs.get(&scope.team))
     }
 
     /// Strip changes since the last call, for the app to store.
@@ -680,11 +816,21 @@ impl TerminalState {
         self.team_dirs = dirs;
     }
 
-    /// New shells on `team` start in `dir`; existing shells don't move.
-    pub fn set_team_dir(&mut self, team: &str, dir: Option<std::path::PathBuf>) {
+    pub fn set_project_dirs(&mut self, dirs: HashMap<String, std::path::PathBuf>) {
+        self.project_dirs = dirs;
+    }
+
+    /// New shells in the strip of `scope` start in `dir`; existing shells
+    /// don't move. A project's folder is its own: clearing it falls back to
+    /// the team's, and setting the team's leaves it alone.
+    pub fn set_dir(&mut self, scope: &Scope, dir: Option<std::path::PathBuf>) {
+        let (dirs, key) = match &scope.project {
+            Some(p) => (&mut self.project_dirs, p),
+            None => (&mut self.team_dirs, &scope.team),
+        };
         match dir {
-            Some(d) => self.team_dirs.insert(team.to_string(), d),
-            None => self.team_dirs.remove(team),
+            Some(d) => dirs.insert(key.clone(), d),
+            None => dirs.remove(key),
         };
     }
 
@@ -740,11 +886,16 @@ impl TerminalState {
     }
 
     /// A click on `team`'s sidebar row has just focused its Tab: show that
-    /// Tab's panel if the team has an open Terminal. The keyboard stays with
-    /// the app.
+    /// Tab's panel if the team's own strip has an open Terminal (a project's
+    /// don't show there). The keyboard stays with the app.
     pub fn reveal_for_click(&mut self, team: &str) {
-        self.panel.visible =
-            panel::visible_after_click(self.terminals.open_count(team), self.panel.visible);
+        let scope = Scope::team(team);
+        let open = self
+            .roster
+            .of_scope(&scope)
+            .filter(|r| r.shell && !self.terminals.is_exited(r.id))
+            .count();
+        self.panel.visible = panel::visible_after_click(open, self.panel.visible);
     }
 
     /// The page is a removed team's, whose panel can't be hidden.
@@ -752,14 +903,27 @@ impl TerminalState {
         self.pinned = pinned;
     }
 
-    /// Whether the team has any Terminal in its strip, running or stopped.
+    /// Whether the team has any Terminal, in its own strip or a project's,
+    /// running or stopped.
     pub fn has_terminals(&self, team: &str) -> bool {
         self.roster.of_team(team).next().is_some()
     }
 
-    /// How many of the team's Terminals have a live shell.
+    /// How many of the team's Terminals, its projects' included, have a live shell.
     pub fn open_count(&self, team: &str) -> usize {
         self.terminals.open_count(team)
+    }
+
+    /// Paste `text` into the focused pane's Terminal (no Enter) and give it the
+    /// keyboard. False when the panel is hidden or the pane is empty or exited.
+    pub fn type_into_focused(&mut self, text: String) -> bool {
+        let Some(id) = self.focused_terminal().filter(|&id| self.panel.visible && !self.terminals.is_exited(id))
+        else {
+            return false;
+        };
+        self.terminals.paste(id, text);
+        self.focused = true;
+        true
     }
 
     fn focused_terminal(&self) -> Option<TerminalId> {
@@ -779,12 +943,15 @@ impl TerminalState {
 
     /// Size in cells of one pane; every pane of a layout is the same size.
     fn grid(&self, cell: (f32, f32)) -> (u16, u16) {
-        let (w, h) = panel::pane_size(
-            self.window.width,
-            self.window.height,
-            self.panel.height,
-            self.panel.layout,
-        );
+        let (w, h) = match self.dock {
+            Dock::Bottom => panel::pane_size(
+                self.window.width,
+                self.window.height,
+                self.panel.height,
+                self.panel.layout,
+            ),
+            Dock::Right => panel::split_body(self.body_size(), self.panel.layout, Dock::Right),
+        };
         panel::grid_for(w, h, cell.0, cell.1)
     }
 
@@ -860,11 +1027,11 @@ impl TerminalState {
         }
     }
 
-    /// Start a Terminal for `team` in pane `slot`.
-    fn create(&mut self, team: &str, slot: usize) {
-        let cwd = self.team_dirs.get(team).cloned();
-        if let Some(id) = self.spawn(team, cwd.clone()) {
-            self.roster.add(id, team, cwd);
+    /// Start a Terminal in the strip of `scope`, in pane `slot`.
+    fn create(&mut self, scope: &Scope, slot: usize) {
+        let cwd = self.dir_for(scope).cloned();
+        if let Some(id) = self.spawn(&scope.team, cwd.clone()) {
+            self.roster.add(id, scope, cwd);
             self.focus_slot(slot);
             self.place(self.panel.focused_pane, id);
         }
@@ -887,16 +1054,16 @@ impl TerminalState {
     }
 }
 
-/// The team whose Terminals the current page can show: team and project pages
-/// only. Cross-team pages have no panel (their Terminals keep running).
-pub fn panel_team<'a>(
-    view: &crate::app::View,
-    selected_team_id: Option<&'a str>,
-) -> Option<&'a str> {
+/// The strip the current page shows, before the Tab set exists: a project
+/// page shows the project's, any other team page the team's own. Cross-team
+/// pages have no panel (their Terminals keep running).
+pub fn panel_scope(view: &crate::app::View, selected_team_id: Option<&str>) -> Option<Scope> {
     use crate::app::View;
+    let team = selected_team_id?;
     match view {
         View::MyIssues | View::Inbox | View::Dashboard(_) => None,
-        _ => selected_team_id,
+        View::ProjectDetail(project) => Some(Scope::project(team, project.clone())),
+        _ => Some(Scope::team(team)),
     }
 }
 
@@ -906,7 +1073,15 @@ mod tests {
     use crate::db::terminal_records::Stored;
 
     fn record(key: &str, team: &str) -> Stored {
-        Stored { key: key.into(), team_id: team.into(), name: key.into(), cwd: None }
+        Stored { key: key.into(), team_id: team.into(), project_id: None, name: key.into(), cwd: None }
+    }
+
+    fn project_record(key: &str, team: &str, project: &str) -> Stored {
+        Stored { project_id: Some(project.into()), ..record(key, team) }
+    }
+
+    fn a() -> Scope {
+        Scope::team("a")
     }
 
     fn panel(layout: &str, panes: [Option<&str>; 4]) -> StoredPanel {
@@ -964,10 +1139,10 @@ mod tests {
         let mut t = TerminalState::new();
         t.restore_records(vec![record("k1", "a")]);
         let id = t.roster.id_of_key("k1").unwrap();
-        let _ = t.update(TerminalMessage::RenameStart(id), Some("a"));
-        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some("a"));
+        let _ = t.update(TerminalMessage::RenameStart(id), Some(&a()));
+        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some(&a()));
         assert!(t.is_renaming());
-        let _ = t.update(TerminalMessage::RenameCancel, Some("a"));
+        let _ = t.update(TerminalMessage::RenameCancel, Some(&a()));
         assert!(!t.is_renaming());
         assert_eq!(t.roster.get(id).unwrap().name, "k1");
         assert!(t.focused, "the keyboard goes back to the shell");
@@ -976,14 +1151,27 @@ mod tests {
     #[test]
     fn clearing_a_teams_folder_sends_new_shells_home_and_leaves_other_teams() {
         let mut t = TerminalState::new();
-        t.set_team_dir("a", Some("/tmp".into()));
-        t.set_team_dir("b", Some("/var".into()));
-        t.set_team_dir("a", None);
+        t.set_dir(&a(), Some("/tmp".into()));
+        t.set_dir(&Scope::team("b"), Some("/var".into()));
+        t.set_dir(&a(), None);
         assert!(!t.team_dirs.contains_key("a"));
         assert!(t.team_dirs.contains_key("b"));
         // Clearing is its own message, so a cancelled picker never clears.
-        let _ = t.update(TerminalMessage::DirPicked(None), Some("b"));
+        let _ = t.update(TerminalMessage::DirPicked(None), Some(&Scope::team("b")));
         assert!(t.team_dirs.contains_key("b"));
+    }
+
+    #[test]
+    fn a_projects_folder_overrides_its_teams_and_clearing_it_falls_back() {
+        let mut t = TerminalState::new();
+        let p = Scope::project("a", "p");
+        t.set_dir(&a(), Some("/work".into()));
+        assert_eq!(t.dir_for(&p), Some(&"/work".into()), "the team's until the project has one");
+        t.set_dir(&p, Some("/work/api".into()));
+        assert_eq!(t.dir_for(&p), Some(&"/work/api".into()));
+        assert_eq!(t.dir_for(&a()), Some(&"/work".into()), "the team's own is untouched");
+        t.set_dir(&p, None);
+        assert_eq!(t.dir_for(&p), Some(&"/work".into()));
     }
 
     #[test]
@@ -991,9 +1179,9 @@ mod tests {
         let mut t = TerminalState::new();
         t.restore_records(vec![record("k1", "a")]);
         let id = t.roster.id_of_key("k1").unwrap();
-        let _ = t.update(TerminalMessage::RenameStart(id), Some("a"));
-        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some("a"));
-        let _ = t.update(TerminalMessage::RenameSubmit, Some("a"));
+        let _ = t.update(TerminalMessage::RenameStart(id), Some(&a()));
+        let _ = t.update(TerminalMessage::RenameInput("changed".into()), Some(&a()));
+        let _ = t.update(TerminalMessage::RenameSubmit, Some(&a()));
         assert_eq!(t.roster.get(id).unwrap().name, "changed");
     }
 
@@ -1019,17 +1207,38 @@ mod tests {
     }
 
     #[test]
-    fn a_team_and_its_project_tab_list_the_same_terminals() {
-        use crate::tabs::TabKey;
+    fn a_team_and_each_of_its_projects_list_their_own_terminals() {
         let mut t = TerminalState::new();
-        t.restore_records(vec![record("k1", "a"), record("k2", "a"), record("k3", "b")]);
-        let team_tab = TabKey::Team("a".into());
-        let project_tab = TabKey::Project("p".into());
-        let of = |key: &TabKey| {
-            crate::tab_state::panel_team(key, Some("a")).map(|team| t.owned_by(team))
+        t.restore_records(vec![
+            record("k1", "a"),
+            project_record("k2", "a", "p"),
+            project_record("k3", "a", "q"),
+            record("k4", "b"),
+        ]);
+        let keys = |s: &Scope| -> Vec<String> {
+            t.owned_by(s).into_iter().filter_map(|id| t.roster.key_of(id)).collect()
         };
-        assert_eq!(of(&team_tab), of(&project_tab));
-        assert_eq!(of(&team_tab).map(|ids| ids.len()), Some(2));
+        assert_eq!(keys(&a()), ["k1"]);
+        assert_eq!(keys(&Scope::project("a", "p")), ["k2"]);
+        assert_eq!(keys(&Scope::project("a", "q")), ["k3"]);
+        assert!(t.has_terminals("a"));
+    }
+
+    #[test]
+    fn a_new_terminal_on_a_project_strip_belongs_to_the_project() {
+        let mut t = TerminalState::new();
+        let p = Scope::project("a", "p");
+        t.roster.add(TerminalId(1), &p, None);
+        assert_eq!(t.owned_by(&p), [TerminalId(1)]);
+        assert!(t.owned_by(&a()).is_empty());
+    }
+
+    #[test]
+    fn a_removed_teams_pinned_panel_lists_its_projects_terminals_too() {
+        let mut t = TerminalState::new();
+        t.restore_records(vec![record("k1", "gone"), project_record("k2", "gone", "p")]);
+        t.set_pinned(true);
+        assert_eq!(t.owned_by(&Scope::team("gone")).len(), 2);
     }
 
     #[test]
@@ -1047,10 +1256,10 @@ mod tests {
         t.restore_records(vec![record("k1", "gone")]);
         assert!(t.has_terminals("gone") && !t.has_terminals("other"));
         t.set_pinned(true);
-        t.sync(Some("gone"));
+        t.sync(Some(&Scope::team("gone")));
         assert!(t.stored_panel().visible, "shown although it was hidden");
-        let _ = t.update(TerminalMessage::Hide, Some("gone"));
-        let _ = t.update(TerminalMessage::New, Some("gone"));
+        let _ = t.update(TerminalMessage::Hide, Some(&Scope::team("gone")));
+        let _ = t.update(TerminalMessage::New, Some(&Scope::team("gone")));
         assert!(t.stored_panel().visible);
         assert_eq!(t.roster.ids_of_team("gone").len(), 1, "no new Terminal for a removed team");
     }

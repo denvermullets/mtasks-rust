@@ -225,3 +225,22 @@ pub struct SpawnConfig {
     /// Program and arguments. `None` runs the user's login shell.
     pub program: Option<(String, Vec<String>)>,
 }
+
+/// Whose strip a Terminal is in (ADR 0003): a team's own (`project: None`), or
+/// one of its projects'. Ids are local ids. A project's Terminals still belong
+/// to its team: the team's sidebar count includes them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Scope {
+    pub team: String,
+    pub project: Option<String>,
+}
+
+impl Scope {
+    pub fn team(team: impl Into<String>) -> Self {
+        Scope { team: team.into(), project: None }
+    }
+
+    pub fn project(team: impl Into<String>, project: impl Into<String>) -> Self {
+        Scope { team: team.into(), project: Some(project.into()) }
+    }
+}

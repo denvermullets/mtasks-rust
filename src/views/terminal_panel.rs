@@ -17,7 +17,7 @@ use iced::widget::{button, column, container, row, scrollable, text, text_input}
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
-use crate::terminal::panel::{Layout, PaneNotice, PANE_GAP, STRIP_HEIGHT};
+use crate::terminal::panel::{Dock, Layout, PaneNotice, HANDLE_WIDTH, PANE_GAP, STRIP_HEIGHT};
 use crate::terminal::{
     links::Link, pointer, CursorShape, Frame, KeyMods, MouseAction, MouseButton, MouseInput, Rgb, RowData, Run,
     TerminalId, TerminalMessage, WheelInput,
@@ -527,7 +527,11 @@ pub struct PanelView<'a> {
     pub note: Option<String>,
     /// Name of the team's starting folder, if one is set.
     pub dir_label: Option<String>,
+    pub dock: Dock,
+    /// Panel height docked at the bottom.
     pub height: f32,
+    /// Panel width docked right.
+    pub width: f32,
 }
 
 /// One pane of the panel.
@@ -757,7 +761,8 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             .on_press(Message::Terminal(TerminalMessage::New))
             .style(button::text),
     );
-    for (layout, label) in [(Layout::Single, "1"), (Layout::Columns, "1\u{00d7}2"), (Layout::Grid, "2\u{00d7}2")] {
+    for layout in [Layout::Single, Layout::Columns, Layout::Grid] {
+        let label = layout.label(p.dock);
         let on = layout == p.layout;
         strip = strip.push(
             button(text(label).size(11))
@@ -771,6 +776,19 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
                 }),
         );
     }
+    // Dock the panel at the other side (also in the palette). Device-wide.
+    strip = strip.push(
+        button(
+            text(match p.dock {
+                Dock::Bottom => "Dock right",
+                Dock::Right => "Dock bottom",
+            })
+            .size(11),
+        )
+        .padding([2, 8])
+        .on_press(Message::ToggleTerminalDock)
+        .style(button::text),
+    );
     let has_dir = p.dir_label.is_some();
     strip = strip
         .push(
@@ -794,7 +812,9 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
                 .style(button::text),
         );
     }
-    strip = strip.push(text("Cmd+J").size(11).color(t::text_muted()));
+    if p.dock == Dock::Bottom {
+        strip = strip.push(text("Cmd+J").size(11).color(t::text_muted()));
+    }
     let strip = container(strip)
         .padding([0, 10])
         .height(STRIP_HEIGHT)
@@ -806,12 +826,17 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
             ..Default::default()
         });
 
-    // Dragging the strip resizes the panel (JRST-397).
-    let strip = iced::widget::mouse_area(strip)
-        .on_press(Message::Terminal(TerminalMessage::DragStart))
-        .interaction(mouse::Interaction::ResizingVertically);
+    // Docked at the bottom, dragging the strip resizes the panel (JRST-397).
+    // Docked right, the left edge does.
+    let strip: Element<'a, Message> = match p.dock {
+        Dock::Bottom => iced::widget::mouse_area(strip)
+            .on_press(Message::Terminal(TerminalMessage::DragStart))
+            .interaction(mouse::Interaction::ResizingVertically)
+            .into(),
+        Dock::Right => strip.into(),
+    };
 
-    let (cols, _) = p.layout.grid();
+    let (cols, _) = p.layout.grid(p.dock);
     let mut slots = p.slots.into_iter();
     let mut grid = column![].spacing(PANE_GAP).width(Length::Fill).height(Length::Fill);
     loop {
@@ -826,11 +851,31 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         }
         grid = grid.push(line);
     }
-    let body: Element<'a, Message> = grid.into();
-    column![strip, body]
-        .width(Length::Fill)
-        .height(Length::Fixed(p.height))
-        .into()
+    match p.dock {
+        Dock::Bottom => column![strip, grid].width(Length::Fill).height(Length::Fixed(p.height)).into(),
+        Dock::Right => {
+            // Pane sizes come from the body as laid out: its height depends on
+            // the bars above it, which the Terminal state doesn't know.
+            let body = crate::views::measure::measure(grid, |size| {
+                Message::Terminal(TerminalMessage::BodySize(size))
+            });
+            let handle = iced::widget::mouse_area(
+                container(iced::widget::Space::new(Length::Fixed(HANDLE_WIDTH), Length::Fill))
+                    .width(Length::Fixed(HANDLE_WIDTH))
+                    .height(Length::Fill)
+                    .style(|_theme: &Theme| container::Style {
+                        background: Some(iced::Background::Color(t::border())),
+                        ..Default::default()
+                    }),
+            )
+            .on_press(Message::Terminal(TerminalMessage::DragStart))
+            .interaction(mouse::Interaction::ResizingHorizontally);
+            row![handle, column![strip, body].width(Length::Fill).height(Length::Fill)]
+                .width(Length::Fixed(p.width))
+                .height(Length::Fill)
+                .into()
+        }
+    }
 }
 
 #[cfg(test)]

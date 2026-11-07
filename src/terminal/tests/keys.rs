@@ -63,6 +63,19 @@ fn a_paste_is_bracketed_once_the_program_asks_for_it() {
 }
 
 #[test]
+fn an_empty_paste_still_brackets_so_the_program_can_read_an_image() {
+    let mut t = terminals();
+    let id = t.spawn(sh_config("t1")).unwrap();
+    type_line(&t, id, "stty -icanon -echo; printf '\\033[?2004h'; cat -v");
+    std::thread::sleep(Duration::from_millis(700));
+    t.paste(id, String::new());
+    wait_for(&t, id, "empty bracketed paste", |f| {
+        f.lines().iter().any(|l| l.contains("^[[200~^[[201~"))
+    });
+    close_all(t);
+}
+
+#[test]
 fn a_job_keeps_running_while_the_terminal_is_hidden() {
     let mut t = terminals();
     let id = t.spawn(sh_config("t1")).unwrap();

@@ -31,6 +31,29 @@ pub fn all(conn: &Connection) -> Result<HashMap<String, PathBuf>> {
     rows.collect()
 }
 
+/// Remember `dir` for the project's new Terminals, replacing any earlier one.
+pub fn set_project(conn: &Connection, project_id: &str, dir: &Path) -> Result<()> {
+    conn.execute(
+        "INSERT INTO project_terminal_dirs (project_id, path) VALUES (?1, ?2)
+         ON CONFLICT(project_id) DO UPDATE SET path = excluded.path",
+        params![project_id, dir.to_string_lossy()],
+    )?;
+    Ok(())
+}
+
+/// Forget the project's directory; its new shells start in the team's again.
+pub fn clear_project(conn: &Connection, project_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM project_terminal_dirs WHERE project_id = ?1", params![project_id])?;
+    Ok(())
+}
+
+/// Every project's directory, by project id.
+pub fn all_projects(conn: &Connection) -> Result<HashMap<String, PathBuf>> {
+    let mut stmt = conn.prepare("SELECT project_id, path FROM project_terminal_dirs")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, PathBuf::from(r.get::<_, String>(1)?))))?;
+    rows.collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +85,19 @@ mod tests {
         assert_eq!(all(&c).unwrap().get("t1"), Some(&PathBuf::from("/work/web")));
         clear(&c, "t1").unwrap();
         assert!(all(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_project_directory_round_trips_apart_from_the_teams() {
+        let c = mem();
+        team(&c, "t1");
+        set(&c, "t1", Path::new("/work")).unwrap();
+        set_project(&c, "p1", Path::new("/work/api")).unwrap();
+        set_project(&c, "p1", Path::new("/work/web")).unwrap();
+        assert_eq!(all_projects(&c).unwrap().get("p1"), Some(&PathBuf::from("/work/web")));
+        assert_eq!(all(&c).unwrap().get("t1"), Some(&PathBuf::from("/work")));
+        clear_project(&c, "p1").unwrap();
+        assert!(all_projects(&c).unwrap().is_empty());
     }
 
     #[test]

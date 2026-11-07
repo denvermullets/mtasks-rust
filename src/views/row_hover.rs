@@ -50,22 +50,24 @@ impl InsideTracker {
     }
 }
 
-type OnHover<'a, Message> = Box<dyn Fn(u64, Option<(Anchor, Rectangle)>) -> Message + 'a>;
+type OnHover<'a, T, Message> = Box<dyn Fn(u64, Option<(T, Rectangle)>) -> Message + 'a>;
 
-pub struct RowHover<'a, Message> {
+/// `T` is what the row stands for: a hover-card `Anchor` on detail pages, a
+/// card's issue id on the board.
+pub struct RowHover<'a, Message, T = Anchor> {
     content: Element<'a, Message>,
-    anchor: Anchor,
-    on_hover: OnHover<'a, Message>,
+    anchor: T,
+    on_hover: OnHover<'a, T, Message>,
 }
 
 /// Wrap `content` as the hover anchor for `anchor`. `on_hover` gets this
 /// widget's owner id and `Some((anchor, window rectangle))` on enter, `None`
 /// on leave.
-pub fn row_hover<'a, Message>(
+pub fn row_hover<'a, Message, T: Clone + 'a>(
     content: impl Into<Element<'a, Message>>,
-    anchor: Anchor,
-    on_hover: impl Fn(u64, Option<(Anchor, Rectangle)>) -> Message + 'a,
-) -> RowHover<'a, Message> {
+    anchor: T,
+    on_hover: impl Fn(u64, Option<(T, Rectangle)>) -> Message + 'a,
+) -> RowHover<'a, Message, T> {
     RowHover { content: content.into(), anchor, on_hover: Box::new(on_hover) }
 }
 
@@ -76,7 +78,7 @@ struct State {
     window_cursor: Option<Point>,
 }
 
-impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for RowHover<'a, Message> {
+impl<'a, Message: 'a, T: Clone + 'a> Widget<Message, Theme, iced::Renderer> for RowHover<'a, Message, T> {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
@@ -196,8 +198,8 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for RowHover<'a, Me
     }
 }
 
-impl<'a, Message: 'a> From<RowHover<'a, Message>> for Element<'a, Message> {
-    fn from(row: RowHover<'a, Message>) -> Self {
+impl<'a, Message: 'a, T: Clone + 'a> From<RowHover<'a, Message, T>> for Element<'a, Message> {
+    fn from(row: RowHover<'a, Message, T>) -> Self {
         Element::new(row)
     }
 }

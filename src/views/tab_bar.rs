@@ -2,7 +2,7 @@
 //! Tab kinds only change what the caller passes in.
 
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
-use iced::widget::{button, container, mouse_area, row, scrollable, stack, text};
+use iced::widget::{button, container, mouse_area, row, scrollable, stack, text, tooltip};
 use iced::{Border, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::{Message, TabMessage};
@@ -123,24 +123,36 @@ pub fn view<'a>(
         let placeholder = dragging == Some(i);
         // Not a button: a button captures the press, and the Tab drags from it.
         let label_button = mouse_area(
-            container(
-                text(label.clone())
-                    .size(13)
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .color(if placeholder {
-                        t::text_muted()
-                    } else if active {
-                        t::text_strong()
-                    } else {
-                        t::text_secondary()
-                    }),
-            )
+            container(crate::views::truncated::truncated(
+                label.clone(),
+                13.0,
+                if placeholder {
+                    t::text_muted()
+                } else if active {
+                    t::text_strong()
+                } else {
+                    t::text_secondary()
+                },
+            ))
             .width(Length::Fill)
             .clip(true)
             .padding(iced::Padding { top: 5.0, right: 4.0, bottom: 5.0, left: 12.0 }),
         )
         .on_press(Message::Tab(TabMessage::DragPress(i)))
         .interaction(iced::mouse::Interaction::Pointer);
+        // The label is cut to one line; hovering shows the full title.
+        let label_button = tooltip(
+            label_button,
+            container(text(label.clone()).size(12).color(t::text_strong()))
+                .padding([4, 8])
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(t::bg_menu())),
+                    border: Border { color: t::border(), width: 1.0, radius: 4.0.into() },
+                    ..Default::default()
+                }),
+            tooltip::Position::Bottom,
+        )
+        .gap(4);
         let close = button(text("\u{00D7}").size(14).color(t::text_muted()))
             .padding([3, 8])
             .on_press(Message::Tab(TabMessage::Close(i)))
@@ -156,7 +168,12 @@ pub fn view<'a>(
             .style(move |_theme: &Theme| container::Style {
                 background: (active && !placeholder)
                     .then(|| iced::Background::Color(t::bg_secondary())),
-                border: Border { radius: TAB_RADIUS.into(), ..Default::default() },
+                // The placeholder drops the solid border so its dashed outline shows.
+                border: Border {
+                    color: t::border(),
+                    width: if placeholder { 0.0 } else { 1.0 },
+                    radius: TAB_RADIUS.into(),
+                },
                 ..Default::default()
             });
         if placeholder {

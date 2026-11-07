@@ -14,6 +14,7 @@ use crate::db::panel_states::StoredPanel;
 use crate::saved_view::OpenView;
 use crate::scroll::ScrollKey;
 use crate::tabs::{Page, TabKey, TabSet};
+use crate::terminal::Scope;
 
 /// The comment or reply being typed on an issue or project detail, and its
 /// staged files. Parked with the Tab; closing the Tab discards it, and it isn't
@@ -156,15 +157,23 @@ impl ParkedTab {
     }
 }
 
-/// The team whose Terminals the Tab `key` shows. A team Tab shows its own
-/// team's; a project Tab its project's team (`project_team`), so both Tabs list
-/// the same Terminals and a new one belongs to the team. A cross-team Tab
-/// shows none, whatever page it is on: an issue opened there from another
-/// team switches the selected team, and must not bring that team's panel.
-pub fn panel_team<'a>(key: &'a TabKey, project_team: Option<&'a str>) -> Option<&'a str> {
+/// The Terminal strip the Tab `key` shows (ADR 0003). A project Tab shows its
+/// project's, on every page (an issue opened in it included); its team is
+/// `project_team`. A team Tab shows the team's own, or a project's while that
+/// project's page (`viewed_project`) is open in it. A cross-team Tab shows
+/// none, whatever page it is on: an issue opened there from another team
+/// switches the selected team, and must not bring that team's panel.
+pub fn panel_scope(
+    key: &TabKey,
+    project_team: Option<&str>,
+    viewed_project: Option<&str>,
+) -> Option<Scope> {
     match key {
-        TabKey::Team(id) => Some(id.as_str()),
-        TabKey::Project(_) => project_team,
+        TabKey::Team(id) => Some(match viewed_project {
+            Some(p) => Scope::project(id.as_str(), p),
+            None => Scope::team(id.as_str()),
+        }),
+        TabKey::Project(p) => project_team.map(|t| Scope::project(t, p.as_str())),
         TabKey::MyIssues | TabKey::Inbox | TabKey::Dashboard(_) => None,
     }
 }
@@ -546,12 +555,23 @@ mod tests {
 
     #[test]
     fn only_team_and_project_tabs_show_a_panel() {
-        assert_eq!(panel_team(&team("a"), Some("a")), Some("a"));
-        assert_eq!(panel_team(&TabKey::Project("p".into()), Some("a")), Some("a"));
+        assert_eq!(panel_scope(&team("a"), None, None), Some(Scope::team("a")));
         // Even with another team's issue open in the Tab.
         for key in [TabKey::MyIssues, TabKey::Inbox, TabKey::Dashboard("d".into())] {
-            assert_eq!(panel_team(&key, Some("other")), None);
+            assert_eq!(panel_scope(&key, Some("other"), None), None);
         }
+    }
+
+    #[test]
+    fn a_project_tab_shows_its_projects_strip_on_every_page() {
+        let p = TabKey::Project("p".into());
+        assert_eq!(panel_scope(&p, Some("a"), None), Some(Scope::project("a", "p")));
+        assert_eq!(panel_scope(&p, Some("a"), Some("p")), Some(Scope::project("a", "p")));
+    }
+
+    #[test]
+    fn a_team_tab_shows_a_projects_strip_while_that_project_is_open() {
+        assert_eq!(panel_scope(&team("a"), None, Some("p")), Some(Scope::project("a", "p")));
     }
 
     #[test]

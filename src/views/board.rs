@@ -26,6 +26,9 @@ pub struct CardData<'a> {
     pub projects: &'a [Project],
     pub issue_labels: &'a HashMap<String, Vec<Label>>,
     pub display: &'a DisplayOptions,
+    /// Local id of the card or row under the pointer; painted with the hover
+    /// highlight (Rails' `hover:bg-hover-highlight`).
+    pub hovered: Option<&'a str>,
 }
 
 /// Render the board. Columns come from `display::build_columns`, so they may be
@@ -338,7 +341,8 @@ fn issue_card<'a>(
             .push(container(meta).padding(iced::Padding::ZERO.top(space::S3)));
     }
 
-    let bg = if focused {
+    let hovered = data.hovered == Some(issue.id.as_str());
+    let bg = if focused || hovered {
         t::bg_card_focused()
     } else {
         t::bg_secondary()
@@ -361,7 +365,10 @@ fn issue_card<'a>(
             ..Default::default()
         });
 
-    mouse_area(card)
-        .on_press(Message::CardPressed(lane_idx, issue_idx))
-        .into()
+    crate::views::row_hover::row_hover(
+        mouse_area(card).on_press(Message::CardPressed(lane_idx, issue_idx)),
+        issue.id.clone(),
+        Message::CardHover,
+    )
+    .into()
 }
