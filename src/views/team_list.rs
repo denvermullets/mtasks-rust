@@ -11,6 +11,7 @@ use crate::db::sidebar_layout::StoredSidebar;
 use crate::db::saved_views::SavedView;
 use crate::sidebar_layout::{sidebar_layout, SectionKind};
 use crate::theme as t;
+use crate::views::truncated::truncated;
 
 /// Everything the sidebar reads, bundled so `view` takes one argument.
 pub struct SidebarState<'a> {
@@ -241,17 +242,24 @@ fn team_block<'a>(
         }))
         .padding([2, 4]);
 
-        let name_text = text(&team.name).size(14).color(if is_selected {
-            t::text_primary()
+        let name_color = if is_selected { t::text_primary() } else { t::text_secondary() };
+        // An admin (not the owner) gets the web's small ADMIN label. The name
+        // then truncates to whatever width the other items leave, so a long
+        // name never pushes the badge out; without the badge the name is the
+        // plain text row it always was.
+        let show_admin = team.shows_admin_badge();
+        let name_text: Element<'a, Message> = if show_admin {
+            container(truncated(team.name.clone(), 14.0, name_color)).width(Length::Fill).into()
         } else {
-            t::text_secondary()
-        });
+            text(&team.name).size(14).color(name_color).into()
+        };
 
         let header_content = row![]
             .spacing(8)
             .align_y(iced::Alignment::Center)
             .push(identifier_badge)
             .push(name_text)
+            .push_maybe(show_admin.then(admin_badge))
             .push_maybe(is_home_team(home, team).then(home_marker))
             .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())))
             .push_maybe(open_terminals_label(open_terminals.get(&team.id).copied().unwrap_or(0)).map(
@@ -458,6 +466,11 @@ fn icon_btn<'a>(glyph: &'static str, size: u16, padding: [u16; 2], msg: Option<M
             ..Default::default()
         })
         .into()
+}
+
+/// The ADMIN label after an admin's team name (about 10px, accent colour).
+fn admin_badge<'a>() -> Element<'a, Message> {
+    text("ADMIN").size(10).color(t::accent()).into()
 }
 
 /// The small home glyph shown next to the Home page's row.
