@@ -1,7 +1,12 @@
-<!-- last-sha: 10f06e2a46b38714a7ef06399406e5ac1559f765 -->
-**Version: v0.3.0**
+<!-- last-sha: 4787cda8ac4013a81aff71d892bef2db49fe2d2c -->
+**Version: v0.4.0**
 
 # What's new
+
+## 2026-11-06
+- **Drag to reorder tabs.** Drag a tab to a new spot in the tab bar; a dashed outline marks where it will land.
+- **Sidebar matches the web.** Your team groups from JAIT on the web now show in the sidebar, with teams you own and teams you've joined in their own sections, in the same order as on the web. Teams you administer carry an ADMIN badge, and collapsing a group is saved back to the web.
+- **Paste images into terminals.** Pasting while an image is on the clipboard now reaches programs that can read it, so tools like Claude Code can pull the image in.
 
 ## 2026-11-06
 - **Quick property pickers.** Hover a card or list row (or open an issue) and press `s` for status, `p` for priority, `j` for project or `l` for labels to open a searchable picker right beside it. Use ↑/↓ and Enter to choose, Escape to close; labels can be toggled several at a time, and you can create a new label straight from the search box.
