@@ -858,15 +858,6 @@ const MIGRATIONS: &[Migration] = &[
         ",
     },
     Migration {
-        version: 41,
-        name: "teams_role",
-        up: "
-            -- The signed-in user's role on the team from GET /teams: owner,
-            -- admin or member. NULL until a pull carries it (read as member).
-            ALTER TABLE teams ADD COLUMN role TEXT;
-        ",
-    },
-    Migration {
         version: 42,
         name: "sidebar_layout",
         up: "
@@ -897,6 +888,17 @@ const MIGRATIONS: &[Migration] = &[
             CREATE TABLE sidebar_layout_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1)
             );
+        ",
+    },
+    Migration {
+        version: 43,
+        name: "teams_role",
+        up: "
+            -- 43, not 41: feat/project-terminals already uses 41
+            -- (project_terminals), and dev DBs that ran it skipped this.
+            -- The signed-in user's role on the team from GET /teams: owner,
+            -- admin or member. NULL until a pull carries it (read as member).
+            ALTER TABLE teams ADD COLUMN role TEXT;
         ",
     },
 ];
@@ -1511,13 +1513,13 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_from_v40_adds_the_team_role_column_and_keeps_teams() {
+    fn upgrade_from_v42_adds_the_team_role_column_and_keeps_teams() {
         let conn = open_mem();
         conn.execute_batch(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
         )
         .unwrap();
-        for m in MIGRATIONS.iter().filter(|m| m.version < 41) {
+        for m in MIGRATIONS.iter().filter(|m| m.version < 43) {
             conn.execute_batch(m.up).unwrap();
             conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
         }
@@ -1537,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_from_v41_adds_the_sidebar_layout_tables_and_keeps_data() {
+    fn upgrade_from_v40_adds_the_sidebar_layout_tables_and_keeps_data() {
         let conn = open_mem();
         conn.execute_batch(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
