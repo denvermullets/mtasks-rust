@@ -7217,7 +7217,11 @@ impl App {
         };
 
         let main_content = column![]
-            .push(tab_bar::view(&self.tab_labels(), self.window_width))
+            .push(tab_bar::view(
+                &self.tab_labels(),
+                self.window_width,
+                self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
+            ))
             .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
             .push_maybe(self.terminals.panel_view(self.panel_team()))
