@@ -817,6 +817,8 @@ pub struct App {
     /// Tab in view. Neither is per Tab.
     window_width: f32,
     tab_bar_offset: f32,
+    /// A Tab pressed in the bar, until the pointer is released.
+    tab_drag: Option<tab_update::TabDrag>,
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
     tab_projects: HashMap<String, (String, String)>,
@@ -3164,6 +3166,7 @@ impl App {
             restored_panels: HashMap::new(),
             window_width: 1100.0,
             tab_bar_offset: 0.0,
+            tab_drag: None,
             tab_projects: HashMap::new(),
             terminals: {
                 let mut terminals = crate::terminal::TerminalState::new();
@@ -3335,6 +3338,18 @@ impl App {
             resizes,
             self.terminals.subscription(modal_open),
         ];
+        // A pressed Tab follows the pointer until release.
+        if self.tab_drag.is_some() {
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Tab(TabMessage::DragMove(position.x)))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
+                    Some(Message::Tab(TabMessage::DragEnd))
+                }
+                _ => None,
+            }));
+        }
         // Only listen for wheel events while a card is pending or showing.
         if self.body_hover.is_active() {
             subs.push(scrolls);

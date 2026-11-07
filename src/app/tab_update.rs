@@ -21,6 +21,22 @@ pub enum TabMessage {
     BackToPage(View),
     /// The tab bar scrolled sideways to this offset.
     BarScrolled(f32),
+    /// The pointer went down on the Tab at this position: a click or a drag.
+    DragPress(usize),
+    /// The pointer moved (window x) while a Tab is pressed.
+    DragMove(f32),
+    /// The pointer was released: a click focuses, a drag drops.
+    DragEnd,
+}
+
+/// A Tab pressed in the bar. `start_x` is the pointer's first position;
+/// `index` follows the Tab as it moves; `moved` is set once the pointer has
+/// travelled past the threshold.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabDrag {
+    pub index: usize,
+    pub start_x: Option<f32>,
+    pub moved: bool,
 }
 
 /// Whether a Tab's team, project or Dashboard is still in the local mirror.
@@ -53,8 +69,43 @@ impl App {
             TabMessage::BackToRoot => return self.back_to_tab_root(),
             TabMessage::BackToPage(view) => return self.back_to_page(view),
             TabMessage::BarScrolled(x) => self.tab_bar_offset = x,
+            TabMessage::DragPress(index) => {
+                self.tab_drag = Some(TabDrag { index, start_x: None, moved: false });
+            }
+            TabMessage::DragMove(x) => self.drag_tab_to(x),
+            TabMessage::DragEnd => {
+                if let Some(drag) = self.tab_drag.take() {
+                    if !drag.moved {
+                        return self.update_tab(TabMessage::Focus(drag.index));
+                    }
+                }
+            }
         }
         Task::none()
+    }
+
+    /// Move the pressed Tab under the pointer once it has passed the drag
+    /// threshold. Parked state is keyed by Tab, so only the order changes.
+    fn drag_tab_to(&mut self, x: f32) {
+        use crate::views::tab_bar;
+        let Some(drag) = self.tab_drag.as_mut() else {
+            return;
+        };
+        let start = *drag.start_x.get_or_insert(x);
+        if !drag.moved && (x - start).abs() < tab_bar::DRAG_THRESHOLD {
+            return;
+        }
+        drag.moved = true;
+        let Some(set) = self.tab_set.as_mut() else {
+            return;
+        };
+        let count = set.tabs().len();
+        let viewport = tab_bar::tab_viewport(self.window_width);
+        let w = tab_bar::tab_width(count, viewport);
+        let to = tab_bar::drop_index(x, self.tab_bar_offset, count, w);
+        if set.move_tab(drag.index, to) {
+            drag.index = to;
+        }
     }
 
     /// Close the Tab at `index`. Closing the active Tab (or the last Tab,
