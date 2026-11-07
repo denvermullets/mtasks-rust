@@ -182,6 +182,27 @@ impl TabSet {
         true
     }
 
+    /// Move the Tab at `from` to position `to`, shifting the Tabs between.
+    /// The active Tab stays the same Tab, wherever it ends up. Out of range
+    /// or `from == to` does nothing; returns whether the order changed.
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = if self.active == from {
+            to
+        } else if from < self.active && self.active <= to {
+            self.active - 1
+        } else if to <= self.active && self.active < from {
+            self.active + 1
+        } else {
+            self.active
+        };
+        true
+    }
+
     /// Open `key`, or focus its Tab if it's already open. A new Tab goes at
     /// the end and becomes active. Returns the index of the focused Tab.
     pub fn open(&mut self, key: TabKey) -> usize {
@@ -318,6 +339,34 @@ mod tests {
 
     fn set(keys: &[TabKey], active: usize) -> TabSet {
         TabSet::from_parts(keys.to_vec(), active, &home())
+    }
+
+    #[test]
+    fn moving_a_tab_keeps_the_active_tab_the_same_tab() {
+        let keys = [team("a"), team("b"), team("c"), team("d")];
+        for active in 0..4 {
+            for from in 0..4 {
+                for to in 0..4 {
+                    let mut tabs = set(&keys, active);
+                    let before = tabs.active().clone();
+                    let changed = tabs.move_tab(from, to);
+                    assert_eq!(changed, from != to);
+                    assert_eq!(tabs.active(), &before, "{active} {from}->{to}");
+                    assert_eq!(tabs.tabs().len(), 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moving_a_tab_reorders_and_out_of_range_does_nothing() {
+        let mut tabs = set(&[team("a"), team("b"), team("c")], 0);
+        assert!(tabs.move_tab(0, 2));
+        assert_eq!(tabs.tabs(), [team("b"), team("c"), team("a")]);
+        assert_eq!(tabs.active_index(), 2);
+        assert!(!tabs.move_tab(5, 0));
+        assert!(!tabs.move_tab(0, 3));
+        assert_eq!(tabs.tabs(), [team("b"), team("c"), team("a")]);
     }
 
     #[test]

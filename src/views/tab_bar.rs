@@ -1,7 +1,7 @@
 //! The tab bar across the top of the main area. Takes plain labels so other
 //! Tab kinds only change what the caller passes in.
 
-use iced::widget::{button, container, row, scrollable, text};
+use iced::widget::{button, container, mouse_area, row, scrollable, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{Message, TabMessage};
@@ -58,6 +58,21 @@ pub fn reveal_offset(index: usize, count: usize, tab_w: f32, viewport: f32, curr
     wanted.clamp(0.0, max)
 }
 
+/// Pixels the pointer must travel from the press before a Tab starts to drag,
+/// so a plain click still focuses.
+pub const DRAG_THRESHOLD: f32 = 5.0;
+
+/// The Tab slot under window x `cursor_x`, given the bar's scroll offset.
+/// Clamped to the first and last Tab.
+pub fn drop_index(cursor_x: f32, offset: f32, count: usize, tab_w: f32) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let x = cursor_x - crate::terminal::panel::SIDEBAR_WIDTH - BAR_PADDING + offset;
+    let slot = (x / (tab_w + TAB_SPACING)).floor();
+    (slot.max(0.0) as usize).min(count - 1)
+}
+
 pub fn scroll_id() -> scrollable::Id {
     scrollable::Id::new("tab-bar")
 }
@@ -67,17 +82,20 @@ pub fn view<'a>(tabs: &[(String, bool)], window_width: f32) -> Element<'a, Messa
     let mut bar = row![].spacing(TAB_SPACING).padding([4.0, BAR_PADDING]);
     for (i, (label, active)) in tabs.iter().enumerate() {
         let active = *active;
-        let label_button = button(
-            text(label.clone())
-                .size(13)
-                .wrapping(iced::widget::text::Wrapping::None)
-                .color(if active { t::text_strong() } else { t::text_secondary() }),
+        // Not a button: a button captures the press, and the Tab drags from it.
+        let label_button = mouse_area(
+            container(
+                text(label.clone())
+                    .size(13)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .color(if active { t::text_strong() } else { t::text_secondary() }),
+            )
+            .width(Length::Fill)
+            .clip(true)
+            .padding(iced::Padding { top: 5.0, right: 4.0, bottom: 5.0, left: 12.0 }),
         )
-        .width(Length::Fill)
-        .clip(true)
-        .padding(iced::Padding { top: 5.0, right: 4.0, bottom: 5.0, left: 12.0 })
-        .on_press(Message::Tab(TabMessage::Focus(i)))
-        .style(|_theme: &Theme, _status| button::Style::default());
+        .on_press(Message::Tab(TabMessage::DragPress(i)))
+        .interaction(iced::mouse::Interaction::Pointer);
         let close = button(text("\u{00D7}").size(14).color(t::text_muted()))
             .padding([3, 8])
             .on_press(Message::Tab(TabMessage::Close(i)))
@@ -126,6 +144,16 @@ pub fn view<'a>(tabs: &[(String, bool)], window_width: f32) -> Element<'a, Messa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drop_index_follows_the_pointer_and_the_scroll() {
+        let left = crate::terminal::panel::SIDEBAR_WIDTH + BAR_PADDING;
+        assert_eq!(drop_index(left + 10.0, 0.0, 5, 120.0), 0);
+        assert_eq!(drop_index(left + 130.0, 0.0, 5, 120.0), 1);
+        assert_eq!(drop_index(left + 10.0, 244.0, 5, 120.0), 2);
+        assert_eq!(drop_index(0.0, 0.0, 5, 120.0), 0);
+        assert_eq!(drop_index(5000.0, 0.0, 5, 120.0), 4);
+    }
 
     #[test]
     fn few_tabs_cap_at_max() {
