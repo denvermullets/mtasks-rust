@@ -1,7 +1,13 @@
-<!-- last-sha: 4787cda8ac4013a81aff71d892bef2db49fe2d2c -->
-**Version: v0.4.0**
+<!-- last-sha: e1d24028686e38782951dfdc3e16464f73488aaa -->
+**Version: v0.5.0**
 
 # What's new
+
+## 2026-11-07
+- **Board rows.** Pick a "Rows" sub-grouping in the Display menu to split the board into rows that run across every column, lined up so you can scan them side by side. Empty rows start collapsed (click a row to expand or collapse it), a new "Show empty rows" option keeps them visible, and arrow-key navigation skips collapsed rows.
+- **Display menu matches the web.** The Display menu now uses the same names and order as JAIT on the web: "Columns" on the board, "Grouping" in the list, and "No grouping" and "Parent issue" as options.
+- **Sort a project's issues.** The Issues card on a project page has Sort chips for Newest, ID, Status, Updated and Priority. It sorts by ID unless you pick another.
+- **Your edits stick through sync.** An open issue or project no longer overwrites newer changes from the web with stale text, and edits you're making aren't lost when a sync arrives.
 
 ## 2026-11-06
 - **Drag to reorder tabs.** Drag a tab to a new spot in the tab bar; a dashed outline marks where it will land.
