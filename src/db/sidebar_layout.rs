@@ -164,7 +164,6 @@ pub fn apply_keeping_collapsed(
 
 /// Set one group's collapsed state locally. Returns false when the group is
 /// unknown. Does not queue a push; the collapse-sync work does that.
-#[allow(dead_code)] // called by the sidebar group collapse toggle
 pub fn set_collapsed(conn: &Connection, group_id: &str, collapsed: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE sidebar_groups SET collapsed = ?2 WHERE id = ?1",

@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, row, text, Column};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{Message, TeamWebSection, View};
 use crate::db::dashboards::Dashboard;
 use crate::db::home_page::HomePage;
 use crate::db::models::Team;
+use crate::db::sidebar_layout::StoredSidebar;
 use crate::db::saved_views::SavedView;
+use crate::sidebar_layout::{sidebar_layout, SectionKind};
 use crate::theme as t;
 
 /// Everything the sidebar reads, bundled so `view` takes one argument.
@@ -29,6 +31,8 @@ pub struct SidebarState<'a> {
     pub open_dashboard_id: Option<&'a str>,
     /// Open Terminals per team id (JRST-407); teams at zero are absent.
     pub open_terminals: HashMap<String, usize>,
+    /// Stored sidebar groups and team order; `None` keeps the single list.
+    pub sidebar: Option<&'a StoredSidebar>,
 }
 
 /// What a row shows for its team's open Terminals: nothing at zero.
@@ -52,6 +56,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         home,
         dashboards,
         open_dashboard_id,
+        sidebar,
     } = state;
     let mut col = column![].spacing(0).width(Length::Fill);
 
@@ -113,38 +118,109 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         );
     }
 
-    // Teams section. The archived toggle only appears once there's something
-    // archived to reveal.
+    // Teams: the stored layout's sections (groups, owned, joined, archived),
+    // or one "YOUR TEAMS" list when no layout is stored. The archived toggle
+    // only appears once there's something archived to reveal, on the first
+    // section header.
     let has_archived = teams.iter().any(|t| t.archived_at.is_some());
-    if has_archived {
-        col = col.push(
-            row![]
-                .align_y(iced::Alignment::Center)
-                .push(section_header("YOUR TEAMS"))
-                .push(iced::widget::horizontal_space())
-                .push(
-                    button(
-                        text(if show_archived {
-                            "Hide archived"
-                        } else {
-                            "Show archived"
-                        })
-                        .size(11)
-                        .color(t::text_muted()),
-                    )
-                    .on_press(Message::ToggleShowArchivedTeams)
-                    .padding([4, 14])
-                    .style(plain_row_style),
-                ),
-        );
-    } else {
-        col = col.push(section_header("YOUR TEAMS"));
+    let mut archived_toggle = has_archived;
+    let ctx = RowCtx {
+        selected_team_id,
+        expanded_teams,
+        current_view,
+        team_menu_open,
+        saved_views,
+        open_view_id,
+        open_terminals: &open_terminals,
+        home,
+        read_only,
+    };
+    let layout = sidebar_layout(teams, sidebar, show_archived);
+    for section in &layout.sections {
+        let toggle = std::mem::take(&mut archived_toggle)
+            .then(|| archived_toggle_button(show_archived));
+        let collapsed = match &section.kind {
+            SectionKind::Group { id, name, collapsed } => {
+                col = col.push(group_header(id, name, *collapsed, toggle));
+                *collapsed
+            }
+            kind => {
+                let label = match kind {
+                    SectionKind::Owned => "TEAMS YOU OWN",
+                    SectionKind::Joined => "TEAMS YOU'VE JOINED",
+                    SectionKind::Archived => "ARCHIVED",
+                    _ => "YOUR TEAMS",
+                };
+                col = col.push(
+                    row![]
+                        .align_y(iced::Alignment::Center)
+                        .push(section_header(label))
+                        .push_maybe(toggle.is_some().then(iced::widget::horizontal_space))
+                        .push_maybe(toggle),
+                );
+                false
+            }
+        };
+        if collapsed {
+            continue;
+        }
+        if section.teams.is_empty() {
+            let msg = match section.kind {
+                SectionKind::Group { .. } => Some("No teams in this group."),
+                SectionKind::Owned => Some("No teams yet."),
+                _ => None,
+            };
+            if let Some(msg) = msg {
+                col = col.push(container(text(msg).size(12).color(t::text_muted())).padding([4, 14]));
+            }
+        }
+        for team in &section.teams {
+            col = team_block(col, team, &ctx);
+        }
     }
 
-    for team in teams
-        .iter()
-        .filter(|t| show_archived || t.archived_at.is_none())
-    {
+
+    container(col)
+        .padding(0)
+        .width(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_menu())),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Per-row inputs shared by every team in the sidebar.
+struct RowCtx<'a, 'b> {
+    selected_team_id: Option<&'a str>,
+    expanded_teams: &'a HashSet<String>,
+    current_view: &'a View,
+    team_menu_open: Option<&'a str>,
+    saved_views: &'a HashMap<String, Vec<SavedView>>,
+    open_view_id: Option<&'a str>,
+    open_terminals: &'b HashMap<String, usize>,
+    home: Option<&'a HomePage>,
+    read_only: bool,
+}
+
+/// One team's header row, menu, sub-rows and Saved views.
+fn team_block<'a>(
+    mut col: Column<'a, Message>,
+    team: &'a Team,
+    ctx: &RowCtx<'a, '_>,
+) -> Column<'a, Message> {
+    let RowCtx {
+        selected_team_id,
+        expanded_teams,
+        current_view,
+        team_menu_open,
+        saved_views,
+        open_view_id,
+        open_terminals,
+        home,
+        read_only,
+    } = *ctx;
+
         let is_archived = team.archived_at.is_some();
         let is_selected = selected_team_id == Some(team.id.as_str());
         let is_expanded = expanded_teams.contains(&team.id);
@@ -305,16 +381,48 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
                 );
             }
         }
-    }
+    col
+}
 
-    container(col)
-        .padding(0)
-        .width(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
-            ..Default::default()
-        })
+/// A group's header: muted chevron and name; clicking toggles its collapsed
+/// state locally. The archived toggle rides on the first header.
+fn group_header<'a>(
+    id: &str,
+    name: &str,
+    collapsed: bool,
+    toggle: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let label = row![
+        text(if collapsed { "\u{203A}" } else { "\u{2304}" }) // › / ⌄
+            .size(13)
+            .color(t::text_muted()),
+        text(name.to_string()).size(13).color(t::text_muted()),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
+    row![]
+        .align_y(iced::Alignment::Center)
+        .push(
+            button(label)
+                .on_press(Message::ToggleSidebarGroup(id.to_string()))
+                .padding([10, 14])
+                .style(plain_row_style),
+        )
+        .push_maybe(toggle.is_some().then(iced::widget::horizontal_space))
+        .push_maybe(toggle)
         .into()
+}
+
+fn archived_toggle_button<'a>(show_archived: bool) -> Element<'a, Message> {
+    button(
+        text(if show_archived { "Hide archived" } else { "Show archived" })
+            .size(11)
+            .color(t::text_muted()),
+    )
+    .on_press(Message::ToggleShowArchivedTeams)
+    .padding([4, 14])
+    .style(plain_row_style)
+    .into()
 }
 
 /// Dashboards in sidebar order: server position, then id.
