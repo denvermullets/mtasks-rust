@@ -9,7 +9,7 @@ use super::models::{Comment, CommentOwner, Issue, IssueDependency, Label, Lane, 
 
 pub fn all_teams(conn: &Connection) -> Result<Vec<Team>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
+        "SELECT id, name, identifier, remote_id, archived_at, role, created_at, updated_at
          FROM teams ORDER BY name",
     )?;
     let rows = stmt.query_map([], Team::from_row)?;
@@ -1524,7 +1524,7 @@ pub fn upsert_pulled_dependency(
 
 pub fn find_team_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Option<Team>> {
     conn.query_row(
-        "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
+        "SELECT id, name, identifier, remote_id, archived_at, role, created_at, updated_at
          FROM teams WHERE remote_id = ?1",
         params![remote_id],
         Team::from_row,
@@ -1597,18 +1597,20 @@ pub fn find_issue_by_remote_id(conn: &Connection, remote_id: i64) -> Result<Opti
 
 pub fn upsert_team(conn: &Connection, team: &Team) -> Result<()> {
     conn.execute(
-        "INSERT INTO teams (id, name, identifier, remote_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO teams (id, name, identifier, remote_id, role, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             identifier = excluded.identifier,
             remote_id = excluded.remote_id,
+            role = excluded.role,
             updated_at = excluded.updated_at",
         params![
             team.id,
             team.name,
             team.identifier,
             team.remote_id,
+            team.role,
             team.created_at,
             team.updated_at
         ],
@@ -2014,6 +2016,31 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn upsert_team_stores_and_updates_the_role() {
+        let conn = setup();
+        let mut team = find_team_by_remote_id(&conn, 5).unwrap();
+        assert!(team.is_none());
+        let dto: crate::api::TeamDto =
+            serde_json::from_str(r#"{"id":5,"name":"Core","identifier":"COR","role":"owner"}"#)
+                .unwrap();
+        let fresh = Team::from(dto);
+        upsert_team(&conn, &fresh).unwrap();
+        team = find_team_by_remote_id(&conn, 5).unwrap();
+        assert_eq!(team.as_ref().unwrap().role.as_deref(), Some("owner"));
+
+        let mut demoted = team.unwrap();
+        demoted.role = Some("member".into());
+        upsert_team(&conn, &demoted).unwrap();
+        let all = all_teams(&conn).unwrap();
+        let core = all.iter().find(|t| t.id == demoted.id).unwrap();
+        assert!(!core.is_owner());
+        // A team with no stored role (never pulled with one) reads as member.
+        let t1 = all.iter().find(|t| t.id == "t1").unwrap();
+        assert_eq!(t1.role, None);
+        assert!(!t1.is_owner());
     }
 
     #[test]

@@ -857,6 +857,15 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 41,
+        name: "teams_role",
+        up: "
+            -- The signed-in user's role on the team from GET /teams: owner,
+            -- admin or member. NULL until a pull carries it (read as member).
+            ALTER TABLE teams ADD COLUMN role TEXT;
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1466,6 +1475,32 @@ mod tests {
         assert!(table_exists(&conn, "panel_states"));
         let teams: i64 = conn.query_row("SELECT COUNT(*) FROM teams", [], |r| r.get(0)).unwrap();
         assert_eq!(teams, 1);
+    }
+
+    #[test]
+    fn upgrade_from_v40_adds_the_team_role_column_and_keeps_teams() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 41) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+             VALUES ('t1', 'T', 'T', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let role: Option<String> = conn
+            .query_row("SELECT role FROM teams WHERE id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(role, None);
     }
 
     #[test]

@@ -7991,6 +7991,7 @@ mod tests {
             identifier: id.into(),
             remote_id: None,
             archived_at: archived.then(|| "2026-01-01T00:00:00.000Z".into()),
+            role: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

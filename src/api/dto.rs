@@ -423,6 +423,9 @@ pub struct TeamDto {
     pub id: i64,
     pub name: String,
     pub identifier: String,
+    /// "owner" | "admin" | "member"; absent on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -439,6 +442,7 @@ impl From<TeamDto> for Team {
             identifier: dto.identifier,
             remote_id: Some(dto.id),
             archived_at: None,
+            role: dto.role,
             created_at,
             updated_at,
         }
@@ -452,6 +456,7 @@ impl TryFrom<&Team> for TeamDto {
             id: require_remote(t.remote_id, "team")?,
             name: t.name.clone(),
             identifier: t.identifier.clone(),
+            role: t.role.clone(),
             created_at: Some(t.created_at.clone()),
             updated_at: Some(t.updated_at.clone()),
         })
@@ -763,7 +768,7 @@ mod tests {
 
     fn lookup_team_by_local_id(conn: &Connection, id: &str) -> Result<Team, ApiError> {
         conn.query_row(
-            "SELECT id, name, identifier, remote_id, archived_at, created_at, updated_at
+            "SELECT id, name, identifier, remote_id, archived_at, role, created_at, updated_at
              FROM teams WHERE id = ?1",
             params![id],
             Team::from_row,
@@ -1156,6 +1161,7 @@ mod tests {
             identifier: "APO".into(),
             remote_id: Some(99),
             archived_at: None,
+            role: None,
             created_at: now(),
             updated_at: now(),
         };
@@ -1170,6 +1176,19 @@ mod tests {
         // id is regenerated on the From path; just confirm it's a UUID
         assert_eq!(model.id.len(), 36);
         let _ = conn; // silence unused
+    }
+
+    #[test]
+    fn team_dto_reads_role_and_tolerates_its_absence() {
+        let with: TeamDto =
+            serde_json::from_str(r#"{"id":1,"name":"E","identifier":"ENG","role":"admin"}"#)
+                .unwrap();
+        assert_eq!(with.role.as_deref(), Some("admin"));
+        assert_eq!(Team::from(with).role.as_deref(), Some("admin"));
+        let without: TeamDto =
+            serde_json::from_str(r#"{"id":1,"name":"E","identifier":"ENG"}"#).unwrap();
+        assert_eq!(without.role, None);
+        assert!(!Team::from(without).is_owner());
     }
 
     #[test]
