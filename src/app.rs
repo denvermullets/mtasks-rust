@@ -4609,9 +4609,14 @@ impl App {
                     .map(|g| g.collapsed);
                 if let Some(collapsed) = collapsed {
                     let conn = self.db();
-                    if let Err(e) =
-                        crate::db::sidebar_layout::set_collapsed(&conn, &group_id, !collapsed)
-                    {
+                    // A read-only token can't push: the toggle stays local and
+                    // the next pull resets it.
+                    if let Err(e) = crate::db::sidebar_layout::toggle_local(
+                        &conn,
+                        &group_id,
+                        !collapsed,
+                        !self.sync_read_only,
+                    ) {
                         eprintln!("[sidebar] collapse failed: {e}");
                     }
                     self.sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();

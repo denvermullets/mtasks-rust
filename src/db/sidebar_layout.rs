@@ -40,12 +40,51 @@ pub struct StoredSidebar {
     pub joined_order: Vec<i64>,
 }
 
+/// Queue `entity_type` for a group's collapsed state awaiting push. The
+/// entry's `entity_id` is the Rails group id and its payload is
+/// `{"collapsed": bool}`.
+pub const QUEUE_ENTITY: &str = "sidebar_group";
+
 /// Group ids whose collapsed state was changed locally and has not pushed yet.
-/// `apply_me` keeps those groups' local `collapsed`. Nothing queues collapse
-/// pushes yet, so this is empty; the collapse-sync work fills it in (for
-/// example from unsynced `sync_queue` rows of a sidebar-group entity type).
-pub fn pending_collapse_group_ids(_conn: &Connection) -> Result<Vec<String>> {
-    Ok(Vec::new())
+/// `apply_me` keeps those groups' local `collapsed`.
+pub fn pending_collapse_group_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT entity_id FROM sync_queue WHERE entity_type = ?1 AND synced_at IS NULL",
+    )?;
+    let rows = stmt.query_map(params![QUEUE_ENTITY], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// Set one group's collapsed state locally and, when `queue_push` (a token that
+/// can write), queue the push. A newer toggle retires the group's still-pending
+/// entry first, so at most one entry per group is ever waiting. Returns false
+/// (changing nothing) for an unknown group.
+pub fn toggle_local(
+    conn: &Connection,
+    group_id: &str,
+    collapsed: bool,
+    queue_push: bool,
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    if !set_collapsed(&tx, group_id, collapsed)? {
+        return Ok(false);
+    }
+    if queue_push {
+        tx.execute(
+            "UPDATE sync_queue SET synced_at = ?3
+             WHERE entity_type = ?1 AND entity_id = ?2 AND synced_at IS NULL",
+            params![QUEUE_ENTITY, group_id, crate::db::now_iso()],
+        )?;
+        let payload = serde_json::json!({ "collapsed": collapsed }).to_string();
+        crate::db::sync_queue::enqueue(&tx, QUEUE_ENTITY, group_id, "update", Some(&payload))?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
+/// `collapsed` from a queued `sidebar_group` payload.
+pub fn parse_payload(payload: Option<&str>) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(payload?).ok()?.get("collapsed")?.as_bool()
 }
 
 /// Read the stored layout, or `None` when no pull has reported one (an old
@@ -102,7 +141,6 @@ pub fn apply_me(conn: &Connection, reported: Option<&SidebarDto>) -> Result<()> 
 
 /// `apply_me` with an explicit set of group ids whose local `collapsed` value
 /// survives the replacement (ignored for ids the server no longer reports).
-#[allow(dead_code)] // for callers that know their pending collapses
 pub fn apply_keeping_collapsed(
     conn: &Connection,
     reported: Option<&SidebarDto>,
@@ -284,6 +322,69 @@ mod tests {
         let s = load(&conn).unwrap().unwrap();
         assert!(s.groups[0].collapsed);
         assert!(!s.groups[1].collapsed);
+    }
+
+    fn queued(conn: &Connection) -> Vec<crate::db::models::SyncQueueEntry> {
+        crate::db::sync_queue::pending_entries(conn).unwrap()
+    }
+
+    #[test]
+    fn a_toggle_queues_one_push_and_a_newer_toggle_replaces_it() {
+        let conn = mem();
+        apply_me(&conn, Some(&dto())).unwrap();
+        assert!(toggle_local(&conn, "g1", true, true).unwrap());
+        let q = queued(&conn);
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].entity_type.as_str(), q[0].entity_id.as_str()), (QUEUE_ENTITY, "g1"));
+        assert_eq!(parse_payload(q[0].payload.as_deref()), Some(true));
+
+        // Toggling back coalesces: still one entry, now carrying the newest value.
+        assert!(toggle_local(&conn, "g1", false, true).unwrap());
+        let q = queued(&conn);
+        assert_eq!(q.len(), 1);
+        assert_eq!(parse_payload(q[0].payload.as_deref()), Some(false));
+
+        // Another group queues its own entry.
+        assert!(toggle_local(&conn, "g2", false, true).unwrap());
+        assert_eq!(queued(&conn).len(), 2);
+        let mut pending = pending_collapse_group_ids(&conn).unwrap();
+        pending.sort();
+        assert_eq!(pending, vec!["g1".to_string(), "g2".to_string()]);
+    }
+
+    #[test]
+    fn a_read_only_toggle_stays_local_and_queues_nothing() {
+        let conn = mem();
+        apply_me(&conn, Some(&dto())).unwrap();
+        assert!(toggle_local(&conn, "g1", true, false).unwrap());
+        assert!(queued(&conn).is_empty());
+        assert!(load(&conn).unwrap().unwrap().groups[0].collapsed);
+        // The next pull resets it to the server value.
+        apply_me(&conn, Some(&dto())).unwrap();
+        assert!(!load(&conn).unwrap().unwrap().groups[0].collapsed);
+    }
+
+    #[test]
+    fn toggling_an_unknown_group_changes_and_queues_nothing() {
+        let conn = mem();
+        apply_me(&conn, Some(&dto())).unwrap();
+        assert!(!toggle_local(&conn, "nope", true, true).unwrap());
+        assert!(queued(&conn).is_empty());
+    }
+
+    #[test]
+    fn a_pull_between_toggle_and_push_does_not_revert_the_toggle() {
+        let conn = mem();
+        apply_me(&conn, Some(&dto())).unwrap();
+        toggle_local(&conn, "g1", true, true).unwrap();
+        // The server still reports g1 expanded.
+        apply_me(&conn, Some(&dto())).unwrap();
+        assert!(load(&conn).unwrap().unwrap().groups[0].collapsed);
+        // Once the push has landed, the server value rules again.
+        let id = queued(&conn)[0].id.unwrap();
+        crate::db::sync_queue::mark_synced(&conn, id).unwrap();
+        apply_me(&conn, Some(&dto())).unwrap();
+        assert!(!load(&conn).unwrap().unwrap().groups[0].collapsed);
     }
 
     #[test]

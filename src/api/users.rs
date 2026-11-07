@@ -101,6 +101,20 @@ pub async fn set_home_page(client: &ApiClient, kind: &str, id: i64) -> Result<()
     Ok(())
 }
 
+/// `PATCH /api/v1/me/sidebar_groups/:id {collapsed}`. Needs a write token; a
+/// group deleted on the web is a 404. The updated group in the response is not
+/// needed: the next `/me` read reports it.
+pub async fn set_sidebar_group_collapsed(
+    client: &ApiClient,
+    group_id: &str,
+    collapsed: bool,
+) -> Result<(), ApiError> {
+    let path = format!("api/v1/me/sidebar_groups/{}", super::encode_query_value(group_id));
+    let _: serde_json::Value =
+        client.patch(&path, &serde_json::json!({ "collapsed": collapsed })).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
