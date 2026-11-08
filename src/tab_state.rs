@@ -259,6 +259,7 @@ pub fn scroll_keys(view: &View, list_mode: bool, lanes: usize) -> Vec<ScrollKey>
         View::RecurringIssues => vec![ScrollKey::RecurringIssues],
         View::IssueDetail(_) => vec![ScrollKey::IssueDetail],
         View::ProjectDetail(_) => vec![ScrollKey::ProjectDetail],
+        View::DependencyMap { .. } => vec![ScrollKey::DependencyMap],
     }
 }
 
@@ -328,7 +329,7 @@ pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
 /// views park as that Tab's own page.
 pub fn parked_view(key: &TabKey, view: View) -> View {
     match (key, view) {
-        (_, view @ View::IssueDetail(_)) => view,
+        (_, view @ (View::IssueDetail(_) | View::DependencyMap { .. })) => view,
         (TabKey::Team(_), View::ProjectDetail(_)) => View::Board,
         (TabKey::Team(_), other) => other,
         // Project and cross-team Tabs have one page of their own. Whatever
@@ -347,7 +348,9 @@ pub fn resolve_parked(
     exists: impl Fn(&str) -> bool,
 ) -> (View, bool) {
     match view {
-        View::IssueDetail(id) if !exists(&id) => (root_view(key), true),
+        View::IssueDetail(id) | View::DependencyMap { issue_id: id, .. } if !exists(&id) => {
+            (root_view(key), true)
+        }
         view => (view, false),
     }
 }
@@ -1140,5 +1143,55 @@ mod tests {
         }
         assert_eq!(Page::decode(Some("hologram")), Page::Root);
         assert_eq!(Page::decode(Some("view:")), Page::Root);
+    }
+
+    fn map(tab: crate::app::DependencyMapTab, depth: u8) -> View {
+        View::DependencyMap { issue_id: "i".into(), tab, depth }
+    }
+
+    #[test]
+    fn a_dependency_map_parks_as_itself_in_every_tab_kind() {
+        use crate::app::DependencyMapTab::Hierarchy;
+        let view = map(Hierarchy, 5);
+        for key in [
+            team("a"),
+            TabKey::Project("p".into()),
+            TabKey::MyIssues,
+            TabKey::Inbox,
+            TabKey::Dashboard("d".into()),
+        ] {
+            assert_eq!(parked_view(&key, view.clone()), view);
+        }
+    }
+
+    #[test]
+    fn a_dependency_map_keeps_its_tab_and_depth_across_a_park() {
+        use crate::app::DependencyMapTab::Hierarchy;
+        let mut parked = Parked::default();
+        let view = map(Hierarchy, 5);
+        parked.save(team("a"), ParkedTab::new(parked_view(&team("a"), view.clone()), None));
+        assert_eq!(parked.take(&team("a")).unwrap().view, view);
+    }
+
+    #[test]
+    fn a_dependency_map_has_its_own_scroll_key() {
+        use crate::app::DependencyMapTab::Dependencies;
+        assert_eq!(
+            scroll_keys(&map(Dependencies, 3), false, 4),
+            vec![ScrollKey::DependencyMap]
+        );
+    }
+
+    #[test]
+    fn a_dependency_map_of_a_gone_issue_falls_back_to_the_tab_root() {
+        use crate::app::DependencyMapTab::Dependencies;
+        let view = map(Dependencies, 3);
+        assert_eq!(resolve_parked(&team("a"), view.clone(), |_| true), (view.clone(), false));
+        assert_eq!(resolve_parked(&team("a"), view.clone(), |_| false), (View::Board, true));
+        let project = TabKey::Project("p".into());
+        assert_eq!(
+            resolve_parked(&project, view, |_| false),
+            (View::ProjectDetail("p".into()), true)
+        );
     }
 }
