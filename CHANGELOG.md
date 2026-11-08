@@ -1,7 +1,14 @@
-<!-- last-sha: e1d24028686e38782951dfdc3e16464f73488aaa -->
-**Version: v0.5.0**
+<!-- last-sha: d19a4b2f08e6bb5d591e6b9d6e42fb327064c481 -->
+**Version: v0.6.0**
 
 # What's new
+
+## 2026-11-08
+- **Clickable breadcrumbs.** The team name at the top of a page now takes you to that team's board, "Projects" on a project page goes back to the project list, and "My Issues", "Inbox" or a dashboard name takes you back to where you opened an issue from. Project pages also show the project's ID once it has synced, and issue pages no longer show the Search, Filter, Display and "+ New" controls.
+- **Hover cards for projects.** Hover the Project field on an issue to see a card with the project's status, progress, lead, due date and the start of its description. The card gets out of the way when you click to open the dropdown.
+- **Issue page shortcuts open the sidebar.** On an issue page, `s`, `p`, `j` and `l` now open the matching dropdown in the issue's sidebar, like on the web, instead of a picker that covered the sidebar. Clicking the field again closes it.
+- **Icons display properly.** Arrows, the terminal-count badge, the "⋯" menu and other small symbols in the sidebar, board and list no longer show up as empty boxes.
+- **Smoother terminal cursor.** Moving the cursor in a terminal without typing, for example jumping by word with Option+Arrow, now shows the cursor's new position straight away.
 
 ## 2026-11-07
 - **Board rows.** Pick a "Rows" sub-grouping in the Display menu to split the board into rows that run across every column, lined up so you can scan them side by side. Empty rows start collapsed (click a row to expand or collapse it), a new "Show empty rows" option keeps them visible, and arrow-key navigation skips collapsed rows.
