@@ -96,7 +96,7 @@ macro_rules! light {
     };
 }
 
-pub const THEMES: [Tokens; 15] = [
+pub const THEMES: [Tokens; 16] = [
     dark!(
         "default", "Default", 0x000000, 0x0B0A0A, 0x121111, 0x191818, 0xBAD4F7, 0x22242B, 0x92E8D4,
         0x84d5c2, 0x1E1D1D
@@ -268,6 +268,34 @@ pub const THEMES: [Tokens; 15] = [
         0xc88050,
         0x2a2248
     ),
+    // Desktop-only (no Rails counterpart): ported from the NERV Black VS Code
+    // theme, with its teal-green foreground as the text scale.
+    Tokens {
+        key: "nervosa",
+        name: "Nervosa",
+        light: false,
+        menu: hx(0x070f0d),
+        background: hx(0x0a1612),
+        foreground: hx(0x0f1f1a),
+        context_foreground: hx(0x132620),
+        highlight: hx(0xa8d3c5),
+        stroke: hx(0x2a4a3d),
+        accent: hx(0xe85d04),
+        accent_hover: hx(0xf4820b),
+        hover_highlight: hx(0x1a2e28),
+        gray: [
+            hx(0xd4ebe2),
+            hx(0xa8d3c5),
+            hx(0x8fb3a5),
+            hx(0x6a8a7d),
+            hx(0x4a6a5d),
+            hx(0x3a5a4d),
+            hx(0x2a4a3d),
+            hx(0x1a2e28),
+            hx(0x0f1f1a),
+        ],
+        dep: [hx(0x9a6a9a), hx(0x4a8a9c), hx(0x5aac6c), hx(0xd4a017)],
+    },
 ];
 
 /// Key of the theme used when none (or an unknown one) is configured.
@@ -663,7 +691,7 @@ mod tests {
         }
     }
 
-    const RAILS_KEYS: [&str; 15] = [
+    const CATALOG_KEYS: [&str; 16] = [
         "default",
         "warm-paper",
         "cool-linen",
@@ -679,12 +707,13 @@ mod tests {
         "ash",
         "chalk",
         "dusk-redux",
+        "nervosa",
     ];
 
     #[test]
     fn choices_list_all_themes_in_catalog_order_by_name() {
         let c = choices();
-        assert_eq!(c.len(), 15);
+        assert_eq!(c.len(), 16);
         for (choice, t) in c.iter().zip(THEMES.iter()) {
             assert_eq!(choice.key, t.key);
             assert_eq!(choice.to_string(), t.name);
@@ -723,7 +752,7 @@ mod tests {
     fn theme_selection_and_read_functions() {
         let _restore = RestoreDefault;
         let keys: Vec<_> = THEMES.iter().map(|t| t.key).collect();
-        assert_eq!(keys, RAILS_KEYS);
+        assert_eq!(keys, CATALOG_KEYS);
         let light: Vec<_> = THEMES.iter().filter(|t| t.light).map(|t| t.name).collect();
         assert_eq!(light, ["Warm Paper", "Cool Linen", "Chalk"]);
 
