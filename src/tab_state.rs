@@ -260,6 +260,8 @@ pub fn scroll_keys(view: &View, list_mode: bool, lanes: usize) -> Vec<ScrollKey>
         View::IssueDetail(_) => vec![ScrollKey::IssueDetail],
         View::ProjectDetail(_) => vec![ScrollKey::ProjectDetail],
         View::DependencyMap { .. } => vec![ScrollKey::DependencyMap],
+        // The canvas scrolls itself and isn't tracked.
+        View::ProjectDependencyMap { .. } => vec![],
     }
 }
 
@@ -330,7 +332,12 @@ pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
 pub fn parked_view(key: &TabKey, view: View) -> View {
     match (key, view) {
         (_, view @ (View::IssueDetail(_) | View::DependencyMap { .. })) => view,
-        (TabKey::Team(_), View::ProjectDetail(_)) => View::Board,
+        // Like ProjectDetail: a team Tab parks the Board, a project Tab keeps
+        // the map as its page.
+        (TabKey::Team(_), View::ProjectDetail(_) | View::ProjectDependencyMap { .. }) => {
+            View::Board
+        }
+        (TabKey::Project(_), view @ View::ProjectDependencyMap { .. }) => view,
         (TabKey::Team(_), other) => other,
         // Project and cross-team Tabs have one page of their own. Whatever
         // else the live view is parks as that page.
@@ -348,7 +355,12 @@ pub fn resolve_parked(
     exists: impl Fn(&str) -> bool,
 ) -> (View, bool) {
     match view {
-        View::IssueDetail(id) | View::DependencyMap { issue_id: id, .. } if !exists(&id) => {
+        // `exists` answers for an issue id or a project id (a project map).
+        View::IssueDetail(id)
+        | View::DependencyMap { issue_id: id, .. }
+        | View::ProjectDependencyMap { project_id: id, .. }
+            if !exists(&id) =>
+        {
             (root_view(key), true)
         }
         view => (view, false),
@@ -1171,6 +1183,42 @@ mod tests {
         let view = map(Hierarchy, 5);
         parked.save(team("a"), ParkedTab::new(parked_view(&team("a"), view.clone()), None));
         assert_eq!(parked.take(&team("a")).unwrap().view, view);
+    }
+
+    fn project_map(active_only: bool) -> View {
+        View::ProjectDependencyMap { project_id: "p".into(), active_only }
+    }
+
+    #[test]
+    fn a_project_map_parks_in_its_project_tab_and_as_board_in_a_team_tab() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(parked_view(&project, project_map(false)), project_map(false));
+        assert_eq!(parked_view(&team("a"), project_map(false)), View::Board);
+        assert_eq!(parked_view(&TabKey::MyIssues, project_map(true)), View::MyIssues);
+    }
+
+    #[test]
+    fn a_project_map_keeps_its_scope_across_a_park() {
+        let project = TabKey::Project("p".into());
+        let mut parked = Parked::default();
+        parked.save(project.clone(), ParkedTab::new(parked_view(&project, project_map(false)), None));
+        assert_eq!(parked.take(&project).unwrap().view, project_map(false));
+    }
+
+    #[test]
+    fn a_project_map_of_a_gone_project_falls_back_to_the_tab_root() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(resolve_parked(&project, project_map(true), |_| true), (project_map(true), false));
+        assert_eq!(
+            resolve_parked(&project, project_map(true), |_| false),
+            (View::ProjectDetail("p".into()), true)
+        );
+        assert_eq!(resolve_parked(&team("a"), project_map(true), |_| false), (View::Board, true));
+    }
+
+    #[test]
+    fn a_project_map_tracks_no_scroll() {
+        assert!(scroll_keys(&project_map(true), false, 4).is_empty());
     }
 
     #[test]
