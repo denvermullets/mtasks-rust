@@ -243,6 +243,14 @@ pub enum Message {
     ResetDashboard,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
+    /// Open the issue picker to set / change the open issue's parent.
+    OpenParentPicker,
+    /// Open the issue picker to add an existing issue as a sub-issue.
+    OpenChildPicker,
+    /// Remove the open issue's parent.
+    RemoveParent,
+    /// Detach a sub-issue (local UUID), making it top-level.
+    DetachSubIssue(String),
     /// Step the open picker's link kind (Tab forward, Shift+Tab back).
     CycleDependencyKind(bool),
     /// Set the open picker's link kind (clicking a kind chip).
@@ -976,6 +984,8 @@ pub struct App {
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
+    /// Every stored dependency; feeds the board's dependency lines.
+    board_deps: Vec<crate::db::models::IssueDependency>,
     /// Members of the open detail's own team: what its bodies and comments
     /// resolve mentions against. Not `members`, which is the selected team's
     /// (or every team's in My Issues). Empty outside a detail view.
@@ -1502,6 +1512,7 @@ impl App {
     /// Resolve dependency edges for the open detail issue so the sidebar can
     /// render them; other views don't need this, so keep it cheap.
     fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
+        self.board_deps = queries::all_issue_dependencies(conn).unwrap_or_default();
         self.detail_members = self
             .detail_team_id()
             .map(|team_id| queries::members_for_team(conn, team_id).unwrap_or_default())
@@ -2364,7 +2375,7 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: None,
+                    hovered: None, deps: None,
                 };
                 let Some((top, h)) = board::swimlane_focused_span(
                     &columns,
@@ -2384,7 +2395,7 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: None,
+                    hovered: None, deps: None,
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
                 (ScrollKey::Lane(self.focused_lane), top, h)
@@ -3208,6 +3219,16 @@ impl App {
         }
     }
 
+    /// Set (or clear) `issue_id`'s parent, persisting and enqueueing a push.
+    /// A validation failure shows as an error toast and writes nothing.
+    fn set_parent(&mut self, issue_id: &str, parent_id: Option<&str>) {
+        let result = queries::set_issue_parent_queued(&self.db(), issue_id, parent_id);
+        match result {
+            Ok(_) => self.reload_data(),
+            Err(e) => self.push_toast(e.to_string(), ToastKind::Error, false),
+        }
+    }
+
     /// Create a dependency edge from the open detail issue to `target_id`, in the
     /// active picker's direction. Persists locally, then enqueues a push (the
     /// sync consumer re-reads the row, so no payload is needed). A self-link or a
@@ -3527,6 +3548,7 @@ expanded_teams,
             labels,
             issue_labels,
             detail_deps: Default::default(),
+            board_deps: Vec::new(),
             detail_members: Vec::new(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
@@ -4066,6 +4088,10 @@ expanded_teams,
                     }
                 }
                 if self.modal == Modal::IssuePicker
+                    && self
+                        .issue_picker
+                        .as_ref()
+                        .is_some_and(|p| p.mode == issue_picker::PickerMode::Dependency)
                     && key == keyboard::Key::Named(keyboard::key::Named::Tab)
                 {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
@@ -5655,8 +5681,41 @@ expanded_teams,
                     picker.query = query;
                 }
             }
+            Message::OpenParentPicker => {
+                self.issue_picker = Some(issue_picker::IssuePickerState::hierarchy(
+                    issue_picker::PickerMode::Parent,
+                ));
+                self.modal = Modal::IssuePicker;
+            }
+            Message::OpenChildPicker => {
+                self.issue_picker = Some(issue_picker::IssuePickerState::hierarchy(
+                    issue_picker::PickerMode::Child,
+                ));
+                self.modal = Modal::IssuePicker;
+            }
+            Message::RemoveParent => {
+                if let Some(id) = self.issue_detail.as_ref().map(|d| d.issue_id.clone()) {
+                    self.set_parent(&id, None);
+                }
+            }
+            Message::DetachSubIssue(child_id) => {
+                self.body_hover.event(crate::hover_card::Event::Clicked);
+                self.set_parent(&child_id, None);
+            }
             Message::DependencyPickerSelected(target_id) => {
-                self.add_dependency(&target_id);
+                let open = self.issue_detail.as_ref().map(|d| d.issue_id.clone());
+                match (self.issue_picker.as_ref().map(|p| p.mode), open) {
+                    (Some(issue_picker::PickerMode::Parent), Some(id)) => {
+                        self.set_parent(&id, Some(&target_id));
+                    }
+                    (Some(issue_picker::PickerMode::Child), Some(id)) => {
+                        self.set_parent(&target_id, Some(&id));
+                    }
+                    (Some(issue_picker::PickerMode::Dependency), _) => {
+                        self.add_dependency(&target_id);
+                    }
+                    _ => {}
+                }
                 self.issue_picker = None;
                 self.modal = Modal::None;
             }
@@ -7741,7 +7800,7 @@ expanded_teams,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: self.board_display(),
-                        hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
+                        hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()), deps: None,
                     },
                     &self.collapsed_sections,
                     self.focused_lane,
@@ -7749,6 +7808,12 @@ expanded_teams,
                 )
             }
             View::Board | View::MyIssues => {
+                let dep_lines = self.board_display().show_dependencies.then(|| {
+                    crate::views::dep_overlay::DepLines::new(
+                        columns.iter().flat_map(|c| c.issues.iter().map(|i| i.id.as_str())),
+                        &self.board_deps,
+                    )
+                });
                 let board_el = board::view(
                 &columns,
                 board::CardData {
@@ -7758,7 +7823,7 @@ expanded_teams,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
+                    hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()), deps: dep_lines,
                 },
                 &self.swimlane_collapsed(&columns),
                 self.focused_lane,
@@ -7926,7 +7991,7 @@ expanded_teams,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: DisplayOptions::dashboard_rows(),
-                        hovered: None,
+                        hovered: None, deps: None,
                     },
                     self.dashboard_header.clone(),
                     &crate::views::dashboard::ViewState {
@@ -8286,6 +8351,27 @@ expanded_teams,
                     let mut excluded: HashSet<&str> =
                         existing.iter().map(|l| l.issue_id.as_str()).collect();
                     excluded.insert(detail.issue_id.as_str());
+                    if picker.mode != issue_picker::PickerMode::Dependency {
+                        // Hierarchy modes offer only the spec's candidates.
+                        let open = self.issues.iter().find(|i| i.id == detail.issue_id);
+                        let hierarchy = crate::hierarchy::Hierarchy::new(&self.issues, &self.lanes);
+                        let ok: HashSet<&str> = match open {
+                            Some(open) if picker.mode == issue_picker::PickerMode::Parent => {
+                                hierarchy.parent_candidates(open)
+                            }
+                            Some(open) => hierarchy.child_candidates(open),
+                            None => Vec::new(),
+                        }
+                        .into_iter()
+                        .map(|i| i.id.as_str())
+                        .collect();
+                        excluded = self
+                            .issues
+                            .iter()
+                            .map(|i| i.id.as_str())
+                            .filter(|id| !ok.contains(id))
+                            .collect();
+                    }
                     let modal =
                         issue_picker::view(picker, &self.issues, self.selected_team(), &excluded);
                     iced::widget::stack![base, modal].into()

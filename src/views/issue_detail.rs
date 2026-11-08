@@ -291,6 +291,7 @@ pub fn view<'a>(
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
+        .push(parent_block(parent, team))
         .push(sub_issues_section(issue, &sub_issues, team, lanes))
         .push(comments_section(
             comments,
@@ -555,6 +556,42 @@ fn sub_issue_progress_bar<'a>(done: usize, total: usize) -> Element<'a, Message>
     r.width(Length::Fill).into()
 }
 
+/// Parent line above the Sub-issues list. With a parent: "Sub-issue of
+/// IDENT title" (opens it) plus Change / Remove. Without: "Set parent issue…".
+fn parent_block<'a>(parent: Option<&'a Issue>, team: Option<&'a Team>) -> Element<'a, Message> {
+    let link = |label: &'static str, msg: Message| {
+        button(text(label).size(type_scale::XS).color(t::accent()))
+            .on_press(msg)
+            .padding(0)
+            .style(button::text)
+    };
+    match parent {
+        Some(p) => row![]
+            .spacing(space::S3)
+            .align_y(Alignment::Center)
+            .push(text("Sub-issue of").size(type_scale::XS).color(t::text_muted()))
+            .push(
+                button(
+                    row![]
+                        .spacing(space::S1_5)
+                        .push(
+                            text(issue_identifier(p, team))
+                                .size(type_scale::XS)
+                                .color(t::text_muted()),
+                        )
+                        .push(text(&p.title).size(type_scale::XS).color(t::text_primary())),
+                )
+                .on_press(Message::OpenIssueDetail(p.id.clone()))
+                .padding(0)
+                .style(button::text),
+            )
+            .push(link("Change", Message::OpenParentPicker))
+            .push(link("Remove", Message::RemoveParent))
+            .into(),
+        None => link("Set parent issue…", Message::OpenParentPicker).into(),
+    }
+}
+
 /// "Sub-issues" block in the left column, shown on every issue (sub-issues can
 /// nest). Header with an "N/M done" count, a progress bar, one clickable row per
 /// child (closed ones dimmed), then a "+ New sub-issue" button that opens the
@@ -588,12 +625,21 @@ fn sub_issues_section<'a>(
         );
     }
     // HOOK (JRST-436 / JRST-444): push "Add existing" and "View tree →" buttons here.
-    let actions = row![].spacing(space::S3).align_y(Alignment::Center).push(
-        button(text("+ New sub-issue").size(type_scale::XS).color(t::accent()))
-            .on_press(Message::CreateSubIssue(issue.id.clone()))
-            .padding(0)
-            .style(button::text),
-    );
+    let actions = row![]
+        .spacing(space::S3)
+        .align_y(Alignment::Center)
+        .push(
+            button(text("Add existing").size(type_scale::XS).color(t::accent()))
+                .on_press(Message::OpenChildPicker)
+                .padding(0)
+                .style(button::text),
+        )
+        .push(
+            button(text("+ New sub-issue").size(type_scale::XS).color(t::accent()))
+                .on_press(Message::CreateSubIssue(issue.id.clone()))
+                .padding(0)
+                .style(button::text),
+        );
 
     let mut col = column![].spacing(space::S2);
     if children.is_empty() {
@@ -654,7 +700,7 @@ fn sub_issue_row<'a>(
             })
     });
 
-    button(
+    let open = button(
         row![]
             .spacing(space::S2)
             .align_y(Alignment::Center)
@@ -674,8 +720,19 @@ fn sub_issue_row<'a>(
     .on_press(Message::OpenIssueDetail(child.id.clone()))
     .padding([space::S1_5, space::S2])
     .width(Length::Fill)
-    .style(button::text)
-    .into()
+    .style(button::text);
+    // Trailing × detaches the child (it becomes top-level).
+    row![]
+        .spacing(space::S1_5)
+        .align_y(Alignment::Center)
+        .push(open)
+        .push(
+            button(text("×").size(type_scale::SM).color(t::text_muted()))
+                .on_press(Message::DetachSubIssue(child.id.clone()))
+                .padding(0)
+                .style(button::text),
+        )
+        .into()
 }
 
 /// Width of a sidebar control: the panel minus its padding.
