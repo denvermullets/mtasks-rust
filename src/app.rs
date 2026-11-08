@@ -1008,10 +1008,10 @@ pub struct App {
     detail_from_dashboard: Option<String>,
     /// The team-level page a team Tab's open issue was opened from (Back).
     detail_from_page: Option<View>,
-    /// A dependency map opened from a board card (JRST-452): the issue it
-    /// shows and the view to return to on Back. `None` for every other entry
-    /// (issue detail, palette), which return to the issue detail.
-    map_return: Option<(String, View)>,
+    /// A dependency map opened from a board card (JRST-452): the view to
+    /// return to on Back. `None` for every other entry (issue detail,
+    /// palette), which return to the issue detail. Parked per Tab.
+    map_return: Option<crate::tab_state::MapReturn>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -5962,7 +5962,7 @@ expanded_teams,
                         let from = self.view.clone();
                         let task = self.update(Message::OpenDependencyMap(issue.id.clone()));
                         if matches!(self.view, View::DependencyMap { .. }) {
-                            self.map_return = Some((issue.id, from));
+                            self.map_return = Some(crate::tab_state::MapReturn { back: from });
                         }
                         return task;
                     }
@@ -6190,11 +6190,11 @@ expanded_teams,
                     return Task::none();
                 };
                 // Opened from a board card: Back returns to that board.
-                if let Some((id, back)) = self.map_return.take() {
-                    if id == *issue_id {
-                        self.view = back;
-                        return Task::none();
-                    }
+                // The slot lasts for the map session, so it still applies
+                // after a refocus onto another issue.
+                if let Some(crate::tab_state::MapReturn { back }) = self.map_return.take() {
+                    self.view = back;
+                    return Task::none();
                 }
                 let issue = match self.issues.iter().find(|i| i.id == *issue_id).cloned() {
                     Some(issue) => Some(issue),
