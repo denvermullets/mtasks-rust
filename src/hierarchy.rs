@@ -200,7 +200,7 @@ impl<'a> Hierarchy<'a> {
         // Uncapped: a deep loop must still be caught.
         let mut chain = self.walk_up(parent_id, usize::MAX);
         chain.push(parent_id.to_string());
-        if chain.iter().any(|a| *a == issue.id) {
+        if chain.contains(&issue.id) {
             return Err(ParentError::Circular);
         }
         Ok(())
