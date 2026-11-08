@@ -7501,7 +7501,7 @@ impl App {
 
         let main_pane: Element<'_, Message> = match self.view {
             View::MyIssues if my_empty.is_some() => iced::widget::container(
-                iced::widget::text(my_empty.unwrap_or_default())
+                crate::views::text(my_empty.unwrap_or_default())
                     .size(14)
                     .color(t::text_muted()),
             )
@@ -7711,7 +7711,7 @@ impl App {
 
         let main_pane = if self.removed_team_tab() {
             iced::widget::container(
-                iced::widget::text(
+                crate::views::text(
                     "This team is no longer available. Its Terminals keep running below until you close them.",
                 )
                 .size(14)
@@ -8217,7 +8217,8 @@ fn cmp_option_nulls_last(a: &Option<String>, b: &Option<String>, dir: SortDir) -
 }
 
 fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
-    use iced::widget::{button, column, container, row, text};
+    use iced::widget::{button, column, container, row};
+    use crate::views::text;
     use iced::Border;
 
     let content = column![]
@@ -8312,7 +8313,8 @@ fn dashboard_form_modal<'a>(
     submit: Message,
     form: &'a DashboardForm,
 ) -> Element<'a, Message> {
-    use iced::widget::{button, text};
+    use iced::widget::{button};
+    use crate::views::text;
 
     let mut content = column![]
         .spacing(12)
@@ -8388,7 +8390,8 @@ fn save_view_input_id() -> text_input::Id {
 
 /// Name prompt for "Save view…".
 fn save_view_modal<'a>(title: &'a str, name: &'a str, error: Option<&'static str>) -> Element<'a, Message> {
-    use iced::widget::{button, text};
+    use iced::widget::{button};
+    use crate::views::text;
 
     let mut content = column![]
         .spacing(12)
@@ -8450,7 +8453,8 @@ fn save_view_modal<'a>(title: &'a str, name: &'a str, error: Option<&'static str
 }
 
 fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'a, Message> {
-    use iced::widget::{button, column, container, row, text};
+    use iced::widget::{button, column, container, row};
+    use crate::views::text;
     use iced::Border;
 
     let content = column![]

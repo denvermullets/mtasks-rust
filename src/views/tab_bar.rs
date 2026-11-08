@@ -2,7 +2,8 @@
 //! Tab kinds only change what the caller passes in.
 
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
-use iced::widget::{button, container, mouse_area, row, scrollable, stack, text, tooltip};
+use iced::widget::{button, container, mouse_area, row, scrollable, stack, tooltip};
+use crate::views::text;
 use iced::{Border, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::{Message, TabMessage};

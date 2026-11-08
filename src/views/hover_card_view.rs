@@ -5,7 +5,8 @@
 //! `body_hover::content_for`). Placement is `card_placement::place`, called from
 //! `overlay`; keep `estimated_height` in step with the card's rows.
 
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row};
+use crate::views::text;
 use iced::{alignment, Border, Element, Length, Padding, Rectangle, Size, Theme};
 
 use crate::app::Message;

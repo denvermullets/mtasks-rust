@@ -8,10 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use iced::alignment::Horizontal;
-use iced::widget::{
-    button, column, container, horizontal_space, mouse_area, pick_list, row, scrollable, stack,
-    svg, text, text_input, Column, Space,
-};
+use iced::widget::{button, column, container, horizontal_space, mouse_area, pick_list, row, scrollable, stack, svg, text_input, Column, Space};
+use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 
 use crate::app::Message;

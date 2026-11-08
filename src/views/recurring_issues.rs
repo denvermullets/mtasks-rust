@@ -5,9 +5,8 @@
 //! a `header_cell` in `view` and a cell in `recurring_row`; add a row action in
 //! `recurring_row` (a `mouse_area` / button on the row) with its own `Message`.
 
-use iced::widget::{
-    button, column, container, horizontal_rule, mouse_area, row, scrollable, text,
-};
+use iced::widget::{button, column, container, horizontal_rule, mouse_area, row, scrollable};
+use crate::views::text;
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;

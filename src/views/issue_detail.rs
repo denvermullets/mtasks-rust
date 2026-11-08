@@ -1,7 +1,5 @@
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, text, text_editor,
-    text_input,
-};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text_editor, text_input};
+use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message, View};

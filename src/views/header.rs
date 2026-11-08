@@ -1,5 +1,6 @@
 use iced::widget::text::LineHeight;
-use iced::widget::{button, container, row, text, text_input};
+use iced::widget::{button, container, row, text_input};
+use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;

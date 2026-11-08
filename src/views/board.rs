@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use iced::widget::{
-    column, container, mouse_area, row, scrollable, text, Column, Row,
-};
+use iced::widget::{column, container, mouse_area, row, scrollable, Column, Row};
+use crate::views::text;
 use iced::widget::text::LineHeight;
 use iced::{Border, Element, Length, Theme};
 

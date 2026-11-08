@@ -17,7 +17,8 @@
 //! without the UI.
 
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{button, column, container, pick_list, row, text, text_editor, text_input};
+use iced::widget::{button, column, container, pick_list, row, text_editor, text_input};
+use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;

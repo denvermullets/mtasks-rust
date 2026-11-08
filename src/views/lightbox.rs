@@ -1,7 +1,8 @@
 //! Full-window image viewer: dark backdrop, the image scaled to fit, and the
 //! filename. Clicking anywhere (or Esc) closes it.
 
-use iced::widget::{button, column, container, image, text};
+use iced::widget::{button, column, container, image};
+use crate::views::text;
 use iced::{Alignment, ContentFit, Element, Length, Theme};
 
 use crate::app::Message;

@@ -1,7 +1,8 @@
 //! Reusable file-card list for an owner's attachments (issue, project or
 //! comment). Callers load the rows with `db::attachments::list_for_owner`.
 
-use iced::widget::{button, column, container, image, row, text};
+use iced::widget::{button, column, container, image, row};
+use crate::views::text;
 use iced::{Alignment, Border, ContentFit, Element, Length, Theme};
 
 use crate::app::Message;

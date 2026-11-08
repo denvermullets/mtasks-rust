@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "iced_widget::helpers::text", reason = "use crate::views::text — Iced's default Shaping::Basic has no font fallback, so glyphs render as tofu" },
+]

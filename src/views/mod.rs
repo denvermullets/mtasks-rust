@@ -36,6 +36,8 @@ pub mod terminal_panel;
 pub mod team_list;
 pub mod team_members;
 pub mod team_picker;
+pub mod text;
+pub use text::text;
 pub mod toast;
 pub mod truncated;
 pub mod util;

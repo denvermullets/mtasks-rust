@@ -12,9 +12,8 @@
 
 use std::collections::HashSet;
 
-use iced::widget::{
-    column, container, horizontal_rule, mouse_area, row, scrollable, text, Column, Row,
-};
+use iced::widget::{column, container, horizontal_rule, mouse_area, row, scrollable, Column, Row};
+use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;

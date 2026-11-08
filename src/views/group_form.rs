@@ -5,7 +5,8 @@
 //! A new source kind joins by adding a `*_sources` block to `source_picker`
 //! whose rows send `Message::GroupToggleSource` and `Message::GroupSetIncludeAll`.
 
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, Column};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text_input, Column};
+use crate::views::text;
 use iced::{Element, Length, Theme};
 
 use crate::app::Message;

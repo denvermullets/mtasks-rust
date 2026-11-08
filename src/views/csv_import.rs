@@ -1,4 +1,5 @@
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable};
+use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;

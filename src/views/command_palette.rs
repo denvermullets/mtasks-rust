@@ -2,7 +2,8 @@
 //! `PaletteState` (text field plus one button per result row); the state and
 //! results logic live in `palette_results`.
 
-use iced::widget::{button, column, container, mouse_area, row, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, text_input};
+use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;

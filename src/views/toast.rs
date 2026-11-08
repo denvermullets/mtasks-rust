@@ -7,7 +7,8 @@
 //! only its cards are interactive, so clicks elsewhere pass through to the UI
 //! beneath it.
 
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, row};
+use crate::views::text;
 use iced::{Border, Color, Element, Length, Theme};
 
 use crate::app::Message;

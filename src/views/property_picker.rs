@@ -10,7 +10,8 @@
 //! toggle in place and stay open, with a "Create" row when the search has no
 //! exact match.
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text_input, Space};
+use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Rectangle, Size, Theme};
 
 use crate::app::Message;

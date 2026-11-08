@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, image, row, scrollable, span, text};
+use iced::widget::{button, column, container, image, row, scrollable, span};
+use crate::views::text;
 use iced::{Border, Color, ContentFit, Element, Theme};
 
 use crate::app::Message;

@@ -13,7 +13,8 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::keyboard;
 use iced::mouse::{self, Cursor};
 use iced::widget::canvas::{self, Cache, Canvas, Geometry, Text};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text_input};
+use crate::views::text;
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;

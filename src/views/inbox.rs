@@ -2,7 +2,8 @@
 //! are bold with a dot; the selected row is highlighted. Selection and the
 //! filter live in `crate::inbox::InboxState`.
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Column};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, Column};
+use crate::views::text;
 use iced::widget::text::LineHeight;
 use iced::{Alignment, Border, Element, Length, Theme};
 

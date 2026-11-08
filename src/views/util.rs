@@ -1,7 +1,8 @@
 //! Small view-layer formatting helpers shared across views.
 
 use chrono::{DateTime, Utc};
-use iced::widget::{column, container, pick_list, text, text_input};
+use iced::widget::{column, container, pick_list, text_input};
+use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
 use crate::theme::{self as t, radius, space, type_scale};

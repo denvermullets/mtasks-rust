@@ -1,4 +1,5 @@
-use iced::widget::{column, container, text};
+use iced::widget::{column, container};
+use crate::views::text;
 use iced::{Element, Length};
 
 use crate::app::Message;

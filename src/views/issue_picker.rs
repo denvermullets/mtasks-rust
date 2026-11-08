@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text_input};
+use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::{DepDirection, Message};

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use iced::widget::{container, row, text};
+use iced::widget::{container, row};
+use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
