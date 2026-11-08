@@ -624,10 +624,16 @@ fn sub_issues_section<'a>(
                 .color(t::text_muted()),
         );
     }
-    // HOOK (JRST-436 / JRST-444): push "Add existing" and "View tree →" buttons here.
+    let has_tree = issue.parent_issue_id.is_some() || !children.is_empty();
     let actions = row![]
         .spacing(space::S3)
         .align_y(Alignment::Center)
+        .push_maybe(has_tree.then(|| {
+            button(text("View tree →").size(type_scale::XS).color(t::accent()))
+                .on_press(Message::OpenHierarchyTree(issue.id.clone()))
+                .padding(0)
+                .style(button::text)
+        }))
         .push(
             button(text("Add existing").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenChildPicker)

@@ -111,12 +111,12 @@ fn dimmed(c: Color, closed: bool) -> Color {
 }
 
 /// One card. `selected` is the focus variant; clicking emits `on_click(id)`.
-pub fn card<'a>(node: &'a NodeCard, selected: bool, on_click: Message) -> Element<'a, Message> {
+pub fn card<'a>(node: &NodeCard, selected: bool, on_click: Message) -> Element<'a, Message> {
     let closed = node.closed;
     let mut top = Row::new().spacing(space::S2).align_y(iced::Alignment::Center);
     top = top.push(crate::views::lane_icon::view(node.lane_icon));
     top = top.push(
-        text(&node.identifier)
+        text(node.identifier.clone())
             .size(type_scale::XS)
             .color(dimmed(t::text_secondary(), closed)),
     );
@@ -136,7 +136,7 @@ pub fn card<'a>(node: &'a NodeCard, selected: bool, on_click: Message) -> Elemen
     }
     if let Some(initials) = &node.assignee_initials {
         top = top.push(
-            container(text(initials.as_str()).size(9).color(dimmed(t::text_primary(), closed)))
+            container(text(initials.clone()).size(9).color(dimmed(t::text_primary(), closed)))
                 .center_x(Length::Fixed(16.0))
                 .center_y(Length::Fixed(16.0))
                 .style(move |_: &Theme| container::Style {
@@ -184,7 +184,7 @@ pub fn card<'a>(node: &'a NodeCard, selected: bool, on_click: Message) -> Elemen
 /// focus card; `opts` carries focus/highlight ids and the bow; `on_click`
 /// builds the message for a card click.
 pub fn view<'a>(
-    columns: &'a [Vec<NodeCard>],
+    columns: &[Vec<NodeCard>],
     edges: &[EdgeSpec],
     selected: Option<&str>,
     opts: &DrawOptions,

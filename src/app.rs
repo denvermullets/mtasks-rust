@@ -323,8 +323,14 @@ pub enum Message {
     /// Switch the open dependency map between its Dependencies and Hierarchy tabs.
     SetDependencyMapTab(DependencyMapTab),
     /// Change the open dependency map's depth (clamped to 1..=MAX by the handler).
-    #[allow(dead_code)] // The depth selector (JRST-443) sends it.
     SetDependencyMapDepth(u8),
+    /// Click on a non-focus card of the open dependency map: refocus on it.
+    FocusDependencyMap(String),
+    /// Open this issue's dependency map on the Hierarchy tab (the issue
+    /// detail's "View tree →").
+    OpenHierarchyTree(String),
+    /// Expand or collapse a Hierarchy outline node (not persisted).
+    ToggleHierarchyNode(String),
     /// Leave the dependency map for its issue's detail (Back, Escape, the
     /// breadcrumb's issue crumb).
     CloseDependencyMap,
@@ -788,8 +794,8 @@ impl DependencyMapTab {
 
 /// Levels of blockers a dependency map shows until the user changes it.
 pub const DEFAULT_DEPENDENCY_DEPTH: u8 = 3;
-/// The deepest a dependency map can be set.
-pub const MAX_DEPENDENCY_DEPTH: u8 = 10;
+/// The deepest a dependency map can be set (spec: 1-5).
+pub const MAX_DEPENDENCY_DEPTH: u8 = 5;
 
 impl View {
     /// A fresh project dependency map: Active scope.
@@ -984,6 +990,10 @@ pub struct App {
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
+    /// Every dependency row, for the open dependency map (`View::DependencyMap`).
+    map_deps: Vec<IssueDependency>,
+    /// Hierarchy outline nodes toggled away from their default open state.
+    map_flipped: HashSet<String>,
     /// Every stored dependency; feeds the board's dependency lines.
     board_deps: Vec<crate::db::models::IssueDependency>,
     /// Members of the open detail's own team: what its bodies and comments
@@ -1521,6 +1531,11 @@ impl App {
             .detail_team_id()
             .map(|team_id| queries::members_for_team(conn, team_id).unwrap_or_default())
             .unwrap_or_default();
+        self.map_deps = if matches!(self.view, View::DependencyMap { .. }) {
+            queries::all_issue_dependencies(conn).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if let View::IssueDetail(ref issue_id) = self.view {
             self.detail_deps =
                 queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
@@ -3569,6 +3584,8 @@ expanded_teams,
             labels,
             issue_labels,
             detail_deps: Default::default(),
+            map_deps: Vec::new(),
+            map_flipped: HashSet::new(),
             board_deps: Vec::new(),
             detail_members: Vec::new(),
             detail_from_my_issues: false,
@@ -6132,10 +6149,35 @@ expanded_teams,
                 self.composer_focused = false;
                 self.map_return = None;
                 self.view = View::dependency_map(issue_id);
+                self.map_flipped.clear();
+                let conn = self.db();
+                self.load_detail_dependencies(&conn);
+            }
+            Message::OpenHierarchyTree(issue_id) => {
+                let task = self.update(Message::OpenDependencyMap(issue_id));
+                if let View::DependencyMap { ref mut tab, .. } = self.view {
+                    *tab = DependencyMapTab::Hierarchy;
+                }
+                return task;
+            }
+            Message::ToggleHierarchyNode(id) => {
+                if !self.map_flipped.remove(&id) {
+                    self.map_flipped.insert(id);
+                }
             }
             Message::SetDependencyMapTab(next) => {
                 if let View::DependencyMap { ref mut tab, .. } = self.view {
                     *tab = next;
+                }
+            }
+            Message::FocusDependencyMap(next) => {
+                if let View::DependencyMap { ref mut issue_id, .. } = self.view {
+                    if *issue_id != next {
+                        *issue_id = next;
+                        self.map_flipped.clear();
+                        let conn = self.db();
+                        self.load_detail_dependencies(&conn);
+                    }
                 }
             }
             Message::SetDependencyMapDepth(next) => {
@@ -7951,7 +7993,20 @@ expanded_teams,
             }
             View::DependencyMap { ref issue_id, tab, depth } => {
                 match self.issues.iter().find(|i| i.id == *issue_id) {
-                    Some(issue) => crate::views::dependency_map::view(issue, tab, depth),
+                    Some(issue) => crate::views::dependency_map::view(
+                        issue,
+                        tab,
+                        depth,
+                        &crate::views::dependency_map::MapData {
+                            issues: &self.issues,
+                            lanes: &self.lanes,
+                            teams: &self.teams,
+                            members: &self.members,
+                            issue_labels: &self.issue_labels,
+                            deps: &self.map_deps,
+                            flipped: &self.map_flipped,
+                        },
+                    ),
                     // Issue removed by a background sync, or state desync → fallback.
                     None => placeholder::view("Dependency map"),
                 }
