@@ -1253,17 +1253,6 @@ pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<Is
     .optional()
 }
 
-/// Every dependency row (the dependency map filters by team itself).
-pub fn all_issue_dependencies(conn: &Connection) -> Result<Vec<IssueDependency>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
-                created_at, updated_at
-         FROM issue_dependencies",
-    )?;
-    let rows = stmt.query_map([], IssueDependency::from_row)?.collect::<Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 /// Whether the two issues are already linked, in either order and of any kind
 /// (Rails allows one link per pair).
 pub fn issue_dependency_pair_exists(conn: &Connection, a: &str, b: &str) -> Result<bool> {
@@ -1479,6 +1468,17 @@ pub fn group_dependency_links(links: Vec<DependencyLink>) -> DependencyGroups {
         bucket.push(link);
     }
     g
+}
+
+/// Every stored dependency, for the board's dependency lines.
+pub fn all_issue_dependencies(conn: &Connection) -> Result<Vec<IssueDependency>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+                created_at, updated_at
+         FROM issue_dependencies ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([], IssueDependency::from_row)?;
+    rows.collect()
 }
 
 /// Resolve every dependency edge touching `issue_id` (any kind, either side)

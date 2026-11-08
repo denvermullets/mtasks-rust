@@ -600,6 +600,7 @@ impl App {
             let conn = self.db();
             tab_state::resolve_parked(key, view, |id| {
                 matches!(queries::get_issue(&conn, id), Ok(Some(_)))
+                    || matches!(queries::get_project(&conn, id), Ok(Some(_)))
             })
         };
         let (detail_from, draft) = if gone {
