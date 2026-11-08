@@ -28,6 +28,9 @@ pub struct CardData<'a> {
     /// Local id of the card or row under the pointer; painted with the hover
     /// highlight (Rails' `hover:bg-hover-highlight`).
     pub hovered: Option<&'a str>,
+    /// Dependency lines for the board overlay (JRST-450); `None` when the
+    /// "Dependencies" display option is off, which also skips the card anchors.
+    pub deps: Option<crate::views::dep_overlay::DepLines>,
 }
 
 /// Render the board. Columns come from `display::build_columns`, so they may be
@@ -121,10 +124,21 @@ pub fn view<'a>(
         .width(Length::Fill)
         .height(Length::Fill);
 
-    // Spike check (JRST-449): debug builds with MTASKS_DEBUG_ANCHORS=1 outline
-    // every collected card rect over the board.
-    let debug = cfg!(debug_assertions) && std::env::var_os("MTASKS_DEBUG_ANCHORS").is_some();
-    let board = crate::views::dep_overlay::dep_overlay(board).debug_outlines(debug);
+    // Dependency lines (JRST-450): only wrapped when the display option is on.
+    let board: Element<'a, Message> = match data.deps.clone() {
+        Some(lines) => {
+            let opts = crate::dep_connectors::DrawOptions {
+                bow: Some(crate::dep_connectors::BOARD_BOW),
+                ..Default::default()
+            };
+            crate::views::dep_overlay::dep_overlay(board)
+                .draw_over(move |renderer, bounds, anchors| {
+                    crate::views::dep_overlay::draw_connectors(renderer, bounds, anchors, &lines.edges, &opts)
+                })
+                .into()
+        }
+        None => board.into(),
+    };
 
     container(board)
         .width(Length::Fill)
@@ -524,13 +538,14 @@ fn issue_card<'a>(
             ..Default::default()
         });
 
-    crate::views::dep_overlay::dep_anchor(
+    let card = crate::views::row_hover::row_hover(
+        mouse_area(card).on_press(Message::CardPressed(lane_idx, issue_idx)),
         issue.id.clone(),
-        crate::views::row_hover::row_hover(
-            mouse_area(card).on_press(Message::CardPressed(lane_idx, issue_idx)),
-            issue.id.clone(),
-            Message::CardHover,
-        ),
-    )
-    .into()
+        Message::CardHover,
+    );
+    if data.deps.is_some() {
+        crate::views::dep_overlay::dep_anchor(issue.id.clone(), card).into()
+    } else {
+        card.into()
+    }
 }

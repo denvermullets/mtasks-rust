@@ -418,12 +418,97 @@ impl<'a, Message: 'a> From<DepOverlay<'a, Message>> for Element<'a, Message> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Board connectors (JRST-450)
+
+/// What the board overlay draws: the edges between visible cards.
+#[derive(Debug, Clone, Default)]
+pub struct DepLines {
+    pub edges: Vec<crate::dep_connectors::EdgeSpec>,
+    /// Issue id -> linked ids (from `dep_graph::board_edges`).
+    pub neighbors: std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+impl DepLines {
+    /// Build from the stored dependencies and the ids of the cards on screen.
+    pub fn new<I, S>(visible_ids: I, deps: &[crate::db::models::IssueDependency]) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        use crate::dep_connectors::{ConnectorKind, EdgeSpec};
+        let be = crate::dep_graph::board_edges(visible_ids, deps);
+        let edges = be
+            .edges
+            .iter()
+            .filter_map(|e| {
+                let kind = match e.kind.as_str() {
+                    "blocks" => ConnectorKind::Blocks,
+                    "relates" => ConnectorKind::Relates,
+                    "duplicates" => ConnectorKind::Duplicates,
+                    _ => return None,
+                };
+                Some(EdgeSpec { from_id: e.from.clone(), to_id: e.to.clone(), kind })
+            })
+            .collect();
+        Self { edges, neighbors: be.neighbors }
+    }
+}
+
+/// Stroke `edges` between the anchors found on the last redraw. Anchors that
+/// are fully scrolled out of view drop their lines. Called from `draw_over`.
+pub fn draw_connectors(
+    renderer: &mut iced::Renderer,
+    bounds: Rectangle,
+    anchors: &Anchors,
+    edges: &[crate::dep_connectors::EdgeSpec],
+    opts: &crate::dep_connectors::DrawOptions,
+) {
+    use iced::advanced::graphics::geometry::Renderer as _;
+    let list = crate::dep_connectors::connectors(
+        edges,
+        |id| anchors.get(id).filter(|p| p.visible.is_some()).map(|p| p.rect),
+        opts,
+    );
+    if list.is_empty() {
+        return;
+    }
+    let mut frame = iced::widget::canvas::Frame::new(renderer, bounds.size());
+    crate::dep_connectors::stroke_connectors(&mut frame, &list);
+    renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+        renderer.draw_geometry(frame.into_geometry());
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn r(x: f32, y: f32, w: f32, h: f32) -> Rectangle {
         Rectangle { x, y, width: w, height: h }
+    }
+
+    fn dep(from: &str, to: &str, kind: &str) -> crate::db::models::IssueDependency {
+        crate::db::models::IssueDependency {
+            id: format!("{from}-{to}"),
+            remote_id: None,
+            blocking_issue_id: from.into(),
+            blocked_issue_id: to.into(),
+            kind: kind.into(),
+            direction: "blocking".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn dep_lines_map_kinds_and_drop_hidden_ends() {
+        use crate::dep_connectors::ConnectorKind::*;
+        let deps = vec![dep("a", "b", "blocks"), dep("b", "c", "relates"), dep("c", "z", "duplicates")];
+        let l = DepLines::new(["a", "b", "c"], &deps);
+        let got: Vec<_> = l.edges.iter().map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.kind)).collect();
+        assert_eq!(got, [("a", "b", Blocks), ("b", "c", Relates)]);
+        assert!(l.neighbors["b"].contains("a") && l.neighbors["b"].contains("c"));
     }
 
     #[test]

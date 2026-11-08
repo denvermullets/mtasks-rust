@@ -906,6 +906,8 @@ pub struct App {
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
+    /// Every stored dependency; feeds the board's dependency lines.
+    board_deps: Vec<crate::db::models::IssueDependency>,
     /// Members of the open detail's own team: what its bodies and comments
     /// resolve mentions against. Not `members`, which is the selected team's
     /// (or every team's in My Issues). Empty outside a detail view.
@@ -1394,6 +1396,7 @@ impl App {
     /// Resolve dependency edges for the open detail issue so the sidebar can
     /// render them; other views don't need this, so keep it cheap.
     fn load_detail_dependencies(&mut self, conn: &rusqlite::Connection) {
+        self.board_deps = queries::all_issue_dependencies(conn).unwrap_or_default();
         self.detail_members = self
             .detail_team_id()
             .map(|team_id| queries::members_for_team(conn, team_id).unwrap_or_default())
@@ -2246,7 +2249,7 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: None,
+                    hovered: None, deps: None,
                 };
                 let Some((top, h)) = board::swimlane_focused_span(
                     &columns,
@@ -2266,7 +2269,7 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: None,
+                    hovered: None, deps: None,
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
                 (ScrollKey::Lane(self.focused_lane), top, h)
@@ -3408,6 +3411,7 @@ impl App {
             labels,
             issue_labels,
             detail_deps: Default::default(),
+            board_deps: Vec::new(),
             detail_members: Vec::new(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
@@ -7524,7 +7528,7 @@ impl App {
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: self.board_display(),
-                        hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
+                        hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()), deps: None,
                     },
                     &self.collapsed_sections,
                     self.focused_lane,
@@ -7532,6 +7536,12 @@ impl App {
                 )
             }
             View::Board | View::MyIssues => {
+                let dep_lines = self.board_display().show_dependencies.then(|| {
+                    crate::views::dep_overlay::DepLines::new(
+                        columns.iter().flat_map(|c| c.issues.iter().map(|i| i.id.as_str())),
+                        &self.board_deps,
+                    )
+                });
                 let board_el = board::view(
                 &columns,
                 board::CardData {
@@ -7541,7 +7551,7 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
+                    hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()), deps: dep_lines,
                 },
                 &self.swimlane_collapsed(&columns),
                 self.focused_lane,
@@ -7694,7 +7704,7 @@ impl App {
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: DisplayOptions::dashboard_rows(),
-                        hovered: None,
+                        hovered: None, deps: None,
                     },
                     self.dashboard_header.clone(),
                     &crate::views::dashboard::ViewState {
