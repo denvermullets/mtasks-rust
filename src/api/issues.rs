@@ -23,7 +23,9 @@ pub struct IssueParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_issue_id: Option<i64>,
+    /// Tri-state: `None` omits the key (Rails keeps the parent), `Some(None)`
+    /// sends `null` (clears it), `Some(Some(id))` sets it.
+    pub parent_issue_id: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_ids: Option<Vec<i64>>,
 }
@@ -179,6 +181,27 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn parent_body(parent: Option<Option<i64>>) -> serde_json::Value {
+        let params = IssueParams {
+            parent_issue_id: parent,
+            ..Default::default()
+        };
+        serde_json::to_value(IssueWrap { issue: &params }).unwrap()
+    }
+
+    #[test]
+    fn parent_issue_id_is_tri_state() {
+        assert_eq!(
+            parent_body(Some(None)),
+            serde_json::json!({ "issue": { "parent_issue_id": null } })
+        );
+        assert_eq!(
+            parent_body(Some(Some(42))),
+            serde_json::json!({ "issue": { "parent_issue_id": 42 } })
+        );
+        assert_eq!(parent_body(None), serde_json::json!({ "issue": {} }));
     }
 
     #[test]

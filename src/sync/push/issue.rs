@@ -347,7 +347,8 @@ fn build_issue_params(conn: &Connection, issue: &Issue) -> Result<IssueParams, O
         due_date: issue.due_date.clone(),
         assignee_id,
         project_id,
-        parent_issue_id,
+        // No local parent -> send null so Rails clears a stale one.
+        parent_issue_id: Some(parent_issue_id),
         label_ids,
     })
 }
@@ -451,6 +452,57 @@ mod tests {
         }
     }
 
+    // ── Parent in the pushed params ──────────────────────────────────────
+
+    fn issue_row(conn: &Connection, id: &str) -> Issue {
+        queries::get_issue(conn, id).unwrap().unwrap()
+    }
+
+    fn set_parent(conn: &Connection, id: &str, parent: Option<&str>) {
+        conn.execute(
+            "UPDATE issues SET parent_issue_id = ?1 WHERE id = ?2",
+            rusqlite::params![parent, id],
+        )
+        .unwrap();
+    }
+
+    fn pushed_parent_json(params: &IssueParams) -> serde_json::Value {
+        serde_json::to_value(params).unwrap()
+    }
+
+    #[test]
+    fn params_send_null_when_the_parent_was_cleared() {
+        let (conn, _) = moved_locally();
+        set_parent(&conn, "i2", None);
+        let params = build_issue_params(&conn, &issue_row(&conn, "i2")).unwrap();
+        assert_eq!(params.parent_issue_id, Some(None));
+        assert_eq!(
+            pushed_parent_json(&params).get("parent_issue_id"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[test]
+    fn params_send_the_parents_remote_id() {
+        let (conn, _) = moved_locally();
+        set_parent(&conn, "i2", Some("i1"));
+        let params = build_issue_params(&conn, &issue_row(&conn, "i2")).unwrap();
+        assert_eq!(params.parent_issue_id, Some(Some(1)));
+        assert_eq!(pushed_parent_json(&params)["parent_issue_id"], 1);
+    }
+
+    #[test]
+    fn unsynced_parent_leaves_the_entry_pending() {
+        let (conn, _) = moved_locally();
+        conn.execute("UPDATE issues SET remote_id = NULL WHERE id = 'i1'", [])
+            .unwrap();
+        set_parent(&conn, "i2", Some("i1"));
+        match build_issue_params(&conn, &issue_row(&conn, "i2")) {
+            Err(Outcome::LeavePending(_)) => {}
+            other => panic!("expected LeavePending, got {other:?}"),
+        }
+    }
+
     // ── Per-issue ordering around a queued move ──────────────────────────
 
     fn queue_update(conn: &Connection) -> i64 {
@@ -487,6 +539,7 @@ mod tests {
     fn update_queued_before_a_move_goes_to_the_source_team() {
         let conn = setup_move_db();
         let update = queue_update(&conn);
+        set_parent(&conn, "i2", None);
         queries::move_issue_to_team(&conn, "i2", "t2").unwrap();
         assert!(queries::queue_issue_move(&conn, "i2", "t1").unwrap());
         assert!(update < move_entry_id(&conn));
@@ -496,6 +549,11 @@ mod tests {
                 // Post-move lane/labels aren't sent to the old team.
                 assert_eq!(p.params.lane_id, None);
                 assert_eq!(p.params.label_ids, None);
+                // The strip omits the key (not null), so the source team keeps it.
+                assert_eq!(p.params.parent_issue_id, None);
+                assert!(pushed_parent_json(&p.params)
+                    .get("parent_issue_id")
+                    .is_none());
                 assert!(p.params.title.is_some());
             }
             Prep::Done(o) => panic!("expected ready, got {o:?}"),
