@@ -15,6 +15,7 @@ mod document;
 mod files;
 mod fonts;
 mod hover_card;
+mod hierarchy;
 mod highlight;
 mod inbox;
 mod issue_match;
