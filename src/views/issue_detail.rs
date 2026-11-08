@@ -617,12 +617,21 @@ fn sub_issues_section<'a>(
         );
     }
     // HOOK (JRST-436 / JRST-444): push "Add existing" and "View tree →" buttons here.
-    let actions = row![].spacing(space::S3).align_y(Alignment::Center).push(
-        button(text("+ New sub-issue").size(type_scale::XS).color(t::accent()))
-            .on_press(Message::CreateSubIssue(issue.id.clone()))
-            .padding(0)
-            .style(button::text),
-    );
+    let actions = row![]
+        .spacing(space::S3)
+        .align_y(Alignment::Center)
+        .push(
+            button(text("Add existing").size(type_scale::XS).color(t::accent()))
+                .on_press(Message::OpenChildPicker)
+                .padding(0)
+                .style(button::text),
+        )
+        .push(
+            button(text("+ New sub-issue").size(type_scale::XS).color(t::accent()))
+                .on_press(Message::CreateSubIssue(issue.id.clone()))
+                .padding(0)
+                .style(button::text),
+        );
 
     let mut col = column![].spacing(space::S2);
     if children.is_empty() {
