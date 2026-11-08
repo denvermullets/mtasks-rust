@@ -432,6 +432,9 @@ impl TerminalState {
                     Route::Tab(i) => {
                         return Task::done(Message::Tab(crate::app::TabMessage::Focus(i)))
                     }
+                    Route::CloseTab => {
+                        return Task::done(Message::Tab(crate::app::TabMessage::CloseActive))
+                    }
                     Route::Send(key) => {
                         if let Some(id) = self.focused_terminal() {
                             self.terminals.send_key(id, key);
@@ -861,6 +864,14 @@ impl TerminalState {
     /// The Terminal's name, for the ask.
     pub fn name_of(&self, id: TerminalId) -> Option<String> {
         self.roster.get(id).map(|r| r.name.clone())
+    }
+
+    /// Stop every Terminal in one strip at once, busy ones included: the
+    /// Tab that showed them is closing.
+    pub fn close_scope(&mut self, scope: &Scope) {
+        for id in self.roster.ids_of_scope(scope) {
+            self.close(id);
+        }
     }
 
     /// Stop a Terminal now. It leaves the strip at once; its shell is

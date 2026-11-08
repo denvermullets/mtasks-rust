@@ -15,6 +15,8 @@ pub enum TabMessage {
     Focus(usize),
     /// Close a Tab from the bar, by position.
     Close(usize),
+    /// Cmd+W: close the active Tab.
+    CloseActive,
     /// Back from an issue opened in a project Tab to the project, its root.
     BackToRoot,
     /// Back from a team Tab's issue to the page it was opened from.
@@ -66,6 +68,12 @@ impl App {
                 }
             }
             TabMessage::Close(index) => return self.close_tab(index),
+            TabMessage::CloseActive => {
+                self.ensure_tab_set();
+                if let Some(index) = self.tab_set.as_ref().map(|s| s.active_index()) {
+                    return self.close_tab(index);
+                }
+            }
             TabMessage::BackToRoot => return self.back_to_tab_root(),
             TabMessage::BackToPage(view) => return self.back_to_page(view),
             TabMessage::BarScrolled(x) => self.tab_bar_offset = x,
@@ -111,7 +119,8 @@ impl App {
     /// Close the Tab at `index`. Closing the active Tab (or the last Tab,
     /// which becomes the Home page) restores the Tab that takes over;
     /// closing a background Tab only forgets its parked state, comment draft
-    /// included (ADR 0001).
+    /// included (ADR 0001). The Tab's own Terminal strip (a team Tab's team
+    /// Terminals, a project Tab's project Terminals) is killed with it.
     fn close_tab(&mut self, index: usize) -> Task<Message> {
         self.ensure_tab_set();
         let home = self.home_tab_key();
@@ -125,6 +134,13 @@ impl App {
         // The closed Tab's comment draft goes with it, staged files included.
         if let Some(draft) = self.parked_tabs.forget(&closed.closed).and_then(|p| p.comment_draft) {
             self.drop_drafts(&draft.owner_ids());
+        }
+        let project_team = match &closed.closed {
+            TabKey::Project(id) => self.tab_projects.get(id).map(|(_, team)| team.as_str()),
+            _ => None,
+        };
+        if let Some(scope) = tab_state::panel_scope(&closed.closed, project_team, None) {
+            self.terminals.close_scope(&scope);
         }
         if closed.closed == from {
             self.discard_live_composers();
