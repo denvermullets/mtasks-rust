@@ -258,6 +258,11 @@ impl Anchors {
     pub fn get(&self, id: &str) -> Option<&Placed> {
         self.0.iter().find(|p| p.id == id)
     }
+
+    /// The card whose visible part contains `point` (overlay-relative).
+    pub fn hit(&self, point: iced::Point) -> Option<&Placed> {
+        self.0.iter().find(|p| p.visible.is_some_and(|v| v.contains(point)))
+    }
 }
 
 /// Paints on top of the board. Gets the renderer, the overlay's absolute
@@ -348,6 +353,12 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepOverlay<'a, 
                 .collect();
             *tree.state.downcast_mut::<Anchors>() = Anchors(anchors);
         }
+        // JRST-452 hook: a card click (open the Dependency map) belongs here.
+        // Match `Event::Mouse(ButtonReleased(Left))` on `cursor.position()`,
+        // find the card with `Anchors::hit(..)` (rects are overlay-relative,
+        // `layout.bounds()` is the origin) and `shell.publish(..)` a message
+        // when the card has lines. Forward the event afterwards as below, so
+        // the card's own press handling keeps working.
         self.content
             .as_widget_mut()
             .on_event(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
@@ -455,6 +466,48 @@ impl DepLines {
     }
 }
 
+/// Drawing options for the board while `hovered` is under the pointer
+/// (JRST-451): lines not touching it dim and its incoming `blocks` lines read
+/// as "blocked by". Cards without lines change nothing.
+pub fn hover_options(hovered: Option<&str>, lines: &DepLines) -> crate::dep_connectors::DrawOptions {
+    let mut opts = crate::dep_connectors::DrawOptions {
+        bow: Some(crate::dep_connectors::BOARD_BOW),
+        ..Default::default()
+    };
+    if let Some(id) = hovered.filter(|id| lines.neighbors.contains_key(*id)) {
+        opts.focus_id = Some(id.to_string());
+        opts.highlight_id = Some(id.to_string());
+    }
+    opts
+}
+
+/// Ring the hovered card (accent, 2px) and its neighbors (accent at 60%, 1px).
+pub fn draw_hover_rings(
+    renderer: &mut iced::Renderer,
+    bounds: Rectangle,
+    anchors: &Anchors,
+    hovered: &str,
+    lines: &DepLines,
+) {
+    let Some(neighbors) = lines.neighbors.get(hovered) else { return };
+    let ring = |renderer: &mut iced::Renderer, id: &str, color: Color, width: f32| {
+        let Some(v) = anchors.get(id).and_then(|p| p.visible) else { return };
+        renderer.fill_quad(
+            Quad {
+                bounds: Rectangle { x: v.x + bounds.x, y: v.y + bounds.y, ..v },
+                border: Border { color, width, radius: crate::theme::radius::SM.into() },
+                ..Default::default()
+            },
+            Color::TRANSPARENT,
+        );
+    };
+    let accent = crate::theme::accent();
+    for id in neighbors {
+        ring(renderer, id, Color { a: 0.6, ..accent }, 1.0);
+    }
+    ring(renderer, hovered, accent, 2.0);
+}
+
 /// Stroke `edges` between the anchors found on the last redraw. Anchors that
 /// are fully scrolled out of view drop their lines. Called from `draw_over`.
 pub fn draw_connectors(
@@ -509,6 +562,17 @@ mod tests {
         let got: Vec<_> = l.edges.iter().map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.kind)).collect();
         assert_eq!(got, [("a", "b", Blocks), ("b", "c", Relates)]);
         assert!(l.neighbors["b"].contains("a") && l.neighbors["b"].contains("c"));
+    }
+
+    #[test]
+    fn hover_dims_and_focuses_only_linked_cards() {
+        let l = DepLines::new(["a", "b", "c"], &[dep("a", "b", "blocks")]);
+        let o = hover_options(Some("b"), &l);
+        assert_eq!((o.focus_id.as_deref(), o.highlight_id.as_deref()), (Some("b"), Some("b")));
+        assert_eq!(o.bow, Some(crate::dep_connectors::BOARD_BOW));
+        let none = hover_options(Some("c"), &l);
+        assert!(none.focus_id.is_none() && none.highlight_id.is_none());
+        assert!(hover_options(None, &l).highlight_id.is_none());
     }
 
     #[test]

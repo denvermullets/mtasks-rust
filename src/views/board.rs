@@ -127,13 +127,15 @@ pub fn view<'a>(
     // Dependency lines (JRST-450): only wrapped when the display option is on.
     let board: Element<'a, Message> = match data.deps.clone() {
         Some(lines) => {
-            let opts = crate::dep_connectors::DrawOptions {
-                bow: Some(crate::dep_connectors::BOARD_BOW),
-                ..Default::default()
-            };
+            // Hover state comes from the cards' own `CardHover` tracking.
+            let hovered = data.hovered.map(str::to_string);
+            let opts = crate::views::dep_overlay::hover_options(hovered.as_deref(), &lines);
             crate::views::dep_overlay::dep_overlay(board)
                 .draw_over(move |renderer, bounds, anchors| {
-                    crate::views::dep_overlay::draw_connectors(renderer, bounds, anchors, &lines.edges, &opts)
+                    crate::views::dep_overlay::draw_connectors(renderer, bounds, anchors, &lines.edges, &opts);
+                    if let Some(id) = &hovered {
+                        crate::views::dep_overlay::draw_hover_rings(renderer, bounds, anchors, id, &lines);
+                    }
                 })
                 .into()
         }
