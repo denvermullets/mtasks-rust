@@ -221,6 +221,240 @@ pub fn direction_for(dep: &IssueDependency, issue_id: &str) -> String {
     .to_string()
 }
 
+/// One card on the project map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectNode {
+    pub issue: Issue,
+    /// Set only for issues outside the project: their project's name, or "No project".
+    pub outside_project: Option<String>,
+}
+
+/// Result of [`project_graph`]: columns left to right, in display order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectGraph {
+    pub columns: Vec<Vec<ProjectNode>>,
+    pub edges: Vec<Edge>,
+    pub active_only: bool,
+}
+
+impl ProjectGraph {
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+}
+
+/// Not completed or canceled, and not in a completed/canceled lane (Rails `Issue.active`).
+fn is_active(issue: &Issue, lanes: &[Lane]) -> bool {
+    if issue.completed_at.is_some() || issue.canceled_at.is_some() {
+        return false;
+    }
+    !lanes
+        .iter()
+        .find(|l| l.id == issue.lane_id)
+        .and_then(|l| l.category.as_deref())
+        .is_some_and(|c| c == "completed" || c == "canceled")
+}
+
+type Adjacency<'a> = HashMap<&'a str, Vec<&'a str>>;
+
+/// Every issue of `project` laid out left to right by the blocks chain. Column 0 holds issues
+/// nothing blocks (including unlinked ones); outside issues appear only through a surviving
+/// direct link. `projects` is used to name outside issues' projects.
+pub fn project_graph(
+    project: &crate::db::models::Project,
+    deps: &[IssueDependency],
+    issues: &[Issue],
+    lanes: &[Lane],
+    projects: &[crate::db::models::Project],
+    active_only: bool,
+) -> ProjectGraph {
+    let positions = lane_positions(lanes);
+    let in_scope = |i: &&Issue| {
+        i.team_id == project.team_id && (!active_only || is_active(i, lanes))
+    };
+    let own: Vec<&Issue> = issues
+        .iter()
+        .filter(|i| i.project_id.as_deref() == Some(project.id.as_str()))
+        .filter(in_scope)
+        .collect();
+    let own_ids: HashSet<&str> = own.iter().map(|i| i.id.as_str()).collect();
+
+    // Links touching a project issue, distinct by (from, to, kind).
+    let mut seen = HashSet::new();
+    let touching: Vec<&IssueDependency> = deps
+        .iter()
+        .filter(|d| {
+            (own_ids.contains(d.blocking_issue_id.as_str())
+                || own_ids.contains(d.blocked_issue_id.as_str()))
+                && seen.insert((
+                    d.blocking_issue_id.as_str(),
+                    d.blocked_issue_id.as_str(),
+                    d.kind.as_str(),
+                ))
+        })
+        .collect();
+
+    // Outside issues only come in through a link whose both ends survive the scope.
+    let by_id: HashMap<&str, &Issue> = issues
+        .iter()
+        .filter(in_scope)
+        .map(|i| (i.id.as_str(), i))
+        .collect();
+    let mut loaded: Vec<&Issue> = own.clone();
+    let mut loaded_ids = own_ids.clone();
+    for d in &touching {
+        for id in [&d.blocking_issue_id, &d.blocked_issue_id] {
+            if let Some(i) = by_id.get(id.as_str()) {
+                if loaded_ids.insert(i.id.as_str()) {
+                    loaded.push(i);
+                }
+            }
+        }
+    }
+    let edges: Vec<Edge> = touching
+        .iter()
+        .filter(|d| {
+            loaded_ids.contains(d.blocking_issue_id.as_str())
+                && loaded_ids.contains(d.blocked_issue_id.as_str())
+        })
+        .map(|d| Edge {
+            from: d.blocking_issue_id.clone(),
+            to: d.blocked_issue_id.clone(),
+            kind: d.kind.clone(),
+        })
+        .collect();
+
+    let mut blockers: Adjacency = HashMap::new();
+    let mut blocked: Adjacency = HashMap::new();
+    let mut related: Adjacency = HashMap::new();
+    for e in &edges {
+        let (from, to) = (e.from.as_str(), e.to.as_str());
+        if e.kind == "blocks" {
+            blockers.entry(to).or_default().push(from);
+            blocked.entry(from).or_default().push(to);
+        } else {
+            related.entry(from).or_default().push(to);
+            related.entry(to).or_default().push(from);
+        }
+    }
+    let in_chain = |id: &str| blockers.contains_key(id) || blocked.contains_key(id);
+    let linked = |id: &str| in_chain(id) || related.contains_key(id);
+
+    let ids: Vec<&str> = loaded.iter().map(|i| i.id.as_str()).collect();
+    let ranks = ranks_for(&ids, &blockers, &blocked, &related, &in_chain);
+
+    let mut by_rank: BTreeMap<usize, Vec<&Issue>> = BTreeMap::new();
+    for i in &loaded {
+        by_rank.entry(ranks[i.id.as_str()]).or_default().push(i);
+    }
+
+    let mut rows: HashMap<&str, usize> = HashMap::new();
+    let mut columns: Vec<Vec<ProjectNode>> = Vec::new();
+    for (index, mut column) in by_rank.into_values().enumerate() {
+        if index == 0 {
+            column.sort_by_key(|i| (u8::from(!linked(&i.id)), sort_key(i, &positions)));
+        } else {
+            let bary = |id: &str| {
+                let placed: Vec<usize> = [&blockers, &blocked, &related]
+                    .iter()
+                    .flat_map(|adj| adj.get(id).into_iter().flatten())
+                    .filter_map(|other| rows.get(other).copied())
+                    .collect();
+                (!placed.is_empty())
+                    .then(|| placed.iter().sum::<usize>() as f64 / placed.len() as f64)
+            };
+            column.sort_by(|a, b| {
+                let ka = bary(&a.id).unwrap_or(f64::INFINITY);
+                let kb = bary(&b.id).unwrap_or(f64::INFINITY);
+                ka.total_cmp(&kb)
+                    .then_with(|| sort_key(a, &positions).cmp(&sort_key(b, &positions)))
+            });
+        }
+        for (row, i) in column.iter().enumerate() {
+            rows.insert(i.id.as_str(), row);
+        }
+        columns.push(
+            column
+                .into_iter()
+                .map(|i| ProjectNode {
+                    issue: i.clone(),
+                    outside_project: (!own_ids.contains(i.id.as_str()))
+                        .then(|| outside_label(i, projects)),
+                })
+                .collect(),
+        );
+    }
+
+    ProjectGraph { columns, edges, active_only }
+}
+
+fn outside_label(issue: &Issue, projects: &[crate::db::models::Project]) -> String {
+    issue
+        .project_id
+        .as_deref()
+        .and_then(|pid| projects.iter().find(|p| p.id == pid))
+        .map_or_else(|| "No project".to_string(), |p| p.name.clone())
+}
+
+/// Longest path from a source over blocks edges; relates/duplicates-only issues sit beside
+/// their chain partners; issues stuck in or behind a cycle land one past their furthest
+/// drained blocker.
+fn ranks_for<'a>(
+    ids: &[&'a str],
+    blockers: &Adjacency<'a>,
+    blocked: &Adjacency<'a>,
+    related: &Adjacency<'a>,
+    in_chain: &dyn Fn(&str) -> bool,
+) -> HashMap<&'a str, usize> {
+    // Kahn's algorithm.
+    let mut pending: HashMap<&str, usize> = ids
+        .iter()
+        .map(|id| (*id, blockers.get(id).map_or(0, Vec::len)))
+        .collect();
+    let mut queue: std::collections::VecDeque<&str> =
+        ids.iter().copied().filter(|id| pending[id] == 0).collect();
+    let mut ranks: HashMap<&str, usize> = queue.iter().map(|id| (*id, 0)).collect();
+    while let Some(id) = queue.pop_front() {
+        let rank = ranks[id];
+        for next in blocked.get(id).into_iter().flatten() {
+            let r = ranks.entry(next).or_insert(0);
+            *r = (*r).max(rank + 1);
+            let p = pending.get_mut(next).expect("blocked id is loaded");
+            *p -= 1;
+            if *p == 0 {
+                queue.push_back(next);
+            }
+        }
+    }
+    let (stuck, drained): (Vec<&str>, Vec<&str>) = ids.iter().partition(|id| pending[*id] > 0);
+    let drained: HashSet<&str> = drained.into_iter().collect();
+    for id in stuck {
+        let furthest = blockers
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter(|b| drained.contains(*b))
+            .filter_map(|b| ranks.get(b))
+            .max()
+            .copied()
+            .unwrap_or(0);
+        ranks.insert(id, furthest + 1);
+    }
+    for id in ids.iter().filter(|id| !in_chain(id)) {
+        let partner = related
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter(|p| in_chain(p))
+            .filter_map(|p| ranks.get(p))
+            .min();
+        if let Some(r) = partner {
+            ranks.insert(id, *r);
+        }
+    }
+    ranks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +685,178 @@ mod tests {
         ];
         let g = issue_graph("f", &deps, &[a, b, c, f], &lanes(), 3).unwrap();
         assert_eq!(ids(&g.downstream[&1]), ["c", "b", "a"]);
+    }
+
+    fn project(id: &str, name: &str) -> crate::db::models::Project {
+        crate::db::models::Project {
+            id: id.into(),
+            remote_id: None,
+            team_id: "t1".into(),
+            name: name.into(),
+            description: None,
+            status: None,
+            priority: 0,
+            lead_id: None,
+            start_date: None,
+            due_date: None,
+            roadmap_commitment: None,
+            velocity_score: 0,
+            completed_issues_count: 0,
+            total_issues_count: 0,
+            progress_percentage: 0,
+            behind_schedule: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn in_project(id: &str, number: i32, project_id: Option<&str>) -> Issue {
+        let mut i = issue(id, number);
+        i.project_id = project_id.map(String::from);
+        i
+    }
+
+    fn cols(g: &ProjectGraph) -> Vec<Vec<&str>> {
+        g.columns
+            .iter()
+            .map(|c| c.iter().map(|n| n.issue.id.as_str()).collect())
+            .collect()
+    }
+
+    fn run(issues: &[Issue], deps: &[IssueDependency], active_only: bool) -> ProjectGraph {
+        let ps = [project("p", "Launch"), project("q", "Infra")];
+        project_graph(&ps[0], deps, issues, &lanes(), &ps, active_only)
+    }
+
+    #[test]
+    fn project_empty() {
+        let g = run(&[], &[], false);
+        assert!(g.is_empty());
+        assert!(g.edges.is_empty());
+    }
+
+    #[test]
+    fn project_unlinked_only_sorted_by_lane_then_number() {
+        let a = in_project("a", 3, Some("p"));
+        let mut b = in_project("b", 1, Some("p"));
+        b.lane_id = "started".into();
+        let c = in_project("c", 2, Some("p"));
+        let g = run(&[a, b, c], &[], false);
+        assert_eq!(cols(&g), [["c", "a", "b"]]);
+    }
+
+    #[test]
+    fn project_chain_and_longest_path_diamond() {
+        let issues: Vec<Issue> = ["a", "b", "c", "d"]
+            .iter()
+            .enumerate()
+            .map(|(n, id)| in_project(id, n as i32 + 1, Some("p")))
+            .collect();
+        let deps = vec![
+            dep("a", "b", "blocks"),
+            dep("b", "c", "blocks"),
+            dep("a", "c", "blocks"),
+            dep("d", "c", "blocks"),
+        ];
+        let g = run(&issues, &deps, false);
+        assert_eq!(cols(&g), [vec!["a", "d"], vec!["b"], vec!["c"]]);
+        assert_eq!(g.edges.len(), 4);
+    }
+
+    #[test]
+    fn project_stuck_cycle_is_placed_after_drained_blockers() {
+        let issues: Vec<Issue> = ["a", "b", "c"]
+            .iter()
+            .enumerate()
+            .map(|(n, id)| in_project(id, n as i32 + 1, Some("p")))
+            .collect();
+        let deps = vec![
+            dep("a", "b", "blocks"),
+            dep("b", "c", "blocks"),
+            dep("c", "b", "blocks"),
+        ];
+        let g = run(&issues, &deps, false);
+        // b and c never drain; both sit one past a (rank 0).
+        assert_eq!(cols(&g), [vec!["a"], vec!["b", "c"]]);
+    }
+
+    #[test]
+    fn project_related_only_sits_beside_partner() {
+        let issues: Vec<Issue> = ["a", "b", "c"]
+            .iter()
+            .enumerate()
+            .map(|(n, id)| in_project(id, n as i32 + 1, Some("p")))
+            .collect();
+        let deps = vec![dep("a", "b", "blocks"), dep("b", "c", "relates")];
+        let g = run(&issues, &deps, false);
+        assert_eq!(cols(&g), [vec!["a"], vec!["b", "c"]]);
+    }
+
+    #[test]
+    fn project_first_column_puts_linked_before_unlinked() {
+        let issues = vec![
+            in_project("loner", 1, Some("p")),
+            in_project("a", 2, Some("p")),
+            in_project("b", 3, Some("p")),
+        ];
+        let g = run(&issues, &[dep("a", "b", "blocks")], false);
+        assert_eq!(cols(&g), [vec!["a", "loner"], vec!["b"]]);
+    }
+
+    #[test]
+    fn project_later_columns_order_by_barycenter() {
+        // Column 0 order: x1 (#1), x2 (#2). y1 (#3) depends on x2, y2 (#4) on x1,
+        // so barycenter flips them against their numbers.
+        let issues = vec![
+            in_project("x1", 1, Some("p")),
+            in_project("x2", 2, Some("p")),
+            in_project("y1", 3, Some("p")),
+            in_project("y2", 4, Some("p")),
+        ];
+        let deps = vec![dep("x2", "y1", "blocks"), dep("x1", "y2", "blocks")];
+        let g = run(&issues, &deps, false);
+        assert_eq!(cols(&g), [vec!["x1", "x2"], vec!["y2", "y1"]]);
+    }
+
+    #[test]
+    fn project_active_only_drops_closed_and_their_links() {
+        let mut shipped = in_project("shipped", 1, Some("p"));
+        shipped.completed_at = Some("2024-01-01".into());
+        let mut staged = in_project("staged", 2, Some("p"));
+        staged.lane_id = "done".into(); // completed lane, no timestamp
+        let open = in_project("open", 3, Some("p"));
+        let deps = vec![dep("shipped", "open", "blocks"), dep("staged", "open", "blocks")];
+        let all = run(&[shipped.clone(), staged.clone(), open.clone()], &deps, false);
+        assert_eq!(all.columns.iter().map(Vec::len).sum::<usize>(), 3);
+        let active = run(&[shipped, staged, open], &deps, true);
+        assert_eq!(cols(&active), [["open"]]);
+        assert!(active.edges.is_empty());
+        assert!(active.active_only);
+    }
+
+    #[test]
+    fn project_outside_issues_tagged_and_only_via_links() {
+        let outside = in_project("out", 1, Some("q"));
+        let nowhere = in_project("nowhere", 2, None);
+        let inside = in_project("in", 3, Some("p"));
+        let unrelated = in_project("unrelated", 4, Some("q"));
+        let deps = vec![dep("out", "in", "blocks"), dep("in", "nowhere", "relates")];
+        let g = run(&[outside, nowhere, inside, unrelated], &deps, false);
+        assert_eq!(cols(&g), [vec!["out"], vec!["in", "nowhere"]]);
+        let tag = |c: usize, r: usize| g.columns[c][r].outside_project.clone();
+        assert_eq!(tag(0, 0).as_deref(), Some("Infra"));
+        assert_eq!(tag(1, 0), None);
+        assert_eq!(tag(1, 1).as_deref(), Some("No project"));
+    }
+
+    #[test]
+    fn project_other_team_issues_are_left_out() {
+        let a = in_project("a", 1, Some("p"));
+        let mut x = in_project("x", 2, Some("q"));
+        x.team_id = "t2".into();
+        let g = run(&[a, x], &[dep("a", "x", "blocks")], false);
+        assert_eq!(cols(&g), [["a"]]);
+        assert!(g.edges.is_empty());
     }
 
     #[test]
