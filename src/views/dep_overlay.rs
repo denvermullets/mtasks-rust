@@ -258,6 +258,11 @@ impl Anchors {
     pub fn get(&self, id: &str) -> Option<&Placed> {
         self.0.iter().find(|p| p.id == id)
     }
+
+    /// The card whose visible part contains `point` (overlay-relative).
+    pub fn hit(&self, point: iced::Point) -> Option<&Placed> {
+        self.0.iter().find(|p| p.visible.is_some_and(|v| v.contains(point)))
+    }
 }
 
 /// Paints on top of the board. Gets the renderer, the overlay's absolute
@@ -348,6 +353,12 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepOverlay<'a, 
                 .collect();
             *tree.state.downcast_mut::<Anchors>() = Anchors(anchors);
         }
+        // JRST-452 hook: a card click (open the Dependency map) belongs here.
+        // Match `Event::Mouse(ButtonReleased(Left))` on `cursor.position()`,
+        // find the card with `Anchors::hit(..)` (rects are overlay-relative,
+        // `layout.bounds()` is the origin) and `shell.publish(..)` a message
+        // when the card has lines. Forward the event afterwards as below, so
+        // the card's own press handling keeps working.
         self.content
             .as_widget_mut()
             .on_event(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
@@ -418,12 +429,150 @@ impl<'a, Message: 'a> From<DepOverlay<'a, Message>> for Element<'a, Message> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Board connectors (JRST-450)
+
+/// What the board overlay draws: the edges between visible cards.
+#[derive(Debug, Clone, Default)]
+pub struct DepLines {
+    pub edges: Vec<crate::dep_connectors::EdgeSpec>,
+    /// Issue id -> linked ids (from `dep_graph::board_edges`).
+    pub neighbors: std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+impl DepLines {
+    /// Build from the stored dependencies and the ids of the cards on screen.
+    pub fn new<I, S>(visible_ids: I, deps: &[crate::db::models::IssueDependency]) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        use crate::dep_connectors::{ConnectorKind, EdgeSpec};
+        let be = crate::dep_graph::board_edges(visible_ids, deps);
+        let edges = be
+            .edges
+            .iter()
+            .filter_map(|e| {
+                let kind = match e.kind.as_str() {
+                    "blocks" => ConnectorKind::Blocks,
+                    "relates" => ConnectorKind::Relates,
+                    "duplicates" => ConnectorKind::Duplicates,
+                    _ => return None,
+                };
+                Some(EdgeSpec { from_id: e.from.clone(), to_id: e.to.clone(), kind })
+            })
+            .collect();
+        Self { edges, neighbors: be.neighbors }
+    }
+}
+
+/// Drawing options for the board while `hovered` is under the pointer
+/// (JRST-451): lines not touching it dim and its incoming `blocks` lines read
+/// as "blocked by". Cards without lines change nothing.
+pub fn hover_options(hovered: Option<&str>, lines: &DepLines) -> crate::dep_connectors::DrawOptions {
+    let mut opts = crate::dep_connectors::DrawOptions {
+        bow: Some(crate::dep_connectors::BOARD_BOW),
+        ..Default::default()
+    };
+    if let Some(id) = hovered.filter(|id| lines.neighbors.contains_key(*id)) {
+        opts.focus_id = Some(id.to_string());
+        opts.highlight_id = Some(id.to_string());
+    }
+    opts
+}
+
+/// Ring the hovered card (accent, 2px) and its neighbors (accent at 60%, 1px).
+pub fn draw_hover_rings(
+    renderer: &mut iced::Renderer,
+    bounds: Rectangle,
+    anchors: &Anchors,
+    hovered: &str,
+    lines: &DepLines,
+) {
+    let Some(neighbors) = lines.neighbors.get(hovered) else { return };
+    let ring = |renderer: &mut iced::Renderer, id: &str, color: Color, width: f32| {
+        let Some(v) = anchors.get(id).and_then(|p| p.visible) else { return };
+        renderer.fill_quad(
+            Quad {
+                bounds: Rectangle { x: v.x + bounds.x, y: v.y + bounds.y, ..v },
+                border: Border { color, width, radius: crate::theme::radius::SM.into() },
+                ..Default::default()
+            },
+            Color::TRANSPARENT,
+        );
+    };
+    let accent = crate::theme::accent();
+    for id in neighbors {
+        ring(renderer, id, Color { a: 0.6, ..accent }, 1.0);
+    }
+    ring(renderer, hovered, accent, 2.0);
+}
+
+/// Stroke `edges` between the anchors found on the last redraw. Anchors that
+/// are fully scrolled out of view drop their lines. Called from `draw_over`.
+pub fn draw_connectors(
+    renderer: &mut iced::Renderer,
+    bounds: Rectangle,
+    anchors: &Anchors,
+    edges: &[crate::dep_connectors::EdgeSpec],
+    opts: &crate::dep_connectors::DrawOptions,
+) {
+    use iced::advanced::graphics::geometry::Renderer as _;
+    let list = crate::dep_connectors::connectors(
+        edges,
+        |id| anchors.get(id).filter(|p| p.visible.is_some()).map(|p| p.rect),
+        opts,
+    );
+    if list.is_empty() {
+        return;
+    }
+    let mut frame = iced::widget::canvas::Frame::new(renderer, bounds.size());
+    crate::dep_connectors::stroke_connectors(&mut frame, &list);
+    renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+        renderer.draw_geometry(frame.into_geometry());
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn r(x: f32, y: f32, w: f32, h: f32) -> Rectangle {
         Rectangle { x, y, width: w, height: h }
+    }
+
+    fn dep(from: &str, to: &str, kind: &str) -> crate::db::models::IssueDependency {
+        crate::db::models::IssueDependency {
+            id: format!("{from}-{to}"),
+            remote_id: None,
+            blocking_issue_id: from.into(),
+            blocked_issue_id: to.into(),
+            kind: kind.into(),
+            direction: "blocking".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn dep_lines_map_kinds_and_drop_hidden_ends() {
+        use crate::dep_connectors::ConnectorKind::*;
+        let deps = vec![dep("a", "b", "blocks"), dep("b", "c", "relates"), dep("c", "z", "duplicates")];
+        let l = DepLines::new(["a", "b", "c"], &deps);
+        let got: Vec<_> = l.edges.iter().map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.kind)).collect();
+        assert_eq!(got, [("a", "b", Blocks), ("b", "c", Relates)]);
+        assert!(l.neighbors["b"].contains("a") && l.neighbors["b"].contains("c"));
+    }
+
+    #[test]
+    fn hover_dims_and_focuses_only_linked_cards() {
+        let l = DepLines::new(["a", "b", "c"], &[dep("a", "b", "blocks")]);
+        let o = hover_options(Some("b"), &l);
+        assert_eq!((o.focus_id.as_deref(), o.highlight_id.as_deref()), (Some("b"), Some("b")));
+        assert_eq!(o.bow, Some(crate::dep_connectors::BOARD_BOW));
+        let none = hover_options(Some("c"), &l);
+        assert!(none.focus_id.is_none() && none.highlight_id.is_none());
+        assert!(hover_options(None, &l).highlight_id.is_none());
     }
 
     #[test]

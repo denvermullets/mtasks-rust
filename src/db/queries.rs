@@ -1470,6 +1470,17 @@ pub fn group_dependency_links(links: Vec<DependencyLink>) -> DependencyGroups {
     g
 }
 
+/// Every stored dependency, for the board's dependency lines.
+pub fn all_issue_dependencies(conn: &Connection) -> Result<Vec<IssueDependency>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+                created_at, updated_at
+         FROM issue_dependencies ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([], IssueDependency::from_row)?;
+    rows.collect()
+}
+
 /// Resolve every dependency edge touching `issue_id` (any kind, either side)
 /// and group it for the sidebar.
 pub fn dependency_groups_for_issue(conn: &Connection, issue_id: &str) -> Result<DependencyGroups> {
