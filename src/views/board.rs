@@ -222,7 +222,7 @@ fn swimlane_body<'a>(
                 row![]
                     .spacing(space::S2)
                     .align_y(iced::Alignment::Center)
-                    .push(text(marker).size(type_scale::XS).color(t::text_muted()))
+                    .push(text(marker).size(type_scale::XS).font(fonts::SYMBOL).color(t::text_muted()))
                     .push(
                         text(brow.title.clone())
                             .size(type_scale::XS)
