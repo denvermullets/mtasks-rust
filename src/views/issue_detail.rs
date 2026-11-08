@@ -283,13 +283,7 @@ pub fn view<'a>(
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
-        // Rails nests one level only, so a sub-issue gets no section of its own.
-        .push_maybe(
-            issue
-                .parent_issue_id
-                .is_none()
-                .then(|| sub_issues_section(issue, &sub_issues, team, lanes)),
-        )
+        .push(sub_issues_section(issue, &sub_issues, team, lanes))
         .push(comments_section(
             comments,
             activity,
@@ -509,25 +503,113 @@ fn parent_link<'a>(parent: &'a Issue, team: Option<&'a Team>) -> Element<'a, Mes
     .into()
 }
 
-/// "Sub-issues" block in the left column: one clickable row per child, then a
-/// "+ Add sub-issue" button that opens the create modal pre-linked to `issue`.
+/// Children ordered like Rails' `_hierarchy`: `(lane.position, team_number)`.
+/// A child whose lane is unknown sorts last.
+fn ordered_sub_issues<'a>(sub_issues: &[&'a Issue], lanes: &[Lane]) -> Vec<&'a Issue> {
+    let mut out: Vec<&'a Issue> = sub_issues.to_vec();
+    out.sort_by_key(|c| {
+        let pos = lanes
+            .iter()
+            .find(|l| l.id == c.lane_id)
+            .map_or(i32::MAX, |l| l.position);
+        (pos, c.team_number.unwrap_or(i32::MAX))
+    });
+    out
+}
+
+/// How many of `sub_issues` are done or canceled (`display::is_completed`).
+fn done_count(sub_issues: &[&Issue]) -> usize {
+    sub_issues
+        .iter()
+        .filter(|i| crate::display::is_completed(i))
+        .count()
+}
+
+/// Thin 4px progress bar, accent fill = `done / total`.
+fn sub_issue_progress_bar<'a>(done: usize, total: usize) -> Element<'a, Message> {
+    let filled = if total == 0 { 0 } else { (done * 100 / total) as u16 };
+    let bar = |w: u16, fill: Color| {
+        container(text(""))
+            .width(Length::FillPortion(w))
+            .height(Length::Fixed(4.0))
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(fill)),
+                ..Default::default()
+            })
+    };
+    let mut r = row![].height(Length::Fixed(4.0));
+    if filled > 0 {
+        r = r.push(bar(filled, t::accent()));
+    }
+    if filled < 100 {
+        r = r.push(bar(100 - filled, t::text_muted().scale_alpha(0.25)));
+    }
+    r.width(Length::Fill).into()
+}
+
+/// "Sub-issues" block in the left column, shown on every issue (sub-issues can
+/// nest). Header with an "N/M done" count, a progress bar, one clickable row per
+/// child (closed ones dimmed), then a "+ New sub-issue" button that opens the
+/// create modal pre-linked to `issue`.
+///
+/// Extension points: follow-up tickets add their buttons to the `actions` row
+/// (JRST-436 "Add existing", JRST-444 "View tree →") and a per-row remove
+/// control in `sub_issue_row` (JRST-437).
 fn sub_issues_section<'a>(
     issue: &'a Issue,
     sub_issues: &[&'a Issue],
     team: Option<&'a Team>,
     lanes: &'a [Lane],
 ) -> Element<'a, Message> {
-    let mut col = column![].spacing(space::S2);
-    for child in sub_issues {
-        col = col.push(sub_issue_row(child, team, lanes));
+    let children = ordered_sub_issues(sub_issues, lanes);
+    let done = done_count(&children);
+    let mut header = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(
+            text("Sub-issues")
+                .size(type_scale::SM)
+                .font(crate::fonts::bold_active())
+                .color(t::text_secondary()),
+        );
+    if !children.is_empty() {
+        header = header.push(
+            text(format!("{}/{} done", done, children.len()))
+                .size(type_scale::XS)
+                .color(t::text_muted()),
+        );
     }
-    let col = col.push(
-        button(text("+ Add sub-issue").size(type_scale::XS).color(t::accent()))
+    // HOOK (JRST-436 / JRST-444): push "Add existing" and "View tree →" buttons here.
+    let actions = row![].spacing(space::S3).align_y(Alignment::Center).push(
+        button(text("+ New sub-issue").size(type_scale::XS).color(t::accent()))
             .on_press(Message::CreateSubIssue(issue.id.clone()))
             .padding(0)
             .style(button::text),
     );
-    with_heading("Sub-issues", col)
+
+    let mut col = column![].spacing(space::S2);
+    if children.is_empty() {
+        col = col.push(
+            text("No sub-issues yet.")
+                .size(type_scale::XS)
+                .color(t::text_muted()),
+        );
+    } else {
+        col = col.push(sub_issue_progress_bar(done, children.len()));
+        for child in &children {
+            col = col.push(sub_issue_row(child, team, lanes));
+        }
+    }
+    column![]
+        .spacing(space::S4)
+        .push(
+            row![]
+                .align_y(Alignment::Center)
+                .push(header.width(Length::Fill))
+                .push(actions),
+        )
+        .push(col)
+        .into()
 }
 
 /// One sub-issue: `IDENT  title` with its lane name as a colored badge on the right.
@@ -537,6 +619,9 @@ fn sub_issue_row<'a>(
     lanes: &'a [Lane],
 ) -> Element<'a, Message> {
     let lane = lanes.iter().find(|l| l.id == child.lane_id);
+    // Closed (done/canceled) children are dimmed, like Rails' `opacity-60`.
+    let closed = crate::display::is_completed(child);
+    let dim = move |c: Color| if closed { c.scale_alpha(0.6) } else { c };
     let badge = lane.map(|l| {
         let color = l
             .color
@@ -568,12 +653,12 @@ fn sub_issue_row<'a>(
             .push(
                 text(issue_identifier(child, team))
                     .size(type_scale::XS)
-                    .color(t::text_muted()),
+                    .color(dim(t::text_muted())),
             )
             .push(
                 text(&child.title)
                     .size(13)
-                    .color(t::text_primary())
+                    .color(dim(t::text_primary()))
                     .width(Length::Fill),
             )
             .push_maybe(badge),
@@ -1625,5 +1710,68 @@ mod description_tests {
             let got = matches!(op.finish(), iced::advanced::widget::operation::Outcome::Some(true));
             assert_eq!(got, want, "inside {inside} outside {outside}");
         }
+    }
+}
+
+#[cfg(test)]
+mod sub_issue_tests {
+    use super::*;
+
+    fn child(id: &str, lane: &str, num: i32) -> Issue {
+        Issue {
+            id: id.into(),
+            title: id.into(),
+            description: None,
+            priority: 0,
+            team_number: Some(num),
+            due_date: None,
+            estimate: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
+            lane_id: lane.into(),
+            team_id: "t".into(),
+            project_id: None,
+            parent_issue_id: Some("p".into()),
+            assignee_id: None,
+            creator_id: None,
+            remote_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn lane(id: &str, position: i32) -> Lane {
+        Lane {
+            id: id.into(),
+            name: id.into(),
+            color: None,
+            position,
+            team_id: "t".into(),
+            remote_id: None,
+            category: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn sorts_by_lane_position_then_team_number() {
+        let lanes = [lane("a", 0), lane("b", 1)];
+        let (c1, c2, c3) = (child("c1", "b", 1), child("c2", "a", 5), child("c3", "a", 2));
+        let sorted = ordered_sub_issues(&[&c1, &c2, &c3], &lanes);
+        let ids: Vec<&str> = sorted.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["c3", "c2", "c1"]);
+    }
+
+    #[test]
+    fn done_count_includes_completed_and_canceled() {
+        let open = child("o", "a", 1);
+        let mut done = child("d", "a", 2);
+        done.completed_at = Some("2026-01-01T00:00:00Z".into());
+        let mut canceled = child("c", "a", 3);
+        canceled.canceled_at = Some("2026-01-01T00:00:00Z".into());
+        assert_eq!(done_count(&[&open, &done, &canceled]), 2);
+        assert_eq!(done_count(&[]), 0);
     }
 }
