@@ -14,6 +14,16 @@ use crate::theme as t;
 pub struct IssuePickerState {
     pub query: String,
     pub direction: DepDirection,
+    pub mode: PickerMode,
+}
+
+/// What selecting a row does: add a dependency link, or (hierarchy) set the
+/// open issue's parent / add the pick as a sub-issue of the open issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerMode {
+    Dependency,
+    Parent,
+    Child,
 }
 
 impl IssuePickerState {
@@ -21,6 +31,16 @@ impl IssuePickerState {
         Self {
             query: String::new(),
             direction,
+            mode: PickerMode::Dependency,
+        }
+    }
+
+    /// A single-select hierarchy picker (no link-kind chips).
+    pub fn hierarchy(mode: PickerMode) -> Self {
+        Self {
+            query: String::new(),
+            direction: DepDirection::Blocking,
+            mode,
         }
     }
 }
@@ -36,7 +56,8 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     // Kind chips: the active one is highlighted.
     let mut kinds = row![].spacing(6);
-    for kind in DepDirection::ALL {
+    let is_dep = state.mode == PickerMode::Dependency;
+    for kind in DepDirection::ALL.into_iter().filter(|_| is_dep) {
         let active = kind == state.direction;
         let chip = button(text(kind.label()).size(12))
             .padding([4, 10])
@@ -95,9 +116,19 @@ pub fn view<'a>(
     let content = column![]
         .spacing(14)
         .width(Length::Fixed(440.0))
-        .push(text("Add link").size(18).color(t::text_primary()))
-        .push(kinds)
-        .push(text("Tab / Shift+Tab to change kind").size(11).color(t::text_muted()))
+        .push(
+            text(match state.mode {
+                PickerMode::Dependency => "Add link",
+                PickerMode::Parent => "Set parent issue",
+                PickerMode::Child => "Add existing sub-issue",
+            })
+            .size(18)
+            .color(t::text_primary()),
+        )
+        .push_maybe(is_dep.then_some(kinds))
+        .push_maybe(is_dep.then(|| {
+            text("Tab / Shift+Tab to change kind").size(11).color(t::text_muted())
+        }))
         .push(
             text_input("Search issues…", &state.query)
                 .on_input(Message::DependencyPickerSearchChanged)
