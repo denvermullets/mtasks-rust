@@ -315,8 +315,9 @@ pub enum Message {
     /// Switch the open dependency map between its Dependencies and Hierarchy tabs.
     SetDependencyMapTab(DependencyMapTab),
     /// Change the open dependency map's depth (clamped to 1..=MAX by the handler).
-    #[allow(dead_code)] // The depth selector (JRST-443) sends it.
     SetDependencyMapDepth(u8),
+    /// Click on a non-focus card of the open dependency map: refocus on it.
+    FocusDependencyMap(String),
     /// Leave the dependency map for its issue's detail (Back, Escape, the
     /// breadcrumb's issue crumb).
     CloseDependencyMap,
@@ -766,8 +767,8 @@ impl DependencyMapTab {
 
 /// Levels of blockers a dependency map shows until the user changes it.
 pub const DEFAULT_DEPENDENCY_DEPTH: u8 = 3;
-/// The deepest a dependency map can be set.
-pub const MAX_DEPENDENCY_DEPTH: u8 = 10;
+/// The deepest a dependency map can be set (spec: 1-5).
+pub const MAX_DEPENDENCY_DEPTH: u8 = 5;
 
 impl View {
     /// A fresh dependency map for `issue_id`: Dependencies tab, default depth.
@@ -957,6 +958,8 @@ pub struct App {
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
+    /// Every dependency row, for the open dependency map (`View::DependencyMap`).
+    map_deps: Vec<IssueDependency>,
     /// Members of the open detail's own team: what its bodies and comments
     /// resolve mentions against. Not `members`, which is the selected team's
     /// (or every team's in My Issues). Empty outside a detail view.
@@ -1451,6 +1454,11 @@ impl App {
             .detail_team_id()
             .map(|team_id| queries::members_for_team(conn, team_id).unwrap_or_default())
             .unwrap_or_default();
+        self.map_deps = if matches!(self.view, View::DependencyMap { .. }) {
+            queries::all_issue_dependencies(conn).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if let View::IssueDetail(ref issue_id) = self.view {
             self.detail_deps =
                 queries::dependency_groups_for_issue(conn, issue_id).unwrap_or_default();
@@ -3467,6 +3475,7 @@ impl App {
             labels,
             issue_labels,
             detail_deps: Default::default(),
+            map_deps: Vec::new(),
             detail_members: Vec::new(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
@@ -5974,10 +5983,21 @@ impl App {
                 }
                 self.composer_focused = false;
                 self.view = View::dependency_map(issue_id);
+                let conn = self.db();
+                self.load_detail_dependencies(&conn);
             }
             Message::SetDependencyMapTab(next) => {
                 if let View::DependencyMap { ref mut tab, .. } = self.view {
                     *tab = next;
+                }
+            }
+            Message::FocusDependencyMap(next) => {
+                if let View::DependencyMap { ref mut issue_id, .. } = self.view {
+                    if *issue_id != next {
+                        *issue_id = next;
+                        let conn = self.db();
+                        self.load_detail_dependencies(&conn);
+                    }
                 }
             }
             Message::SetDependencyMapDepth(next) => {
@@ -7735,7 +7755,19 @@ impl App {
             }
             View::DependencyMap { ref issue_id, tab, depth } => {
                 match self.issues.iter().find(|i| i.id == *issue_id) {
-                    Some(issue) => crate::views::dependency_map::view(issue, tab, depth),
+                    Some(issue) => crate::views::dependency_map::view(
+                        issue,
+                        tab,
+                        depth,
+                        &crate::views::dependency_map::MapData {
+                            issues: &self.issues,
+                            lanes: &self.lanes,
+                            teams: &self.teams,
+                            members: &self.members,
+                            issue_labels: &self.issue_labels,
+                            deps: &self.map_deps,
+                        },
+                    ),
                     // Issue removed by a background sync, or state desync → fallback.
                     None => placeholder::view("Dependency map"),
                 }
