@@ -866,6 +866,15 @@ impl TerminalState {
         self.roster.get(id).map(|r| r.name.clone())
     }
 
+    /// The names of the busy Terminals in one strip, for the Tab-close ask.
+    pub fn busy_names(&self, scope: &Scope) -> Vec<String> {
+        self.roster
+            .of_scope(scope)
+            .filter(|r| self.terminals.is_busy(r.id))
+            .map(|r| r.name.clone())
+            .collect()
+    }
+
     /// Stop every Terminal in one strip at once, busy ones included: the
     /// Tab that showed them is closing.
     pub fn close_scope(&mut self, scope: &Scope) {

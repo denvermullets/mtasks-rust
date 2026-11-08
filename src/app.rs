@@ -607,6 +607,8 @@ pub enum Modal {
     TerminalCloseConfirm(crate::terminal::TerminalId),
     /// Ask before quitting with a busy Terminal.
     QuitConfirm,
+    /// Ask before closing a Tab whose Terminal strip has a busy Terminal.
+    TabCloseConfirm(crate::tabs::TabKey),
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -8267,6 +8269,26 @@ impl App {
                     "A program is still running in a Terminal. Quitting will stop it.".to_string(),
                     "Quit",
                     Message::QuitConfirmed,
+                );
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::TabCloseConfirm(key) => {
+                let names = self
+                    .tab_terminal_scope(key)
+                    .map(|s| self.terminals.busy_names(&s))
+                    .unwrap_or_default();
+                let body = match names.as_slice() {
+                    [one] => format!("A program is still running in \"{one}\". Closing this Tab will stop it."),
+                    many => format!(
+                        "Programs are still running in {} Terminals in this Tab. Closing it will stop them.",
+                        many.len()
+                    ),
+                };
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Close Tab?",
+                    body,
+                    "Close",
+                    Message::Tab(TabMessage::CloseConfirmed(key.clone())),
                 );
                 iced::widget::stack![base, confirm].into()
             }

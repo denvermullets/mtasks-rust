@@ -17,6 +17,8 @@ pub enum TabMessage {
     Close(usize),
     /// Cmd+W: close the active Tab.
     CloseActive,
+    /// The ask was answered: close this Tab, busy Terminals and all.
+    CloseConfirmed(TabKey),
     /// Back from an issue opened in a project Tab to the project, its root.
     BackToRoot,
     /// Back from a team Tab's issue to the page it was opened from.
@@ -67,11 +69,20 @@ impl App {
                     return self.apply_switch(switch);
                 }
             }
-            TabMessage::Close(index) => return self.close_tab(index),
+            TabMessage::Close(index) => return self.close_tab(index, false),
             TabMessage::CloseActive => {
                 self.ensure_tab_set();
                 if let Some(index) = self.tab_set.as_ref().map(|s| s.active_index()) {
-                    return self.close_tab(index);
+                    return self.close_tab(index, false);
+                }
+            }
+            TabMessage::CloseConfirmed(key) => {
+                if self.modal == super::Modal::TabCloseConfirm(key.clone()) {
+                    self.modal = super::Modal::None;
+                }
+                let index = self.tab_set.as_ref().and_then(|s| s.tabs().iter().position(|k| *k == key));
+                if let Some(index) = index {
+                    return self.close_tab(index, true);
                 }
             }
             TabMessage::BackToRoot => return self.back_to_tab_root(),
@@ -120,10 +131,19 @@ impl App {
     /// which becomes the Home page) restores the Tab that takes over;
     /// closing a background Tab only forgets its parked state, comment draft
     /// included (ADR 0001). The Tab's own Terminal strip (a team Tab's team
-    /// Terminals, a project Tab's project Terminals) is killed with it.
-    fn close_tab(&mut self, index: usize) -> Task<Message> {
+    /// Terminals, a project Tab's project Terminals) is killed with it; while
+    /// one of them is busy, the Tab asks first unless `confirmed`.
+    fn close_tab(&mut self, index: usize, confirmed: bool) -> Task<Message> {
         self.ensure_tab_set();
         let home = self.home_tab_key();
+        let Some(key) = self.tab_set.as_ref().and_then(|s| s.tabs().get(index)).cloned() else {
+            return Task::none();
+        };
+        let scope = self.tab_terminal_scope(&key);
+        if !confirmed && scope.as_ref().is_some_and(|s| !self.terminals.busy_names(s).is_empty()) {
+            self.modal = super::Modal::TabCloseConfirm(key);
+            return Task::none();
+        }
         let Some(set) = self.tab_set.as_mut() else {
             return Task::none();
         };
@@ -135,11 +155,7 @@ impl App {
         if let Some(draft) = self.parked_tabs.forget(&closed.closed).and_then(|p| p.comment_draft) {
             self.drop_drafts(&draft.owner_ids());
         }
-        let project_team = match &closed.closed {
-            TabKey::Project(id) => self.tab_projects.get(id).map(|(_, team)| team.as_str()),
-            _ => None,
-        };
-        if let Some(scope) = tab_state::panel_scope(&closed.closed, project_team, None) {
+        if let Some(scope) = scope {
             self.terminals.close_scope(&scope);
         }
         if closed.closed == from {
@@ -157,6 +173,17 @@ impl App {
             return self.restore_tab(&to);
         }
         Task::none()
+    }
+
+    /// The Terminal strip that belongs to the Tab `key` itself, the one
+    /// closing it kills: a team Tab's team strip, a project Tab's project
+    /// strip. Cross-team Tabs have none.
+    pub(super) fn tab_terminal_scope(&self, key: &TabKey) -> Option<crate::terminal::Scope> {
+        let project_team = match key {
+            TabKey::Project(id) => self.tab_projects.get(id).map(|(_, team)| team.as_str()),
+            _ => None,
+        };
+        tab_state::panel_scope(key, project_team, None)
     }
 
     /// Leave the open issue for the active Tab's root page (the project, for a
