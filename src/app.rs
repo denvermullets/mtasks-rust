@@ -398,6 +398,7 @@ pub enum Message {
     ToggleShowSubIssues,
     ToggleShowEmptyGroups,
     ToggleShowEmptyRows,
+    ToggleShowDependencies,
     ToggleCardProperty(CardProperty),
     ToggleFilter(FilterField, String),
     ClearFilters,
@@ -5859,6 +5860,11 @@ impl App {
                 d.show_empty_rows = !d.show_empty_rows;
                 self.persist_display();
             }
+            Message::ToggleShowDependencies => {
+                let d = self.board_display_mut();
+                d.show_dependencies = !d.show_dependencies;
+                self.persist_display();
+            }
             Message::ToggleCardProperty(p) => {
                 self.board_display_mut().toggle_property(p);
                 self.persist_display();
@@ -7525,7 +7531,8 @@ impl App {
                     self.focused_issue,
                 )
             }
-            View::Board | View::MyIssues => board::view(
+            View::Board | View::MyIssues => {
+                let board_el = board::view(
                 &columns,
                 board::CardData {
                     teams: &self.teams,
@@ -7539,7 +7546,20 @@ impl App {
                 &self.swimlane_collapsed(&columns),
                 self.focused_lane,
                 self.focused_issue,
-            ),
+                );
+                if self.board_display().show_dependencies {
+                    // Legend bar under the header (web: #dependency_legend).
+                    iced::widget::column![
+                        iced::widget::container(crate::views::dep_map_canvas::legend())
+                            .padding([6, 16])
+                            .width(Length::Fill),
+                        board_el
+                    ]
+                    .into()
+                } else {
+                    board_el
+                }
+            }
             View::ProjectList => {
                 let mut list: Vec<&Project> = self
                     .projects
