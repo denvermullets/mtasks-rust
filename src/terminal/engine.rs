@@ -751,6 +751,7 @@ fn owner(
     let mut sel_bg = theme.selection;
 
     let mut prev: Vec<Arc<RowData>> = vec![];
+    let mut prev_cursor: Option<CursorData> = None;
     let mut exited = false;
     let mut visible = true;
     let mut force_full = true;
@@ -1021,6 +1022,7 @@ fn owner(
                 &mut row_it,
                 &mut cell_it,
                 &mut prev,
+                &mut prev_cursor,
                 force_full,
                 exited,
                 &mut had_selection,
@@ -1072,6 +1074,7 @@ fn build_frame(
     row_it: &mut RowIterator<'static>,
     cell_it: &mut CellIterator<'static>,
     prev: &mut Vec<Arc<RowData>>,
+    prev_cursor: &mut Option<CursorData>,
     force_full: bool,
     exited: bool,
     had_selection: &mut bool,
@@ -1084,11 +1087,28 @@ fn build_frame(
     // rows underneath it being marked dirty.
     let has_selection = term.selection().ok().flatten().is_some();
     let selection_in_play = has_selection || std::mem::replace(had_selection, has_selection);
-    if dirty == Dirty::Clean && !force_full && !selection_in_play {
+    let colors = snap.colors().ok()?;
+    let cursor = if snap.cursor_visible().unwrap_or(false) {
+        snap.cursor_viewport().ok().flatten().map(|c| CursorData {
+            x: c.x,
+            y: c.y,
+            shape: match snap.cursor_visual_style() {
+                Ok(CursorVisualStyle::Bar) => CursorShape::Bar,
+                Ok(CursorVisualStyle::Underline) => CursorShape::Underline,
+                _ => CursorShape::Block,
+            },
+            color: colors.cursor.map(rgb).unwrap_or(rgb(colors.foreground)),
+        })
+    } else {
+        None
+    };
+    // A cursor that moved without changing any cell (Option+Left in a line
+    // editor) leaves the render state clean; it still needs a frame.
+    if dirty == Dirty::Clean && !force_full && !selection_in_play && cursor == *prev_cursor {
         return None;
     }
+    *prev_cursor = cursor;
     let full = force_full || selection_in_play || dirty == Dirty::Full;
-    let colors = snap.colors().ok()?;
     let (cols, nrows) = (snap.cols().ok()?, snap.rows().ok()? as usize);
 
     let mut rows = Vec::with_capacity(nrows);
@@ -1236,20 +1256,6 @@ fn build_frame(
         let _ = row.set_dirty(false);
         y += 1;
     }
-    let cursor = if snap.cursor_visible().unwrap_or(false) {
-        snap.cursor_viewport().ok().flatten().map(|c| CursorData {
-            x: c.x,
-            y: c.y,
-            shape: match snap.cursor_visual_style() {
-                Ok(CursorVisualStyle::Bar) => CursorShape::Bar,
-                Ok(CursorVisualStyle::Underline) => CursorShape::Underline,
-                _ => CursorShape::Block,
-            },
-            color: colors.cursor.map(rgb).unwrap_or(rgb(colors.foreground)),
-        })
-    } else {
-        None
-    };
     let _ = snap.set_dirty(Dirty::Clean);
     *prev = rows.clone();
     Some(Frame {
@@ -1293,7 +1299,7 @@ mod cost {
             let n = 200;
             let t0 = Instant::now();
             for _ in 0..n {
-                build_frame(&term, &mut rs, &mut row_it, &mut cell_it, &mut prev, true, false, &mut false, [0; 3])
+                build_frame(&term, &mut rs, &mut row_it, &mut cell_it, &mut prev, &mut None, true, false, &mut false, [0; 3])
                     .unwrap();
             }
             let per = t0.elapsed().as_secs_f64() * 1e6 / n as f64;

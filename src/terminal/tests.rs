@@ -475,3 +475,22 @@ mod scroll;
 mod select;
 mod theme;
 mod wake;
+
+#[test]
+fn a_cursor_only_move_publishes_a_frame_with_the_new_cursor() {
+    let mut t = terminals();
+    let mut cfg = sh_config("t1");
+    // Write a line, then (later) move only the cursor: no cell changes.
+    cfg.program = Some((
+        "/bin/sh".into(),
+        vec!["-c".into(), "printf 'abcdefghij'; sleep 0.5; printf '\\033[5D'; sleep 5".into()],
+    ));
+    let id = t.spawn(cfg).unwrap();
+    wait_for(&t, id, "cursor after the text", |f| {
+        f.contains_line("abcdefghij") && f.cursor.as_ref().is_some_and(|c| c.x == 10)
+    });
+    wait_for_secs(3, &t, id, "cursor moved back to column 5", |f| {
+        f.cursor.as_ref().is_some_and(|c| c.x == 5)
+    });
+    close_all(t);
+}
