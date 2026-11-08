@@ -1,13 +1,10 @@
-//! Pure dependency-graph queries over local rows (ports of the Rails
+//! Pure dependency map queries over local rows (ports of the Rails
 //! `DependencyGraphQuery`, `ProjectDependencyGraphQuery` and
 //! `DependencyOverlayHelper#board_dependency_edges`). Never touches the DB.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::db::models::{Issue, IssueDependency, Lane};
-
-/// Default depth of the issue map (Rails `DEFAULT_MAX_DEPTH`).
-pub const DEFAULT_MAX_DEPTH: usize = 3;
 
 /// A link between two nodes of a result, oriented blocking -> blocked as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +235,7 @@ pub struct ProjectGraph {
 }
 
 impl ProjectGraph {
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
     }
@@ -466,6 +464,7 @@ pub struct BoardEdges {
 
 impl BoardEdges {
     /// Whether the card has at least one line.
+    #[cfg(test)]
     pub fn is_linked(&self, id: &str) -> bool {
         self.neighbors.contains_key(id)
     }

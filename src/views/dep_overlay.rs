@@ -271,21 +271,15 @@ pub type DrawFn<'a> = Box<dyn Fn(&mut iced::Renderer, Rectangle, &Anchors) + 'a>
 
 pub struct DepOverlay<'a, Message> {
     content: Element<'a, Message>,
-    debug_outlines: bool,
     draw_over: Option<DrawFn<'a>>,
 }
 
-/// Wrap the board. Pass `debug_outlines` to outline every visible anchor.
+/// Wrap the board.
 pub fn dep_overlay<'a, Message>(board: impl Into<Element<'a, Message>>) -> DepOverlay<'a, Message> {
-    DepOverlay { content: board.into(), debug_outlines: false, draw_over: None }
+    DepOverlay { content: board.into(), draw_over: None }
 }
 
 impl<'a, Message> DepOverlay<'a, Message> {
-    pub fn debug_outlines(mut self, on: bool) -> Self {
-        self.debug_outlines = on;
-        self
-    }
-
     /// Draw over the board each frame (connectors, JRST-450).
     pub fn draw_over(mut self, f: impl Fn(&mut iced::Renderer, Rectangle, &Anchors) + 'a) -> Self {
         self.draw_over = Some(Box::new(f));
@@ -392,19 +386,6 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepOverlay<'a, 
         let bounds = layout.bounds();
         let anchors = tree.state.downcast_ref::<Anchors>();
         renderer.with_layer(bounds, |renderer| {
-            if self.debug_outlines {
-                for p in &anchors.0 {
-                    let Some(v) = p.visible else { continue };
-                    renderer.fill_quad(
-                        Quad {
-                            bounds: Rectangle { x: v.x + bounds.x, y: v.y + bounds.y, ..v },
-                            border: Border { color: Color::from_rgb(1.0, 0.0, 0.6), width: 1.5, ..Default::default() },
-                            ..Default::default()
-                        },
-                        Color::TRANSPARENT,
-                    );
-                }
-            }
             if let Some(f) = &self.draw_over {
                 f(renderer, bounds, anchors);
             }

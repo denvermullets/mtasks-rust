@@ -63,6 +63,37 @@ pub struct DetailFrom {
     pub page: Option<View>,
 }
 
+/// Where Back from a dependency map goes when the map was opened from a
+/// board card (JRST-452) rather than from an issue detail. It lasts for the
+/// map session: refocusing the map onto another issue keeps it, and closing
+/// the map (or opening a new one) ends it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapReturn {
+    /// The board view the map was opened from.
+    pub back: View,
+}
+
+/// The per-view map state a Tab keeps while parked, so it can't leak into
+/// another Tab: the return slot and the Hierarchy outline's collapse state.
+/// `project_map` is rebuilt by every reload, so it isn't parked.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MapState {
+    pub map_return: Option<MapReturn>,
+    pub flipped: HashSet<String>,
+}
+
+impl MapState {
+    /// What survives restoring a Tab on `view`: nothing unless it is an issue
+    /// dependency map (state parked for a view that no longer shows is stale).
+    pub fn for_view(self, view: &View) -> Self {
+        if matches!(view, View::DependencyMap { .. }) {
+            self
+        } else {
+            Self::default()
+        }
+    }
+}
+
 /// Where Back from an open issue goes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Back {
@@ -122,6 +153,8 @@ pub struct ParkedTab {
     /// a Terminal restarts, keys don't. `None` for a cross-team Tab, which has
     /// no panel, and for one never shown (the default, hidden panel).
     pub panel: Option<StoredPanel>,
+    /// Map return slot and outline collapse state (see [`MapState`]).
+    pub map: MapState,
 }
 
 impl ParkedTab {
@@ -142,6 +175,7 @@ impl ParkedTab {
             open_view: None,
             detail_from: DetailFrom::default(),
             panel: None,
+            map: MapState::default(),
         }
     }
 
@@ -331,12 +365,10 @@ pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
 /// views park as that Tab's own page.
 pub fn parked_view(key: &TabKey, view: View) -> View {
     match (key, view) {
-        (_, view @ (View::IssueDetail(_) | View::DependencyMap { .. })) => view,
+        (_, view) if view.issue_id().is_some() => view,
         // Like ProjectDetail: a team Tab parks the Board, a project Tab keeps
         // the map as its page.
-        (TabKey::Team(_), View::ProjectDetail(_) | View::ProjectDependencyMap { .. }) => {
-            View::Board
-        }
+        (TabKey::Team(_), view) if view.project_id().is_some() => View::Board,
         (TabKey::Project(_), view @ View::ProjectDependencyMap { .. }) => view,
         (TabKey::Team(_), other) => other,
         // Project and cross-team Tabs have one page of their own. Whatever
@@ -354,16 +386,17 @@ pub fn resolve_parked(
     view: View,
     exists: impl Fn(&str) -> bool,
 ) -> (View, bool) {
-    match view {
-        // `exists` answers for an issue id or a project id (a project map).
-        View::IssueDetail(id)
-        | View::DependencyMap { issue_id: id, .. }
-        | View::ProjectDependencyMap { project_id: id, .. }
-            if !exists(&id) =>
-        {
-            (root_view(key), true)
-        }
-        view => (view, false),
+    // `exists` answers for an issue id or a project id (a project map). Only
+    // a project's detail is left to the caller, which has its own fallback.
+    let gone = match (&view, view.issue_id(), view.project_id()) {
+        (_, Some(id), _) => !exists(id),
+        (View::ProjectDependencyMap { .. }, _, Some(id)) => !exists(id),
+        _ => false,
+    };
+    if gone {
+        (root_view(key), true)
+    } else {
+        (view, false)
     }
 }
 
@@ -1183,6 +1216,27 @@ mod tests {
         let view = map(Hierarchy, 5);
         parked.save(team("a"), ParkedTab::new(parked_view(&team("a"), view.clone()), None));
         assert_eq!(parked.take(&team("a")).unwrap().view, view);
+    }
+
+    #[test]
+    fn map_state_parks_per_tab_and_is_dropped_off_a_map_view() {
+        let state = MapState {
+            map_return: Some(MapReturn { back: View::Board }),
+            flipped: ["n".to_string()].into(),
+        };
+        let mut parked = Parked::default();
+        parked.save(
+            team("a"),
+            ParkedTab { map: state.clone(), ..ParkedTab::new(View::dependency_map("i"), None) },
+        );
+        parked.save(team("b"), ParkedTab::new(View::Board, None));
+        // Tab b never saw tab a's return slot.
+        assert_eq!(parked.take(&team("b")).unwrap().map, MapState::default());
+        let back = parked.take(&team("a")).unwrap().map;
+        assert_eq!(back, state);
+        // Still on the map: kept. On anything else: cleared.
+        assert_eq!(back.clone().for_view(&View::dependency_map("i")), state);
+        assert_eq!(back.for_view(&View::Board), MapState::default());
     }
 
     fn project_map(active_only: bool) -> View {

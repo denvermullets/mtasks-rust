@@ -798,6 +798,24 @@ pub const DEFAULT_DEPENDENCY_DEPTH: u8 = 3;
 pub const MAX_DEPENDENCY_DEPTH: u8 = 5;
 
 impl View {
+    /// The issue this view is about: the open issue detail or its map.
+    pub fn issue_id(&self) -> Option<&str> {
+        match self {
+            View::IssueDetail(id) | View::DependencyMap { issue_id: id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The project this view is about: the open project detail or its map.
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            View::ProjectDetail(id) | View::ProjectDependencyMap { project_id: id, .. } => {
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
     /// A fresh project dependency map: Active scope.
     pub fn project_dependency_map(project_id: impl Into<String>) -> View {
         View::ProjectDependencyMap { project_id: project_id.into(), active_only: true }
@@ -1008,10 +1026,10 @@ pub struct App {
     detail_from_dashboard: Option<String>,
     /// The team-level page a team Tab's open issue was opened from (Back).
     detail_from_page: Option<View>,
-    /// A dependency map opened from a board card (JRST-452): the issue it
-    /// shows and the view to return to on Back. `None` for every other entry
-    /// (issue detail, palette), which return to the issue detail.
-    map_return: Option<(String, View)>,
+    /// A dependency map opened from a board card (JRST-452): the view to
+    /// return to on Back. `None` for every other entry (issue detail,
+    /// palette), which return to the issue detail. Parked per Tab.
+    map_return: Option<crate::tab_state::MapReturn>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -1224,13 +1242,9 @@ impl App {
         }
         // A detail view can be open on another team's row, e.g. from My Issues.
         let conn = self.db();
-        let detail_gone = match &self.view {
-            View::IssueDetail(id) | View::DependencyMap { issue_id: id, .. } => {
-                matches!(queries::get_issue(&conn, id), Ok(None))
-            }
-            View::ProjectDetail(id) | View::ProjectDependencyMap { project_id: id, .. } => {
-                matches!(queries::get_project(&conn, id), Ok(None))
-            }
+        let detail_gone = match (self.view.issue_id(), self.view.project_id()) {
+            (Some(id), _) => matches!(queries::get_issue(&conn, id), Ok(None)),
+            (_, Some(id)) => matches!(queries::get_project(&conn, id), Ok(None)),
             _ => false,
         };
         if detail_gone {
@@ -1316,15 +1330,17 @@ impl App {
             .find(|t| t.id == project.team_id)
             .map_or("", |t| t.identifier.as_str());
         self.project_map = Some(crate::views::project_dependency_map::build(
-            project,
-            &deps,
-            &self.issues,
-            &self.lanes,
-            &self.projects,
-            &self.members,
-            &self.issue_labels,
-            *active_only,
-            identifier,
+            crate::views::project_dependency_map::MapInput {
+                project,
+                deps: &deps,
+                issues: &self.issues,
+                lanes: &self.lanes,
+                projects: &self.projects,
+                members: &self.members,
+                issue_labels: &self.issue_labels,
+                active_only: *active_only,
+                team_identifier: identifier,
+            },
         ));
     }
 
@@ -1815,13 +1831,9 @@ impl App {
     /// The team the open detail's issue or project belongs to. Its bodies are
     /// resolved against this team, whichever team is selected.
     fn detail_team_id(&self) -> Option<&str> {
-        match &self.view {
-            View::IssueDetail(id) | View::DependencyMap { issue_id: id, .. } => {
-                self.issues.iter().find(|i| i.id == *id).map(|i| i.team_id.as_str())
-            }
-            View::ProjectDetail(id) | View::ProjectDependencyMap { project_id: id, .. } => {
-                self.projects.iter().find(|p| p.id == *id).map(|p| p.team_id.as_str())
-            }
+        match (self.view.issue_id(), self.view.project_id()) {
+            (Some(id), _) => self.issues.iter().find(|i| i.id == id).map(|i| i.team_id.as_str()),
+            (_, Some(id)) => self.projects.iter().find(|p| p.id == id).map(|p| p.team_id.as_str()),
             _ => None,
         }
     }
@@ -2394,7 +2406,8 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: None, deps: None,
+                    hovered: None,
+                    deps: None,
                 };
                 let Some((top, h)) = board::swimlane_focused_span(
                     &columns,
@@ -2414,7 +2427,8 @@ impl App {
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: None, deps: None,
+                    hovered: None,
+                    deps: None,
                 };
                 let (top, h) = board::focused_span(col, &data, self.focused_issue);
                 (ScrollKey::Lane(self.focused_lane), top, h)
@@ -2659,7 +2673,7 @@ impl App {
         // The page Back returns a team Tab to: set when leaving a page, kept
         // when going from issue A to issue B.
         // Returning from the dependency map isn't leaving a page.
-        if !matches!(self.view, View::IssueDetail(_) | View::DependencyMap { .. }) {
+        if self.view.issue_id().is_none() {
             self.detail_from_page = Some(self.view.clone());
         }
         self.commit_issue_detail();
@@ -3573,7 +3587,7 @@ impl App {
             teams,
             selected_team_id,
             view: View::Board,
-expanded_teams,
+            expanded_teams,
             team_menu_open: None,
             show_archived_teams: false,
             team_members: Vec::new(),
@@ -5743,15 +5757,17 @@ expanded_teams,
             }
             Message::DependencyPickerSelected(target_id) => {
                 let open = self.issue_detail.as_ref().map(|d| d.issue_id.clone());
-                match (self.issue_picker.as_ref().map(|p| p.mode), open) {
-                    (Some(issue_picker::PickerMode::Parent), Some(id)) => {
-                        self.set_parent(&id, Some(&target_id));
-                    }
-                    (Some(issue_picker::PickerMode::Child), Some(id)) => {
-                        self.set_parent(&target_id, Some(&id));
-                    }
+                let mode = self.issue_picker.as_ref().map(|p| p.mode);
+                match (mode, open) {
                     (Some(issue_picker::PickerMode::Dependency), _) => {
                         self.add_dependency(&target_id);
+                    }
+                    (Some(mode), Some(id)) => {
+                        if let Some((child, parent)) =
+                            issue_picker::picked_parent_change(mode, &id, &target_id)
+                        {
+                            self.set_parent(child, Some(parent));
+                        }
                     }
                     _ => {}
                 }
@@ -5962,7 +5978,7 @@ expanded_teams,
                         let from = self.view.clone();
                         let task = self.update(Message::OpenDependencyMap(issue.id.clone()));
                         if matches!(self.view, View::DependencyMap { .. }) {
-                            self.map_return = Some((issue.id, from));
+                            self.map_return = Some(crate::tab_state::MapReturn { back: from });
                         }
                         return task;
                     }
@@ -6190,11 +6206,11 @@ expanded_teams,
                     return Task::none();
                 };
                 // Opened from a board card: Back returns to that board.
-                if let Some((id, back)) = self.map_return.take() {
-                    if id == *issue_id {
-                        self.view = back;
-                        return Task::none();
-                    }
+                // The slot lasts for the map session, so it still applies
+                // after a refocus onto another issue.
+                if let Some(crate::tab_state::MapReturn { back }) = self.map_return.take() {
+                    self.view = back;
+                    return Task::none();
                 }
                 let issue = match self.issues.iter().find(|i| i.id == *issue_id).cloned() {
                     Some(issue) => Some(issue),
@@ -7881,7 +7897,8 @@ expanded_teams,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: self.board_display(),
-                        hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()), deps: None,
+                        hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
+                        deps: None,
                     },
                     &self.collapsed_sections,
                     self.focused_lane,
@@ -7904,7 +7921,8 @@ expanded_teams,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
                     display: self.board_display(),
-                    hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()), deps: dep_lines,
+                    hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
+                    deps: dep_lines,
                 },
                 &self.swimlane_collapsed(&columns),
                 self.focused_lane,
@@ -8085,7 +8103,8 @@ expanded_teams,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
                         display: DisplayOptions::dashboard_rows(),
-                        hovered: None, deps: None,
+                        hovered: None,
+                        deps: None,
                     },
                     self.dashboard_header.clone(),
                     &crate::views::dashboard::ViewState {
@@ -8447,24 +8466,12 @@ expanded_teams,
                     excluded.insert(detail.issue_id.as_str());
                     if picker.mode != issue_picker::PickerMode::Dependency {
                         // Hierarchy modes offer only the spec's candidates.
-                        let open = self.issues.iter().find(|i| i.id == detail.issue_id);
-                        let hierarchy = crate::hierarchy::Hierarchy::new(&self.issues, &self.lanes);
-                        let ok: HashSet<&str> = match open {
-                            Some(open) if picker.mode == issue_picker::PickerMode::Parent => {
-                                hierarchy.parent_candidates(open)
-                            }
-                            Some(open) => hierarchy.child_candidates(open),
-                            None => Vec::new(),
-                        }
-                        .into_iter()
-                        .map(|i| i.id.as_str())
-                        .collect();
-                        excluded = self
-                            .issues
-                            .iter()
-                            .map(|i| i.id.as_str())
-                            .filter(|id| !ok.contains(id))
-                            .collect();
+                        excluded = issue_picker::hierarchy_excluded(
+                            picker.mode,
+                            &detail.issue_id,
+                            &self.issues,
+                            &self.lanes,
+                        );
                     }
                     let modal =
                         issue_picker::view(picker, &self.issues, self.selected_team(), &excluded);
@@ -8993,6 +9000,16 @@ mod tests {
         assert_eq!(super::clamped_focus(&[2, 4], 1, 9), (1, 3));
         assert_eq!(super::clamped_focus(&[2, 0], 1, 5), (1, 0));
         assert_eq!(super::clamped_focus(&[], 2, 5), (0, 0));
+    }
+
+    #[test]
+    fn view_names_its_issue_or_project_across_detail_and_map() {
+        assert_eq!(super::View::IssueDetail("i".into()).issue_id(), Some("i"));
+        assert_eq!(super::View::dependency_map("i").issue_id(), Some("i"));
+        assert_eq!(super::View::dependency_map("i").project_id(), None);
+        assert_eq!(super::View::ProjectDetail("p".into()).project_id(), Some("p"));
+        assert_eq!(super::View::project_dependency_map("p").project_id(), Some("p"));
+        assert_eq!(super::View::Board.issue_id(), None);
     }
 
     #[test]

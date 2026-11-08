@@ -736,9 +736,11 @@ pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> R
     Ok(())
 }
 
+/// Marker in an `issue/update` payload meaning "this edit clears the parent",
+/// so the push sends `parent_issue_id: null` (see sync/push/issue.rs).
+pub const CLEAR_PARENT_KEY: &str = "clear_parent";
+
 /// Why [`set_issue_parent_queued`] failed.
-// Callers (issue detail parent/sub-issue controls) land in later tickets.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum SetParentError {
     /// The parent breaks a Rails rule; nothing was written.
@@ -771,7 +773,6 @@ impl std::error::Error for SetParentError {}
 /// atomically. Returns the queue entry id, or `Ok(None)` when the parent is
 /// unchanged (nothing written or queued). A refused parent writes nothing.
 /// Attach-as-sub-issue is this call on the child; detach is `None`.
-#[allow(dead_code)]
 pub fn set_issue_parent_queued(
     conn: &Connection,
     issue_id: &str,
@@ -796,7 +797,13 @@ pub fn set_issue_parent_queued(
     let mut updated = issue;
     updated.parent_issue_id = parent_id.map(str::to_string);
     updated.updated_at = crate::db::now_iso();
-    let payload = serde_json::to_string(&updated).ok();
+    let mut payload = serde_json::to_value(&updated).ok();
+    if parent_id.is_none() {
+        if let Some(obj) = payload.as_mut().and_then(|v| v.as_object_mut()) {
+            obj.insert(CLEAR_PARENT_KEY.into(), true.into());
+        }
+    }
+    let payload = payload.map(|v| v.to_string());
     let id = edit_issue_queued(conn, issue_id, "update", payload.as_deref(), |c| {
         let old = get_issue(c, issue_id)?;
         c.execute(
@@ -3345,6 +3352,31 @@ mod tests {
     fn event_count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM issue_events", [], |r| r.get(0))
             .unwrap()
+    }
+
+    fn payload_of(conn: &Connection, id: i64) -> serde_json::Value {
+        let entry = crate::db::sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == Some(id))
+            .unwrap();
+        serde_json::from_str(entry.payload.as_deref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn remove_parent_and_detach_queue_an_explicit_clear_but_setting_does_not() {
+        let conn = parent_setup();
+        let set = set_issue_parent_queued(&conn, "b", Some("a")).unwrap().unwrap();
+        assert!(payload_of(&conn, set).get(CLEAR_PARENT_KEY).is_none());
+        // Remove parent (RemoveParent) and detach a sub-issue (DetachSubIssue)
+        // are both this call with `None`.
+        let detach = set_issue_parent_queued(&conn, "b", None).unwrap().unwrap();
+        assert_eq!(payload_of(&conn, detach)[CLEAR_PARENT_KEY], true);
+        assert_eq!(issue_row(&conn, "b").parent_issue_id, None);
+        // Detaching an already top-level issue queues nothing.
+        let before = queued(&conn);
+        assert!(set_issue_parent_queued(&conn, "b", None).unwrap().is_none());
+        assert_eq!(queued(&conn), before);
     }
 
     #[test]

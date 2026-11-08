@@ -1,9 +1,6 @@
 //! Sub-issue hierarchy over a slice of issues (pure; never touches the DB).
 //! Ports Rails' `IssueHierarchyQuery` and `IssueHierarchy#parent_issue_error`.
 
-// Consumers (pickers, detail view, maps) land in later tickets of project 294.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -80,6 +77,7 @@ impl<'a> Hierarchy<'a> {
 
     /// Ancestor ids, root first, direct parent last. Cycle-safe, capped at
     /// [`MAX_DEPTH`]. Empty for an unknown or top-level issue.
+    #[cfg(test)]
     pub fn ancestors(&self, issue_id: &str) -> Vec<String> {
         self.walk_up(issue_id, MAX_DEPTH)
     }
