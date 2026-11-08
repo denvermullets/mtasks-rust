@@ -197,7 +197,7 @@ pub fn view<'a>(
     // The right-docked Terminal panel, placed between the page and Properties.
     terminal: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    // ---- Breadcrumb: "← Projects › <name>" ----
+    // ---- Breadcrumb: "← Projects › <name> [› #<rails id>]" ----
     let mut breadcrumb = row![].spacing(space::S2).align_y(Alignment::Center);
     if show_back {
         breadcrumb = breadcrumb
@@ -210,6 +210,12 @@ pub fn view<'a>(
             .push(text("›").size(type_scale::SM).color(t::text_muted()));
     }
     breadcrumb = breadcrumb.push(text(&project.name).size(type_scale::SM).color(t::text_secondary()));
+    // The Rails id (what the JAIT MCP's `get_project` takes); absent until synced.
+    if let Some(id) = project.remote_id {
+        breadcrumb = breadcrumb
+            .push(text("›").size(type_scale::SM).color(t::text_muted()))
+            .push(text(format!("#{id}")).size(type_scale::SM).color(t::text_secondary()));
+    }
 
     // ---- Header: status dot + buffered title ----
     let status_color = project
