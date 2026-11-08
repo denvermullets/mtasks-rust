@@ -153,10 +153,7 @@ pub enum Message {
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
     CommitIssueDetail,
-    // Issue detail — live-apply sidebar pick_lists
-    IssueDetailStatusChanged(String),
-    IssueDetailPriorityChanged(Priority),
-    IssueDetailProjectChanged(Option<String>),
+    // Issue detail — live-apply sidebar assignee pick_list
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
 
@@ -3071,7 +3068,8 @@ impl App {
             // Rebuild so the new label is listed (checked), keeping the anchor.
             if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                 if let Modal::PropertyPicker(ref old) = self.modal {
-                    let state = self.property_picker_state(&issue, old.field, old.anchor);
+                    let mut state = self.property_picker_state(&issue, old.field, old.anchor);
+                    state.in_sidebar = old.in_sidebar;
                     self.modal = Modal::PropertyPicker(state);
                 }
             }
@@ -5418,15 +5416,6 @@ impl App {
             }
 
             // --- Issue detail: live-apply pick_lists ---
-            Message::IssueDetailStatusChanged(lane_id) => {
-                self.apply_issue_update(|i| i.lane_id = lane_id);
-            }
-            Message::IssueDetailPriorityChanged(p) => {
-                self.apply_issue_update(|i| i.priority = p.to_i32());
-            }
-            Message::IssueDetailProjectChanged(pid) => {
-                self.apply_issue_update(|i| i.project_id = pid);
-            }
             Message::IssueDetailAssigneeChanged(member_id) => {
                 self.apply_issue_update(|i| i.assignee_id = member_id);
             }
@@ -5935,12 +5924,21 @@ impl App {
                 }
             }
             Message::OpenPropertyPicker(field) => {
+                // The issue sidebar's toggle button: a second click closes it.
+                if let Modal::PropertyPicker(ref open) = self.modal {
+                    if open.in_sidebar && open.field == field {
+                        self.modal = Modal::None;
+                    }
+                    return Task::none();
+                }
                 if self.modal != Modal::None {
                     return Task::none();
                 }
                 if let Some((issue, anchor)) = self.key_target() {
                     let issue = issue.clone();
-                    let state = self.property_picker_state(&issue, field, anchor);
+                    let mut state = self.property_picker_state(&issue, field, anchor);
+                    // The issue page opens the sidebar field's own dropdown, as Rails does.
+                    state.in_sidebar = matches!(self.view, View::IssueDetail(_));
                     let focus = state.has_search();
                     self.modal = Modal::PropertyPicker(state);
                     if focus {
@@ -7649,6 +7647,12 @@ impl App {
                             &my_member_ids,
                             &self.config.api_base_url,
                             &self.detail_pending_paths,
+                            match &self.modal {
+                                Modal::PropertyPicker(p) if p.in_sidebar && p.issue_id == issue.id => {
+                                    Some(p)
+                                }
+                                _ => None,
+                            },
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
@@ -8036,6 +8040,8 @@ impl App {
                 }
                 _ => base,
             },
+            // Drawn by the issue sidebar as the field's dropdown.
+            Modal::PropertyPicker(state) if state.in_sidebar => base,
             Modal::PropertyPicker(state) => {
                 let window = iced::Size::new(self.window_width, self.window_height);
                 iced::widget::stack![base, property_picker::view(state, window)].into()

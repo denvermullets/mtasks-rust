@@ -9,17 +9,18 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::attachments::Attachment;
 use crate::files::images::ImageStore;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
-use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
+use crate::db::models::{Comment, Issue, Lane, Member, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{EditorTarget, Reference, SuggestState};
 use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::body::BodyCtx;
-use crate::views::issue_form::LaneOption;
+use crate::views::dropdown::dropdown;
 use crate::views::lane_icon;
+use crate::views::property_picker::{self, Field, PickerState};
 use crate::views::projects::MemberOption;
 use crate::views::util::{
     relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_menu_style,
-    sidebar_panel, sidebar_pick_list_style, with_heading, SIDEBAR_CONTROL_PADDING,
+    sidebar_panel, sidebar_pick_list_style, with_heading, SIDEBAR_CONTROL_PADDING, SIDEBAR_WIDTH,
 };
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
@@ -193,27 +194,6 @@ impl IssueDetailState {
     }
 }
 
-/// Project pick_list option; the leading `{ id: None }` entry is "No project".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectOption {
-    pub id: Option<String>,
-    pub name: String,
-}
-
-impl std::fmt::Display for ProjectOption {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
-
-const PRIORITIES: [Priority; 5] = [
-    Priority::Urgent,
-    Priority::High,
-    Priority::Medium,
-    Priority::Low,
-    Priority::None,
-];
-
 pub fn view<'a>(
     issue: &'a Issue,
     detail: &'a IssueDetailState,
@@ -237,6 +217,7 @@ pub fn view<'a>(
     my_member_ids: &[String],
     host: &'a str,
     pending_paths: &'a crate::views::body::PendingInlineMap,
+    picker: Option<&'a PickerState>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -338,32 +319,12 @@ pub fn view<'a>(
         .push(sections);
 
     // ---- Right sidebar: properties ----
-    let lane_options: Vec<LaneOption> = lanes
-        .iter()
-        .map(|l| LaneOption {
-            id: l.id.clone(),
-            name: l.name.clone(),
-        })
-        .collect();
-    let selected_lane = lane_options.iter().find(|l| l.id == issue.lane_id).cloned();
-    let selected_icon = lanes
-        .iter()
-        .find(|l| l.id == issue.lane_id)
-        .map(|l| crate::lane_icon::icon_for(l.category.as_deref()));
-
-    let project_options: Vec<ProjectOption> = std::iter::once(ProjectOption {
-        id: None,
-        name: "No project".to_string(),
-    })
-    .chain(projects.iter().map(|p| ProjectOption {
-        id: Some(p.id.clone()),
-        name: p.name.clone(),
-    }))
-    .collect();
-    let selected_project = project_options
-        .iter()
-        .find(|o| o.id == issue.project_id)
-        .cloned();
+    let lane_name = lanes.iter().find(|l| l.id == issue.lane_id).map(|l| l.name.clone());
+    let project_label = issue
+        .project_id
+        .as_ref()
+        .and_then(|id| projects.iter().find(|p| &p.id == id))
+        .map(|p| p.name.clone());
 
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
         id: None,
@@ -393,35 +354,15 @@ pub fn view<'a>(
         .width(Length::Fill)
         .push(sidebar_heading("Properties"))
         .push_maybe(parent.map(|p| sidebar_field("Parent", parent_link(p, team))))
-        .push(sidebar_field(
-            "Status",
-            row![]
-                .spacing(space::S2)
-                .align_y(Alignment::Center)
-                .push_maybe(selected_icon.map(lane_icon::view))
-                .push(
-                    pick_list(lane_options, selected_lane, |o: LaneOption| {
-                        Message::IssueDetailStatusChanged(o.id)
-                    })
-                    .width(Length::Fill)
-                    .text_size(type_scale::SM)
-                    .padding(SIDEBAR_CONTROL_PADDING)
-                    .style(sidebar_pick_list_style)
-                    .menu_style(sidebar_menu_style),
-                ),
-        ))
+        .push(sidebar_field("Status", sidebar_select(Field::Status, lane_name, "No status", picker)))
         .push(sidebar_field(
             "Priority",
-            pick_list(
-                PRIORITIES.as_slice(),
-                Some(issue.priority_enum()),
-                Message::IssueDetailPriorityChanged,
-            )
-            .width(Length::Fill)
-            .text_size(type_scale::SM)
-            .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style)
-            .menu_style(sidebar_menu_style),
+            sidebar_select(
+                Field::Priority,
+                Some(issue.priority_enum().to_string()),
+                "No priority",
+                picker,
+            ),
         ))
         .push(sidebar_field(
             "Assignee",
@@ -460,28 +401,20 @@ pub fn view<'a>(
                 .style(sidebar_input_style),
         ))
         .push(sidebar_field("Project", {
-            let picker: Element<'a, Message> = pick_list(project_options, selected_project, |o: ProjectOption| {
-                Message::IssueDetailProjectChanged(o.id)
-            })
-            .width(Length::Fill)
-            .text_size(type_scale::SM)
-            .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style)
-            .menu_style(sidebar_menu_style)
-            .into();
+            let select = sidebar_select(Field::Project, project_label, "No project", picker);
             // Like the web's sidebar pill: a project card while one is set.
             match &issue.project_id {
                 Some(id) => crate::views::row_hover::row_hover(
-                    picker,
+                    select,
                     crate::body_hover::Anchor::Project(id.clone()),
                     Message::RowHover,
                 )
                 .dismiss_on_press()
                 .into(),
-                None => picker,
+                None => select,
             }
         }))
-        .push(sidebar_field("Labels", placeholder_value()))
+        .push(sidebar_field("Labels", sidebar_select(Field::Labels, None, "—", picker)))
         .push(dependency_block(DepKind::Blocking, &deps.blocking))
         .push(dependency_block(DepKind::BlockedBy, &deps.blocked_by))
         .push_maybe(optional_dependency_block(DepKind::Related, &deps.related))
@@ -651,6 +584,56 @@ fn sub_issue_row<'a>(
     .padding([space::S1_5, space::S2])
     .width(Length::Fill)
     .style(button::text)
+    .into()
+}
+
+/// Width of a sidebar control: the panel minus its padding.
+const SIDEBAR_CONTROL_WIDTH: f32 = SIDEBAR_WIDTH - 2.0 * space::S6;
+
+/// A sidebar property control (Rails' `issue_sidebar` toggle button) with its
+/// dropdown open below it while `picker` is open on `field`. A click toggles
+/// it; `s` / `p` / `j` / `l` open it too.
+fn sidebar_select<'a>(
+    field: Field,
+    value: Option<String>,
+    empty: &'static str,
+    picker: Option<&'a PickerState>,
+) -> Element<'a, Message> {
+    let open = picker.filter(|p| p.field == field);
+    let label = match value {
+        Some(v) => text(v).size(type_scale::SM).color(t::text_body()),
+        None => text(empty).size(type_scale::SM).color(t::text_muted()),
+    };
+    let is_open = open.is_some();
+    let anchor = button(
+        row![]
+            .align_y(Alignment::Center)
+            .push(label.width(Length::Fill))
+            .push(text("▾").size(type_scale::SM).color(t::text_muted())),
+    )
+    .on_press(Message::OpenPropertyPicker(field))
+    .width(Length::Fill)
+    .padding(SIDEBAR_CONTROL_PADDING)
+    .style(move |_: &Theme, status| button::Style {
+        background: Some(t::bg_secondary().into()),
+        text_color: t::text_body(),
+        border: Border {
+            color: if is_open || matches!(status, button::Status::Hovered) {
+                t::text_muted()
+            } else {
+                t::border()
+            },
+            width: 1.0,
+            radius: radius::MD.into(),
+        },
+        ..Default::default()
+    });
+    dropdown(
+        anchor,
+        open.map(property_picker::sidebar_menu),
+        SIDEBAR_CONTROL_WIDTH,
+        Message::CloseModal,
+    )
     .into()
 }
 

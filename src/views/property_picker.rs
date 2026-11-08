@@ -98,6 +98,9 @@ pub struct PickerState {
     pub frequent: Vec<PickerOption>,
     /// The issue's current value(s): radio / checkbox state.
     pub current: Vec<Choice>,
+    /// Opened on the issue page: drawn as the sidebar field's own dropdown
+    /// (`sidebar_menu`), not as a floating popover.
+    pub in_sidebar: bool,
 }
 
 /// Inputs for `PickerState::new`, all scoped to the issue's team.
@@ -217,6 +220,7 @@ impl PickerState {
             options,
             frequent,
             current,
+            in_sidebar: false,
         }
     }
 
@@ -384,8 +388,8 @@ fn marker<'a>(field: Field, on: bool) -> Element<'a, Message> {
         .into()
 }
 
-/// The popover as a full-window layer: clicks outside it close it.
-pub fn view(state: &PickerState, window: Size) -> Element<'_, Message> {
+/// The pickable rows (with section headings, or an empty-state line).
+fn list(state: &PickerState) -> Element<'_, Message> {
     let mut list = column![];
     let mut item_idx = 0;
     for line in state.lines() {
@@ -456,14 +460,68 @@ pub fn view(state: &PickerState, window: Size) -> Element<'_, Message> {
                 .padding([32, 12]),
         );
     }
+    list.into()
+}
 
-    let rule = || {
-        container(Space::new(Length::Fill, 1)).style(|_: &Theme| container::Style {
-            background: Some(t::border().into()),
+fn rule<'a>() -> container::Container<'a, Message> {
+    container(Space::new(Length::Fill, 1)).style(|_: &Theme| container::Style {
+        background: Some(t::border().into()),
+        ..Default::default()
+    })
+}
+
+fn search_box<'a>(state: &'a PickerState, placeholder: &'static str) -> Element<'a, Message> {
+    container(
+        text_input(placeholder, &state.query)
+            .id(search_id())
+            .on_input(Message::PropertyPickerQuery)
+            .on_submit(Message::PropertyPickerSubmit)
+            .size(type_scale::SM)
+            .padding([8, 12]),
+    )
+    .padding(8)
+    .into()
+}
+
+fn new_project_row<'a>() -> Element<'a, Message> {
+    button(text("+  New Project").size(type_scale::SM).color(t::accent()))
+        .on_press(Message::PropertyPickerNewProject)
+        .padding([8, 12])
+        .width(Length::Fill)
+        .style(button::text)
+        .into()
+}
+
+/// The picker as the issue sidebar's own dropdown (Rails' `issue_sidebar`
+/// menus): a plain list the width of the field, no header. Only labels keep
+/// their search box, as Rails' sidebar label picker does.
+pub fn sidebar_menu(state: &PickerState) -> Element<'_, Message> {
+    let mut menu = column![].width(Length::Fill);
+    if state.field == Field::Labels {
+        if let Some(placeholder) = state.field.placeholder() {
+            menu = menu.push(search_box(state, placeholder)).push(rule());
+        }
+    }
+    menu = menu.push(container(scrollable(list(state))).max_height(LIST_MAX_H));
+    if state.field == Field::Project {
+        menu = menu.push(rule()).push(new_project_row());
+    }
+    container(menu)
+        .style(|_: &Theme| container::Style {
+            background: Some(t::bg_secondary().into()),
+            border: Border { color: t::border(), width: 1.0, radius: radius::MD.into() },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 24.0,
+            },
             ..Default::default()
         })
-    };
+        .into()
+}
 
+/// The popover as a full-window layer: clicks outside it close it.
+pub fn view(state: &PickerState, window: Size) -> Element<'_, Message> {
     let mut popover = column![]
         .width(Length::Fixed(WIDTH))
         .push(
@@ -472,29 +530,11 @@ pub fn view(state: &PickerState, window: Size) -> Element<'_, Message> {
         )
         .push(rule());
     if let Some(placeholder) = state.field.placeholder() {
-        popover = popover
-            .push(
-                container(
-                    text_input(placeholder, &state.query)
-                        .id(search_id())
-                        .on_input(Message::PropertyPickerQuery)
-                        .on_submit(Message::PropertyPickerSubmit)
-                        .size(type_scale::SM)
-                        .padding([8, 12]),
-                )
-                .padding(8),
-            )
-            .push(rule());
+        popover = popover.push(search_box(state, placeholder)).push(rule());
     }
-    popover = popover.push(container(scrollable(list)).max_height(LIST_MAX_H));
+    popover = popover.push(container(scrollable(list(state))).max_height(LIST_MAX_H));
     if state.field == Field::Project {
-        popover = popover.push(rule()).push(
-            button(text("+  New Project").size(type_scale::SM).color(t::accent()))
-                .on_press(Message::PropertyPickerNewProject)
-                .padding([8, 12])
-                .width(Length::Fill)
-                .style(button::text),
-        );
+        popover = popover.push(rule()).push(new_project_row());
     }
 
     let card = container(popover).style(|_: &Theme| container::Style {
