@@ -8,6 +8,7 @@ pub mod dep_map_canvas;
 pub mod group_form;
 pub mod display_panel;
 pub mod dep_overlay;
+pub mod dependency_map;
 pub mod dropdown;
 pub mod equal_row;
 pub mod measure;
