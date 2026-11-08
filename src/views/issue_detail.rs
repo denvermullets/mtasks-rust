@@ -692,7 +692,7 @@ fn sub_issue_row<'a>(
             })
     });
 
-    button(
+    let open = button(
         row![]
             .spacing(space::S2)
             .align_y(Alignment::Center)
@@ -712,8 +712,19 @@ fn sub_issue_row<'a>(
     .on_press(Message::OpenIssueDetail(child.id.clone()))
     .padding([space::S1_5, space::S2])
     .width(Length::Fill)
-    .style(button::text)
-    .into()
+    .style(button::text);
+    // Trailing × detaches the child (it becomes top-level).
+    row![]
+        .spacing(space::S1_5)
+        .align_y(Alignment::Center)
+        .push(open)
+        .push(
+            button(text("×").size(type_scale::SM).color(t::text_muted()))
+                .on_press(Message::DetachSubIssue(child.id.clone()))
+                .padding(0)
+                .style(button::text),
+        )
+        .into()
 }
 
 /// Width of a sidebar control: the panel minus its padding.
