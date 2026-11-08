@@ -210,7 +210,7 @@ pub enum Message {
     IssueFetched(Result<(), String>),
 
     // Issue detail — sub-issues
-    /// "+ Add sub-issue" pressed: open the create modal with the parent's local
+    /// "+ New sub-issue" pressed: open the create modal with the parent's local
     /// UUID pre-filled as `parent_issue_id`.
     CreateSubIssue(String),
 
