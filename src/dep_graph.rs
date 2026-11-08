@@ -1,4 +1,4 @@
-//! Pure dependency-graph queries over local rows (ports of the Rails
+//! Pure dependency map queries over local rows (ports of the Rails
 //! `DependencyGraphQuery`, `ProjectDependencyGraphQuery` and
 //! `DependencyOverlayHelper#board_dependency_edges`). Never touches the DB.
 

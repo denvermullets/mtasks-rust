@@ -2,7 +2,7 @@
 //! / Hierarchy segmented switch over a tab body. The header's breadcrumb is
 //! built in `app::breadcrumb`.
 //!
-//! The Dependencies tab (JRST-443) is the graph canvas, a depth selector and
+//! The Dependencies tab (JRST-443) is the map canvas, a depth selector and
 //! three lists. [`hierarchy_body`] (JRST-444) is still a placeholder.
 
 use std::collections::{HashMap, HashSet};

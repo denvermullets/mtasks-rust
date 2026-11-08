@@ -365,12 +365,10 @@ pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
 /// views park as that Tab's own page.
 pub fn parked_view(key: &TabKey, view: View) -> View {
     match (key, view) {
-        (_, view @ (View::IssueDetail(_) | View::DependencyMap { .. })) => view,
+        (_, view) if view.issue_id().is_some() => view,
         // Like ProjectDetail: a team Tab parks the Board, a project Tab keeps
         // the map as its page.
-        (TabKey::Team(_), View::ProjectDetail(_) | View::ProjectDependencyMap { .. }) => {
-            View::Board
-        }
+        (TabKey::Team(_), view) if view.project_id().is_some() => View::Board,
         (TabKey::Project(_), view @ View::ProjectDependencyMap { .. }) => view,
         (TabKey::Team(_), other) => other,
         // Project and cross-team Tabs have one page of their own. Whatever
@@ -388,16 +386,17 @@ pub fn resolve_parked(
     view: View,
     exists: impl Fn(&str) -> bool,
 ) -> (View, bool) {
-    match view {
-        // `exists` answers for an issue id or a project id (a project map).
-        View::IssueDetail(id)
-        | View::DependencyMap { issue_id: id, .. }
-        | View::ProjectDependencyMap { project_id: id, .. }
-            if !exists(&id) =>
-        {
-            (root_view(key), true)
-        }
-        view => (view, false),
+    // `exists` answers for an issue id or a project id (a project map). Only
+    // a project's detail is left to the caller, which has its own fallback.
+    let gone = match (&view, view.issue_id(), view.project_id()) {
+        (_, Some(id), _) => !exists(id),
+        (View::ProjectDependencyMap { .. }, _, Some(id)) => !exists(id),
+        _ => false,
+    };
+    if gone {
+        (root_view(key), true)
+    } else {
+        (view, false)
     }
 }
 

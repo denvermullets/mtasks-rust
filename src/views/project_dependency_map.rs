@@ -1,6 +1,6 @@
 //! A project's dependency map (`View::ProjectDependencyMap`, JRST-445): the
 //! web's ProjectDependencyMapsController page. Header (title, explainer,
-//! Active / All switch, legend) over the graph canvas, or an empty state.
+//! Active / All switch, legend) over the map canvas, or an empty state.
 //! The breadcrumb is built in `app::breadcrumb`.
 
 use std::collections::HashMap;
@@ -37,19 +37,32 @@ fn kind_for(kind: &str) -> ConnectorKind {
     }
 }
 
+/// Everything [`build`] reads: the project and the loaded mirror data.
+pub struct MapInput<'a> {
+    pub project: &'a Project,
+    pub deps: &'a [IssueDependency],
+    pub issues: &'a [Issue],
+    pub lanes: &'a [Lane],
+    pub projects: &'a [Project],
+    pub members: &'a [Member],
+    pub issue_labels: &'a HashMap<String, Vec<Label>>,
+    pub active_only: bool,
+    pub team_identifier: &'a str,
+}
+
 /// Run `dep_graph::project_graph` and map its output onto canvas cards.
-#[allow(clippy::too_many_arguments)]
-pub fn build(
-    project: &Project,
-    deps: &[IssueDependency],
-    issues: &[Issue],
-    lanes: &[Lane],
-    projects: &[Project],
-    members: &[Member],
-    issue_labels: &HashMap<String, Vec<Label>>,
-    active_only: bool,
-    team_identifier: &str,
-) -> ProjectMapData {
+pub fn build(input: MapInput<'_>) -> ProjectMapData {
+    let MapInput {
+        project,
+        deps,
+        issues,
+        lanes,
+        projects,
+        members,
+        issue_labels,
+        active_only,
+        team_identifier,
+    } = input;
     let graph = project_graph(project, deps, issues, lanes, projects, active_only);
     let columns = graph
         .columns

@@ -1,4 +1,4 @@
-//! Shared dependency graph canvas: columns of fixed-size issue cards with
+//! Shared dependency map canvas: columns of fixed-size issue cards with
 //! curved connectors drawn behind them (JRST-441). Renders no data of its own;
 //! the issue and project dependency maps feed it columns and edges.
 //!
