@@ -1,9 +1,13 @@
-<!-- last-sha: 07cf2e16e2ca715af7ee6f010be275bfd586cc30 -->
-**Version: v0.7.0**
+<!-- last-sha: 842db75fc5a7365f5bf4c5ad33231d158f1a993d -->
+**Version: v0.8.0**
 
 # What's new
 
 ## 2026-11-08
+- **Nervosa theme.** A new dark teal-and-orange theme, available only in the desktop app. Pick it in Settings.
+- **See-through window.** New Window opacity and Blur sliders in Settings let you make the app's background translucent and blur what's behind it. Changes show up as you drag. Text, cards and menus stay solid.
+- **Close tabs with Cmd+W.** Cmd+W now closes the tab you're on, and closing a tab also closes its terminals. If a program is still running in one of them, you're asked before the tab closes.
+- **Status changes show up right away.** Moving an issue to Done, Canceled or an in-progress column now updates the board straight away, instead of waiting for the next sync to show or hide it.
 - **Sub-issues on every issue.** Each issue page now has a Sub-issues section with a done count and progress bar. You can set, change or remove an issue's parent, add an existing issue as a sub-issue, and detach a sub-issue from its parent.
 - **Dependency maps.** Click "Dependencies" on an issue or project, or use the command palette, to open a map of what's blocking what. An issue's map has a Dependencies tab with a graph, a depth selector and lists of blockers, plus a Hierarchy tab that shows the issue's parent and sub-issues as an outline (also reachable from "View tree →" on the issue). A project's map shows the blockers across all of its issues.
 - **Dependency lines on the board.** Turn on "Dependencies" in the board's Display menu to draw lines between linked cards, with a legend bar along the top. Hover a card to highlight its lines and the cards it's linked to, and click a linked card to open its dependency map. Back takes you to the board.
