@@ -54,6 +54,7 @@ pub struct GraphLayout {
 
 /// Lay out `columns` of node ids (left to right, top to bottom) with fixed card
 /// size and gaps. Pure. Every card is `CARD_W` x `CARD_H`.
+#[cfg(test)]
 pub fn layout(columns: &[Vec<String>]) -> GraphLayout {
     layout_with(columns, |_| CARD_H)
 }
