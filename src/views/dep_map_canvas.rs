@@ -190,6 +190,21 @@ pub fn view<'a>(
     opts: &DrawOptions,
     on_click: impl Fn(&str) -> Message,
 ) -> Element<'a, Message> {
+    view_with_header(None, columns, edges, selected, opts, on_click)
+}
+
+/// [`view`] with a `header` row (column titles) inside the same scrollable,
+/// above the graph, so it scrolls horizontally with the columns. The header
+/// should use [`PAD`] side padding, [`COLUMN_GAP`] spacing and [`CARD_W`]
+/// cells to line up.
+pub fn view_with_header<'a>(
+    header: Option<Element<'a, Message>>,
+    columns: &[Vec<NodeCard>],
+    edges: &[EdgeSpec],
+    selected: Option<&str>,
+    opts: &DrawOptions,
+    on_click: impl Fn(&str) -> Message,
+) -> Element<'a, Message> {
     let ids: Vec<Vec<String>> = columns.iter().map(|c| c.iter().map(|n| n.id.clone()).collect()).collect();
     let tagged: HashMap<&str, bool> =
         columns.iter().flatten().map(|n| (n.id.as_str(), n.tag.is_some())).collect();
@@ -213,7 +228,12 @@ pub fn view<'a>(
         .width(Length::Fixed(lay.size.width))
         .height(Length::Fixed(lay.size.height));
 
-    scrollable(stack![lines, cards])
+    let graph = stack![lines, cards];
+    let content: Element<'a, Message> = match header {
+        Some(h) => column![h, graph].into(),
+        None => graph.into(),
+    };
+    scrollable(content)
         .direction(scrollable::Direction::Both {
             vertical: scrollable::Scrollbar::default(),
             horizontal: scrollable::Scrollbar::default(),

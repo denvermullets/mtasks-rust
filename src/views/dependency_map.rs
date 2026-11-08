@@ -95,8 +95,10 @@ fn dependencies_body<'a>(issue: &'a Issue, depth: u8, data: &MapData<'a>) -> Ele
         return empty_state();
     }
 
-    let model = MapModel::build(&graph, data);    let opts = DrawOptions { focus_id: Some(issue.id.clone()), ..Default::default() };
-    let graph_el: Element<'a, Message> = container(dep_map_canvas::view(
+    let model = MapModel::build(&graph, data);
+    let opts = DrawOptions { focus_id: Some(issue.id.clone()), ..Default::default() };
+    let graph_el: Element<'a, Message> = container(dep_map_canvas::view_with_header(
+        Some(model.header_row),
         &model.columns,
         &model.edges,
         Some(issue.id.as_str()),
@@ -111,7 +113,7 @@ fn dependencies_body<'a>(issue: &'a Issue, depth: u8, data: &MapData<'a>) -> Ele
     })
     .into();
 
-    let mut out = column![depth_selector(depth), model.header_row, graph_el].spacing(space::S3);
+    let mut out = column![depth_selector(depth), graph_el].spacing(space::S3);
     if graph.truncated {
         out = out.push(truncation_note(depth));
     }
@@ -216,6 +218,8 @@ pub fn drawn_edges(graph: &IssueGraph) -> Vec<EdgeSpec> {
         .collect()
 }
 
+const FOCUS_HEADER: &str = "Selected issue";
+
 /// Column header and issues, left to right: upstream deepest first, the focus
 /// column (focus, then related), then downstream nearest first.
 pub fn column_plan(graph: &IssueGraph) -> Vec<(String, Vec<Issue>)> {
@@ -230,9 +234,15 @@ pub fn column_plan(graph: &IssueGraph) -> Vec<(String, Vec<Issue>)> {
         graph.upstream.iter().rev().map(|(d, v)| (head(true, *d), v.clone())).collect();
     let mut focus_col = vec![graph.focus.clone()];
     focus_col.extend(graph.related.iter().map(|e| e.issue.clone()));
-    cols.push(("Selected issue".to_string(), focus_col));
+    cols.push((FOCUS_HEADER.to_string(), focus_col));
     cols.extend(graph.downstream.iter().map(|(d, v)| (head(false, *d), v.clone())));
     cols
+}
+
+/// The tag each card of the focus column shows: none on the focus card, then
+/// one per related stub (web `RELATED_TAGS`), in `column_plan` order.
+pub fn focus_column_tags(graph: &IssueGraph) -> Vec<Option<&'static str>> {
+    std::iter::once(None).chain(graph.related.iter().map(|e| related_tag(&e.direction))).collect()
 }
 
 struct MapModel<'a> {
@@ -246,18 +256,29 @@ impl<'a> MapModel<'a> {
         let mut headers =
             row![].spacing(dep_map_canvas::COLUMN_GAP).padding([0.0, dep_map_canvas::PAD]);
         let mut columns = Vec::new();
+        let focus_tags = focus_column_tags(graph);
         for (title, issues) in column_plan(graph) {
+            let is_focus = title == FOCUS_HEADER;
             headers = headers.push(
                 container(text(title).size(type_scale::XS).color(t::text_muted()))
                     .width(Length::Fixed(dep_map_canvas::CARD_W)),
             );
-            columns.push(issues.iter().map(|i| node_card(i, data)).collect());
+            columns.push(
+                issues
+                    .iter()
+                    .enumerate()
+                    .map(|(n, i)| {
+                        let tag = if is_focus { focus_tags.get(n).copied().flatten() } else { None };
+                        node_card(i, data, tag)
+                    })
+                    .collect(),
+            );
         }
         MapModel { columns, edges: drawn_edges(graph), header_row: headers.into() }
     }
 }
 
-fn node_card(issue: &Issue, data: &MapData<'_>) -> NodeCard {
+fn node_card(issue: &Issue, data: &MapData<'_>, tag: Option<&str>) -> NodeCard {
     let category =
         data.lanes.iter().find(|l| l.id == issue.lane_id).and_then(|l| l.category.as_deref());
     NodeCard {
@@ -282,7 +303,7 @@ fn node_card(issue: &Issue, data: &MapData<'_>) -> NodeCard {
             })
             .unwrap_or_default(),
         closed: is_closed(issue, data.lanes),
-        tag: None,
+        tag: tag.map(str::to_string),
     }
 }
 
@@ -741,6 +762,18 @@ mod tests {
         assert_eq!(heads[1], "Upstream: blocked by");
         assert_eq!(heads[2], "Selected issue");
         assert_eq!(heads[3], "Downstream: blocks");
+    }
+
+    #[test]
+    fn related_stubs_carry_their_duplicate_tags_in_focus_column_order() {
+        let mut g = graph();
+        g.related.push(crate::dep_graph::RelatedEntry {
+            issue: issue("r2"),
+            kind: "duplicates".into(),
+            direction: "duplicated_by".into(),
+        });
+        // Focus card has no tag; "relates" has none in the web either.
+        assert_eq!(focus_column_tags(&g), vec![None, None, Some("Duplicated by")]);
     }
 
     #[test]
