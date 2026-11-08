@@ -3354,6 +3354,31 @@ mod tests {
             .unwrap()
     }
 
+    fn payload_of(conn: &Connection, id: i64) -> serde_json::Value {
+        let entry = crate::db::sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == Some(id))
+            .unwrap();
+        serde_json::from_str(entry.payload.as_deref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn remove_parent_and_detach_queue_an_explicit_clear_but_setting_does_not() {
+        let conn = parent_setup();
+        let set = set_issue_parent_queued(&conn, "b", Some("a")).unwrap().unwrap();
+        assert!(payload_of(&conn, set).get(CLEAR_PARENT_KEY).is_none());
+        // Remove parent (RemoveParent) and detach a sub-issue (DetachSubIssue)
+        // are both this call with `None`.
+        let detach = set_issue_parent_queued(&conn, "b", None).unwrap().unwrap();
+        assert_eq!(payload_of(&conn, detach)[CLEAR_PARENT_KEY], true);
+        assert_eq!(issue_row(&conn, "b").parent_issue_id, None);
+        // Detaching an already top-level issue queues nothing.
+        let before = queued(&conn);
+        assert!(set_issue_parent_queued(&conn, "b", None).unwrap().is_none());
+        assert_eq!(queued(&conn), before);
+    }
+
     #[test]
     fn set_change_and_clear_a_parent() {
         let conn = parent_setup();

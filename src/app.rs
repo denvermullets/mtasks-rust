@@ -5743,15 +5743,17 @@ expanded_teams,
             }
             Message::DependencyPickerSelected(target_id) => {
                 let open = self.issue_detail.as_ref().map(|d| d.issue_id.clone());
-                match (self.issue_picker.as_ref().map(|p| p.mode), open) {
-                    (Some(issue_picker::PickerMode::Parent), Some(id)) => {
-                        self.set_parent(&id, Some(&target_id));
-                    }
-                    (Some(issue_picker::PickerMode::Child), Some(id)) => {
-                        self.set_parent(&target_id, Some(&id));
-                    }
+                let mode = self.issue_picker.as_ref().map(|p| p.mode);
+                match (mode, open) {
                     (Some(issue_picker::PickerMode::Dependency), _) => {
                         self.add_dependency(&target_id);
+                    }
+                    (Some(mode), Some(id)) => {
+                        if let Some((child, parent)) =
+                            issue_picker::picked_parent_change(mode, &id, &target_id)
+                        {
+                            self.set_parent(child, Some(parent));
+                        }
                     }
                     _ => {}
                 }
@@ -8447,24 +8449,12 @@ expanded_teams,
                     excluded.insert(detail.issue_id.as_str());
                     if picker.mode != issue_picker::PickerMode::Dependency {
                         // Hierarchy modes offer only the spec's candidates.
-                        let open = self.issues.iter().find(|i| i.id == detail.issue_id);
-                        let hierarchy = crate::hierarchy::Hierarchy::new(&self.issues, &self.lanes);
-                        let ok: HashSet<&str> = match open {
-                            Some(open) if picker.mode == issue_picker::PickerMode::Parent => {
-                                hierarchy.parent_candidates(open)
-                            }
-                            Some(open) => hierarchy.child_candidates(open),
-                            None => Vec::new(),
-                        }
-                        .into_iter()
-                        .map(|i| i.id.as_str())
-                        .collect();
-                        excluded = self
-                            .issues
-                            .iter()
-                            .map(|i| i.id.as_str())
-                            .filter(|id| !ok.contains(id))
-                            .collect();
+                        excluded = issue_picker::hierarchy_excluded(
+                            picker.mode,
+                            &detail.issue_id,
+                            &self.issues,
+                            &self.lanes,
+                        );
                     }
                     let modal =
                         issue_picker::view(picker, &self.issues, self.selected_team(), &excluded);
