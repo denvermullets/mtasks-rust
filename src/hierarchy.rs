@@ -1,12 +1,46 @@
 //! Sub-issue hierarchy over a slice of issues (pure; never touches the DB).
 //! Ports Rails' `IssueHierarchyQuery` and `IssueHierarchy#parent_issue_error`.
 
+// Consumers (pickers, detail view, maps) land in later tickets of project 294.
+#![allow(dead_code)]
+
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use crate::db::models::{Issue, Lane};
 
 /// Cap on both walks (and the default tree depth), like Rails' `MAX_DEPTH`.
 pub const MAX_DEPTH: usize = 10;
+
+/// Why a parent was refused. `Display` gives the full Rails message, e.g.
+/// "Parent issue would create a circular sub-issue chain".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentError {
+    DoesNotExist,
+    DifferentTeam,
+    SelfParent,
+    Circular,
+}
+
+impl ParentError {
+    /// Rails' bare message (without the "Parent issue" prefix).
+    pub fn detail(&self) -> &'static str {
+        match self {
+            Self::DoesNotExist => "does not exist",
+            Self::DifferentTeam => "must be in the same team",
+            Self::SelfParent => "cannot be the issue itself",
+            Self::Circular => "would create a circular sub-issue chain",
+        }
+    }
+}
+
+impl fmt::Display for ParentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Parent issue {}", self.detail())
+    }
+}
+
+impl std::error::Error for ParentError {}
 
 /// The sub-issue tree an issue belongs to. Ids only; look issues up in the
 /// slice you built the [`Hierarchy`] from.
@@ -142,6 +176,66 @@ impl<'a> Hierarchy<'a> {
             children,
             truncated,
         })
+    }
+
+    /// Rails' `parent_issue_error`. `None` (clearing) is always fine.
+    pub fn validate_parent(
+        &self,
+        issue: &Issue,
+        parent_id: Option<&str>,
+    ) -> Result<(), ParentError> {
+        let Some(parent_id) = parent_id else {
+            return Ok(());
+        };
+        let parent = self
+            .by_id
+            .get(parent_id)
+            .ok_or(ParentError::DoesNotExist)?;
+        if parent.team_id != issue.team_id {
+            return Err(ParentError::DifferentTeam);
+        }
+        if parent_id == issue.id {
+            return Err(ParentError::SelfParent);
+        }
+        // Uncapped: a deep loop must still be caught.
+        let mut chain = self.walk_up(parent_id, usize::MAX);
+        chain.push(parent_id.to_string());
+        if chain.iter().any(|a| *a == issue.id) {
+            return Err(ParentError::Circular);
+        }
+        Ok(())
+    }
+
+    /// Issues the parent picker may offer: same team, not the issue itself,
+    /// its descendants, its current parent or canceled.
+    pub fn parent_candidates(&self, issue: &Issue) -> Vec<&'a Issue> {
+        let descendants: HashSet<String> = self.descendants(&issue.id).into_iter().collect();
+        self.issues
+            .iter()
+            .filter(|i| {
+                i.team_id == issue.team_id
+                    && i.id != issue.id
+                    && i.canceled_at.is_none()
+                    && !descendants.contains(&i.id)
+                    && issue.parent_issue_id.as_deref() != Some(i.id.as_str())
+            })
+            .collect()
+    }
+
+    /// Issues the add-existing picker may offer: same team, not the issue
+    /// itself, its ancestors, its current sub-issues or canceled.
+    pub fn child_candidates(&self, issue: &Issue) -> Vec<&'a Issue> {
+        let ancestors: HashSet<String> = self.walk_up(&issue.id, usize::MAX).into_iter().collect();
+        self.issues
+            .iter()
+            .filter(|i| {
+                i.team_id == issue.team_id
+                    && i.id != issue.id
+                    && i.canceled_at.is_none()
+                    && !ancestors.contains(&i.id)
+                    && i.parent_issue_id.as_deref() != Some(issue.id.as_str())
+            })
+            .collect()
     }
 
     /// Ancestors of `issue_id` (root first), stopping at a missing or
@@ -331,6 +425,76 @@ mod tests {
         let h = Hierarchy::new(&issues, &ls);
         let t = h.tree("p", 5).unwrap();
         assert_eq!(t.children_of("p"), ["k3", "k1", "k2"]);
+    }
+
+    #[test]
+    fn validate_parent_rules() {
+        let mut issues = chain();
+        let mut o = iss("o", 1, None);
+        o.team_id = "t2".into();
+        issues.push(o);
+        let ls = lanes();
+        let h = Hierarchy::new(&issues, &ls);
+        let a = &issues[0];
+        let b = &issues[1];
+        assert_eq!(h.validate_parent(a, None), Ok(()));
+        assert_eq!(
+            h.validate_parent(a, Some("nope")),
+            Err(ParentError::DoesNotExist)
+        );
+        assert_eq!(
+            h.validate_parent(a, Some("o")),
+            Err(ParentError::DifferentTeam)
+        );
+        assert_eq!(
+            h.validate_parent(a, Some("a")),
+            Err(ParentError::SelfParent)
+        );
+        // direct child and grandchild as parent
+        assert_eq!(h.validate_parent(a, Some("b")), Err(ParentError::Circular));
+        assert_eq!(h.validate_parent(a, Some("d")), Err(ParentError::Circular));
+        // sibling re-parent is fine, so is the unchanged parent
+        assert_eq!(h.validate_parent(b, Some("e")), Ok(()));
+        assert_eq!(h.validate_parent(b, Some("a")), Ok(()));
+        assert_eq!(
+            ParentError::Circular.to_string(),
+            "Parent issue would create a circular sub-issue chain"
+        );
+        assert_eq!(
+            ParentError::DifferentTeam.detail(),
+            "must be in the same team"
+        );
+    }
+
+    #[test]
+    fn validate_parent_catches_loop_deeper_than_cap() {
+        let issues = line(15);
+        let ls = lanes();
+        let h = Hierarchy::new(&issues, &ls);
+        assert_eq!(
+            h.validate_parent(&issues[0], Some("i14")),
+            Err(ParentError::Circular)
+        );
+    }
+
+    fn ids(v: Vec<&Issue>) -> Vec<&str> {
+        v.into_iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn candidate_sets() {
+        let mut issues = chain();
+        let mut x = iss("x", 6, None);
+        x.canceled_at = Some("2026-01-01".into());
+        let mut o = iss("o", 7, None);
+        o.team_id = "t2".into();
+        issues.extend([x, o]);
+        let ls = lanes();
+        let h = Hierarchy::new(&issues, &ls);
+        // b: not itself, not descendants c/d, not parent a, not canceled/other team.
+        assert_eq!(ids(h.parent_candidates(&issues[1])), vec!["e"]);
+        // b: not itself, not ancestor a, not child c; d and e are fair game.
+        assert_eq!(ids(h.child_candidates(&issues[1])), vec!["d", "e"]);
     }
 
     #[test]
