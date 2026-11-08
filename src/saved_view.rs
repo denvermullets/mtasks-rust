@@ -178,6 +178,9 @@ pub fn decode(query: &RawQuery, mirror: &Mirror, local: &BoardState) -> Decoded 
     if let Some(v) = get("show_empty_rows").and_then(boolean) {
         s.display.show_empty_rows = v;
     }
+    if let Some(v) = get("show_dependencies").and_then(boolean) {
+        s.display.show_dependencies = v;
+    }
     if let Some(v) = get("visible_properties") {
         s.display.properties = csv(v).into_iter().filter_map(card_property).collect();
     }
@@ -339,7 +342,7 @@ fn card_property(v: &str) -> Option<CardProperty> {
 }
 
 /// The query keys the desktop models (everything else is passed through).
-pub const MODELLED_KEYS: [&str; 15] = [
+pub const MODELLED_KEYS: [&str; 16] = [
     "view_mode",
     "group_by",
     "sub_group_by",
@@ -348,6 +351,7 @@ pub const MODELLED_KEYS: [&str; 15] = [
     "show_sub_issues",
     "show_empty_groups",
     "show_empty_rows",
+    "show_dependencies",
     "visible_properties",
     "lane_ids",
     "assignee_ids",
@@ -382,6 +386,7 @@ pub fn encode(state: &BoardState, raw: &RawQuery, mirror: &Mirror) -> RawQuery {
         ("show_sub_issues", d.show_sub_issues),
         ("show_empty_groups", d.show_empty_groups),
         ("show_empty_rows", d.show_empty_rows),
+        ("show_dependencies", d.show_dependencies),
     ] {
         let s = match raw_get(key) {
             Some(r) if boolean(r) == Some(val) => r.to_string(),
@@ -836,6 +841,21 @@ mod tests {
     }
 
     #[test]
+    fn show_dependencies_decodes_and_round_trips() {
+        let fx = Fx::new();
+        for (raw, want) in [("true", true), ("1", true), ("false", false), ("0", false)] {
+            let d = fx.decode(&q(&[("show_dependencies", raw)]));
+            assert_eq!(d.state.display.show_dependencies, want, "{raw}");
+        }
+        let d = fx.decode(&q(&[]));
+        assert!(!d.state.display.show_dependencies);
+        let ov = open_with(&fx, &[("show_dependencies", "1")]);
+        assert!(ov.state.display.show_dependencies);
+        assert_eq!(ov.encoded(&fx.mirror())["show_dependencies"], "1");
+        assert!(!ov.is_modified(&fx.mirror()));
+    }
+
+    #[test]
     fn q_is_view_search() {
         let d = Fx::new().decode(&q(&[("q", "login bug")]));
         assert_eq!(d.state.search, "login bug");
@@ -847,7 +867,7 @@ mod tests {
             ("creator_ids", "5"),
             ("future_key", "x"),
             ("lane_ids", "999"),
-            ("show_dependencies", "1"),
+            ("future_flag", "1"),
         ]);
         let d = Fx::new().decode(&raw);
         assert_eq!(d.raw, raw);
@@ -968,6 +988,7 @@ mod tests {
             ("show_sub_issues", "false"),
             ("show_empty_groups", "true"),
             ("show_empty_rows", "true"),
+            ("show_dependencies", "true"),
             ("visible_properties", "id,labels,due_date"),
             ("lane_ids", "10,11"),
             ("assignee_ids", "21"),
@@ -1001,7 +1022,7 @@ mod tests {
             &fx,
             &[
                 ("creator_ids", "4"),
-                ("show_dependencies", "true"),
+                ("future_flag", "true"),
                 ("visible_properties", "id,time_in_status,pull_requests_and_commits"),
                 ("lane_ids", "10,999"),
                 ("project_ids", "none,777"),
@@ -1012,7 +1033,7 @@ mod tests {
         ov.state.display.properties = vec![CardProperty::Labels];
         let e = ov.encoded(&fx.mirror());
         assert_eq!(e["creator_ids"], "4");
-        assert_eq!(e["show_dependencies"], "true");
+        assert_eq!(e["future_flag"], "true");
         assert_eq!(e["visible_properties"], "labels,time_in_status,pull_requests_and_commits");
         assert_eq!(e["lane_ids"], "11,999");
         assert_eq!(e["project_ids"], "none,777");

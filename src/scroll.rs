@@ -344,6 +344,7 @@ pub enum ScrollKey {
     RecurringIssues,
     IssueDetail,
     ProjectDetail,
+    DependencyMap,
 }
 
 impl ScrollKey {
@@ -362,6 +363,7 @@ impl ScrollKey {
             ScrollKey::RecurringIssues => Id::new("recurring-issues"),
             ScrollKey::IssueDetail => Id::new("issue-detail"),
             ScrollKey::ProjectDetail => Id::new("project-detail"),
+            ScrollKey::DependencyMap => Id::new("dependency-map"),
         }
     }
 
@@ -424,6 +426,7 @@ mod scroll_key_tests {
             ScrollKey::RecurringIssues,
             ScrollKey::IssueDetail,
             ScrollKey::ProjectDetail,
+            ScrollKey::DependencyMap,
         ];
         for (i, a) in keys.iter().enumerate() {
             for b in &keys[i + 1..] {
