@@ -121,6 +121,11 @@ pub fn view<'a>(
         .width(Length::Fill)
         .height(Length::Fill);
 
+    // Spike check (JRST-449): debug builds with MTASKS_DEBUG_ANCHORS=1 outline
+    // every collected card rect over the board.
+    let debug = cfg!(debug_assertions) && std::env::var_os("MTASKS_DEBUG_ANCHORS").is_some();
+    let board = crate::views::dep_overlay::dep_overlay(board).debug_outlines(debug);
+
     container(board)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -519,10 +524,13 @@ fn issue_card<'a>(
             ..Default::default()
         });
 
-    crate::views::row_hover::row_hover(
-        mouse_area(card).on_press(Message::CardPressed(lane_idx, issue_idx)),
+    crate::views::dep_overlay::dep_anchor(
         issue.id.clone(),
-        Message::CardHover,
+        crate::views::row_hover::row_hover(
+            mouse_area(card).on_press(Message::CardPressed(lane_idx, issue_idx)),
+            issue.id.clone(),
+            Message::CardHover,
+        ),
     )
     .into()
 }
