@@ -62,7 +62,7 @@ pub fn reveal_offset(index: usize, count: usize, tab_w: f32, viewport: f32, curr
 
 /// Pixels the pointer must travel from the press before a Tab starts to drag,
 /// so a plain click still focuses.
-pub const DRAG_THRESHOLD: f32 = 5.0;
+pub const DRAG_THRESHOLD: f32 = 8.0;
 
 /// The Tab slot under window x `cursor_x`, given the bar's scroll offset.
 /// Clamped to the first and last Tab.
@@ -140,6 +140,10 @@ pub fn view<'a>(
             .padding(iced::Padding { top: 5.0, right: 4.0, bottom: 5.0, left: 12.0 }),
         )
         .on_press(Message::Tab(TabMessage::DragPress(i)))
+        // The drag subscription only starts after the press is handled, so a
+        // quick click can release before it listens; end the press here too.
+        // A second DragEnd from the subscription is a no-op.
+        .on_release(Message::Tab(TabMessage::DragEnd))
         .interaction(iced::mouse::Interaction::Pointer);
         // The label is cut to one line; hovering shows the full title.
         let label_button = tooltip(
