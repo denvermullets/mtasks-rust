@@ -243,6 +243,14 @@ pub enum Message {
     ResetDashboard,
     /// Open the searchable issue picker to add a dependency in `direction`.
     OpenDependencyPicker(DepDirection),
+    /// Open the issue picker to set / change the open issue's parent.
+    OpenParentPicker,
+    /// Open the issue picker to add an existing issue as a sub-issue.
+    OpenChildPicker,
+    /// Remove the open issue's parent.
+    RemoveParent,
+    /// Detach a sub-issue (local UUID), making it top-level.
+    DetachSubIssue(String),
     /// Step the open picker's link kind (Tab forward, Shift+Tab back).
     CycleDependencyKind(bool),
     /// Set the open picker's link kind (clicking a kind chip).
@@ -309,6 +317,17 @@ pub enum Message {
     SendIssuePrompt(String),
     /// Palette: dock the Terminal panel at the bottom or down the right.
     ToggleTerminalDock,
+    /// Open this issue's dependency map (JRST-442): Dependencies tab, default
+    /// depth. From the issue detail's button or the palette.
+    OpenDependencyMap(String),
+    /// Switch the open dependency map between its Dependencies and Hierarchy tabs.
+    SetDependencyMapTab(DependencyMapTab),
+    /// Change the open dependency map's depth (clamped to 1..=MAX by the handler).
+    #[allow(dead_code)] // The depth selector (JRST-443) sends it.
+    SetDependencyMapDepth(u8),
+    /// Leave the dependency map for its issue's detail (Back, Escape, the
+    /// breadcrumb's issue crumb).
+    CloseDependencyMap,
     /// Cmd+K: open the command palette.
     OpenCommandPalette,
     /// The palette's text field changed.
@@ -727,6 +746,46 @@ pub enum View {
     /// A dashboard (local id). Cross-team like `MyIssues`: the mirror data of
     /// every active team is loaded, and the selected team is left alone.
     Dashboard(String),
+    /// One issue's dependency map (JRST-442): the Dependencies or Hierarchy
+    /// tab, `depth` levels of blockers each way. Opened from the issue
+    /// detail, and parked per Tab like `IssueDetail`.
+    DependencyMap {
+        issue_id: String,
+        tab: DependencyMapTab,
+        depth: u8,
+    },
+}
+
+/// The two tabs of `View::DependencyMap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyMapTab {
+    Dependencies,
+    Hierarchy,
+}
+
+impl DependencyMapTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            DependencyMapTab::Dependencies => "Dependencies",
+            DependencyMapTab::Hierarchy => "Hierarchy",
+        }
+    }
+}
+
+/// Levels of blockers a dependency map shows until the user changes it.
+pub const DEFAULT_DEPENDENCY_DEPTH: u8 = 3;
+/// The deepest a dependency map can be set.
+pub const MAX_DEPENDENCY_DEPTH: u8 = 10;
+
+impl View {
+    /// A fresh dependency map for `issue_id`: Dependencies tab, default depth.
+    pub fn dependency_map(issue_id: impl Into<String>) -> View {
+        View::DependencyMap {
+            issue_id: issue_id.into(),
+            tab: DependencyMapTab::Dependencies,
+            depth: DEFAULT_DEPENDENCY_DEPTH,
+        }
+    }
 }
 
 impl View {
@@ -1130,7 +1189,9 @@ impl App {
         // A detail view can be open on another team's row, e.g. from My Issues.
         let conn = self.db();
         let detail_gone = match &self.view {
-            View::IssueDetail(id) => matches!(queries::get_issue(&conn, id), Ok(None)),
+            View::IssueDetail(id) | View::DependencyMap { issue_id: id, .. } => {
+                matches!(queries::get_issue(&conn, id), Ok(None))
+            }
             View::ProjectDetail(id) => matches!(queries::get_project(&conn, id), Ok(None)),
             _ => false,
         };
@@ -1681,7 +1742,9 @@ impl App {
     /// resolved against this team, whichever team is selected.
     fn detail_team_id(&self) -> Option<&str> {
         match &self.view {
-            View::IssueDetail(id) => self.issues.iter().find(|i| i.id == *id).map(|i| i.team_id.as_str()),
+            View::IssueDetail(id) | View::DependencyMap { issue_id: id, .. } => {
+                self.issues.iter().find(|i| i.id == *id).map(|i| i.team_id.as_str())
+            }
             View::ProjectDetail(id) => self.projects.iter().find(|p| p.id == *id).map(|p| p.team_id.as_str()),
             _ => None,
         }
@@ -1903,6 +1966,9 @@ impl App {
     /// The header's Back for an open issue (`tab_state::back_target`).
     fn back_message(&self) -> Option<Message> {
         use crate::tab_state::{back_target, Back, DetailFrom};
+        if matches!(self.view, View::DependencyMap { .. }) {
+            return Some(Message::CloseDependencyMap);
+        }
         if !matches!(self.view, View::IssueDetail(_)) {
             return None;
         }
@@ -2496,7 +2562,8 @@ impl App {
     fn open_issue_detail(&mut self, issue: &Issue) -> Task<Message> {
         // The page Back returns a team Tab to: set when leaving a page, kept
         // when going from issue A to issue B.
-        if !matches!(self.view, View::IssueDetail(_)) {
+        // Returning from the dependency map isn't leaving a page.
+        if !matches!(self.view, View::IssueDetail(_) | View::DependencyMap { .. }) {
             self.detail_from_page = Some(self.view.clone());
         }
         self.commit_issue_detail();
@@ -3089,6 +3156,16 @@ impl App {
             let conn = self.db();
             let _ = queries::update_issue_queued(&conn, &issue);
             self.reload_data();
+        }
+    }
+
+    /// Set (or clear) `issue_id`'s parent, persisting and enqueueing a push.
+    /// A validation failure shows as an error toast and writes nothing.
+    fn set_parent(&mut self, issue_id: &str, parent_id: Option<&str>) {
+        let result = queries::set_issue_parent_queued(&self.db(), issue_id, parent_id);
+        match result {
+            Ok(_) => self.reload_data(),
+            Err(e) => self.push_toast(e.to_string(), ToastKind::Error, false),
         }
     }
 
@@ -3950,6 +4027,10 @@ impl App {
                     }
                 }
                 if self.modal == Modal::IssuePicker
+                    && self
+                        .issue_picker
+                        .as_ref()
+                        .is_some_and(|p| p.mode == issue_picker::PickerMode::Dependency)
                     && key == keyboard::Key::Named(keyboard::key::Named::Tab)
                 {
                     return self.update(Message::CycleDependencyKind(!modifiers.shift()));
@@ -3971,6 +4052,13 @@ impl App {
                     if let Some(msg) = keys::handle_inbox_key(&key, modifiers) {
                         return self.update(msg);
                     }
+                }
+                // Escape on the dependency map returns to its issue.
+                if matches!(self.view, View::DependencyMap { .. })
+                    && !modal_open
+                    && key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                {
+                    return self.update(Message::CloseDependencyMap);
                 }
                 if matches!(self.view, View::IssueDetail(_)) && !modal_open {
                     let editing_description =
@@ -5526,8 +5614,41 @@ impl App {
                     picker.query = query;
                 }
             }
+            Message::OpenParentPicker => {
+                self.issue_picker = Some(issue_picker::IssuePickerState::hierarchy(
+                    issue_picker::PickerMode::Parent,
+                ));
+                self.modal = Modal::IssuePicker;
+            }
+            Message::OpenChildPicker => {
+                self.issue_picker = Some(issue_picker::IssuePickerState::hierarchy(
+                    issue_picker::PickerMode::Child,
+                ));
+                self.modal = Modal::IssuePicker;
+            }
+            Message::RemoveParent => {
+                if let Some(id) = self.issue_detail.as_ref().map(|d| d.issue_id.clone()) {
+                    self.set_parent(&id, None);
+                }
+            }
+            Message::DetachSubIssue(child_id) => {
+                self.body_hover.event(crate::hover_card::Event::Clicked);
+                self.set_parent(&child_id, None);
+            }
             Message::DependencyPickerSelected(target_id) => {
-                self.add_dependency(&target_id);
+                let open = self.issue_detail.as_ref().map(|d| d.issue_id.clone());
+                match (self.issue_picker.as_ref().map(|p| p.mode), open) {
+                    (Some(issue_picker::PickerMode::Parent), Some(id)) => {
+                        self.set_parent(&id, Some(&target_id));
+                    }
+                    (Some(issue_picker::PickerMode::Child), Some(id)) => {
+                        self.set_parent(&target_id, Some(&id));
+                    }
+                    (Some(issue_picker::PickerMode::Dependency), _) => {
+                        self.add_dependency(&target_id);
+                    }
+                    _ => {}
+                }
                 self.issue_picker = None;
                 self.modal = Modal::None;
             }
@@ -5902,6 +6023,45 @@ impl App {
                 self.csv_import = None;
             }
 
+            Message::OpenDependencyMap(issue_id) => {
+                if matches!(self.view, View::DependencyMap { .. }) {
+                    return Task::none();
+                }
+                self.commit_issue_detail();
+                if let Some(old) = self.issue_detail.take() {
+                    self.drop_drafts(&[old.composer_files.comment_id, old.composer_files.reply_id]);
+                }
+                self.composer_focused = false;
+                self.view = View::dependency_map(issue_id);
+            }
+            Message::SetDependencyMapTab(next) => {
+                if let View::DependencyMap { ref mut tab, .. } = self.view {
+                    *tab = next;
+                }
+            }
+            Message::SetDependencyMapDepth(next) => {
+                if let View::DependencyMap { ref mut depth, .. } = self.view {
+                    *depth = next.clamp(1, MAX_DEPENDENCY_DEPTH);
+                }
+            }
+            Message::CloseDependencyMap => {
+                let View::DependencyMap { issue_id, .. } = &self.view else {
+                    return Task::none();
+                };
+                let issue = match self.issues.iter().find(|i| i.id == *issue_id).cloned() {
+                    Some(issue) => Some(issue),
+                    None => queries::get_issue(&self.db(), issue_id).ok().flatten(),
+                };
+                match issue {
+                    Some(issue) => return self.open_issue_detail(&issue),
+                    None => {
+                        if let Some(key) = self.active_tab_key().cloned() {
+                            self.view = crate::tab_state::root_view(&key);
+                        }
+                    }
+                }
+            }
+
             Message::OpenCommandPalette => {
                 // Never opens over another modal.
                 if self.modal == Modal::None {
@@ -6001,6 +6161,11 @@ impl App {
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
                     PaletteNav::AttachFiles => return self.update(Message::PickAttachmentFiles),
+                    PaletteNav::OpenDependencyMap => {
+                        if let View::IssueDetail(id) = &self.view {
+                            return self.update(Message::OpenDependencyMap(id.clone()));
+                        }
+                    }
                     PaletteNav::ToggleProjectProperties => {
                         return self.update(Message::ToggleProjectProperties)
                     }
@@ -7478,7 +7643,10 @@ impl App {
         } else {
             header::view(
             self.breadcrumb(),
-            !matches!(self.view, View::ProjectDetail(_) | View::IssueDetail(_)),
+            !matches!(
+                self.view,
+                View::ProjectDetail(_) | View::IssueDetail(_) | View::DependencyMap { .. }
+            ),
             search,
             self.search_enabled(),
             matches!(self.view, View::Board | View::MyIssues)
@@ -7628,6 +7796,13 @@ impl App {
                     }
                     // Project removed by a background sync, or state desync → fallback.
                     _ => placeholder::view("Project"),
+                }
+            }
+            View::DependencyMap { ref issue_id, tab, depth } => {
+                match self.issues.iter().find(|i| i.id == *issue_id) {
+                    Some(issue) => crate::views::dependency_map::view(issue, tab, depth),
+                    // Issue removed by a background sync, or state desync → fallback.
+                    None => placeholder::view("Dependency map"),
                 }
             }
             View::IssueDetail(ref issue_id) => {
@@ -8064,6 +8239,27 @@ impl App {
                     let mut excluded: HashSet<&str> =
                         existing.iter().map(|l| l.issue_id.as_str()).collect();
                     excluded.insert(detail.issue_id.as_str());
+                    if picker.mode != issue_picker::PickerMode::Dependency {
+                        // Hierarchy modes offer only the spec's candidates.
+                        let open = self.issues.iter().find(|i| i.id == detail.issue_id);
+                        let hierarchy = crate::hierarchy::Hierarchy::new(&self.issues, &self.lanes);
+                        let ok: HashSet<&str> = match open {
+                            Some(open) if picker.mode == issue_picker::PickerMode::Parent => {
+                                hierarchy.parent_candidates(open)
+                            }
+                            Some(open) => hierarchy.child_candidates(open),
+                            None => Vec::new(),
+                        }
+                        .into_iter()
+                        .map(|i| i.id.as_str())
+                        .collect();
+                        excluded = self
+                            .issues
+                            .iter()
+                            .map(|i| i.id.as_str())
+                            .filter(|id| !ok.contains(id))
+                            .collect();
+                    }
                     let modal =
                         issue_picker::view(picker, &self.issues, self.selected_team(), &excluded);
                     iced::widget::stack![base, modal].into()
@@ -8186,6 +8382,19 @@ fn breadcrumb(
             } else {
                 crumbs.push(Crumb::plain("Issues"));
             }
+        }
+        View::DependencyMap { issue_id, tab, .. } => {
+            if let Some(issue) = issues.iter().find(|i| i.id == *issue_id) {
+                let number = issue.team_number.unwrap_or(0);
+                crumbs.push(Crumb::new(
+                    match team {
+                        Some(t) => format!("{}-{number}", t.identifier),
+                        None => format!("#{number}"),
+                    },
+                    Some(Message::CloseDependencyMap),
+                ));
+            }
+            crumbs.push(Crumb::plain(tab.label()));
         }
         View::MyIssues | View::Inbox | View::Dashboard(_) => {}
     }
@@ -8657,6 +8866,18 @@ mod tests {
         assert_eq!(crumbs(View::Board), ["JAIT", "Issues"]);
         assert_eq!(crumbs(View::Roadmap), ["JAIT", "Roadmap"]);
         assert_eq!(crumbs(View::IssueDetail("i1".into())), ["JAIT", "JAIT-184"]);
+        assert_eq!(
+            crumbs(View::dependency_map("i1")),
+            ["JAIT", "JAIT-184", "Dependencies"]
+        );
+        assert_eq!(
+            crumbs(View::DependencyMap {
+                issue_id: "i1".into(),
+                tab: DependencyMapTab::Hierarchy,
+                depth: 3,
+            }),
+            ["JAIT", "JAIT-184", "Hierarchy"]
+        );
         assert_eq!(crumbs(View::MyIssues), ["My Issues"]);
         assert_eq!(crumbs(View::Inbox), ["Inbox"]);
         // Missing project falls back to the list crumb rather than a blank.
