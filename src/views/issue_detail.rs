@@ -9,17 +9,18 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::attachments::Attachment;
 use crate::files::images::ImageStore;
 use crate::db::activity::{self, ActivityItem, ItemOrigin, TimelineItem};
-use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, Team};
+use crate::db::models::{Comment, Issue, Lane, Member, Project, Team};
 use crate::db::queries::{DependencyGroups, DependencyLink};
 use crate::mentions::{EditorTarget, Reference, SuggestState};
 use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::body::BodyCtx;
-use crate::views::issue_form::LaneOption;
+use crate::views::dropdown::dropdown;
 use crate::views::lane_icon;
+use crate::views::property_picker::{self, Field, PickerState};
 use crate::views::projects::MemberOption;
 use crate::views::util::{
     relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_menu_style,
-    sidebar_panel, sidebar_pick_list_style, with_heading, SIDEBAR_CONTROL_PADDING,
+    sidebar_panel, sidebar_pick_list_style, with_heading, SIDEBAR_CONTROL_PADDING, SIDEBAR_WIDTH,
 };
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
@@ -49,6 +50,20 @@ pub struct IssueDetailState {
     pub suggest: Option<SuggestState>,
     /// Files staged on the new-comment composer.
     pub composer_files: ComposerFiles,
+    /// The buffered fields as last loaded or committed. Only fields that differ
+    /// from this are written on commit, so an untouched buffer never pushes a
+    /// stale copy over a newer pulled value.
+    pub loaded: IssueFields,
+}
+
+/// The buffered issue fields in the form a commit writes them. `estimate` is
+/// the trimmed text; it is parsed only when it was edited.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueFields {
+    pub title: String,
+    pub description: Option<String>,
+    pub due_date: Option<String>,
+    pub estimate: String,
 }
 
 /// Files staged on a comment composer (issue or project detail). They are
@@ -73,6 +88,12 @@ impl Default for ComposerFiles {
 
 impl IssueDetailState {
     pub fn from_issue(issue: &Issue) -> Self {
+        let mut state = Self::buffers_for(issue);
+        state.loaded = state.fields();
+        state
+    }
+
+    fn buffers_for(issue: &Issue) -> Self {
         let body = issue.description.clone().unwrap_or_default();
         Self {
             issue_id: issue.id.clone(),
@@ -96,34 +117,82 @@ impl IssueDetailState {
             reply_composer: text_editor::Content::new(),
             suggest: None,
             composer_files: ComposerFiles::default(),
+            loaded: IssueFields::default(),
         }
     }
 
     pub fn description_text(&self) -> String {
         self.description.text()
     }
-}
 
-/// Project pick_list option; the leading `{ id: None }` entry is "No project".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectOption {
-    pub id: Option<String>,
-    pub name: String,
-}
+    /// The buffers as a commit would write them.
+    pub fn fields(&self) -> IssueFields {
+        let body = self.description_text();
+        let due = self.due_date.trim();
+        IssueFields {
+            title: self.title.trim().to_string(),
+            description: (!body.trim().is_empty()).then(|| body.trim_end().to_string()),
+            due_date: (!due.is_empty()).then(|| due.to_string()),
+            estimate: self.estimate.trim().to_string(),
+        }
+    }
 
-impl std::fmt::Display for ProjectOption {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
+    pub fn is_dirty(&self) -> bool {
+        self.fields() != self.loaded
+    }
+
+    /// Write only the fields edited since load onto `issue` (the fresh DB
+    /// row). Returns whether anything changed, or the estimate parse error.
+    pub fn apply_edits(&self, issue: &mut Issue) -> Result<bool, String> {
+        let now = self.fields();
+        let was = &self.loaded;
+        let mut changed = false;
+        if now.estimate != was.estimate {
+            issue.estimate = if now.estimate.is_empty() {
+                None
+            } else {
+                Some(now.estimate.parse::<f64>().map_err(|_| "Estimate must be a number".to_string())?)
+            };
+            changed = true;
+        }
+        if now.title != was.title {
+            issue.title = now.title;
+            changed = true;
+        }
+        if now.description != was.description {
+            issue.description = now.description;
+            changed = true;
+        }
+        if now.due_date != was.due_date {
+            issue.due_date = now.due_date;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    /// Record the buffers as committed.
+    pub fn mark_committed(&mut self) {
+        self.loaded = self.fields();
+    }
+
+    /// Take `issue`'s values into the buffers when they hold no unsaved edits
+    /// and `issue` differs from what was loaded (e.g. a pull brought a newer
+    /// copy). Composers and drafts are kept.
+    pub fn refresh_from(&mut self, issue: &Issue) {
+        if self.is_dirty() {
+            return;
+        }
+        let fresh = Self::from_issue(issue);
+        if fresh.loaded == self.loaded {
+            return;
+        }
+        self.title = fresh.title;
+        self.description = fresh.description;
+        self.due_date = fresh.due_date;
+        self.estimate = fresh.estimate;
+        self.loaded = fresh.loaded;
     }
 }
-
-const PRIORITIES: [Priority; 5] = [
-    Priority::Urgent,
-    Priority::High,
-    Priority::Medium,
-    Priority::Low,
-    Priority::None,
-];
 
 pub fn view<'a>(
     issue: &'a Issue,
@@ -148,6 +217,7 @@ pub fn view<'a>(
     my_member_ids: &[String],
     host: &'a str,
     pending_paths: &'a crate::views::body::PendingInlineMap,
+    picker: Option<&'a PickerState>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -249,32 +319,12 @@ pub fn view<'a>(
         .push(sections);
 
     // ---- Right sidebar: properties ----
-    let lane_options: Vec<LaneOption> = lanes
-        .iter()
-        .map(|l| LaneOption {
-            id: l.id.clone(),
-            name: l.name.clone(),
-        })
-        .collect();
-    let selected_lane = lane_options.iter().find(|l| l.id == issue.lane_id).cloned();
-    let selected_icon = lanes
-        .iter()
-        .find(|l| l.id == issue.lane_id)
-        .map(|l| crate::lane_icon::icon_for(l.category.as_deref()));
-
-    let project_options: Vec<ProjectOption> = std::iter::once(ProjectOption {
-        id: None,
-        name: "No project".to_string(),
-    })
-    .chain(projects.iter().map(|p| ProjectOption {
-        id: Some(p.id.clone()),
-        name: p.name.clone(),
-    }))
-    .collect();
-    let selected_project = project_options
-        .iter()
-        .find(|o| o.id == issue.project_id)
-        .cloned();
+    let lane_name = lanes.iter().find(|l| l.id == issue.lane_id).map(|l| l.name.clone());
+    let project_label = issue
+        .project_id
+        .as_ref()
+        .and_then(|id| projects.iter().find(|p| &p.id == id))
+        .map(|p| p.name.clone());
 
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
         id: None,
@@ -304,35 +354,15 @@ pub fn view<'a>(
         .width(Length::Fill)
         .push(sidebar_heading("Properties"))
         .push_maybe(parent.map(|p| sidebar_field("Parent", parent_link(p, team))))
-        .push(sidebar_field(
-            "Status",
-            row![]
-                .spacing(space::S2)
-                .align_y(Alignment::Center)
-                .push_maybe(selected_icon.map(lane_icon::view))
-                .push(
-                    pick_list(lane_options, selected_lane, |o: LaneOption| {
-                        Message::IssueDetailStatusChanged(o.id)
-                    })
-                    .width(Length::Fill)
-                    .text_size(type_scale::SM)
-                    .padding(SIDEBAR_CONTROL_PADDING)
-                    .style(sidebar_pick_list_style)
-                    .menu_style(sidebar_menu_style),
-                ),
-        ))
+        .push(sidebar_field("Status", sidebar_select(Field::Status, lane_name, "No status", picker)))
         .push(sidebar_field(
             "Priority",
-            pick_list(
-                PRIORITIES.as_slice(),
-                Some(issue.priority_enum()),
-                Message::IssueDetailPriorityChanged,
-            )
-            .width(Length::Fill)
-            .text_size(type_scale::SM)
-            .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style)
-            .menu_style(sidebar_menu_style),
+            sidebar_select(
+                Field::Priority,
+                Some(issue.priority_enum().to_string()),
+                "No priority",
+                picker,
+            ),
         ))
         .push(sidebar_field(
             "Assignee",
@@ -370,18 +400,21 @@ pub fn view<'a>(
                 .size(type_scale::SM)
                 .style(sidebar_input_style),
         ))
-        .push(sidebar_field(
-            "Project",
-            pick_list(project_options, selected_project, |o: ProjectOption| {
-                Message::IssueDetailProjectChanged(o.id)
-            })
-            .width(Length::Fill)
-            .text_size(type_scale::SM)
-            .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style)
-            .menu_style(sidebar_menu_style),
-        ))
-        .push(sidebar_field("Labels", placeholder_value()))
+        .push(sidebar_field("Project", {
+            let select = sidebar_select(Field::Project, project_label, "No project", picker);
+            // Like the web's sidebar pill: a project card while one is set.
+            match &issue.project_id {
+                Some(id) => crate::views::row_hover::row_hover(
+                    select,
+                    crate::body_hover::Anchor::Project(id.clone()),
+                    Message::RowHover,
+                )
+                .dismiss_on_press()
+                .into(),
+                None => select,
+            }
+        }))
+        .push(sidebar_field("Labels", sidebar_select(Field::Labels, None, "—", picker)))
         .push(dependency_block(DepKind::Blocking, &deps.blocking))
         .push(dependency_block(DepKind::BlockedBy, &deps.blocked_by))
         .push_maybe(optional_dependency_block(DepKind::Related, &deps.related))
@@ -551,6 +584,56 @@ fn sub_issue_row<'a>(
     .padding([space::S1_5, space::S2])
     .width(Length::Fill)
     .style(button::text)
+    .into()
+}
+
+/// Width of a sidebar control: the panel minus its padding.
+const SIDEBAR_CONTROL_WIDTH: f32 = SIDEBAR_WIDTH - 2.0 * space::S6;
+
+/// A sidebar property control (Rails' `issue_sidebar` toggle button) with its
+/// dropdown open below it while `picker` is open on `field`. A click toggles
+/// it; `s` / `p` / `j` / `l` open it too.
+fn sidebar_select<'a>(
+    field: Field,
+    value: Option<String>,
+    empty: &'static str,
+    picker: Option<&'a PickerState>,
+) -> Element<'a, Message> {
+    let open = picker.filter(|p| p.field == field);
+    let label = match value {
+        Some(v) => text(v).size(type_scale::SM).color(t::text_body()),
+        None => text(empty).size(type_scale::SM).color(t::text_muted()),
+    };
+    let is_open = open.is_some();
+    let anchor = button(
+        row![]
+            .align_y(Alignment::Center)
+            .push(label.width(Length::Fill))
+            .push(text("▾").size(type_scale::SM).color(t::text_muted())),
+    )
+    .on_press(Message::OpenPropertyPicker(field))
+    .width(Length::Fill)
+    .padding(SIDEBAR_CONTROL_PADDING)
+    .style(move |_: &Theme, status| button::Style {
+        background: Some(t::bg_secondary().into()),
+        text_color: t::text_body(),
+        border: Border {
+            color: if is_open || matches!(status, button::Status::Hovered) {
+                t::text_muted()
+            } else {
+                t::border()
+            },
+            width: 1.0,
+            radius: radius::MD.into(),
+        },
+        ..Default::default()
+    });
+    dropdown(
+        anchor,
+        open.map(property_picker::sidebar_menu),
+        SIDEBAR_CONTROL_WIDTH,
+        Message::CloseModal,
+    )
     .into()
 }
 
@@ -1421,6 +1504,74 @@ fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input:
         placeholder: t::text_muted(),
         value: t::text_strong(),
         selection: t::accent(),
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    fn issue(desc: &str) -> Issue {
+        Issue {
+            id: "i1".into(),
+            title: "Title".into(),
+            description: Some(desc.into()),
+            priority: 0,
+            team_number: Some(1),
+            due_date: None,
+            estimate: Some(2.0),
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
+            lane_id: "l".into(),
+            team_id: "t".into(),
+            project_id: None,
+            parent_issue_id: None,
+            assignee_id: None,
+            creator_id: None,
+            remote_id: Some(1),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_untouched_buffer_writes_nothing() {
+        let state = IssueDetailState::from_issue(&issue("old"));
+        assert!(!state.is_dirty());
+        let mut fresh = issue("new from rails");
+        assert_eq!(state.apply_edits(&mut fresh), Ok(false));
+        assert_eq!(fresh.description.as_deref(), Some("new from rails"));
+    }
+
+    #[test]
+    fn only_edited_fields_are_written() {
+        let mut state = IssueDetailState::from_issue(&issue("old"));
+        state.estimate = "3.5".into();
+        let mut fresh = issue("new from rails");
+        assert_eq!(state.apply_edits(&mut fresh), Ok(true));
+        assert_eq!(fresh.estimate, Some(3.5));
+        assert_eq!(fresh.description.as_deref(), Some("new from rails"));
+    }
+
+    #[test]
+    fn a_bad_estimate_is_an_error() {
+        let mut state = IssueDetailState::from_issue(&issue("old"));
+        state.estimate = "lots".into();
+        assert!(state.apply_edits(&mut issue("old")).is_err());
+    }
+
+    #[test]
+    fn refresh_takes_pulled_values_only_when_clean() {
+        let mut clean = IssueDetailState::from_issue(&issue("old"));
+        clean.refresh_from(&issue("new"));
+        assert_eq!(clean.fields().description.as_deref(), Some("new"));
+
+        let mut dirty = IssueDetailState::from_issue(&issue("old"));
+        dirty.title = "Edited".into();
+        dirty.refresh_from(&issue("new"));
+        assert_eq!(dirty.fields().description.as_deref(), Some("old"));
+        assert_eq!(dirty.title, "Edited");
     }
 }
 

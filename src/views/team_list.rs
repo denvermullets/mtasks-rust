@@ -9,6 +9,7 @@ use crate::db::home_page::HomePage;
 use crate::db::models::Team;
 use crate::db::sidebar_layout::StoredSidebar;
 use crate::db::saved_views::SavedView;
+use crate::fonts;
 use crate::sidebar_layout::{sidebar_layout, SectionKind};
 use crate::theme as t;
 use crate::views::truncated::truncated;
@@ -36,9 +37,18 @@ pub struct SidebarState<'a> {
     pub sidebar: Option<&'a StoredSidebar>,
 }
 
-/// What a row shows for its team's open Terminals: nothing at zero.
-pub fn open_terminals_label(count: usize) -> Option<String> {
-    (count > 0).then(|| format!("\u{2328} {count}"))
+/// What a row shows for its team's open Terminals: nothing at zero, else the
+/// ⌨ glyph (in the symbol font) and the count (in the UI font).
+fn open_terminals_badge<'a>(count: usize) -> Option<Element<'a, Message>> {
+    (count > 0).then(|| {
+        row![
+            text("\u{2328}").size(11).font(fonts::SYMBOL).color(t::text_muted()),
+            text(count.to_string()).size(11).color(t::text_muted()),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .into()
+    })
 }
 
 pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
@@ -233,6 +243,7 @@ fn team_block<'a>(
             "\u{25B8}" // ▸
         })
         .size(10)
+        .font(fonts::SYMBOL)
         .color(t::text_muted());
 
         let identifier_badge = container(text(&team.identifier).size(11).color(if is_selected {
@@ -262,9 +273,7 @@ fn team_block<'a>(
             .push_maybe(show_admin.then(admin_badge))
             .push_maybe(is_home_team(home, team).then(home_marker))
             .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())))
-            .push_maybe(open_terminals_label(open_terminals.get(&team.id).copied().unwrap_or(0)).map(
-                |label| text(label).size(11).color(t::text_muted()),
-            ));
+            .push_maybe(open_terminals_badge(open_terminals.get(&team.id).copied().unwrap_or(0)));
 
         // The chevron alone collapses or expands; the rest of the row expands
         // the team and focuses (or opens) its Tab.
@@ -288,7 +297,7 @@ fn team_block<'a>(
                     .align_y(iced::Alignment::Center)
                     .push(header_button)
                     .push(
-                        button(text("\u{22EF}").size(14).color(if menu_open {
+                        button(text("\u{22EF}").size(14).font(fonts::SYMBOL).color(if menu_open {
                             t::text_primary()
                         } else {
                             t::text_muted()
@@ -403,6 +412,7 @@ fn group_header<'a>(
     let label = row![
         text(if collapsed { "\u{203A}" } else { "\u{2304}" }) // › / ⌄
             .size(13)
+            .font(fonts::SYMBOL)
             .color(t::text_muted()),
         text(name.to_string()).size(13).color(t::text_muted()),
     ]
@@ -458,7 +468,7 @@ pub fn is_home_view(home: Option<&HomePage>, view: &SavedView) -> bool {
 
 /// A muted glyph-only sidebar button; disabled when `msg` is `None`.
 fn icon_btn<'a>(glyph: &'static str, size: u16, padding: [u16; 2], msg: Option<Message>) -> Element<'a, Message> {
-    button(text(glyph).size(size).color(t::text_muted()))
+    button(text(glyph).size(size).font(fonts::SYMBOL).color(t::text_muted()))
         .on_press_maybe(msg)
         .padding(padding)
         .style(|_theme: &Theme, _status| button::Style {
@@ -475,7 +485,7 @@ fn admin_badge<'a>() -> Element<'a, Message> {
 
 /// The small home glyph shown next to the Home page's row.
 fn home_marker<'a>() -> Element<'a, Message> {
-    text("\u{2302}").size(12).color(t::accent()).into() // ⌂
+    text("\u{2302}").size(12).font(fonts::SYMBOL).color(t::accent()).into() // ⌂
 }
 
 /// Issue export isn't offered to users yet.
@@ -746,11 +756,11 @@ mod tests {
 
 #[cfg(test)]
 mod terminal_count_tests {
-    use super::open_terminals_label;
+    use super::open_terminals_badge;
 
     #[test]
     fn the_open_count_is_hidden_at_zero_and_shown_otherwise() {
-        assert_eq!(open_terminals_label(0), None);
-        assert_eq!(open_terminals_label(3).as_deref(), Some("\u{2328} 3"));
+        assert!(open_terminals_badge(0).is_none());
+        assert!(open_terminals_badge(3).is_some());
     }
 }

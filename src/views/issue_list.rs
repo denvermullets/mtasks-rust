@@ -163,7 +163,7 @@ pub fn view<'a>(
                     row![]
                         .spacing(8)
                         .align_y(Alignment::Center)
-                        .push(text(marker).size(12).color(t::text_muted()))
+                        .push(text(marker).size(12).font(fonts::SYMBOL).color(t::text_muted()))
                         .push_maybe(col.lane_icon.map(lane_icon::view))
                         .push(text(col.title.clone()).size(14).color(t::text_primary()))
                         .push(

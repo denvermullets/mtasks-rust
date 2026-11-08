@@ -17,7 +17,7 @@
 
 use iced::Rectangle;
 
-use crate::db::models::{Issue, Lane, Member, Priority, Project, Team};
+use crate::db::models::{Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::hover_card::{Effect, Event, HoverCard};
 use crate::lane_icon::{icon_for, LaneIcon};
 use crate::mentions::LinkTarget;
@@ -29,6 +29,8 @@ pub enum Anchor {
     Issue(String),
     /// Mention text including the `@`.
     Mention(String),
+    /// Local project UUID.
+    Project(String),
 }
 
 impl Anchor {
@@ -111,6 +113,25 @@ impl BodyHover {
 pub enum CardContent {
     Issue(IssueCard),
     Member(MemberCard),
+    Project(ProjectCard),
+}
+
+/// The fields of a project card (the web's `projects/_hover_card`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectCard {
+    pub name: String,
+    /// `None` when Rails sent no status; drawn as "No status".
+    pub status: Option<ProjectStatus>,
+    /// Plain-text start of the description; `None` when empty.
+    pub excerpt: Option<String>,
+    pub completed: i64,
+    pub total: i64,
+    /// Server-computed, clamped to 0..=100.
+    pub percent: i64,
+    /// The lead's name; `None` when unset or not in the records.
+    pub lead: Option<String>,
+    /// `Jul 6`; `None` when unset or unparseable.
+    pub due: Option<String>,
 }
 
 /// The fields of a mention card.
@@ -255,6 +276,24 @@ pub fn content_for(anchor: &Anchor, records: &Records) -> Option<CardContent> {
                 open_issues: open_issue_count(member, issues),
             }))
         }
+        Anchor::Project(id) => {
+            let project = projects.iter().find(|p| p.id == *id)?;
+            let lead = project
+                .lead_id
+                .as_ref()
+                .and_then(|id| members.iter().find(|m| m.id == *id))
+                .map(|m| m.name.clone());
+            Some(CardContent::Project(ProjectCard {
+                name: project.name.clone(),
+                status: project.status,
+                excerpt: excerpt(project.description.as_deref()),
+                completed: project.completed_issues_count,
+                total: project.total_issues_count,
+                percent: project.progress_percentage.clamp(0, 100),
+                lead,
+                due: project.due_date.as_deref().and_then(due_label),
+            }))
+        }
     }
 }
 
@@ -303,6 +342,45 @@ mod tests {
 
     fn issue_anchor(id: &str) -> Option<Anchor> {
         Some(Anchor::Issue(id.into()))
+    }
+
+    fn project_with_lead(lead: Option<&str>) -> Project {
+        Project {
+            id: "p1".into(),
+            remote_id: None,
+            team_id: "t".into(),
+            name: "Roadmap".into(),
+            description: Some("**Ship** it".into()),
+            status: Some(ProjectStatus::Started),
+            priority: 0,
+            lead_id: lead.map(Into::into),
+            start_date: None,
+            due_date: Some("2026-07-06".into()),
+            roadmap_commitment: None,
+            velocity_score: 0,
+            completed_issues_count: 3,
+            total_issues_count: 4,
+            progress_percentage: 75,
+            behind_schedule: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn project_card_reads_project_and_lead() {
+        let projects = [project_with_lead(Some("m1"))];
+        let records = Records { projects: &projects, ..Default::default() };
+        let Some(CardContent::Project(card)) = content_for(&Anchor::Project("p1".into()), &records) else {
+            panic!("card expected")
+        };
+        assert_eq!(card.name, "Roadmap");
+        assert_eq!(card.status, Some(ProjectStatus::Started));
+        assert_eq!(card.excerpt.as_deref(), Some("Ship it"));
+        assert_eq!((card.completed, card.total, card.percent), (3, 4, 75));
+        assert_eq!(card.due.as_deref(), Some("Jul 6"));
+        assert_eq!(card.lead, None, "lead not in the records");
+        assert!(content_for(&Anchor::Project("nope".into()), &records).is_none());
     }
 
     #[test]

@@ -110,6 +110,11 @@ pub const FONT_BYTES: [&[u8]; 32] = [
     include_bytes!("../assets/fonts/AtkinsonHyperlegibleMono-BoldItalic.ttf"),
 ];
 
+/// Font for glyph-only text (chevrons, ⌨, ⋯, ⌂, ✎, ✕). Most bundled UI fonts
+/// lack these, and Iced's fallback doesn't reliably find a face that has them,
+/// so they render as tofu. Menlo ships with macOS and covers them all.
+pub const SYMBOL: Font = Font::with_name("Menlo");
+
 fn lookup(key: &str) -> &'static FontDef {
     FONTS.iter().find(|f| f.key == key).unwrap_or(&FONTS[0]) // unknown -> Inter
 }

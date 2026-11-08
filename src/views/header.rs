@@ -12,6 +12,62 @@ pub fn search_input_id() -> text_input::Id {
     text_input::Id::new("header-search")
 }
 
+/// One breadcrumb segment. `on_press` navigates to that level; the last
+/// crumb (the current page) is never clickable.
+#[derive(Debug, Clone)]
+pub struct Crumb {
+    pub label: String,
+    pub on_press: Option<Message>,
+}
+
+impl Crumb {
+    pub fn new(label: impl Into<String>, on_press: Option<Message>) -> Self {
+        Self { label: label.into(), on_press }
+    }
+
+    pub fn plain(label: impl Into<String>) -> Self {
+        Self::new(label, None)
+    }
+}
+
+/// The crumb trail: `›`-separated segments, the last in `current`, the rest
+/// in `parent`. Parents with a target are text buttons that brighten on hover.
+fn crumb_trail<'a>(
+    mut trail: iced::widget::Row<'a, Message>,
+    crumbs: Vec<Crumb>,
+    size: f32,
+    parent: iced::Color,
+    current: iced::Color,
+) -> iced::widget::Row<'a, Message> {
+    let last = crumbs.len().saturating_sub(1);
+    for (i, crumb) in crumbs.into_iter().enumerate() {
+        if i > 0 {
+            trail = trail.push(text("\u{203A}").size(size).color(t::text_muted())); // ›
+        }
+        trail = match crumb.on_press.filter(|_| i != last) {
+            Some(msg) => trail.push(
+                button(text(crumb.label).size(size))
+                    .on_press(msg)
+                    .padding(0)
+                    .style(move |theme: &Theme, status| {
+                        let mut style = button::text(theme, status);
+                        style.text_color = match status {
+                            button::Status::Hovered | button::Status::Pressed => current,
+                            _ => parent,
+                        };
+                        style
+                    }),
+            ),
+            None => trail.push(
+                text(crumb.label)
+                    .size(size)
+                    .color(if i == last { current } else { parent }),
+            ),
+        };
+    }
+    trail
+}
+
 /// Whether `project` matches `needle` by name.
 pub fn project_matches(project: &Project, needle: &str) -> bool {
     needle.is_empty() || project.name.to_lowercase().contains(needle)
@@ -91,18 +147,16 @@ pub fn titlebar<'a>(title: String) -> Element<'a, Message> {
 /// The dashboard's top bar (web `h-14 bg-menu border-b`): breadcrumb on the
 /// left, the dashboard's menu on the right.
 pub fn dashboard_bar<'a>(
-    crumbs: Vec<String>,
+    crumbs: Vec<Crumb>,
     menu: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut trail = row![].spacing(t::space::S4).align_y(Alignment::Center);
-    let last = crumbs.len().saturating_sub(1);
-    for (i, crumb) in crumbs.into_iter().enumerate() {
-        if i > 0 {
-            trail = trail.push(text("\u{203A}").size(t::type_scale::SM).color(t::text_muted()));
-        }
-        let color = if i == last { t::text_primary() } else { t::text_muted() };
-        trail = trail.push(text(crumb).size(t::type_scale::SM).color(color));
-    }
+    let trail = crumb_trail(
+        row![].spacing(t::space::S4).align_y(Alignment::Center),
+        crumbs,
+        t::type_scale::SM,
+        t::text_muted(),
+        t::text_primary(),
+    );
     let bar = container(
         row![]
             .align_y(Alignment::Center)
@@ -131,9 +185,9 @@ pub fn dashboard_bar<'a>(
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
 /// is `Some(active_filter_count)` on the board, where Display and Filter apply,
 /// and `None` elsewhere (the buttons are disabled). `show_controls` false drops
-/// Search, Filter, Display and "+ New" entirely (project detail).
+/// Search, Filter, Display and "+ New" entirely (project and issue detail).
 pub fn view<'a>(
-    crumbs: Vec<String>,
+    crumbs: Vec<Crumb>,
     show_controls: bool,
     query: &'a str,
     search_enabled: bool,
@@ -142,27 +196,16 @@ pub fn view<'a>(
     back: Option<Message>,
     view_actions: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut trail = row![].spacing(8).align_y(Alignment::Center);
+    let mut row_trail = row![].spacing(8).align_y(Alignment::Center);
     if let Some(msg) = back {
-        trail = trail.push(
+        row_trail = row_trail.push(
             button(text("\u{2039} Back").size(13))
                 .on_press(msg)
                 .padding([3, 9])
                 .style(button::secondary),
         );
     }
-    let last = crumbs.len().saturating_sub(1);
-    for (i, crumb) in crumbs.into_iter().enumerate() {
-        if i > 0 {
-            trail = trail.push(text("\u{203A}").size(14).color(t::text_muted())); // ›
-        }
-        let color = if i == last {
-            t::text_primary()
-        } else {
-            t::text_secondary()
-        };
-        trail = trail.push(text(crumb).size(14).color(color));
-    }
+    let trail = crumb_trail(row_trail, crumbs, 14.0, t::text_secondary(), t::text_primary());
 
     let mut search = text_input(if search_enabled { "Search…" } else { "" }, query)
         .id(search_input_id())

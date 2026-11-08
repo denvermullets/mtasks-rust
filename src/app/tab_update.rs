@@ -702,7 +702,11 @@ impl App {
             ),
             _ => (false, 0),
         };
-        let keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
+        let mut keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
+        // Sub-group rows scroll as one, in place of the per-lane scrolls.
+        if self.swimlanes_active() {
+            keys = vec![crate::scroll::ScrollKey::Board, crate::scroll::ScrollKey::Swimlanes];
+        }
         let tasks = tab_state::restore_offsets(&keys, &self.scroll_state)
             .into_iter()
             .map(|(k, offset)| k.scroll_to(offset));

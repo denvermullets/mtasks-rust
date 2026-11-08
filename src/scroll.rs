@@ -21,6 +21,14 @@ pub const BOARD_SUBHEAD_H: f32 = 24.0;
 pub const BOARD_SPACING: f32 = crate::theme::space::S1_5;
 pub const BOARD_PAD_TOP: f32 = crate::theme::space::S1;
 
+/// Board sub-group rows (Rails' swimlanes): the row header bar, the gap
+/// from it to the row's cards (`gap-2`), the gap between rows (`gap-6`) and
+/// a cell's minimum height (`min-h-[60px]`).
+pub const SWIMLANE_HEADER_H: f32 = 28.0;
+pub const SWIMLANE_HEADER_GAP: f32 = crate::theme::space::S2;
+pub const SWIMLANE_ROW_GAP: f32 = crate::theme::space::S6;
+pub const SWIMLANE_CELL_MIN_H: f32 = 60.0;
+
 /// The web board's column width (`w-80`), gap (`gap-3`) and side padding
 /// (`px-4`). Columns never shrink: a board wider than the window scrolls.
 pub const BOARD_COLUMN_W: f32 = 320.0;
@@ -51,6 +59,41 @@ pub fn offset_to_reveal(top: f32, height: f32, offset: f32, viewport: f32) -> f3
         offset
     };
     new.max(0.0)
+}
+
+#[cfg(test)]
+mod swimlane_tests {
+    use super::*;
+
+    #[test]
+    fn swimlane_span_stacks_rows_and_cards() {
+        let rows = [
+            SwimlaneRow { collapsed: false, cells_h: 100.0 },
+            SwimlaneRow { collapsed: true, cells_h: 60.0 },
+            SwimlaneRow { collapsed: false, cells_h: 60.0 },
+        ];
+        let first = BOARD_PAD_TOP + SWIMLANE_HEADER_H + SWIMLANE_HEADER_GAP;
+        assert_eq!(swimlane_card_span(&rows, 0, &[], 50.0), (first, 50.0));
+        assert_eq!(
+            swimlane_card_span(&rows, 0, &[40.0], 50.0).0,
+            first + 40.0 + BOARD_SPACING
+        );
+        // Row 2 skips row 1's cells (collapsed) but not its header.
+        let want = BOARD_PAD_TOP
+            + (SWIMLANE_HEADER_H + SWIMLANE_ROW_GAP + SWIMLANE_HEADER_GAP + 100.0)
+            + (SWIMLANE_HEADER_H + SWIMLANE_ROW_GAP)
+            + SWIMLANE_HEADER_H
+            + SWIMLANE_HEADER_GAP;
+        assert_eq!(swimlane_card_span(&rows, 2, &[], 50.0).0, want);
+    }
+
+    #[test]
+    fn swimlane_cells_have_a_minimum() {
+        assert_eq!(swimlane_cells_height(&[]), SWIMLANE_CELL_MIN_H);
+        assert_eq!(swimlane_cells_height(&[10.0, 90.0]), 90.0);
+        assert_eq!(swimlane_stack_height(&[10.0, 20.0]), 30.0 + BOARD_SPACING);
+        assert_eq!(swimlane_stack_height(&[]), 0.0);
+    }
 }
 
 /// One list-mode section as the layout sees it.
@@ -247,6 +290,40 @@ mod tests {
     }
 }
 
+/// Height of one swimlane cell's card stack.
+pub fn swimlane_stack_height(card_heights: &[f32]) -> f32 {
+    let n = card_heights.len();
+    card_heights.iter().sum::<f32>() + BOARD_SPACING * n.saturating_sub(1) as f32
+}
+
+/// Height of a swimlane row's cells: its tallest cell, at least the minimum.
+/// Every cell in the row renders at this height so rows line up.
+pub fn swimlane_cells_height(cell_stacks: &[f32]) -> f32 {
+    cell_stacks.iter().copied().fold(SWIMLANE_CELL_MIN_H, f32::max)
+}
+
+/// One swimlane row as the layout sees it.
+pub struct SwimlaneRow {
+    pub collapsed: bool,
+    /// From `swimlane_cells_height`.
+    pub cells_h: f32,
+}
+
+/// `(top, height)` of a card in the swimlane board's vertical scroll content:
+/// row `row`, `above` the heights of the cards above it in its cell.
+pub fn swimlane_card_span(rows: &[SwimlaneRow], row: usize, above: &[f32], height: f32) -> (f32, f32) {
+    let mut top = BOARD_PAD_TOP;
+    for r in rows.iter().take(row) {
+        top += SWIMLANE_HEADER_H + SWIMLANE_ROW_GAP;
+        if !r.collapsed {
+            top += SWIMLANE_HEADER_GAP + r.cells_h;
+        }
+    }
+    top += SWIMLANE_HEADER_H + SWIMLANE_HEADER_GAP;
+    top += above.iter().map(|h| h + BOARD_SPACING).sum::<f32>();
+    (top, height)
+}
+
 /// Names one tracked scrollable. It keys `App::scroll_state` and, through
 /// `id`, the widget, so the two cannot drift apart. Board lanes are a variant
 /// of their own rather than bare indices sharing a number space with the views.
@@ -256,6 +333,9 @@ pub enum ScrollKey {
     Lane(usize),
     /// The board's sideways scroll across its lanes.
     Board,
+    /// The board's vertical scroll when sub-grouped into rows (swimlanes),
+    /// which replaces the per-lane scrolls.
+    Swimlanes,
     IssueList,
     Dashboard,
     Inbox,
@@ -273,6 +353,7 @@ impl ScrollKey {
         match self {
             ScrollKey::Lane(i) => Id::new(format!("board-lane-{i}")),
             ScrollKey::Board => Id::new("board-columns"),
+            ScrollKey::Swimlanes => Id::new("board-swimlanes"),
             ScrollKey::IssueList => Id::new("issue-list"),
             ScrollKey::Dashboard => Id::new("dashboard-list"),
             ScrollKey::Inbox => Id::new("inbox-list"),

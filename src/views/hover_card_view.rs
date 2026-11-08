@@ -9,7 +9,7 @@ use iced::widget::{column, container, row, text};
 use iced::{alignment, Border, Element, Length, Padding, Rectangle, Size, Theme};
 
 use crate::app::Message;
-use crate::body_hover::{CardContent, IssueCard, MemberCard};
+use crate::body_hover::{CardContent, IssueCard, MemberCard, ProjectCard};
 use crate::card_placement::{self, Vertical};
 use crate::theme as t;
 
@@ -31,6 +31,7 @@ pub fn overlay<'a>(content: &CardContent, anchor: Rectangle) -> Element<'a, Mess
         let card = match &content {
             CardContent::Issue(issue) => issue_card(issue),
             CardContent::Member(member) => member_card(member),
+            CardContent::Project(project) => project_card(project),
         };
         // The card reports the pointer so moving from the anchor onto it keeps it open.
         let card = iced::widget::mouse_area(card)
@@ -73,6 +74,22 @@ fn estimated_height(content: &CardContent) -> f32 {
             }
             let rows = meta_lines(&meta_widths(issue), inner, t::space::S3);
             height += t::space::S1 + rows as f32 * xs_line + (rows - 1) as f32 * t::space::S3;
+            2.0 * t::space::S3 + height
+        }
+        CardContent::Project(project) => {
+            let inner = WIDTH - 2.0 * t::space::S3;
+            let xs_line = t::type_scale::XS * t::type_scale::LH_XS;
+            // Name/status line, progress label + bar, lead/due line.
+            let mut height = t::type_scale::SM * t::type_scale::LH_SM;
+            if let Some(excerpt) = &project.excerpt {
+                let per_line = (inner / (t::type_scale::XS * GLYPH)).floor().max(1.0);
+                let n = (excerpt.chars().count() as f32 / per_line).ceil().clamp(1.0, EXCERPT_LINES);
+                height += t::space::S2 + n * xs_line;
+            }
+            height += t::space::S2 + xs_line + t::space::S1 + PROGRESS_HEIGHT;
+            if project.lead.is_some() || project.due.is_some() {
+                height += t::space::S2 + xs_line.max(16.0);
+            }
             2.0 * t::space::S3 + height
         }
         // Name, email and count: three single lines.
@@ -128,6 +145,94 @@ fn member_card<'a>(member: &MemberCard) -> Element<'a, Message> {
         .color(t::text_secondary()),
     ]
     .spacing(t::space::S1);
+    panel(body.into())
+}
+
+/// Height of the project card's progress bar (the web's `h-1.5`).
+const PROGRESS_HEIGHT: f32 = 6.0;
+
+/// The web's status label: the status, capitalized, or "No status".
+fn status_label(status: Option<crate::db::models::ProjectStatus>) -> String {
+    let Some(status) = status else { return "No status".to_string() };
+    let raw = status.as_str();
+    let mut chars = raw.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+fn project_card<'a>(project: &ProjectCard) -> Element<'a, Message> {
+    let status_color = project.status.map(t::project_status_color).unwrap_or_else(t::text_muted);
+    let top = row![
+        text("◆").size(t::type_scale::XS).color(status_color),
+        container(text(project.name.clone()).size(t::type_scale::SM).color(t::text_primary()))
+            .width(Length::Fill)
+            .max_height(t::type_scale::SM * t::type_scale::LH_SM)
+            .clip(true),
+        muted(status_label(project.status)),
+    ]
+    .spacing(t::space::S2)
+    .align_y(iced::Alignment::Center);
+
+    let mut body = column![top].spacing(t::space::S2);
+    if let Some(excerpt) = &project.excerpt {
+        body = body.push(
+            container(
+                text(excerpt.clone())
+                    .size(t::type_scale::XS)
+                    .line_height(t::type_scale::LH_XS)
+                    .color(t::text_muted()),
+            )
+            .max_height(t::type_scale::XS * t::type_scale::LH_XS * EXCERPT_LINES)
+            .clip(true),
+        );
+    }
+
+    let pct = project.percent.clamp(0, 100) as u16;
+    let bar = row![]
+        .height(Length::Fixed(PROGRESS_HEIGHT))
+        .push_maybe((pct > 0).then(|| {
+            container(text(""))
+                .width(Length::FillPortion(pct))
+                .height(Length::Fixed(PROGRESS_HEIGHT))
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(t::accent())),
+                    border: Border { radius: t::radius::FULL.into(), ..Default::default() },
+                    ..Default::default()
+                })
+        }))
+        .push_maybe((pct < 100).then(|| {
+            container(text("")).width(Length::FillPortion(100 - pct)).height(Length::Fixed(PROGRESS_HEIGHT))
+        }));
+    let bar = container(bar).width(Length::Fill).clip(true).style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::border())),
+        border: Border { radius: t::radius::FULL.into(), ..Default::default() },
+        ..Default::default()
+    });
+    let progress = column![
+        row![
+            muted("Progress"),
+            iced::widget::horizontal_space(),
+            muted(format!("{}/{} · {}%", project.completed, project.total, project.percent)),
+        ],
+        bar,
+    ]
+    .spacing(t::space::S1);
+    body = body.push(progress);
+
+    let mut facts = Vec::new();
+    if let Some(name) = &project.lead {
+        facts.push(fact(vec![initials_badge(name), muted(name.clone())]));
+    }
+    if let Some(due) = &project.due {
+        facts.push(fact(vec![muted("◷"), muted(format!("Due {due}"))]));
+    }
+    if !facts.is_empty() {
+        body = body.push(
+            iced::widget::Row::with_children(facts)
+                .spacing(t::space::S3)
+                .align_y(iced::Alignment::Center)
+                .wrap(),
+        );
+    }
     panel(body.into())
 }
 
@@ -242,6 +347,14 @@ mod tests {
 
     fn height(card: IssueCard) -> f32 {
         estimated_height(&CardContent::Issue(card))
+    }
+
+    #[test]
+    fn status_labels_match_the_web() {
+        use crate::db::models::ProjectStatus;
+        assert_eq!(status_label(Some(ProjectStatus::Started)), "Started");
+        assert_eq!(status_label(Some(ProjectStatus::Cancelled)), "Cancelled");
+        assert_eq!(status_label(None), "No status");
     }
 
     #[test]

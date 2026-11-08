@@ -153,10 +153,7 @@ pub enum Message {
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
     CommitIssueDetail,
-    // Issue detail — live-apply sidebar pick_lists
-    IssueDetailStatusChanged(String),
-    IssueDetailPriorityChanged(Priority),
-    IssueDetailProjectChanged(Option<String>),
+    // Issue detail — live-apply sidebar assignee pick_list
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
 
@@ -387,7 +384,10 @@ pub enum Message {
     ToggleSection(String),
     /// Collapse/expand a dashboard group (its local id) on the open dashboard.
     ToggleDashboardGroup(String),
-    /// List mode `c`: collapse/expand the focused section.
+    /// Board sub-group row (swimlane) with this title: collapse/expand it
+    /// (row header click).
+    ToggleSwimlane(String),
+    /// `C`: collapse/expand the focused list section, or the focused board row.
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
     Scrolled(ScrollKey, f32, f32),
@@ -397,6 +397,7 @@ pub enum Message {
     SetCompletedFilter(display::CompletedFilter),
     ToggleShowSubIssues,
     ToggleShowEmptyGroups,
+    ToggleShowEmptyRows,
     ToggleCardProperty(CardProperty),
     ToggleFilter(FilterField, String),
     ClearFilters,
@@ -464,6 +465,8 @@ pub enum Message {
     OpenProjectDetail(String),
     /// Change the table sort key; re-selecting the active key flips direction.
     ProjectSortChanged(ProjectSort),
+    /// Change how a project page's Issues list is sorted.
+    ProjectIssueSortChanged(display::ProjectIssueSort),
     /// Toggle the "Hide completed" filter.
     ToggleHideCompletedProjects,
 
@@ -947,7 +950,8 @@ pub struct App {
     focused_issue: usize,
     /// Board card or list row under the pointer.
     hovered_card: Option<HoveredCard>,
-    /// List-mode sections (by title) whose rows are hidden.
+    /// List-mode sections (by title) whose rows are hidden, plus board
+    /// sub-group rows flipped from their default (see `swimlane_key`).
     collapsed_sections: HashSet<String>,
     /// Last reported (offset, viewport size) per scrollable. Drives
     /// scroll-to-focus.
@@ -963,6 +967,8 @@ pub struct App {
     /// Projects table sort key + direction (session-only).
     project_sort: ProjectSort,
     project_sort_dir: SortDir,
+    /// Project page Issues list sort (session-only; Rails defaults to ID).
+    project_issue_sort: display::ProjectIssueSort,
     /// "Hide completed" filter for the Projects table; defaults on, matching Rails.
     hide_completed_projects: bool,
     /// Header search text and the view it was typed on. The filter only applies
@@ -1170,6 +1176,7 @@ impl App {
         self.reload_dashboard_config(&conn);
         self.reload_recurring(&conn);
         self.reload_detail_origin(&conn);
+        self.refresh_detail_buffers(&conn);
         self.refresh_open_view();
 
         // Filters hold per-team ids; drop the ones this data doesn't contain
@@ -1345,6 +1352,21 @@ impl App {
 
     /// Re-read the selected team's Recurring issue rows from the mirror.
     /// Refresh the open issue detail's "From recurring issue" title.
+    /// Bring the open detail's text buffers up to date with the DB (a pull may
+    /// have changed them) unless they hold unsaved edits.
+    fn refresh_detail_buffers(&mut self, conn: &rusqlite::Connection) {
+        if let Some(d) = self.issue_detail.as_mut() {
+            if let Ok(Some(issue)) = queries::get_issue(conn, &d.issue_id) {
+                d.refresh_from(&issue);
+            }
+        }
+        if let Some(d) = self.project_detail.as_mut() {
+            if let Ok(Some(project)) = queries::get_project(conn, &d.project_id) {
+                d.refresh_from(&project);
+            }
+        }
+    }
+
     fn reload_detail_origin(&mut self, conn: &rusqlite::Connection) {
         self.detail_origin = match &self.view {
             View::IssueDetail(id) => crate::db::recurring_issues::origin_title(conn, id),
@@ -1832,7 +1854,7 @@ impl App {
     }
     // --- end active board state ----------------------------------------
 
-    fn breadcrumb(&self) -> Vec<String> {
+    fn breadcrumb(&self) -> Vec<header::Crumb> {
         let mut crumbs = breadcrumb(
             &self.view,
             self.selected_team(),
@@ -1841,19 +1863,19 @@ impl App {
         );
         if let View::Dashboard(id) = &self.view {
             if let Some(d) = self.dashboards.iter().find(|d| d.id == *id) {
-                crumbs.push(d.name.clone());
+                crumbs.push(header::Crumb::plain(d.name.clone()));
             }
         }
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
-            crumbs.insert(0, "My Issues".into());
+            crumbs.insert(0, header::Crumb::new("My Issues", Some(Message::BackToMyIssues)));
         }
         if let (Some(o), View::IssueDetail(_)) = (&self.detail_from_dashboard, &self.view) {
             if let Some(d) = self.dashboards.iter().find(|d| d.id == *o) {
-                crumbs.insert(0, d.name.clone());
+                crumbs.insert(0, header::Crumb::new(d.name.clone(), Some(Message::BackToDashboard)));
             }
         }
         if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
-            crumbs.insert(0, "Inbox".into());
+            crumbs.insert(0, header::Crumb::new("Inbox", Some(Message::BackToInbox)));
         }
         if let (Some(v), View::Board) = (&self.open_view, &self.view) {
             // The view's name replaces the "Issues" crumb.
@@ -1864,7 +1886,7 @@ impl App {
                     labels: &self.labels,
                     projects: &self.projects,
                 };
-                *last = if v.is_modified(&mirror) {
+                last.label = if v.is_modified(&mirror) {
                     format!("{} (Modified)", v.name)
                 } else {
                     v.name.clone()
@@ -2008,7 +2030,7 @@ impl App {
         };
         let mut filters = self.board_filters().clone();
         filters.projects.clear();
-        display::visible_from(
+        let mut out = display::visible_from(
             self.issues
                 .iter()
                 .filter(|i| i.project_id.as_deref() == Some(project_id)),
@@ -2016,7 +2038,10 @@ impl App {
             self.board_display(),
             &filters,
             needle,
-        )
+        );
+        // The project page has its own sort (Rails' chips), not the board's.
+        display::sort_project_issues(&mut out, self.project_issue_sort, &self.lanes);
+        out
     }
 
     /// Issues in the focused column, in on-screen order (sub-groups flattened).
@@ -2033,6 +2058,63 @@ impl App {
     /// dashboard (always a list of groups).
     fn list_nav_active(&self) -> bool {
         matches!(self.view, View::Dashboard(_)) || self.board_display().view_mode == ViewMode::List
+    }
+
+    /// Whether the board draws sub-group rows (swimlanes): board mode on a
+    /// board view with a sub-group set.
+    fn swimlanes_active(&self) -> bool {
+        matches!(self.view, View::Board | View::MyIssues)
+            && self.board_display().view_mode == ViewMode::Board
+            && self.board_display().sub_group != SubGroup::None
+    }
+
+    /// Collapsed flag per board row of `columns`. Empty rows start collapsed;
+    /// a row whose title is toggled in `collapsed_sections` flips that.
+    fn swimlane_collapsed(&self, columns: &[display::Column<'_>]) -> Vec<bool> {
+        display::board_rows(columns)
+            .iter()
+            .map(|r| {
+                let toggled = self.collapsed_sections.contains(&swimlane_key(&r.title));
+                display::board_row_collapsed(r, toggled)
+            })
+            .collect()
+    }
+
+    /// Board j/k/h/l with sub-group rows: walk on-screen cards, skipping
+    /// collapsed rows, and keep the row when changing column.
+    fn swimlane_nav(&mut self, message: &Message) {
+        let next = {
+            let columns = self.board_columns();
+            let collapsed = self.swimlane_collapsed(&columns);
+            let Some(col) = columns.get(self.focused_lane) else {
+                return;
+            };
+            match message {
+                Message::FocusNextIssue | Message::FocusPrevIssue => {
+                    let forward = matches!(message, Message::FocusNextIssue);
+                    let issue = display::swimlane_step(
+                        &col.sections,
+                        &collapsed,
+                        self.focused_issue,
+                        forward,
+                    );
+                    (self.focused_lane, issue)
+                }
+                _ => {
+                    let target = if matches!(message, Message::FocusNextLane) {
+                        self.focused_lane + 1
+                    } else {
+                        self.focused_lane.wrapping_sub(1)
+                    };
+                    let Some(next) = columns.get(target) else {
+                        return;
+                    };
+                    let row = display::swimlane_row_of(&col.sections, self.focused_issue);
+                    (target, display::swimlane_enter(&next.sections, &collapsed, row))
+                }
+            }
+        };
+        (self.focused_lane, self.focused_issue) = next;
     }
 
     /// Per-section counts for list-mode navigation: collapsed sections count
@@ -2134,6 +2216,7 @@ impl App {
             return Task::none();
         }
         let list = self.board_display().view_mode == ViewMode::List;
+        let swimlanes = self.swimlanes_active();
         let (key, top, height) = {
             let columns = self.board_columns();
             let Some(col) = columns.get(self.focused_lane) else {
@@ -2153,6 +2236,27 @@ impl App {
                     self.focused_issue,
                 );
                 (ScrollKey::IssueList, top, h)
+            } else if swimlanes {
+                let collapsed = self.swimlane_collapsed(&columns);
+                let data = board::CardData {
+                    teams: &self.teams,
+                    lanes: &self.lanes,
+                    members: &self.members,
+                    projects: &self.projects,
+                    issue_labels: &self.issue_labels,
+                    display: self.board_display(),
+                    hovered: None,
+                };
+                let Some((top, h)) = board::swimlane_focused_span(
+                    &columns,
+                    &collapsed,
+                    &data,
+                    self.focused_lane,
+                    self.focused_issue,
+                ) else {
+                    return Task::none();
+                };
+                (ScrollKey::Swimlanes, top, h)
             } else {
                 let data = board::CardData {
                     teams: &self.teams,
@@ -2212,6 +2316,16 @@ impl App {
             .collect();
         (self.focused_lane, self.focused_issue) =
             clamped_focus(&counts, self.focused_lane, self.focused_issue);
+        // Sub-group rows: a focus left inside a collapsed row moves to a
+        // card that is on screen.
+        if self.swimlanes_active() {
+            let columns = self.board_columns();
+            let collapsed = self.swimlane_collapsed(&columns);
+            if let Some(col) = columns.get(self.focused_lane) {
+                self.focused_issue =
+                    display::swimlane_snap(&col.sections, &collapsed, self.focused_issue);
+            }
+        }
     }
 
     /// Persist the display/filter settings and re-validate board focus.
@@ -2954,7 +3068,8 @@ impl App {
             // Rebuild so the new label is listed (checked), keeping the anchor.
             if let Some(issue) = self.issues.iter().find(|i| i.id == issue_id).cloned() {
                 if let Modal::PropertyPicker(ref old) = self.modal {
-                    let state = self.property_picker_state(&issue, old.field, old.anchor);
+                    let mut state = self.property_picker_state(&issue, old.field, old.anchor);
+                    state.in_sidebar = old.in_sidebar;
                     self.modal = Modal::PropertyPicker(state);
                 }
             }
@@ -3084,51 +3199,37 @@ impl App {
         if !matches!(self.view, View::IssueDetail(_)) {
             return;
         }
+        let conn = self.db();
         let Some(detail) = self.issue_detail.as_mut() else {
             return;
         };
 
+        // Untouched buffers write nothing: they may be older than a pulled copy.
+        if !detail.is_dirty() {
+            return;
+        }
         if detail.title.trim().is_empty() {
             detail.error = Some("Title can't be blank".into());
             return;
         }
-        let estimate = if detail.estimate.trim().is_empty() {
-            None
-        } else {
-            match detail.estimate.trim().parse::<f64>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    detail.error = Some("Estimate must be a number".into());
-                    return;
-                }
+
+        let Ok(Some(mut issue)) = queries::get_issue(&conn, &detail.issue_id) else {
+            return;
+        };
+        match detail.apply_edits(&mut issue) {
+            Err(e) => {
+                detail.error = Some(e);
+                return;
             }
-        };
-        detail.error = None;
-
-        let id = detail.issue_id.clone();
-        let title = detail.title.trim().to_string();
-        let due_date = if detail.due_date.trim().is_empty() {
-            None
-        } else {
-            Some(detail.due_date.trim().to_string())
-        };
-        let body = detail.description_text();
-        let description = if body.trim().is_empty() {
-            None
-        } else {
-            Some(body.trim_end().to_string())
-        };
-
-        if let Some(mut issue) = self.issues.iter().find(|i| i.id == id).cloned() {
-            issue.title = title;
-            issue.description = description;
-            issue.estimate = estimate;
-            issue.due_date = due_date;
-            issue.updated_at = crate::db::now_iso();
-            let conn = self.db();
-            let _ = queries::update_issue_queued(&conn, &issue);
-            self.reload_data();
+            Ok(false) => return,
+            Ok(true) => {}
         }
+        detail.error = None;
+        detail.mark_committed();
+        issue.updated_at = crate::db::now_iso();
+        let _ = queries::update_issue_queued(&conn, &issue);
+        drop(conn);
+        self.reload_data();
     }
 
     /// Switch the right pane to the detail view for `project`, flushing any open
@@ -3208,46 +3309,33 @@ impl App {
         if !matches!(self.view, View::ProjectDetail(_)) {
             return;
         }
+        let conn = self.db();
         let Some(detail) = self.project_detail.as_mut() else {
             return;
         };
+        // Untouched buffers write nothing: they may be older than a pulled copy.
+        if !detail.is_dirty() {
+            return;
+        }
         if detail.name.trim().is_empty() {
             detail.error = Some("Name can't be blank".into());
             return;
         }
         detail.error = None;
 
-        let id = detail.project_id.clone();
-        let name = detail.name.trim().to_string();
-        let start_date = if detail.start_date.trim().is_empty() {
-            None
-        } else {
-            Some(detail.start_date.trim().to_string())
+        let Ok(Some(mut project)) = queries::get_project(&conn, &detail.project_id) else {
+            return;
         };
-        let due_date = if detail.due_date.trim().is_empty() {
-            None
-        } else {
-            Some(detail.due_date.trim().to_string())
-        };
-        let body = detail.description_text();
-        let description = if body.trim().is_empty() {
-            None
-        } else {
-            Some(body.trim_end().to_string())
-        };
-
-        let conn = self.db();
-        if let Ok(Some(mut project)) = queries::get_project(&conn, &id) {
-            project.name = name;
-            project.description = description;
-            project.start_date = start_date;
-            project.due_date = due_date;
-            project.updated_at = crate::db::now_iso();
-            let _ = queries::update_project(&conn, &project);
-            let payload = serde_json::to_string(&project).ok();
-            self.enqueue_sync("project", &project.id, "update", payload.as_deref());
-            self.reload_data();
+        if !detail.apply_edits(&mut project) {
+            return;
         }
+        detail.mark_committed();
+        project.updated_at = crate::db::now_iso();
+        let _ = queries::update_project(&conn, &project);
+        drop(conn);
+        let payload = serde_json::to_string(&project).ok();
+        self.enqueue_sync("project", &project.id, "update", payload.as_deref());
+        self.reload_data();
     }
 }
 
@@ -3347,6 +3435,7 @@ impl App {
             project_detail: None,
             project_sort: ProjectSort::Created,
             project_sort_dir: SortDir::Asc,
+            project_issue_sort: display::ProjectIssueSort::default(),
             hide_completed_projects: true,
             search_query: String::new(),
             search_view: View::Board,
@@ -5327,15 +5416,6 @@ impl App {
             }
 
             // --- Issue detail: live-apply pick_lists ---
-            Message::IssueDetailStatusChanged(lane_id) => {
-                self.apply_issue_update(|i| i.lane_id = lane_id);
-            }
-            Message::IssueDetailPriorityChanged(p) => {
-                self.apply_issue_update(|i| i.priority = p.to_i32());
-            }
-            Message::IssueDetailProjectChanged(pid) => {
-                self.apply_issue_update(|i| i.project_id = pid);
-            }
             Message::IssueDetailAssigneeChanged(member_id) => {
                 self.apply_issue_update(|i| i.assignee_id = member_id);
             }
@@ -5512,7 +5592,7 @@ impl App {
                 // Lanes are only columns when grouped by status.
                 if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
-                        "Moving between lanes needs Display > Group by: Status",
+                        "Moving between lanes needs Display > Columns: Status",
                         ToastKind::Info,
                         false,
                     );
@@ -5540,7 +5620,7 @@ impl App {
                 // Lanes are only columns when grouped by status.
                 if self.board_display().group_by != GroupBy::Status {
                     self.push_toast(
-                        "Moving between lanes needs Display > Group by: Status",
+                        "Moving between lanes needs Display > Columns: Status",
                         ToastKind::Info,
                         false,
                     );
@@ -5574,6 +5654,15 @@ impl App {
                 }
             }
 
+            Message::FocusNextIssue
+            | Message::FocusPrevIssue
+            | Message::FocusNextLane
+            | Message::FocusPrevLane
+                if !self.list_nav_active() && self.swimlanes_active() =>
+            {
+                self.swimlane_nav(&message);
+                return self.scroll_to_focus();
+            }
             Message::FocusNextIssue | Message::FocusPrevIssue
                 if self.list_nav_active() =>
             {
@@ -5673,6 +5762,13 @@ impl App {
                     self.collapsed_sections.insert(title);
                 }
             }
+            Message::ToggleSwimlane(title) => {
+                let key = swimlane_key(&title);
+                if !self.collapsed_sections.remove(&key) {
+                    self.collapsed_sections.insert(key);
+                }
+                self.clamp_focus();
+            }
             Message::ToggleDashboardGroup(group_id) => {
                 if let View::Dashboard(did) = self.view.clone() {
                     crate::views::dashboard::toggle_group(
@@ -5690,6 +5786,19 @@ impl App {
                     .map(|g| g.group.id.clone());
                 if let Some(gid) = gid {
                     return self.update(Message::ToggleDashboardGroup(gid));
+                }
+            }
+            Message::ToggleFocusedSection if self.swimlanes_active() => {
+                let title = {
+                    let columns = self.board_columns();
+                    columns.get(self.focused_lane).and_then(|c| {
+                        display::swimlane_row_of(&c.sections, self.focused_issue)
+                            .map(|r| c.sections[r].title.clone())
+                    })
+                };
+                if let Some(title) = title {
+                    let _ = self.update(Message::ToggleSwimlane(title));
+                    return self.scroll_to_focus();
                 }
             }
             Message::ToggleFocusedSection => {
@@ -5743,6 +5852,11 @@ impl App {
             Message::ToggleShowEmptyGroups => {
                 let d = self.board_display_mut();
                 d.show_empty_groups = !d.show_empty_groups;
+                self.persist_display();
+            }
+            Message::ToggleShowEmptyRows => {
+                let d = self.board_display_mut();
+                d.show_empty_rows = !d.show_empty_rows;
                 self.persist_display();
             }
             Message::ToggleCardProperty(p) => {
@@ -5810,12 +5924,21 @@ impl App {
                 }
             }
             Message::OpenPropertyPicker(field) => {
+                // The issue sidebar's toggle button: a second click closes it.
+                if let Modal::PropertyPicker(ref open) = self.modal {
+                    if open.in_sidebar && open.field == field {
+                        self.modal = Modal::None;
+                    }
+                    return Task::none();
+                }
                 if self.modal != Modal::None {
                     return Task::none();
                 }
                 if let Some((issue, anchor)) = self.key_target() {
                     let issue = issue.clone();
-                    let state = self.property_picker_state(&issue, field, anchor);
+                    let mut state = self.property_picker_state(&issue, field, anchor);
+                    // The issue page opens the sidebar field's own dropdown, as Rails does.
+                    state.in_sidebar = matches!(self.view, View::IssueDetail(_));
                     let focus = state.has_search();
                     self.modal = Modal::PropertyPicker(state);
                     if focus {
@@ -6720,6 +6843,9 @@ impl App {
                     self.project_sort_dir = SortDir::Asc;
                 }
             }
+            Message::ProjectIssueSortChanged(sort) => {
+                self.project_issue_sort = sort;
+            }
             Message::ToggleHideCompletedProjects => {
                 self.hide_completed_projects = !self.hide_completed_projects;
             }
@@ -7259,6 +7385,12 @@ impl App {
                     .ok()
                     .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
             }
+            crate::body_hover::Anchor::Project(id) => {
+                let conn = self.db();
+                crate::db::queries::project_card_records(&conn, id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }
             // A mention resolves on the body's team, whichever team is
             // selected: that team's members and issues, read once as the
             // card opens.
@@ -7336,7 +7468,7 @@ impl App {
         } else {
             header::view(
             self.breadcrumb(),
-            !matches!(self.view, View::ProjectDetail(_)),
+            !matches!(self.view, View::ProjectDetail(_) | View::IssueDetail(_)),
             search,
             self.search_enabled(),
             matches!(self.view, View::Board | View::MyIssues)
@@ -7404,6 +7536,7 @@ impl App {
                     display: self.board_display(),
                     hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
                 },
+                &self.swimlane_collapsed(&columns),
                 self.focused_lane,
                 self.focused_issue,
             ),
@@ -7446,6 +7579,7 @@ impl App {
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
                             self.board_display(),
+                            self.project_issue_sort,
                             &self.lanes,
                             &self.teams,
                             &self.detail_comments,
@@ -7513,6 +7647,12 @@ impl App {
                             &my_member_ids,
                             &self.config.api_base_url,
                             &self.detail_pending_paths,
+                            match &self.modal {
+                                Modal::PropertyPicker(p) if p.in_sidebar && p.issue_id == issue.id => {
+                                    Some(p)
+                                }
+                                _ => None,
+                            },
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
@@ -7900,6 +8040,8 @@ impl App {
                 }
                 _ => base,
             },
+            // Drawn by the issue sidebar as the field's dropdown.
+            Modal::PropertyPicker(state) if state.in_sidebar => base,
             Modal::PropertyPicker(state) => {
                 let window = iced::Size::new(self.window_width, self.window_height);
                 iced::widget::stack![base, property_picker::view(state, window)].into()
@@ -7955,6 +8097,12 @@ impl App {
 
 /// Boot/default team selection: the first non-archived team, falling back to
 /// the first team at all so an all-archived install still shows something.
+/// `collapsed_sections` key for a board sub-group row, kept apart from the
+/// list's section titles that share the set.
+fn swimlane_key(title: &str) -> String {
+    format!("\u{1}row:{title}")
+}
+
 fn default_team_id(teams: &[Team]) -> Option<String> {
     teams
         .iter()
@@ -7964,45 +8112,49 @@ fn default_team_id(teams: &[Team]) -> Option<String> {
 }
 
 /// Header breadcrumb for `view`, e.g. ["JAIT", "Projects", "Desktop Application"]
-/// or ["JAIT", "JAIT-111"]. Team-scoped views lead with the team identifier.
+/// or ["JAIT", "JAIT-111"]. Team-scoped views lead with the team identifier,
+/// which links to the team's board; "Projects" on a project links to the list.
 fn breadcrumb(
     view: &View,
     team: Option<&Team>,
     issues: &[Issue],
     projects: &[Project],
-) -> Vec<String> {
+) -> Vec<header::Crumb> {
+    use header::Crumb;
     if *view == View::MyIssues {
-        return vec!["My Issues".into()];
+        return vec![Crumb::plain("My Issues")];
     }
     if *view == View::Inbox {
-        return vec!["Inbox".into()];
+        return vec![Crumb::plain("Inbox")];
     }
     if matches!(view, View::Dashboard(_)) {
-        return vec!["Dashboards".into()];
+        return vec![Crumb::plain("Dashboards")];
     }
-    let mut crumbs = vec![team
-        .map(|t| t.identifier.clone())
-        .unwrap_or_else(|| "JAIT".into())];
+    let team_page = |v: View| team.map(|t| Message::SelectTeamView(t.id.clone(), v));
+    let mut crumbs = vec![match team {
+        Some(t) => Crumb::new(t.identifier.clone(), team_page(View::Board)),
+        None => Crumb::plain("JAIT"),
+    }];
     match view {
-        View::Board => crumbs.push("Issues".into()),
-        View::ProjectList => crumbs.push("Projects".into()),
-        View::Roadmap => crumbs.push("Roadmap".into()),
-        View::RecurringIssues => crumbs.push("Recurring issues".into()),
+        View::Board => crumbs.push(Crumb::plain("Issues")),
+        View::ProjectList => crumbs.push(Crumb::plain("Projects")),
+        View::Roadmap => crumbs.push(Crumb::plain("Roadmap")),
+        View::RecurringIssues => crumbs.push(Crumb::plain("Recurring issues")),
         View::ProjectDetail(id) => {
-            crumbs.push("Projects".into());
+            crumbs.push(Crumb::new("Projects", team_page(View::ProjectList)));
             if let Some(p) = projects.iter().find(|p| p.id == *id) {
-                crumbs.push(p.name.clone());
+                crumbs.push(Crumb::plain(p.name.clone()));
             }
         }
         View::IssueDetail(id) => {
             if let Some(issue) = issues.iter().find(|i| i.id == *id) {
                 let number = issue.team_number.unwrap_or(0);
-                crumbs.push(match team {
+                crumbs.push(Crumb::plain(match team {
                     Some(t) => format!("{}-{number}", t.identifier),
                     None => format!("#{number}"),
-                });
+                }));
             } else {
-                crumbs.push("Issues".into());
+                crumbs.push(Crumb::plain("Issues"));
             }
         }
         View::MyIssues | View::Inbox | View::Dashboard(_) => {}
@@ -8465,7 +8617,9 @@ mod tests {
     fn breadcrumb_follows_view() {
         let jait = team("JAIT", false);
         let issues = vec![issue("i1", "Header bar", 184)];
-        let crumbs = |v: View| breadcrumb(&v, Some(&jait), &issues, &[]);
+        let crumbs = |v: View| -> Vec<String> {
+            breadcrumb(&v, Some(&jait), &issues, &[]).into_iter().map(|c| c.label).collect()
+        };
         assert_eq!(crumbs(View::Board), ["JAIT", "Issues"]);
         assert_eq!(crumbs(View::Roadmap), ["JAIT", "Roadmap"]);
         assert_eq!(crumbs(View::IssueDetail("i1".into())), ["JAIT", "JAIT-184"]);
@@ -8476,6 +8630,22 @@ mod tests {
             crumbs(View::ProjectDetail("gone".into())),
             ["JAIT", "Projects"]
         );
+    }
+
+    #[test]
+    fn breadcrumb_parents_link_up() {
+        let jait = team("JAIT", false);
+        let crumbs = breadcrumb(&View::ProjectDetail("gone".into()), Some(&jait), &[], &[]);
+        assert!(matches!(
+            &crumbs[0].on_press,
+            Some(Message::SelectTeamView(id, View::Board)) if *id == jait.id
+        ));
+        assert!(matches!(
+            &crumbs[1].on_press,
+            Some(Message::SelectTeamView(_, View::ProjectList))
+        ));
+        // Without a team there's nowhere to go.
+        assert!(breadcrumb(&View::Board, None, &[], &[])[0].on_press.is_none());
     }
 
     #[test]

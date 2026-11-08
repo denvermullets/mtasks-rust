@@ -8,7 +8,7 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::issue_detail::{new_comment_composer, push_thread, CommentAttachments, ThreadCtx};
-use crate::display::{CardProperty, DisplayOptions};
+use crate::display::{CardProperty, DisplayOptions, ProjectIssueSort};
 use crate::views::util;
 use crate::views::progress_chart;
 use crate::views::projects::MemberOption;
@@ -37,10 +37,34 @@ pub struct ProjectDetailState {
     pub suggest: Option<crate::mentions::SuggestState>,
     /// Files staged on the new-comment composer.
     pub composer_files: crate::views::issue_detail::ComposerFiles,
+    /// The buffered fields as last loaded or committed. Only fields that differ
+    /// from this are written on commit, so an untouched buffer never pushes a
+    /// stale copy over a newer pulled value.
+    pub loaded: ProjectFields,
+}
+
+/// The buffered project fields in the form a commit writes them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectFields {
+    pub name: String,
+    pub description: Option<String>,
+    pub start_date: Option<String>,
+    pub due_date: Option<String>,
+}
+
+fn non_blank(s: &str) -> Option<String> {
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 impl ProjectDetailState {
     pub fn from_project(p: &Project) -> Self {
+        let mut state = Self::buffers_for(p);
+        state.loaded = state.fields();
+        state
+    }
+
+    fn buffers_for(p: &Project) -> Self {
         let body = p.description.clone().unwrap_or_default();
         Self {
             project_id: p.id.clone(),
@@ -55,11 +79,75 @@ impl ProjectDetailState {
             reply_composer: text_editor::Content::new(),
             suggest: None,
             composer_files: Default::default(),
+            loaded: ProjectFields::default(),
         }
     }
 
     pub fn description_text(&self) -> String {
         self.description.text()
+    }
+
+    /// The buffers as a commit would write them.
+    pub fn fields(&self) -> ProjectFields {
+        let body = self.description_text();
+        ProjectFields {
+            name: self.name.trim().to_string(),
+            description: (!body.trim().is_empty()).then(|| body.trim_end().to_string()),
+            start_date: non_blank(&self.start_date),
+            due_date: non_blank(&self.due_date),
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.fields() != self.loaded
+    }
+
+    /// Write only the fields edited since load onto `project` (the fresh DB
+    /// row). Returns whether anything changed.
+    pub fn apply_edits(&self, project: &mut Project) -> bool {
+        let now = self.fields();
+        let was = &self.loaded;
+        let mut changed = false;
+        if now.name != was.name {
+            project.name = now.name;
+            changed = true;
+        }
+        if now.description != was.description {
+            project.description = now.description;
+            changed = true;
+        }
+        if now.start_date != was.start_date {
+            project.start_date = now.start_date;
+            changed = true;
+        }
+        if now.due_date != was.due_date {
+            project.due_date = now.due_date;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Record the buffers as committed.
+    pub fn mark_committed(&mut self) {
+        self.loaded = self.fields();
+    }
+
+    /// Take `p`'s values into the buffers when they hold no unsaved edits and
+    /// `p` differs from what was loaded (e.g. a pull brought a newer copy).
+    /// Composers and drafts are kept.
+    pub fn refresh_from(&mut self, p: &Project) {
+        if self.is_dirty() {
+            return;
+        }
+        let fresh = Self::from_project(p);
+        if fresh.loaded == self.loaded {
+            return;
+        }
+        self.name = fresh.name;
+        self.description = fresh.description;
+        self.start_date = fresh.start_date;
+        self.due_date = fresh.due_date;
+        self.loaded = fresh.loaded;
     }
 }
 
@@ -89,6 +177,7 @@ pub fn view<'a>(
     issues: &'a [Issue],
     visible: Vec<&'a Issue>,
     display: &'a DisplayOptions,
+    issue_sort: ProjectIssueSort,
     lanes: &'a [Lane],
     teams: &'a [Team],
     comments: &'a [Comment],
@@ -108,7 +197,7 @@ pub fn view<'a>(
     // The right-docked Terminal panel, placed between the page and Properties.
     terminal: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    // ---- Breadcrumb: "← Projects › <name>" ----
+    // ---- Breadcrumb: "← Projects › <name> [› #<rails id>]" ----
     let mut breadcrumb = row![].spacing(space::S2).align_y(Alignment::Center);
     if show_back {
         breadcrumb = breadcrumb
@@ -121,6 +210,12 @@ pub fn view<'a>(
             .push(text("›").size(type_scale::SM).color(t::text_muted()));
     }
     breadcrumb = breadcrumb.push(text(&project.name).size(type_scale::SM).color(t::text_secondary()));
+    // The Rails id (what the JAIT MCP's `get_project` takes); absent until synced.
+    if let Some(id) = project.remote_id {
+        breadcrumb = breadcrumb
+            .push(text("›").size(type_scale::SM).color(t::text_muted()))
+            .push(text(format!("#{id}")).size(type_scale::SM).color(t::text_secondary()));
+    }
 
     // ---- Header: status dot + buffered title ----
     let status_color = project
@@ -200,7 +295,7 @@ pub fn view<'a>(
                 card_layout(page_width(window_width, properties_open))
             },
             burndown(project, issues),
-            issues_section(visible, display, team, lanes, terminal_showing),
+            issues_section(visible, display, issue_sort, team, lanes, terminal_showing),
         ))
         .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
@@ -398,6 +493,79 @@ fn card_style(_theme: &Theme) -> container::Style {
 }
 
 #[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    fn project(desc: &str) -> Project {
+        Project {
+            id: "p1".into(),
+            remote_id: Some(1),
+            team_id: "t".into(),
+            name: "Proj".into(),
+            description: Some(desc.into()),
+            status: None,
+            priority: 0,
+            lead_id: None,
+            start_date: None,
+            due_date: None,
+            roadmap_commitment: None,
+            velocity_score: 0,
+            completed_issues_count: 0,
+            total_issues_count: 0,
+            progress_percentage: 0,
+            behind_schedule: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_untouched_buffer_is_clean_and_writes_nothing() {
+        let state = ProjectDetailState::from_project(&project("old"));
+        assert!(!state.is_dirty());
+        // A pull replaced the description; committing must not restore "old".
+        let mut fresh = project("new from rails");
+        assert!(!state.apply_edits(&mut fresh));
+        assert_eq!(fresh.description.as_deref(), Some("new from rails"));
+    }
+
+    #[test]
+    fn only_edited_fields_are_written() {
+        let mut state = ProjectDetailState::from_project(&project("old"));
+        state.due_date = "2026-12-01".into();
+        let mut fresh = project("new from rails");
+        assert!(state.apply_edits(&mut fresh));
+        assert_eq!(fresh.due_date.as_deref(), Some("2026-12-01"));
+        assert_eq!(fresh.description.as_deref(), Some("new from rails"));
+    }
+
+    #[test]
+    fn an_edited_description_is_written() {
+        let mut state = ProjectDetailState::from_project(&project("old"));
+        state.description = text_editor::Content::with_text("mine");
+        let mut fresh = project("old");
+        assert!(state.apply_edits(&mut fresh));
+        assert_eq!(fresh.description.as_deref(), Some("mine"));
+        state.mark_committed();
+        assert!(!state.is_dirty());
+    }
+
+    #[test]
+    fn refresh_takes_pulled_values_only_when_clean() {
+        let mut clean = ProjectDetailState::from_project(&project("old"));
+        clean.refresh_from(&project("new"));
+        assert_eq!(clean.fields().description.as_deref(), Some("new"));
+        assert!(!clean.is_dirty());
+
+        let mut dirty = ProjectDetailState::from_project(&project("old"));
+        dirty.name = "Renamed".into();
+        dirty.refresh_from(&project("new"));
+        assert_eq!(dirty.fields().description.as_deref(), Some("old"));
+        assert_eq!(dirty.name, "Renamed");
+    }
+}
+
+#[cfg(test)]
 mod layout_tests {
     use super::*;
 
@@ -533,16 +701,28 @@ fn legend_item<'a>(label: &'a str, color: iced::Color) -> Element<'a, Message> {
         .into()
 }
 
-/// This project's issues (already scoped, filtered and ordered by the caller
-/// with the board's display options), each a clickable row that opens detail.
+/// This project's issues (already scoped and filtered by the caller with the
+/// board's display options, and ordered by `sort`), each a clickable row that
+/// opens detail. The heading carries Rails' "Sort:" chips.
 fn issues_section<'a>(
     scoped: Vec<&'a Issue>,
     display: &'a DisplayOptions,
+    sort: ProjectIssueSort,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     terminal_showing: bool,
 ) -> Element<'a, Message> {
-    let heading = format!("Issues ({})", scoped.len());
+    let heading = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(
+            text(format!("Issues ({})", scoped.len()))
+                .size(type_scale::SM)
+                .font(crate::fonts::bold_active())
+                .color(t::text_secondary()),
+        )
+        .push(iced::widget::horizontal_space())
+        .push(sort_chips(sort));
     let mut col = column![].spacing(space::S1);
 
     if scoped.is_empty() {
@@ -553,11 +733,43 @@ fn issues_section<'a>(
         }
     }
 
-    container(util::with_heading(heading, col))
+    container(column![].spacing(space::S4).push(heading).push(col))
         .width(Length::Fill)
         .padding(space::S4)
         .style(card_style)
         .into()
+}
+
+/// "Sort: Newest ID Status Updated Priority", the active one boxed (as on the
+/// Projects table's sort row).
+fn sort_chips<'a>(active_sort: ProjectIssueSort) -> Element<'a, Message> {
+    let mut chips = row![]
+        .spacing(space::S1)
+        .align_y(Alignment::Center)
+        .push(text("Sort:").size(type_scale::XS).color(t::text_muted()));
+    for option in ProjectIssueSort::ALL {
+        let active = option == active_sort;
+        chips = chips.push(
+            button(text(option.label()).size(type_scale::XS).color(if active {
+                t::text_strong()
+            } else {
+                t::text_secondary()
+            }))
+            .on_press(Message::ProjectIssueSortChanged(option))
+            .padding([space::S0_5, space::S2])
+            .style(move |_theme: &Theme, _status| button::Style {
+                background: active.then_some(iced::Background::Color(t::bg_card_focused())),
+                text_color: t::text_primary(),
+                border: Border {
+                    color: if active { t::border() } else { iced::Color::TRANSPARENT },
+                    width: 1.0,
+                    radius: radius::SM.into(),
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    chips.into()
 }
 
 fn issue_row<'a>(

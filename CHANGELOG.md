@@ -1,7 +1,25 @@
-<!-- last-sha: 10f06e2a46b38714a7ef06399406e5ac1559f765 -->
-**Version: v0.3.0**
+<!-- last-sha: d19a4b2f08e6bb5d591e6b9d6e42fb327064c481 -->
+**Version: v0.6.0**
 
 # What's new
+
+## 2026-11-08
+- **Clickable breadcrumbs.** The team name at the top of a page now takes you to that team's board, "Projects" on a project page goes back to the project list, and "My Issues", "Inbox" or a dashboard name takes you back to where you opened an issue from. Project pages also show the project's ID once it has synced, and issue pages no longer show the Search, Filter, Display and "+ New" controls.
+- **Hover cards for projects.** Hover the Project field on an issue to see a card with the project's status, progress, lead, due date and the start of its description. The card gets out of the way when you click to open the dropdown.
+- **Issue page shortcuts open the sidebar.** On an issue page, `s`, `p`, `j` and `l` now open the matching dropdown in the issue's sidebar, like on the web, instead of a picker that covered the sidebar. Clicking the field again closes it.
+- **Icons display properly.** Arrows, the terminal-count badge, the "⋯" menu and other small symbols in the sidebar, board and list no longer show up as empty boxes.
+- **Smoother terminal cursor.** Moving the cursor in a terminal without typing, for example jumping by word with Option+Arrow, now shows the cursor's new position straight away.
+
+## 2026-11-07
+- **Board rows.** Pick a "Rows" sub-grouping in the Display menu to split the board into rows that run across every column, lined up so you can scan them side by side. Empty rows start collapsed (click a row to expand or collapse it), a new "Show empty rows" option keeps them visible, and arrow-key navigation skips collapsed rows.
+- **Display menu matches the web.** The Display menu now uses the same names and order as JAIT on the web: "Columns" on the board, "Grouping" in the list, and "No grouping" and "Parent issue" as options.
+- **Sort a project's issues.** The Issues card on a project page has Sort chips for Newest, ID, Status, Updated and Priority. It sorts by ID unless you pick another.
+- **Your edits stick through sync.** An open issue or project no longer overwrites newer changes from the web with stale text, and edits you're making aren't lost when a sync arrives.
+
+## 2026-11-06
+- **Drag to reorder tabs.** Drag a tab to a new spot in the tab bar; a dashed outline marks where it will land.
+- **Sidebar matches the web.** Your team groups from JAIT on the web now show in the sidebar, with teams you own and teams you've joined in their own sections, in the same order as on the web. Teams you administer carry an ADMIN badge, and collapsing a group is saved back to the web.
+- **Paste images into terminals.** Pasting while an image is on the clipboard now reaches programs that can read it, so tools like Claude Code can pull the image in.
 
 ## 2026-11-06
 - **Quick property pickers.** Hover a card or list row (or open an issue) and press `s` for status, `p` for priority, `j` for project or `l` for labels to open a searchable picker right beside it. Use ↑/↓ and Enter to choose, Escape to close; labels can be toggled several at a time, and you can create a new label straight from the search box.

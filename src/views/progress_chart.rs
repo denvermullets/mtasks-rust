@@ -284,6 +284,74 @@ fn smooth_to(b: &mut canvas::path::Builder, pts: &[(f32, f32)]) {
     }
 }
 
+/// Nearest sample index for a cursor at `px`, or `None` when the cursor is
+/// outside the plot's horizontal extent (with a little slack at the edges).
+pub fn hover_index(px: f32, pl: f32, w: f32, n: usize) -> Option<usize> {
+    if n == 0 || px < pl - 8.0 || px > pl + w + 8.0 {
+        return None;
+    }
+    if n == 1 {
+        return Some(0);
+    }
+    let f = ((px - pl) / w).clamp(0.0, 1.0) * (n - 1) as f32;
+    Some((f.round() as usize).min(n - 1))
+}
+
+/// Hover card (date + one row per series), placed right of the guide line,
+/// flipping left when it would run off the chart -- Rails' chart tooltip.
+fn draw_tooltip(
+    frame: &mut Frame,
+    bounds: Rectangle,
+    hx: f32,
+    top: f32,
+    date: NaiveDate,
+    rows: &[(Color, &str, String)],
+) {
+    let (pad, row_h, tw) = (10.0, 18.0, 150.0);
+    let th = pad * 2.0 + row_h * (rows.len() as f32 + 1.0);
+    let tx = if hx + 12.0 + tw <= bounds.width {
+        hx + 12.0
+    } else {
+        (hx - 12.0 - tw).max(0.0)
+    };
+    let ty = top;
+    let card = Path::rounded_rectangle(Point::new(tx, ty), Size::new(tw, th), 6.0.into());
+    frame.fill(&card, t::bg_menu());
+    frame.stroke(
+        &card,
+        Stroke::default().with_color(t::border()).with_width(1.0),
+    );
+    frame.fill_text(canvas::Text {
+        content: date.format("%b %-d").to_string(),
+        position: Point::new(tx + pad, ty + pad),
+        color: t::text_muted(),
+        size: 11.0.into(),
+        ..Default::default()
+    });
+    for (k, (color, label, value)) in rows.iter().enumerate() {
+        let ry = ty + pad + row_h * (k as f32 + 1.0);
+        frame.fill(
+            &Path::circle(Point::new(tx + pad + 4.0, ry + 7.0), 4.0),
+            *color,
+        );
+        frame.fill_text(canvas::Text {
+            content: label.to_string(),
+            position: Point::new(tx + pad + 14.0, ry),
+            color: t::text_secondary(),
+            size: 12.0.into(),
+            ..Default::default()
+        });
+        frame.fill_text(canvas::Text {
+            content: value.clone(),
+            position: Point::new(tx + tw - pad, ry),
+            color: t::text_strong(),
+            size: 12.0.into(),
+            horizontal_alignment: iced::alignment::Horizontal::Right,
+            ..Default::default()
+        });
+    }
+}
+
 struct ProgressChart {
     data: ChartData,
     mini: bool,
@@ -300,7 +368,7 @@ impl canvas::Program<Message> for ProgressChart {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let snaps = &self.data.snapshots;
@@ -448,6 +516,51 @@ impl canvas::Program<Message> for ProgressChart {
                     horizontal_alignment: iced::alignment::Horizontal::Center,
                     ..Default::default()
                 });
+            }
+        }
+
+        if !self.mini {
+            if let Some(p) = cursor.position_in(bounds) {
+                if let Some(i) = hover_index(p.x, pl, w, n) {
+                    let snap = &snaps[i];
+                    let expected = self.data.expected.as_ref().map(|e| e[i]);
+                    let hx = x(i);
+                    // Dashed guide at the hovered sample.
+                    frame.stroke(
+                        &Path::line(Point::new(hx, pt), Point::new(hx, base)),
+                        Stroke {
+                            line_dash: canvas::LineDash {
+                                segments: &[3.0, 3.0],
+                                offset: 0,
+                            },
+                            ..Stroke::default()
+                                .with_color(t::text_muted())
+                                .with_width(1.0)
+                        },
+                    );
+                    let mut rows: Vec<(Color, &str, String)> = Vec::new();
+                    for (color, get, _) in series {
+                        frame.fill(
+                            &Path::circle(Point::new(hx, y(get(snap) as f32)), 5.5),
+                            t::bg_primary(),
+                        );
+                        frame.fill(
+                            &Path::circle(Point::new(hx, y(get(snap) as f32)), 3.5),
+                            color,
+                        );
+                    }
+                    rows.push((t::chart_scope(), "Scope", snap.scope.to_string()));
+                    rows.push((t::chart_started(), "Started", snap.started.to_string()));
+                    rows.push((
+                        t::chart_completed(),
+                        "Completed",
+                        snap.completed.to_string(),
+                    ));
+                    if let Some(v) = expected {
+                        rows.push((t::danger(), "Expected", format!("{}", v.round() as i64)));
+                    }
+                    draw_tooltip(&mut frame, bounds, hx, pt, snap.date, &rows);
+                }
             }
         }
 
@@ -621,6 +734,15 @@ mod tests {
         assert_eq!(nice_scale(17.0), (18.0, [0.0, 6.0, 12.0, 18.0]));
         assert_eq!(nice_scale(1.0).0, 3.0);
         assert_eq!(nice_scale(100.0).0, 120.0);
+    }
+
+    #[test]
+    fn hover_index_snaps_to_nearest_sample() {
+        assert_eq!(hover_index(10.0, 32.0, 100.0, 5), None);
+        assert_eq!(hover_index(32.0, 32.0, 100.0, 5), Some(0));
+        assert_eq!(hover_index(70.0, 32.0, 100.0, 5), Some(2));
+        assert_eq!(hover_index(136.0, 32.0, 100.0, 5), Some(4));
+        assert_eq!(hover_index(50.0, 32.0, 100.0, 1), Some(0));
     }
 
     #[test]

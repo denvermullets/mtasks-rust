@@ -9,7 +9,7 @@ use iced::{Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
-use crate::display::{CardProperty, Column as BoardColumn, DisplayOptions};
+use crate::display::{self, CardProperty, Column as BoardColumn, DisplayOptions};
 use crate::scroll;
 use crate::fonts;
 use crate::theme::{self as t, radius, space, type_scale};
@@ -34,9 +34,12 @@ pub struct CardData<'a> {
 /// Render the board. Columns come from `display::build_columns`, so they may be
 /// lanes, priorities, assignees, etc.; `focused_lane` indexes `columns` and
 /// `focused_issue` is the flat index within the column (across sub-groups).
+/// With a sub-group the columns' aligned sections are drawn as rows spanning
+/// the board (Rails' swimlanes); `row_collapsed` holds one flag per row.
 pub fn view<'a>(
     columns: &[BoardColumn<'a>],
     data: CardData<'a>,
+    row_collapsed: &[bool],
     focused_lane: usize,
     focused_issue: usize,
 ) -> Element<'a, Message> {
@@ -93,6 +96,50 @@ pub fn view<'a>(
         );
     }
 
+    let rows = display::board_rows(columns);
+    let body: Element<'a, Message> = if rows.is_empty() {
+        lanes_body(columns, &data, slot_w, focused_lane, focused_issue)
+    } else {
+        swimlane_body(columns, &rows, row_collapsed, &data, slot_w, focused_lane, focused_issue)
+    };
+
+    let board = column![]
+        .push(header_row)
+        .push(body)
+        .padding(iced::Padding::ZERO.left(scroll::BOARD_PAD_X))
+        .width(Length::Fixed(scroll::board_content_width(columns.len())))
+        .height(Length::Fill);
+
+    // Built horizontal from the start: `scrollable()` validates as vertical, which
+    // rejects this `Fill`-height content before `.direction()` could apply.
+    let board = track(
+        scrollable::Scrollable::with_direction(
+            board,
+            scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
+        ),
+        ScrollKey::Board,
+    )
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    container(board)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_primary())),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Columns side by side, each scrolling on its own (no sub-group).
+fn lanes_body<'a>(
+    columns: &[BoardColumn<'a>],
+    data: &CardData<'a>,
+    slot_w: f32,
+    focused_lane: usize,
+    focused_issue: usize,
+) -> Element<'a, Message> {
     // Columns with cards
     let mut lane_columns = row![].height(Length::Fill);
 
@@ -136,7 +183,7 @@ pub fn view<'a>(
             }
             let is_focused = is_focused_lane && issue_idx == focused_issue;
             issue_cards =
-                issue_cards.push(issue_card(issue, &data, is_focused, col_idx, issue_idx));
+                issue_cards.push(issue_card(issue, data, is_focused, col_idx, issue_idx));
         }
 
         let lane_content =
@@ -145,32 +192,102 @@ pub fn view<'a>(
         lane_columns = lane_columns.push(lane_content);
     }
 
-    let board = column![]
-        .push(header_row)
-        .push(lane_columns)
-        .padding(iced::Padding::ZERO.left(scroll::BOARD_PAD_X))
-        .width(Length::Fixed(scroll::board_content_width(columns.len())))
-        .height(Length::Fill);
+    lane_columns.into()
+}
 
-    // Built horizontal from the start: `scrollable()` validates as vertical, which
-    // rejects this `Fill`-height content before `.direction()` could apply.
-    let board = track(
-        scrollable::Scrollable::with_direction(
-            board,
-            scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
-        ),
-        ScrollKey::Board,
-    )
-        .width(Length::Fill)
-        .height(Length::Fill);
+/// Sub-group rows spanning every column, scrolling together (Rails'
+/// swimlanes). Each row is a header bar (click to collapse) over one cell per
+/// column; cells in a row share the tallest cell's height so rows line up.
+/// Heights follow `scroll::swimlane_*` so scroll-to-focus can compute them.
+fn swimlane_body<'a>(
+    columns: &[BoardColumn<'a>],
+    rows: &[display::BoardRow],
+    row_collapsed: &[bool],
+    data: &CardData<'a>,
+    slot_w: f32,
+    focused_lane: usize,
+    focused_issue: usize,
+) -> Element<'a, Message> {
+    let row_w = columns.len() as f32 * slot_w - scroll::BOARD_COLUMN_GAP;
+    let mut body: Column<'_, Message> = column![]
+        .spacing(scroll::SWIMLANE_ROW_GAP)
+        .width(Length::Fixed(columns.len() as f32 * slot_w))
+        .padding(iced::Padding::ZERO.top(scroll::BOARD_PAD_TOP).bottom(space::S3));
 
-    container(board)
-        .width(Length::Fill)
+    for (r, brow) in rows.iter().enumerate() {
+        let collapsed = row_collapsed.get(r).copied().unwrap_or(false);
+        let marker = if collapsed { "▸" } else { "▾" };
+        let header = mouse_area(
+            container(
+                row![]
+                    .spacing(space::S2)
+                    .align_y(iced::Alignment::Center)
+                    .push(text(marker).size(type_scale::XS).font(fonts::SYMBOL).color(t::text_muted()))
+                    .push(
+                        text(brow.title.clone())
+                            .size(type_scale::XS)
+                            .color(t::accent()),
+                    )
+                    .push(
+                        text(format!("{}", brow.count))
+                            .size(type_scale::XS)
+                            .color(t::text_muted()),
+                    ),
+            )
+            .padding([0.0, space::S3])
+            .center_y(Length::Fixed(scroll::SWIMLANE_HEADER_H))
+            .width(Length::Fixed(row_w))
+            .clip(true)
+            // Rails' row bar is `bg-hover-highlight rounded-md`.
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::bg_card_focused())),
+                border: Border {
+                    radius: radius::MD.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )
+        .on_press(Message::ToggleSwimlane(brow.title.clone()));
+
+        let mut block: Column<'_, Message> =
+            column![].spacing(scroll::SWIMLANE_HEADER_GAP).push(header);
+        if !collapsed {
+            let stacks: Vec<f32> = columns
+                .iter()
+                .map(|c| {
+                    let heights: Vec<f32> = c
+                        .sections
+                        .get(r)
+                        .map(|s| c.issues[s.start..s.end].iter().map(|i| card_height(i, data)).collect())
+                        .unwrap_or_default();
+                    scroll::swimlane_stack_height(&heights)
+                })
+                .collect();
+            let cells_h = scroll::swimlane_cells_height(&stacks);
+            let mut cells = row![];
+            for (col_idx, col) in columns.iter().enumerate() {
+                let mut cell: Column<'_, Message> = column![]
+                    .spacing(scroll::BOARD_SPACING)
+                    .width(Length::Fixed(slot_w))
+                    .height(Length::Fixed(cells_h))
+                    .padding(iced::Padding::ZERO.right(scroll::BOARD_COLUMN_GAP));
+                if let Some(sec) = col.sections.get(r) {
+                    for issue_idx in sec.start..sec.end {
+                        let issue = col.issues[issue_idx];
+                        let focused = col_idx == focused_lane && issue_idx == focused_issue;
+                        cell = cell.push(issue_card(issue, data, focused, col_idx, issue_idx));
+                    }
+                }
+                cells = cells.push(cell);
+            }
+            block = block.push(cells);
+        }
+        body = body.push(block);
+    }
+
+    track(scrollable(body), ScrollKey::Swimlanes)
         .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_primary())),
-            ..Default::default()
-        })
         .into()
 }
 
@@ -238,6 +355,44 @@ pub fn focused_span(col: &BoardColumn<'_>, data: &CardData<'_>, issue: usize) ->
     let heights: Vec<f32> = col.issues.iter().map(|i| card_height(i, data)).collect();
     let starts: Vec<usize> = col.sections.iter().map(|s| s.start).collect();
     scroll::board_card_span(&heights, &starts, issue)
+}
+
+/// `(top, height)` of the focused card in the swimlane board's vertical
+/// scroll content, or `None` when it isn't on screen (collapsed row).
+pub fn swimlane_focused_span(
+    columns: &[BoardColumn<'_>],
+    row_collapsed: &[bool],
+    data: &CardData<'_>,
+    lane: usize,
+    issue: usize,
+) -> Option<(f32, f32)> {
+    let col = columns.get(lane)?;
+    let row = display::swimlane_row_of(&col.sections, issue)?;
+    if row_collapsed.get(row).copied().unwrap_or(false) {
+        return None;
+    }
+    let rows: Vec<scroll::SwimlaneRow> = (0..col.sections.len())
+        .map(|r| {
+            let stacks: Vec<f32> = columns
+                .iter()
+                .map(|c| {
+                    let heights: Vec<f32> = c
+                        .sections
+                        .get(r)
+                        .map(|s| c.issues[s.start..s.end].iter().map(|i| card_height(i, data)).collect())
+                        .unwrap_or_default();
+                    scroll::swimlane_stack_height(&heights)
+                })
+                .collect();
+            scroll::SwimlaneRow {
+                collapsed: row_collapsed.get(r).copied().unwrap_or(false),
+                cells_h: scroll::swimlane_cells_height(&stacks),
+            }
+        })
+        .collect();
+    let start = col.sections[row].start;
+    let above: Vec<f32> = col.issues[start..issue].iter().map(|i| card_height(i, data)).collect();
+    Some(scroll::swimlane_card_span(&rows, row, &above, card_height(col.issues[issue], data)))
 }
 
 fn issue_card<'a>(
