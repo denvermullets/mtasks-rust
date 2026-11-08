@@ -131,7 +131,7 @@ pub fn dashboard_bar<'a>(
 /// filter; `new_action` is `None` where "+ New" has no target. `board_controls`
 /// is `Some(active_filter_count)` on the board, where Display and Filter apply,
 /// and `None` elsewhere (the buttons are disabled). `show_controls` false drops
-/// Search, Filter, Display and "+ New" entirely (project detail).
+/// Search, Filter, Display and "+ New" entirely (project and issue detail).
 pub fn view<'a>(
     crumbs: Vec<String>,
     show_controls: bool,

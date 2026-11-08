@@ -7470,7 +7470,7 @@ impl App {
         } else {
             header::view(
             self.breadcrumb(),
-            !matches!(self.view, View::ProjectDetail(_)),
+            !matches!(self.view, View::ProjectDetail(_) | View::IssueDetail(_)),
             search,
             self.search_enabled(),
             matches!(self.view, View::Board | View::MyIssues)
