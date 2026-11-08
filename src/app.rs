@@ -318,6 +318,11 @@ pub enum Message {
     SetDependencyMapDepth(u8),
     /// Click on a non-focus card of the open dependency map: refocus on it.
     FocusDependencyMap(String),
+    /// Open this issue's dependency map on the Hierarchy tab (the issue
+    /// detail's "View tree →").
+    OpenHierarchyTree(String),
+    /// Expand or collapse a Hierarchy outline node (not persisted).
+    ToggleHierarchyNode(String),
     /// Leave the dependency map for its issue's detail (Back, Escape, the
     /// breadcrumb's issue crumb).
     CloseDependencyMap,
@@ -960,6 +965,8 @@ pub struct App {
     detail_deps: queries::DependencyGroups,
     /// Every dependency row, for the open dependency map (`View::DependencyMap`).
     map_deps: Vec<IssueDependency>,
+    /// Hierarchy outline nodes toggled away from their default open state.
+    map_flipped: HashSet<String>,
     /// Members of the open detail's own team: what its bodies and comments
     /// resolve mentions against. Not `members`, which is the selected team's
     /// (or every team's in My Issues). Empty outside a detail view.
@@ -3476,6 +3483,7 @@ impl App {
             issue_labels,
             detail_deps: Default::default(),
             map_deps: Vec::new(),
+            map_flipped: HashSet::new(),
             detail_members: Vec::new(),
             detail_from_my_issues: false,
             detail_from_inbox: false,
@@ -5983,8 +5991,21 @@ impl App {
                 }
                 self.composer_focused = false;
                 self.view = View::dependency_map(issue_id);
+                self.map_flipped.clear();
                 let conn = self.db();
                 self.load_detail_dependencies(&conn);
+            }
+            Message::OpenHierarchyTree(issue_id) => {
+                let task = self.update(Message::OpenDependencyMap(issue_id));
+                if let View::DependencyMap { ref mut tab, .. } = self.view {
+                    *tab = DependencyMapTab::Hierarchy;
+                }
+                return task;
+            }
+            Message::ToggleHierarchyNode(id) => {
+                if !self.map_flipped.remove(&id) {
+                    self.map_flipped.insert(id);
+                }
             }
             Message::SetDependencyMapTab(next) => {
                 if let View::DependencyMap { ref mut tab, .. } = self.view {
@@ -5995,6 +6016,7 @@ impl App {
                 if let View::DependencyMap { ref mut issue_id, .. } = self.view {
                     if *issue_id != next {
                         *issue_id = next;
+                        self.map_flipped.clear();
                         let conn = self.db();
                         self.load_detail_dependencies(&conn);
                     }
@@ -7766,6 +7788,7 @@ impl App {
                             members: &self.members,
                             issue_labels: &self.issue_labels,
                             deps: &self.map_deps,
+                            flipped: &self.map_flipped,
                         },
                     ),
                     // Issue removed by a background sync, or state desync → fallback.

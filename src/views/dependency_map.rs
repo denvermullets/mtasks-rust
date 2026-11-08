@@ -5,7 +5,7 @@
 //! The Dependencies tab (JRST-443) is the graph canvas, a depth selector and
 //! three lists. [`hierarchy_body`] (JRST-444) is still a placeholder.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{button, column, container, horizontal_space, row, scrollable};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
@@ -14,10 +14,12 @@ use crate::app::{DependencyMapTab, Message, MAX_DEPENDENCY_DEPTH};
 use crate::db::models::{Issue, IssueDependency, Label, Lane, Member, Team};
 use crate::dep_connectors::{ConnectorKind, DrawOptions, EdgeSpec};
 use crate::dep_graph::{self, IssueGraph};
+use crate::hierarchy::{Hierarchy, Tree, MAX_DEPTH};
 use crate::scroll::{track, ScrollKey};
 use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::dep_map_canvas::{self, NodeCard};
 use crate::views::text;
+use crate::views::truncated::truncated;
 
 /// Everything the map reads from the app (borrowed for one render).
 pub struct MapData<'a> {
@@ -28,6 +30,8 @@ pub struct MapData<'a> {
     pub issue_labels: &'a HashMap<String, Vec<Label>>,
     /// Every dependency row (the graph query filters by team itself).
     pub deps: &'a [IssueDependency],
+    /// Hierarchy outline nodes the user toggled away from their default.
+    pub flipped: &'a HashSet<String>,
 }
 
 pub fn view<'a>(
@@ -38,7 +42,7 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     let body = match tab {
         DependencyMapTab::Dependencies => dependencies_body(issue, depth, data),
-        DependencyMapTab::Hierarchy => hierarchy_body(issue),
+        DependencyMapTab::Hierarchy => hierarchy_body(issue, data),
     };
     let header = row![tab_switch(tab), horizontal_space()]
         .push_maybe((tab == DependencyMapTab::Dependencies).then(dep_map_canvas::legend))
@@ -436,9 +440,225 @@ fn list_card<'a>(
         .into()
 }
 
-/// REPLACE (JRST-444): the Hierarchy tab (sub-issue tree outline).
-fn hierarchy_body<'a>(_issue: &'a Issue) -> Element<'a, Message> {
-    placeholder("Hierarchy coming soon".to_string())
+/// Levels at or past this start collapsed (web `collapse_depth`).
+pub const COLLAPSE_DEPTH: usize = 3;
+
+/// One visible line of the outline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineRow {
+    pub id: String,
+    pub depth: usize,
+    pub has_children: bool,
+    pub expanded: bool,
+}
+
+/// Flatten `tree` into the rows that are showing. A node is open by default
+/// above [`COLLAPSE_DEPTH`] or on the path to `focus`; `flipped` ids are the
+/// ones the user toggled away from that default. Pure.
+pub fn outline_rows(
+    tree: &Tree,
+    focus: &str,
+    flipped: &HashSet<String>,
+) -> Vec<OutlineRow> {
+    let path: HashSet<&str> =
+        tree.ancestors.iter().map(String::as_str).chain(std::iter::once(focus)).collect();
+    let mut out = Vec::new();
+    // Explicit stack so a deep tree can't overflow; children pushed reversed.
+    let mut stack: Vec<(&str, usize)> = vec![(tree.root.as_str(), 0)];
+    while let Some((id, depth)) = stack.pop() {
+        let kids = tree.children_of(id);
+        let default_open = depth < COLLAPSE_DEPTH || path.contains(id);
+        let expanded = default_open != flipped.contains(id);
+        out.push(OutlineRow {
+            id: id.to_string(),
+            depth,
+            has_children: !kids.is_empty(),
+            expanded: expanded && !kids.is_empty(),
+        });
+        if expanded {
+            for k in kids.iter().rev() {
+                stack.push((k.as_str(), depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// Open blockers inside the tree, keyed by the blocked issue: `blocks` links
+/// whose both ends are tree nodes and whose blocker is not closed.
+pub fn tree_blockers<'a>(
+    tree: &Tree,
+    deps: &[IssueDependency],
+    by_id: &HashMap<&'a str, &'a Issue>,
+    lanes: &[Lane],
+) -> HashMap<String, Vec<&'a Issue>> {
+    let mut nodes: HashSet<&str> = HashSet::from([tree.root.as_str()]);
+    nodes.extend(tree.children.values().flatten().map(String::as_str));
+    let mut out: HashMap<String, Vec<&Issue>> = HashMap::new();
+    for d in deps.iter().filter(|d| d.kind == "blocks") {
+        if !nodes.contains(d.blocking_issue_id.as_str())
+            || !nodes.contains(d.blocked_issue_id.as_str())
+        {
+            continue;
+        }
+        if let Some(blocker) = by_id.get(d.blocking_issue_id.as_str()) {
+            if !is_closed(blocker, lanes) {
+                out.entry(d.blocked_issue_id.clone()).or_default().push(blocker);
+            }
+        }
+    }
+    out
+}
+
+/// The Hierarchy tab: the sub-issue tree this issue belongs to, as an outline.
+fn hierarchy_body<'a>(issue: &'a Issue, data: &MapData<'a>) -> Element<'a, Message> {
+    let hierarchy = Hierarchy::new(data.issues, data.lanes);
+    let Some(tree) = hierarchy.tree(&issue.id, MAX_DEPTH) else {
+        return placeholder("Issue not found".to_string());
+    };
+    if tree.ancestors.is_empty() && tree.children_of(&issue.id).is_empty() {
+        return container(
+            row![
+                text("No parent or sub-issues yet.").size(type_scale::SM).color(t::text_muted()),
+                button(
+                    text("Add sub-issues from the issue page.")
+                        .size(type_scale::SM)
+                        .color(t::text_secondary())
+                )
+                .on_press(Message::CloseDependencyMap)
+                .padding(0)
+                .style(button::text),
+            ]
+            .spacing(space::S2),
+        )
+        .center_x(Length::Fill)
+        .padding(space::S8 * 2.0)
+        .into();
+    }
+
+    let by_id: HashMap<&str, &Issue> = data.issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    let blockers = tree_blockers(&tree, data.deps, &by_id, data.lanes);
+    let mut list = column![].spacing(space::S1);
+    for r in outline_rows(&tree, &issue.id, data.flipped) {
+        if let Some(node) = by_id.get(r.id.as_str()) {
+            let kids: Vec<&Issue> = tree
+                .children_of(&r.id)
+                .iter()
+                .filter_map(|c| by_id.get(c.as_str()).copied())
+                .collect();
+            let node_blockers = blockers.get(&r.id).map(Vec::as_slice).unwrap_or(&[]);
+            list = list.push(outline_row(node, &r, &kids, node_blockers, node.id == issue.id, data));
+        }
+    }
+    let mut out = column![
+        text("The full sub-issue tree this issue belongs to, from the top-level issue down.")
+            .size(type_scale::SM)
+            .color(t::text_secondary()),
+        container(list).padding(space::S2).width(Length::Fill).style(|_: &Theme| {
+            container::Style {
+                border: Border { color: t::border(), width: 1.0, radius: radius::LG.into() },
+                ..Default::default()
+            }
+        }),
+    ]
+    .spacing(space::S3);
+    if tree.truncated {
+        out = out.push(
+            text(format!(
+                "Showing the first {MAX_DEPTH} levels. Open a deeper issue to see the rest of its tree."
+            ))
+            .size(type_scale::XS)
+            .color(t::text_muted()),
+        );
+    }
+    out.into()
+}
+
+fn outline_row<'a>(
+    node: &Issue,
+    r: &OutlineRow,
+    kids: &[&Issue],
+    blockers: &[&Issue],
+    focus: bool,
+    data: &MapData<'_>,
+) -> Element<'a, Message> {
+    let closed = is_closed(node, data.lanes);
+    let alpha = if closed { 0.6 } else { 1.0 };
+    let dim = move |c: Color| Color { a: c.a * alpha, ..c };
+    let category =
+        data.lanes.iter().find(|l| l.id == node.lane_id).and_then(|l| l.category.as_deref());
+
+    let mut line = row![
+        crate::views::lane_icon::view(crate::lane_icon::icon_for(category)),
+        text(identifier(node, data.teams))
+            .size(type_scale::XS)
+            .color(if focus { t::accent() } else { dim(t::text_muted()) }),
+        container(truncated(
+            node.title.clone(),
+            type_scale::SM,
+            if focus { t::text_primary() } else { dim(t::text_primary()) },
+        ))
+        .width(Length::Fill),
+    ]
+    .spacing(space::S2)
+    .align_y(Alignment::Center);
+    for b in blockers.iter().take(2) {
+        line = line.push(
+            row![dot(dim(t::dep_blocked_by()), 6.0), text(identifier(b, data.teams))
+                .size(type_scale::XS)
+                .color(dim(t::text_secondary()))]
+            .spacing(space::S1)
+            .align_y(Alignment::Center),
+        );
+    }
+    if !kids.is_empty() {
+        let done = kids.iter().filter(|k| is_closed(k, data.lanes)).count();
+        line = line
+            .push(text(format!("{done}/{}", kids.len())).size(type_scale::XS).color(t::text_muted()));
+    }
+    if let Some(initials) = node.assignee_id.as_ref().and_then(|a| {
+        data.members
+            .iter()
+            .find(|m| &m.id == a)
+            .map(|m| crate::views::projects::lead_initials(&m.name))
+    }) {
+        line = line.push(text(initials).size(9).color(dim(t::text_primary())));
+    }
+
+    let row_btn = button(line)
+        .on_press(Message::OpenIssueDetail(node.id.clone()))
+        .width(Length::Fill)
+        .padding([space::S1_5, space::S2])
+        .style(move |_: &Theme, status| button::Style {
+            background: (focus || matches!(status, button::Status::Hovered))
+                .then(|| iced::Background::Color(t::bg_card_focused())),
+            text_color: t::text_primary(),
+            border: Border {
+                color: if focus { t::accent() } else { Color::TRANSPARENT },
+                width: if focus { 1.0 } else { 0.0 },
+                radius: radius::MD.into(),
+            },
+            ..Default::default()
+        });
+
+    let chevron: Element<'a, Message> = if r.has_children {
+        button(text(if r.expanded { "v" } else { ">" }).size(type_scale::XS).color(t::text_muted()))
+            .on_press(Message::ToggleHierarchyNode(r.id.clone()))
+            .padding(0)
+            .width(Length::Fixed(14.0))
+            .style(button::text)
+            .into()
+    } else {
+        iced::widget::Space::with_width(Length::Fixed(14.0)).into()
+    };
+    row![
+        iced::widget::Space::with_width(Length::Fixed(r.depth as f32 * 20.0)),
+        chevron,
+        row_btn
+    ]
+    .spacing(space::S1)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn placeholder<'a>(label: String) -> Element<'a, Message> {
@@ -531,6 +751,93 @@ mod tests {
         assert!(pairs.contains(&("u1".into(), "d1".into())));
         assert!(pairs.contains(&("u1".into(), "f".into())));
         assert_eq!(pairs.len(), 4);
+    }
+
+    /// a > b > c > d > e (a chain), plus a sibling s under a.
+    fn chain_tree(ancestors: &[&str]) -> Tree {
+        let kids = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        Tree {
+            root: "a".into(),
+            ancestors: kids(ancestors),
+            children: HashMap::from([
+                ("a".to_string(), kids(&["b", "s"])),
+                ("b".to_string(), kids(&["c"])),
+                ("c".to_string(), kids(&["d"])),
+                ("d".to_string(), kids(&["e"])),
+            ]),
+            truncated: false,
+        }
+    }
+
+    fn ids(rows: &[OutlineRow]) -> Vec<&str> {
+        rows.iter().map(|r| r.id.as_str()).collect()
+    }
+
+    #[test]
+    fn levels_past_three_start_collapsed() {
+        let rows = outline_rows(&chain_tree(&[]), "a", &HashSet::new());
+        // depth 0..=2 open (a, b, c); d (depth 3) is shown but collapsed.
+        assert_eq!(ids(&rows), vec!["a", "b", "c", "d", "s"]);
+        let d = rows.iter().find(|r| r.id == "d").unwrap();
+        assert!(d.has_children && !d.expanded);
+    }
+
+    #[test]
+    fn the_path_to_the_focus_stays_open_past_depth_three() {
+        let rows = outline_rows(&chain_tree(&["a", "b", "c", "d"]), "e", &HashSet::new());
+        assert_eq!(ids(&rows), vec!["a", "b", "c", "d", "e", "s"]);
+    }
+
+    #[test]
+    fn a_toggle_flips_the_default_both_ways() {
+        let tree = chain_tree(&[]);
+        let collapsed = outline_rows(&tree, "a", &HashSet::from(["b".to_string()]));
+        assert_eq!(ids(&collapsed), vec!["a", "b", "s"]);
+        let opened = outline_rows(&tree, "a", &HashSet::from(["d".to_string()]));
+        assert_eq!(ids(&opened), vec!["a", "b", "c", "d", "e", "s"]);
+    }
+
+    #[test]
+    fn only_open_blockers_inside_the_tree_count() {
+        let tree = chain_tree(&[]);
+        let mut open = issue("s");
+        open.lane_id = "l".into();
+        let mut closed = issue("d");
+        closed.lane_id = "done".into();
+        let outside = issue("zz");
+        let by_id: HashMap<&str, &Issue> =
+            [("s", &open), ("d", &closed), ("zz", &outside)].into_iter().collect();
+        let lane = |id: &str, cat: &str| Lane {
+            id: id.into(),
+            name: id.into(),
+            color: None,
+            position: 0,
+            team_id: "t".into(),
+            remote_id: None,
+            category: Some(cat.into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let lanes = [lane("l", "started"), lane("done", "completed")];
+        let dep = |from: &str, to: &str, kind: &str| IssueDependency {
+            id: format!("{from}{to}"),
+            remote_id: None,
+            blocking_issue_id: from.into(),
+            blocked_issue_id: to.into(),
+            kind: kind.into(),
+            direction: "blocking".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let deps = [
+            dep("s", "b", "blocks"),
+            dep("d", "c", "blocks"),
+            dep("zz", "b", "blocks"),
+            dep("s", "c", "relates"),
+        ];
+        let got = tree_blockers(&tree, &deps, &by_id, &lanes);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got["b"].iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), vec!["s"]);
     }
 
     #[test]
