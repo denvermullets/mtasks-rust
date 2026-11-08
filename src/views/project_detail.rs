@@ -216,6 +216,16 @@ pub fn view<'a>(
             .push(text(format!("#{id}")).size(type_scale::SM).color(t::text_secondary()));
     }
 
+    breadcrumb = breadcrumb
+        .width(Length::Fill)
+        .push(iced::widget::horizontal_space())
+        .push(
+            button(text("Dependencies").size(type_scale::XS).color(t::accent()))
+                .on_press(Message::OpenProjectDependencyMap(project.id.clone()))
+                .padding(0)
+                .style(button::text),
+        );
+
     // ---- Header: status dot + buffered title ----
     let status_color = project
         .status
