@@ -221,6 +221,9 @@ pub struct DisplayOptions {
     /// shown (collapsed). Priority rows always all show, as in Rails.
     #[serde(default)]
     pub show_empty_rows: bool,
+    /// Board only: overlay dependency lines between cards (and show the legend).
+    #[serde(default)]
+    pub show_dependencies: bool,
     #[serde(default = "default_properties")]
     pub properties: Vec<CardProperty>,
 }
@@ -257,6 +260,7 @@ impl Default for DisplayOptions {
             show_sub_issues: true,
             show_empty_groups: false,
             show_empty_rows: false,
+            show_dependencies: false,
             properties: default_properties(),
         }
     }

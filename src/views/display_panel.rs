@@ -183,6 +183,12 @@ pub fn display_view<'a>(
                 .size(14)
                 .text_size(12),
         )
+        .push_maybe(board.then(|| {
+            checkbox("Dependencies", opts.show_dependencies)
+                .on_toggle(|_| Message::ToggleShowDependencies)
+                .size(14)
+                .text_size(12)
+        }))
         .push(heading("CARD PROPERTIES"))
         .push(props)
         .push(heading("SAVED VIEW"))
