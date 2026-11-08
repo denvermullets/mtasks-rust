@@ -446,6 +446,10 @@ impl App {
                 },
                 // A cross-team Tab has no panel to park.
                 panel: (!key_is_cross_team).then(|| self.terminals.stored_panel()),
+                map: tab_state::MapState {
+                    map_return: self.map_return.take(),
+                    flipped: std::mem::take(&mut self.map_flipped),
+                },
                 ..ParkedTab::new(view, self.selected_team_id.clone())
                     .with_comment_draft(self.view.clone(), draft)
             },
@@ -556,7 +560,7 @@ impl App {
         let restored = self.restored_pages.remove(key).filter(|_| parked.is_none());
         // A Tab restored at launch returns to its stored panel on first focus.
         let restored_panel = self.restored_panels.remove(key);
-        let (view, team, scroll_state, search, focus, collapsed, open_view, draft, detail_from, panel) = match parked {
+        let (view, team, scroll_state, search, focus, collapsed, open_view, draft, detail_from, panel, map) = match parked {
             Some(p) => (
                 p.view,
                 p.selected_team_id,
@@ -568,6 +572,7 @@ impl App {
                 p.comment_draft,
                 p.detail_from,
                 p.panel,
+                p.map,
             ),
             None => (
                 restored.as_ref().map_or_else(
@@ -592,6 +597,7 @@ impl App {
                 None,
                 DetailFrom::default(),
                 restored_panel,
+                Default::default(),
             ),
         };
         // An issue deleted while the Tab was parked: show the Tab's root page,
@@ -600,6 +606,7 @@ impl App {
             let conn = self.db();
             tab_state::resolve_parked(key, view, |id| {
                 matches!(queries::get_issue(&conn, id), Ok(Some(_)))
+                    || matches!(queries::get_project(&conn, id), Ok(Some(_)))
             })
         };
         let (detail_from, draft) = if gone {
@@ -624,6 +631,11 @@ impl App {
         (self.focused_lane, self.focused_issue) = focus;
         self.collapsed_sections = collapsed;
         self.selected_team_id = team;
+        let map = map.for_view(&view);
+        self.map_return = map.map_return;
+        self.map_flipped = map.flipped;
+        // The project map's cards are rebuilt by the reload below.
+        self.project_map = None;
         self.view = view;
         // A Tab never shown, or a cross-team one, has the default hidden panel.
         self.terminals.restore_panel(&panel.unwrap_or_default());

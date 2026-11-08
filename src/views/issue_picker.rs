@@ -14,6 +14,16 @@ use crate::theme as t;
 pub struct IssuePickerState {
     pub query: String,
     pub direction: DepDirection,
+    pub mode: PickerMode,
+}
+
+/// What selecting a row does: add a dependency link, or (hierarchy) set the
+/// open issue's parent / add the pick as a sub-issue of the open issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerMode {
+    Dependency,
+    Parent,
+    Child,
 }
 
 impl IssuePickerState {
@@ -21,6 +31,16 @@ impl IssuePickerState {
         Self {
             query: String::new(),
             direction,
+            mode: PickerMode::Dependency,
+        }
+    }
+
+    /// A single-select hierarchy picker (no link-kind chips).
+    pub fn hierarchy(mode: PickerMode) -> Self {
+        Self {
+            query: String::new(),
+            direction: DepDirection::Blocking,
+            mode,
         }
     }
 }
@@ -36,7 +56,8 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     // Kind chips: the active one is highlighted.
     let mut kinds = row![].spacing(6);
-    for kind in DepDirection::ALL {
+    let is_dep = state.mode == PickerMode::Dependency;
+    for kind in DepDirection::ALL.into_iter().filter(|_| is_dep) {
         let active = kind == state.direction;
         let chip = button(text(kind.label()).size(12))
             .padding([4, 10])
@@ -95,9 +116,19 @@ pub fn view<'a>(
     let content = column![]
         .spacing(14)
         .width(Length::Fixed(440.0))
-        .push(text("Add link").size(18).color(t::text_primary()))
-        .push(kinds)
-        .push(text("Tab / Shift+Tab to change kind").size(11).color(t::text_muted()))
+        .push(
+            text(match state.mode {
+                PickerMode::Dependency => "Add link",
+                PickerMode::Parent => "Set parent issue",
+                PickerMode::Child => "Add existing sub-issue",
+            })
+            .size(18)
+            .color(t::text_primary()),
+        )
+        .push_maybe(is_dep.then_some(kinds))
+        .push_maybe(is_dep.then(|| {
+            text("Tab / Shift+Tab to change kind").size(11).color(t::text_muted())
+        }))
         .push(
             text_input("Search issues…", &state.query)
                 .on_input(Message::DependencyPickerSearchChanged)
@@ -137,4 +168,124 @@ pub fn view<'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// Ids a hierarchy picker must not offer: everything but the spec's
+/// candidates for `open_id` (`Hierarchy::parent_candidates` for Parent,
+/// `child_candidates` for Child). Empty for the dependency picker, which
+/// has its own exclusions, and an unknown `open_id` excludes everything.
+pub fn hierarchy_excluded<'a>(
+    mode: PickerMode,
+    open_id: &str,
+    issues: &'a [Issue],
+    lanes: &[crate::db::models::Lane],
+) -> HashSet<&'a str> {
+    if mode == PickerMode::Dependency {
+        return HashSet::new();
+    }
+    let hierarchy = crate::hierarchy::Hierarchy::new(issues, lanes);
+    let ok: HashSet<&str> = match issues.iter().find(|i| i.id == open_id) {
+        Some(open) if mode == PickerMode::Parent => hierarchy.parent_candidates(open),
+        Some(open) => hierarchy.child_candidates(open),
+        None => Vec::new(),
+    }
+    .into_iter()
+    .map(|i| i.id.as_str())
+    .collect();
+    issues.iter().map(|i| i.id.as_str()).filter(|id| !ok.contains(id)).collect()
+}
+
+/// The parent change picking `picked` makes in `mode` while `open_id` is
+/// open: `(child, parent)`. Parent mode sets the open issue's parent; Child
+/// mode makes the pick a sub-issue of the open issue. `None` for the
+/// dependency picker, which adds a link instead.
+pub fn picked_parent_change<'a>(
+    mode: PickerMode,
+    open_id: &'a str,
+    picked: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    match mode {
+        PickerMode::Parent => Some((open_id, picked)),
+        PickerMode::Child => Some((picked, open_id)),
+        PickerMode::Dependency => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn iss(id: &str, team: &str, parent: Option<&str>, canceled: bool) -> Issue {
+        Issue {
+            id: id.into(),
+            title: id.into(),
+            description: None,
+            priority: 0,
+            team_number: Some(1),
+            due_date: None,
+            estimate: None,
+            started_at: None,
+            completed_at: None,
+            canceled_at: canceled.then(|| "2026-01-01T00:00:00.000Z".to_string()),
+            lane_id: "l1".into(),
+            team_id: team.into(),
+            project_id: None,
+            parent_issue_id: parent.map(String::from),
+            assignee_id: None,
+            creator_id: None,
+            remote_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// a > b > c (c is b's child, b is a's), x unrelated, y canceled, z in another team.
+    fn issues() -> Vec<Issue> {
+        vec![
+            iss("a", "t", None, false),
+            iss("b", "t", Some("a"), false),
+            iss("c", "t", Some("b"), false),
+            iss("x", "t", None, false),
+            iss("y", "t", None, true),
+            iss("z", "u", None, false),
+        ]
+    }
+
+    fn sorted(set: HashSet<&str>) -> Vec<&str> {
+        let mut v: Vec<&str> = set.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn parent_picker_hides_self_descendants_current_parent_canceled_and_other_teams() {
+        let issues = issues();
+        let ex = hierarchy_excluded(PickerMode::Parent, "b", &issues, &[]);
+        // b itself, its child c, its parent a, canceled y, other-team z.
+        assert_eq!(sorted(ex), vec!["a", "b", "c", "y", "z"]);
+    }
+
+    #[test]
+    fn child_picker_hides_self_ancestors_current_children_canceled_and_other_teams() {
+        let issues = issues();
+        let ex = hierarchy_excluded(PickerMode::Child, "b", &issues, &[]);
+        // b itself, its ancestor a, its child c, canceled y, other-team z.
+        assert_eq!(sorted(ex), vec!["a", "b", "c", "y", "z"]);
+        let ex = hierarchy_excluded(PickerMode::Child, "x", &issues, &[]);
+        assert_eq!(sorted(ex), vec!["x", "y", "z"]);
+    }
+
+    #[test]
+    fn dependency_mode_adds_no_hierarchy_exclusions_and_unknown_issue_excludes_all() {
+        let issues = issues();
+        assert!(hierarchy_excluded(PickerMode::Dependency, "b", &issues, &[]).is_empty());
+        assert_eq!(hierarchy_excluded(PickerMode::Parent, "nope", &issues, &[]).len(), issues.len());
+    }
+
+    #[test]
+    fn picking_sets_the_open_issues_parent_or_adopts_the_pick() {
+        assert_eq!(picked_parent_change(PickerMode::Parent, "open", "p"), Some(("open", "p")));
+        assert_eq!(picked_parent_change(PickerMode::Child, "open", "k"), Some(("k", "open")));
+        assert_eq!(picked_parent_change(PickerMode::Dependency, "open", "k"), None);
+    }
 }

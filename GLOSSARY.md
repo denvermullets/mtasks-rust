@@ -67,6 +67,24 @@ The frequent, cheap check for new or changed Notifications and the unread count.
 The slower cycle that pushes queued local edits and pulls changed team data (issues, projects, labels, members).
 _Avoid_: Sync lane (a Lane is a board column)
 
+### Issue relationships
+
+**Sub-issue**:
+An issue that has a parent issue. It has exactly one parent, in the same team, and sub-issues can nest to any depth. An issue can never be its own ancestor, so the parent links have no loops. A parent issue is the issue a Sub-issue hangs under.
+_Avoid_: Child task, subtask, nested issue
+
+**Hierarchy**:
+The tree of Sub-issues, read from the top-level issue (one with no parent) down through every level.
+_Avoid_: Breakdown, tree view (the Hierarchy is the data; the outline is how it is shown)
+
+**Dependency map**:
+One issue's view of what blocks it and what it blocks, followed chain by chain up and down to a chosen depth, plus the issues it relates to or duplicates. Its other tab shows the issue's Hierarchy.
+_Avoid_: Dependency graph, blocker tree
+
+**Project dependency map**:
+A project's issues laid out left to right, ranked by blockers: an issue sits to the right of everything that blocks it.
+_Avoid_: Gantt, project graph, roadmap (a team page of projects by date)
+
 ### History
 
 **Activity**:

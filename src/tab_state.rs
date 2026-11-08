@@ -63,6 +63,37 @@ pub struct DetailFrom {
     pub page: Option<View>,
 }
 
+/// Where Back from a dependency map goes when the map was opened from a
+/// board card (JRST-452) rather than from an issue detail. It lasts for the
+/// map session: refocusing the map onto another issue keeps it, and closing
+/// the map (or opening a new one) ends it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapReturn {
+    /// The board view the map was opened from.
+    pub back: View,
+}
+
+/// The per-view map state a Tab keeps while parked, so it can't leak into
+/// another Tab: the return slot and the Hierarchy outline's collapse state.
+/// `project_map` is rebuilt by every reload, so it isn't parked.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MapState {
+    pub map_return: Option<MapReturn>,
+    pub flipped: HashSet<String>,
+}
+
+impl MapState {
+    /// What survives restoring a Tab on `view`: nothing unless it is an issue
+    /// dependency map (state parked for a view that no longer shows is stale).
+    pub fn for_view(self, view: &View) -> Self {
+        if matches!(view, View::DependencyMap { .. }) {
+            self
+        } else {
+            Self::default()
+        }
+    }
+}
+
 /// Where Back from an open issue goes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Back {
@@ -122,6 +153,8 @@ pub struct ParkedTab {
     /// a Terminal restarts, keys don't. `None` for a cross-team Tab, which has
     /// no panel, and for one never shown (the default, hidden panel).
     pub panel: Option<StoredPanel>,
+    /// Map return slot and outline collapse state (see [`MapState`]).
+    pub map: MapState,
 }
 
 impl ParkedTab {
@@ -142,6 +175,7 @@ impl ParkedTab {
             open_view: None,
             detail_from: DetailFrom::default(),
             panel: None,
+            map: MapState::default(),
         }
     }
 
@@ -259,6 +293,9 @@ pub fn scroll_keys(view: &View, list_mode: bool, lanes: usize) -> Vec<ScrollKey>
         View::RecurringIssues => vec![ScrollKey::RecurringIssues],
         View::IssueDetail(_) => vec![ScrollKey::IssueDetail],
         View::ProjectDetail(_) => vec![ScrollKey::ProjectDetail],
+        View::DependencyMap { .. } => vec![ScrollKey::DependencyMap],
+        // The canvas scrolls itself and isn't tracked.
+        View::ProjectDependencyMap { .. } => vec![],
     }
 }
 
@@ -328,8 +365,11 @@ pub fn focus_team(set: &mut TabSet, team_id: &str) -> Switch {
 /// views park as that Tab's own page.
 pub fn parked_view(key: &TabKey, view: View) -> View {
     match (key, view) {
-        (_, view @ View::IssueDetail(_)) => view,
-        (TabKey::Team(_), View::ProjectDetail(_)) => View::Board,
+        (_, view) if view.issue_id().is_some() => view,
+        // Like ProjectDetail: a team Tab parks the Board, a project Tab keeps
+        // the map as its page.
+        (TabKey::Team(_), view) if view.project_id().is_some() => View::Board,
+        (TabKey::Project(_), view @ View::ProjectDependencyMap { .. }) => view,
         (TabKey::Team(_), other) => other,
         // Project and cross-team Tabs have one page of their own. Whatever
         // else the live view is parks as that page.
@@ -346,9 +386,17 @@ pub fn resolve_parked(
     view: View,
     exists: impl Fn(&str) -> bool,
 ) -> (View, bool) {
-    match view {
-        View::IssueDetail(id) if !exists(&id) => (root_view(key), true),
-        view => (view, false),
+    // `exists` answers for an issue id or a project id (a project map). Only
+    // a project's detail is left to the caller, which has its own fallback.
+    let gone = match (&view, view.issue_id(), view.project_id()) {
+        (_, Some(id), _) => !exists(id),
+        (View::ProjectDependencyMap { .. }, _, Some(id)) => !exists(id),
+        _ => false,
+    };
+    if gone {
+        (root_view(key), true)
+    } else {
+        (view, false)
     }
 }
 
@@ -1140,5 +1188,112 @@ mod tests {
         }
         assert_eq!(Page::decode(Some("hologram")), Page::Root);
         assert_eq!(Page::decode(Some("view:")), Page::Root);
+    }
+
+    fn map(tab: crate::app::DependencyMapTab, depth: u8) -> View {
+        View::DependencyMap { issue_id: "i".into(), tab, depth }
+    }
+
+    #[test]
+    fn a_dependency_map_parks_as_itself_in_every_tab_kind() {
+        use crate::app::DependencyMapTab::Hierarchy;
+        let view = map(Hierarchy, 5);
+        for key in [
+            team("a"),
+            TabKey::Project("p".into()),
+            TabKey::MyIssues,
+            TabKey::Inbox,
+            TabKey::Dashboard("d".into()),
+        ] {
+            assert_eq!(parked_view(&key, view.clone()), view);
+        }
+    }
+
+    #[test]
+    fn a_dependency_map_keeps_its_tab_and_depth_across_a_park() {
+        use crate::app::DependencyMapTab::Hierarchy;
+        let mut parked = Parked::default();
+        let view = map(Hierarchy, 5);
+        parked.save(team("a"), ParkedTab::new(parked_view(&team("a"), view.clone()), None));
+        assert_eq!(parked.take(&team("a")).unwrap().view, view);
+    }
+
+    #[test]
+    fn map_state_parks_per_tab_and_is_dropped_off_a_map_view() {
+        let state = MapState {
+            map_return: Some(MapReturn { back: View::Board }),
+            flipped: ["n".to_string()].into(),
+        };
+        let mut parked = Parked::default();
+        parked.save(
+            team("a"),
+            ParkedTab { map: state.clone(), ..ParkedTab::new(View::dependency_map("i"), None) },
+        );
+        parked.save(team("b"), ParkedTab::new(View::Board, None));
+        // Tab b never saw tab a's return slot.
+        assert_eq!(parked.take(&team("b")).unwrap().map, MapState::default());
+        let back = parked.take(&team("a")).unwrap().map;
+        assert_eq!(back, state);
+        // Still on the map: kept. On anything else: cleared.
+        assert_eq!(back.clone().for_view(&View::dependency_map("i")), state);
+        assert_eq!(back.for_view(&View::Board), MapState::default());
+    }
+
+    fn project_map(active_only: bool) -> View {
+        View::ProjectDependencyMap { project_id: "p".into(), active_only }
+    }
+
+    #[test]
+    fn a_project_map_parks_in_its_project_tab_and_as_board_in_a_team_tab() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(parked_view(&project, project_map(false)), project_map(false));
+        assert_eq!(parked_view(&team("a"), project_map(false)), View::Board);
+        assert_eq!(parked_view(&TabKey::MyIssues, project_map(true)), View::MyIssues);
+    }
+
+    #[test]
+    fn a_project_map_keeps_its_scope_across_a_park() {
+        let project = TabKey::Project("p".into());
+        let mut parked = Parked::default();
+        parked.save(project.clone(), ParkedTab::new(parked_view(&project, project_map(false)), None));
+        assert_eq!(parked.take(&project).unwrap().view, project_map(false));
+    }
+
+    #[test]
+    fn a_project_map_of_a_gone_project_falls_back_to_the_tab_root() {
+        let project = TabKey::Project("p".into());
+        assert_eq!(resolve_parked(&project, project_map(true), |_| true), (project_map(true), false));
+        assert_eq!(
+            resolve_parked(&project, project_map(true), |_| false),
+            (View::ProjectDetail("p".into()), true)
+        );
+        assert_eq!(resolve_parked(&team("a"), project_map(true), |_| false), (View::Board, true));
+    }
+
+    #[test]
+    fn a_project_map_tracks_no_scroll() {
+        assert!(scroll_keys(&project_map(true), false, 4).is_empty());
+    }
+
+    #[test]
+    fn a_dependency_map_has_its_own_scroll_key() {
+        use crate::app::DependencyMapTab::Dependencies;
+        assert_eq!(
+            scroll_keys(&map(Dependencies, 3), false, 4),
+            vec![ScrollKey::DependencyMap]
+        );
+    }
+
+    #[test]
+    fn a_dependency_map_of_a_gone_issue_falls_back_to_the_tab_root() {
+        use crate::app::DependencyMapTab::Dependencies;
+        let view = map(Dependencies, 3);
+        assert_eq!(resolve_parked(&team("a"), view.clone(), |_| true), (view.clone(), false));
+        assert_eq!(resolve_parked(&team("a"), view.clone(), |_| false), (View::Board, true));
+        let project = TabKey::Project("p".into());
+        assert_eq!(
+            resolve_parked(&project, view, |_| false),
+            (View::ProjectDetail("p".into()), true)
+        );
     }
 }

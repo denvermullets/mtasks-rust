@@ -736,6 +736,85 @@ pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> R
     Ok(())
 }
 
+/// Marker in an `issue/update` payload meaning "this edit clears the parent",
+/// so the push sends `parent_issue_id: null` (see sync/push/issue.rs).
+pub const CLEAR_PARENT_KEY: &str = "clear_parent";
+
+/// Why [`set_issue_parent_queued`] failed.
+#[derive(Debug)]
+pub enum SetParentError {
+    /// The parent breaks a Rails rule; nothing was written.
+    Invalid(crate::hierarchy::ParentError),
+    /// No such (live) issue.
+    UnknownIssue,
+    Db(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for SetParentError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+impl std::fmt::Display for SetParentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(e) => write!(f, "{e}"),
+            Self::UnknownIssue => write!(f, "Issue not found"),
+            Self::Db(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SetParentError {}
+
+/// Set, change or clear (`None`) an issue's parent, validated against Rails'
+/// rules, with its `issue/update` queue entry and local Parent activity event,
+/// atomically. Returns the queue entry id, or `Ok(None)` when the parent is
+/// unchanged (nothing written or queued). A refused parent writes nothing.
+/// Attach-as-sub-issue is this call on the child; detach is `None`.
+pub fn set_issue_parent_queued(
+    conn: &Connection,
+    issue_id: &str,
+    parent_id: Option<&str>,
+) -> std::result::Result<Option<i64>, SetParentError> {
+    let issue = get_issue(conn, issue_id)?.ok_or(SetParentError::UnknownIssue)?;
+    if issue.parent_issue_id.as_deref() == parent_id {
+        return Ok(None);
+    }
+    let mut issues = issues_for_team(conn, &issue.team_id)?;
+    // A parent in another team isn't in the team's list; add it so the error
+    // is "must be in the same team" rather than "does not exist".
+    if let Some(p) = parent_id {
+        if !issues.iter().any(|i| i.id == p) {
+            issues.extend(get_issue(conn, p)?);
+        }
+    }
+    crate::hierarchy::Hierarchy::new(&issues, &[])
+        .validate_parent(&issue, parent_id)
+        .map_err(SetParentError::Invalid)?;
+
+    let mut updated = issue;
+    updated.parent_issue_id = parent_id.map(str::to_string);
+    updated.updated_at = crate::db::now_iso();
+    let mut payload = serde_json::to_value(&updated).ok();
+    if parent_id.is_none() {
+        if let Some(obj) = payload.as_mut().and_then(|v| v.as_object_mut()) {
+            obj.insert(CLEAR_PARENT_KEY.into(), true.into());
+        }
+    }
+    let payload = payload.map(|v| v.to_string());
+    let id = edit_issue_queued(conn, issue_id, "update", payload.as_deref(), |c| {
+        let old = get_issue(c, issue_id)?;
+        c.execute(
+            "UPDATE issues SET parent_issue_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![updated.parent_issue_id, updated.updated_at, issue_id],
+        )?;
+        record_local_diff(c, old, issue_id)
+    })?;
+    Ok(Some(id))
+}
+
 pub fn get_issue(conn: &Connection, issue_id: &str) -> Result<Option<Issue>> {
     conn.query_row(
         "SELECT id, title, description, priority, team_number, due_date, estimate,
@@ -1396,6 +1475,17 @@ pub fn group_dependency_links(links: Vec<DependencyLink>) -> DependencyGroups {
         bucket.push(link);
     }
     g
+}
+
+/// Every stored dependency, for the board's dependency lines.
+pub fn all_issue_dependencies(conn: &Connection) -> Result<Vec<IssueDependency>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, blocking_issue_id, blocked_issue_id, kind, direction,
+                created_at, updated_at
+         FROM issue_dependencies ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([], IssueDependency::from_row)?;
+    rows.collect()
 }
 
 /// Resolve every dependency edge touching `issue_id` (any kind, either side)
@@ -3243,5 +3333,139 @@ mod tests {
         .unwrap();
         assert!(move_issue_to_team(&conn, "i1", "t3").is_err());
         assert_eq!(issue_row(&conn, "i1").team_id, "t1");
+    }
+
+    // ── set_issue_parent_queued (JRST-433) ──
+
+    fn parent_setup() -> Connection {
+        let conn = setup();
+        for id in ["a", "b", "c"] {
+            insert_issue(&conn, &make_issue(id, None, None)).unwrap();
+        }
+        conn
+    }
+
+    fn queued(conn: &Connection) -> usize {
+        crate::db::sync_queue::pending_entries(conn).unwrap().len()
+    }
+
+    fn event_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM issue_events", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn payload_of(conn: &Connection, id: i64) -> serde_json::Value {
+        let entry = crate::db::sync_queue::pending_entries(conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == Some(id))
+            .unwrap();
+        serde_json::from_str(entry.payload.as_deref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn remove_parent_and_detach_queue_an_explicit_clear_but_setting_does_not() {
+        let conn = parent_setup();
+        let set = set_issue_parent_queued(&conn, "b", Some("a")).unwrap().unwrap();
+        assert!(payload_of(&conn, set).get(CLEAR_PARENT_KEY).is_none());
+        // Remove parent (RemoveParent) and detach a sub-issue (DetachSubIssue)
+        // are both this call with `None`.
+        let detach = set_issue_parent_queued(&conn, "b", None).unwrap().unwrap();
+        assert_eq!(payload_of(&conn, detach)[CLEAR_PARENT_KEY], true);
+        assert_eq!(issue_row(&conn, "b").parent_issue_id, None);
+        // Detaching an already top-level issue queues nothing.
+        let before = queued(&conn);
+        assert!(set_issue_parent_queued(&conn, "b", None).unwrap().is_none());
+        assert_eq!(queued(&conn), before);
+    }
+
+    #[test]
+    fn set_change_and_clear_a_parent() {
+        let conn = parent_setup();
+        let before = queued(&conn);
+        let id = set_issue_parent_queued(&conn, "b", Some("a")).unwrap();
+        assert!(id.is_some());
+        assert_eq!(issue_row(&conn, "b").parent_issue_id.as_deref(), Some("a"));
+        assert_eq!(queued(&conn), before + 1);
+        let entry = crate::db::sync_queue::pending_entries(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap();
+        assert_eq!((entry.entity_type.as_str(), entry.action.as_str()), ("issue", "update"));
+        assert_eq!(event_lines(&conn, "b").len(), 1);
+
+        // change to another issue
+        set_issue_parent_queued(&conn, "b", Some("c")).unwrap().unwrap();
+        assert_eq!(issue_row(&conn, "b").parent_issue_id.as_deref(), Some("c"));
+
+        // clear
+        set_issue_parent_queued(&conn, "b", None).unwrap().unwrap();
+        assert_eq!(issue_row(&conn, "b").parent_issue_id, None);
+        assert_eq!(queued(&conn), before + 3);
+    }
+
+    #[test]
+    fn rejected_loop_writes_and_queues_nothing() {
+        let conn = parent_setup();
+        set_issue_parent_queued(&conn, "b", Some("a")).unwrap();
+        set_issue_parent_queued(&conn, "c", Some("b")).unwrap();
+        let before = queued(&conn);
+        let events = event_count(&conn);
+        // a under its grandchild c
+        let err = set_issue_parent_queued(&conn, "a", Some("c")).unwrap_err();
+        assert!(matches!(
+            err,
+            SetParentError::Invalid(crate::hierarchy::ParentError::Circular)
+        ));
+        assert_eq!(err.to_string(), "Parent issue would create a circular sub-issue chain");
+        assert_eq!(issue_row(&conn, "a").parent_issue_id, None);
+        assert_eq!(queued(&conn), before);
+        assert_eq!(event_count(&conn), events);
+        assert!(matches!(
+            set_issue_parent_queued(&conn, "a", Some("a")),
+            Err(SetParentError::Invalid(crate::hierarchy::ParentError::SelfParent))
+        ));
+    }
+
+    #[test]
+    fn other_team_and_unknown_parents_are_refused() {
+        let conn = parent_setup();
+        conn.execute_batch(
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at)
+               VALUES ('t2', 'U', 'U', '2026-01-01', '2026-01-01');
+             INSERT INTO lanes (id, name, position, team_id, created_at, updated_at)
+               VALUES ('l9', 'L', 0, 't2', '2026-01-01', '2026-01-01');
+             INSERT INTO issues (id, title, priority, lane_id, team_id, created_at, updated_at)
+               VALUES ('x', 'X', 1, 'l9', 't2', '2026-01-01', '2026-01-01');",
+        )
+        .unwrap();
+        assert!(matches!(
+            set_issue_parent_queued(&conn, "a", Some("x")),
+            Err(SetParentError::Invalid(crate::hierarchy::ParentError::DifferentTeam))
+        ));
+        assert!(matches!(
+            set_issue_parent_queued(&conn, "a", Some("nope")),
+            Err(SetParentError::Invalid(crate::hierarchy::ParentError::DoesNotExist))
+        ));
+        assert!(matches!(
+            set_issue_parent_queued(&conn, "ghost", None),
+            Err(SetParentError::UnknownIssue)
+        ));
+    }
+
+    #[test]
+    fn unchanged_parent_is_a_no_op() {
+        let conn = parent_setup();
+        let before = queued(&conn);
+        // top-level stays top-level
+        assert!(set_issue_parent_queued(&conn, "b", None).unwrap().is_none());
+        assert_eq!(queued(&conn), before);
+        set_issue_parent_queued(&conn, "b", Some("a")).unwrap();
+        let after_set = queued(&conn);
+        let stamp = issue_row(&conn, "b").updated_at;
+        assert!(set_issue_parent_queued(&conn, "b", Some("a")).unwrap().is_none());
+        assert_eq!(queued(&conn), after_set);
+        assert_eq!(issue_row(&conn, "b").updated_at, stamp);
     }
 }

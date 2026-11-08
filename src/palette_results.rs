@@ -27,6 +27,10 @@ pub enum PaletteNav {
     Dashboard(String),
     /// Attach files to the open issue (`Message::PickAttachmentFiles`).
     AttachFiles,
+    /// Open the open issue's dependency map (`Message::OpenDependencyMap`).
+    OpenDependencyMap,
+    /// Open the open project's dependency map (`Message::OpenProjectDependencyMap`).
+    OpenProjectDependencyMap,
     /// Give the keyboard to the Terminal (`TerminalMessage::FocusTerminal`).
     FocusTerminal,
     /// Give the keyboard back to the app (`TerminalMessage::FocusApp`).
@@ -57,6 +61,8 @@ impl PaletteNav {
             PaletteNav::SavedView(_) => "View",
             PaletteNav::Dashboard(_) => "Dashboard",
             PaletteNav::AttachFiles
+            | PaletteNav::OpenDependencyMap
+            | PaletteNav::OpenProjectDependencyMap
             | PaletteNav::FocusTerminal
             | PaletteNav::FocusApp
             | PaletteNav::HidePanel
@@ -240,6 +246,20 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             primary: "Attach file".to_string(),
             secondary: "Shortcut: a".to_string(),
             nav: PaletteNav::AttachFiles,
+        });
+    }
+    if data.on_issue_detail && name_matches(needle, "Open dependency map") {
+        rows.push(PaletteRow {
+            primary: "Open dependency map".to_string(),
+            secondary: "Blockers and sub-issues around this issue".to_string(),
+            nav: PaletteNav::OpenDependencyMap,
+        });
+    }
+    if data.on_project_detail && name_matches(needle, "Open project dependency map") {
+        rows.push(PaletteRow {
+            primary: "Open project dependency map".to_string(),
+            secondary: "Blockers across this project's issues".to_string(),
+            nav: PaletteNav::OpenProjectDependencyMap,
         });
     }
     if data.on_project_detail && name_matches(needle, "Toggle project properties") {
@@ -802,6 +822,26 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].nav, PaletteNav::AttachFiles);
         assert!(palette_results("attach", &PaletteData::default()).is_empty());
+    }
+
+    #[test]
+    fn dependency_map_command_only_on_issue_detail() {
+        let on = PaletteData { on_issue_detail: true, ..PaletteData::default() };
+        let rows = palette_results("dependency map", &on);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Open dependency map");
+        assert_eq!(rows[0].nav, PaletteNav::OpenDependencyMap);
+        assert_eq!(rows[0].nav.label(), "Command");
+        assert!(palette_results("dependency map", &PaletteData::default()).is_empty());
+    }
+
+    #[test]
+    fn project_dependency_map_command_only_on_the_project_page() {
+        let on = PaletteData { on_project_detail: true, ..PaletteData::default() };
+        let rows = palette_results("project dependency", &on);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nav, PaletteNav::OpenProjectDependencyMap);
+        assert!(palette_results("project dependency", &PaletteData::default()).is_empty());
     }
 
     #[test]
