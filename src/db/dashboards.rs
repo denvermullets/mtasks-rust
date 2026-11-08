@@ -619,8 +619,8 @@ pub struct GroupDeletePayload {
 }
 
 impl GroupDeletePayload {
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("two integers serialize")
+    pub fn to_json(self) -> String {
+        serde_json::to_string(&self).expect("two integers serialize")
     }
 
     /// None for a missing payload or one lacking either id.
@@ -989,9 +989,7 @@ mod tests {
     }
 
     fn draft_named(name: &str) -> GroupDraft {
-        let mut d = GroupDraft::default();
-        d.name = name.into();
-        d
+        GroupDraft { name: name.into(), ..Default::default() }
     }
 
     #[test]

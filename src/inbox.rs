@@ -66,7 +66,7 @@ pub fn empty_message(filter: Filter) -> &'static str {
 #[derive(Debug, PartialEq)]
 pub enum OpenTarget {
     /// The issue is already in the local mirror.
-    Local(crate::db::models::Issue),
+    Local(Box<crate::db::models::Issue>),
     /// Not mirrored (e.g. outside the synced window): one-shot fetch it.
     Fetch { team_remote_id: i64, local_team_id: String, issue_remote_id: i64 },
     /// No issue on the Notification, or its team isn't known locally.
@@ -80,7 +80,7 @@ pub fn resolve_target(conn: &rusqlite::Connection, n: &Notification) -> OpenTarg
         return OpenTarget::Unavailable;
     };
     if let Ok(Some(issue)) = queries::find_issue_by_remote_id(conn, issue_remote_id) {
-        return OpenTarget::Local(issue);
+        return OpenTarget::Local(Box::new(issue));
     }
     let Some(team_remote_id) = n.team_remote_id else {
         return OpenTarget::Unavailable;

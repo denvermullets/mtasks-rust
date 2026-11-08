@@ -232,7 +232,7 @@ impl PendingReads {
                         .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
                         .and_then(|v| v.get("before").and_then(|b| b.as_str().map(String::from)));
                     if let Some(b) = before {
-                        if all_before.as_ref().map_or(true, |cur| b > *cur) {
+                        if all_before.as_ref().is_none_or(|cur| b > *cur) {
                             all_before = Some(b);
                         }
                     }

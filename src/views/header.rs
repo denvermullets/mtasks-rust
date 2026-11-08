@@ -133,7 +133,7 @@ pub fn titlebar<'a>(title: String) -> Element<'a, Message> {
         .center_x(Length::Fill)
         .center_y(Length::Fixed(TITLEBAR_HEIGHT))
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
+            background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             ..Default::default()
         });
     let rule = container(iced::widget::Space::with_height(1.0))
@@ -169,7 +169,7 @@ pub fn dashboard_bar<'a>(
     .center_y(Length::Fixed(t::space::S12 + t::space::S2))
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_menu())),
+        background: Some(iced::Background::Color(t::base(t::bg_menu()))),
         ..Default::default()
     });
     let rule = container(iced::widget::Space::with_height(1.0))
@@ -187,6 +187,7 @@ pub fn dashboard_bar<'a>(
 /// is `Some(active_filter_count)` on the board, where Display and Filter apply,
 /// and `None` elsewhere (the buttons are disabled). `show_controls` false drops
 /// Search, Filter, Display and "+ New" entirely (project and issue detail).
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     crumbs: Vec<Crumb>,
     show_controls: bool,
@@ -303,7 +304,7 @@ pub fn view<'a>(
         .padding([8, 16])
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_secondary())),
+            background: Some(iced::Background::Color(t::base(t::bg_secondary()))),
             border: Border {
                 color: t::border(),
                 width: 0.0,

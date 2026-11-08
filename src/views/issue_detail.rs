@@ -192,6 +192,7 @@ impl IssueDetailState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     issue: &'a Issue,
     detail: &'a IssueDetailState,
@@ -536,7 +537,7 @@ fn done_count(sub_issues: &[&Issue]) -> usize {
 
 /// Thin 4px progress bar, accent fill = `done / total`.
 fn sub_issue_progress_bar<'a>(done: usize, total: usize) -> Element<'a, Message> {
-    let filled = if total == 0 { 0 } else { (done * 100 / total) as u16 };
+    let filled = (done * 100).checked_div(total).unwrap_or(0) as u16;
     let bar = |w: u16, fill: Color| {
         container(text(""))
             .width(Length::FillPortion(w))

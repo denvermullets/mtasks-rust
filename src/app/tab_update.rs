@@ -556,33 +556,27 @@ impl App {
             reply_id: draft.reply_id.clone(),
         };
         match draft.owner.clone() {
-            View::IssueDetail(id) => match queries::get_issue(&conn, &id) {
-                Ok(Some(issue)) => {
-                    let mut d = crate::views::issue_detail::IssueDetailState::from_issue(&issue);
-                    d.comment_composer = Content::with_text(&draft.comment);
-                    d.reply_to = draft.reply_to;
-                    d.reply_composer = Content::with_text(&draft.reply);
-                    d.composer_files = files;
-                    self.issue_detail = Some(d);
-                    self.load_detail_dependencies(&conn);
-                    self.reload_detail_origin(&conn);
-                    return;
-                }
-                _ => {}
+            View::IssueDetail(id) => if let Ok(Some(issue)) = queries::get_issue(&conn, &id) {
+                let mut d = crate::views::issue_detail::IssueDetailState::from_issue(&issue);
+                d.comment_composer = Content::with_text(&draft.comment);
+                d.reply_to = draft.reply_to;
+                d.reply_composer = Content::with_text(&draft.reply);
+                d.composer_files = files;
+                self.issue_detail = Some(d);
+                self.load_detail_dependencies(&conn);
+                self.reload_detail_origin(&conn);
+                return;
             },
-            View::ProjectDetail(id) => match queries::get_project(&conn, &id) {
-                Ok(Some(project)) => {
-                    let mut d = crate::views::project_detail::ProjectDetailState::from_project(&project);
-                    d.comment_composer = Content::with_text(&draft.comment);
-                    d.reply_to = draft.reply_to;
-                    d.reply_composer = Content::with_text(&draft.reply);
-                    d.composer_files = files;
-                    self.project_detail = Some(d);
-                    self.view = View::ProjectDetail(id);
-                    self.load_detail_dependencies(&conn);
-                    return;
-                }
-                _ => {}
+            View::ProjectDetail(id) => if let Ok(Some(project)) = queries::get_project(&conn, &id) {
+                let mut d = crate::views::project_detail::ProjectDetailState::from_project(&project);
+                d.comment_composer = Content::with_text(&draft.comment);
+                d.reply_to = draft.reply_to;
+                d.reply_composer = Content::with_text(&draft.reply);
+                d.composer_files = files;
+                self.project_detail = Some(d);
+                self.view = View::ProjectDetail(id);
+                self.load_detail_dependencies(&conn);
+                return;
             },
             _ => {}
         }
@@ -694,7 +688,7 @@ impl App {
             self.restore_comment_draft(draft, key);
         }
         if let View::IssueDetail(id) = self.view.clone() {
-            if self.issue_detail.as_ref().map_or(true, |d| d.issue_id != id) {
+            if self.issue_detail.as_ref().is_none_or(|d| d.issue_id != id) {
                 self.restore_issue_detail(&id, key);
             }
         }

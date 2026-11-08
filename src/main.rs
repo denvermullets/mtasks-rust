@@ -36,6 +36,7 @@ mod tabs;
 mod terminal;
 mod theme;
 mod views;
+mod window_effects;
 
 use iced::{window, Size};
 
@@ -43,6 +44,7 @@ fn main() -> iced::Result {
     highlight::preload();
     let cfg = config::load().0;
     theme::set_by_key(&cfg.theme);
+    theme::set_window_opacity(cfg.window_opacity);
     let font_key = cfg.font;
     let mut app = iced::application(app::App::title, app::App::update, app::App::view);
     for bytes in fonts::FONT_BYTES {
@@ -54,9 +56,13 @@ fn main() -> iced::Result {
         .exit_on_close_request(false)
         .subscription(app::App::subscription)
         .theme(app::App::theme)
+        .style(app::App::style)
         .window(window::Settings {
             size: Size::new(1100.0, 700.0),
             min_size: Some(Size::new(800.0, 500.0)),
+            // Always transparent so Settings' window opacity applies live; at
+            // 100% every pixel is painted opaque (see `App::style`).
+            transparent: true,
             #[cfg(target_os = "macos")]
             platform_specific: window::settings::PlatformSpecific {
                 // The app paints its own title strip (`header::titlebar`) in

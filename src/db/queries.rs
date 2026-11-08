@@ -1375,7 +1375,7 @@ pub fn edit_issue_queued(
 }
 
 fn max_event_id(conn: &Connection) -> Result<i64> {
-    Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM issue_events", [], |r| r.get(0))?)
+    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM issue_events", [], |r| r.get(0))
 }
 
 /// Link every unlinked locally-written Activity row after `events_before` to

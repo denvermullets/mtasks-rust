@@ -196,7 +196,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         .padding(0)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
+            background: t::repaint(t::bg_menu()),
             ..Default::default()
         })
         .into()
@@ -515,7 +515,7 @@ pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
     .padding([6, 0])
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_menu())),
+        background: t::repaint(t::bg_menu()),
         border: Border {
             color: t::border(),
             width: 1.0,
@@ -610,11 +610,11 @@ fn nav_row<'a>(
 
 fn selected_row_style(active: bool) -> button::Style {
     button::Style {
-        background: Some(iced::Background::Color(if active {
-            t::bg_card_focused()
+        background: if active {
+            Some(iced::Background::Color(t::bg_card_focused()))
         } else {
-            t::bg_menu()
-        })),
+            t::repaint(t::bg_menu())
+        },
         text_color: t::text_primary(),
         border: Border {
             color: if active {
@@ -631,7 +631,7 @@ fn selected_row_style(active: bool) -> button::Style {
 
 fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
     button::Style {
-        background: Some(iced::Background::Color(t::bg_menu())),
+        background: t::repaint(t::bg_menu()),
         text_color: t::text_primary(),
         border: Border {
             color: iced::Color::TRANSPARENT,

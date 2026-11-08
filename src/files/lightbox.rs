@@ -12,7 +12,7 @@ use crate::files::images::is_thumbnailable;
 /// bytes are cached under `key` (see `files::images::ImageStore`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LightboxImage {
-    Attachment(Attachment),
+    Attachment(Box<Attachment>),
     Inline { key: String, src: String, filename: String },
 }
 
@@ -66,8 +66,7 @@ pub fn reading_order_images(
         out.extend(
             atts.iter()
                 .filter(|a| is_thumbnailable(&a.content_type))
-                .cloned()
-                .map(LightboxImage::Attachment),
+                .map(|a| LightboxImage::Attachment(Box::new(a.clone()))),
         );
     };
     push_group(description, attachments);
@@ -160,7 +159,7 @@ mod tests {
     fn open_target_needs_a_loaded_image_for_either_variant() {
         use crate::files::images::ImageStore;
         let mut store = ImageStore::default();
-        let a = LightboxState::new(vec![LightboxImage::Attachment(att("a", "image/png"))], 0).unwrap();
+        let a = LightboxState::new(vec![LightboxImage::Attachment(Box::new(att("a", "image/png")))], 0).unwrap();
         let i = LightboxState::new(
             vec![LightboxImage::Inline { key: "inline-k".into(), src: "s".into(), filename: "p.png".into() }],
             0,
@@ -209,7 +208,7 @@ mod tests {
 
     #[test]
     fn keys_come_from_the_blob_for_attachments_and_verbatim_for_inline() {
-        let a = LightboxImage::Attachment(att("a", "image/png"));
+        let a = LightboxImage::Attachment(Box::new(att("a", "image/png")));
         assert_eq!(a.key().as_deref(), Some("blob-70"));
         let i = LightboxImage::Inline { key: "inline-k".into(), src: "s".into(), filename: "p.png".into() };
         assert_eq!(i.key().as_deref(), Some("inline-k"));

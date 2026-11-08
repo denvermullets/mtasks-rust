@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn every_theme_produces_a_palette_with_red_staying_red() {
-        assert_eq!(theme::THEMES.len(), 15);
+        assert_eq!(theme::THEMES.len(), 16);
         for t in theme::THEMES.iter() {
             let p = term_theme(t);
             assert_eq!(p.light, t.light, "{}", t.key);

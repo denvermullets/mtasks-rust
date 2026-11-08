@@ -20,29 +20,6 @@ fn shortcuts(show_help: bool, in_inbox: bool, on_project: bool) -> &'static str 
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn project_page_hint_shows_the_properties_key_and_keeps_help() {
-        let hint = shortcuts(false, false, true);
-        assert!(hint.contains("[/]properties"));
-        assert!(hint.contains("[?]help"));
-    }
-
-    #[test]
-    fn other_pages_do_not_advertise_properties() {
-        assert!(!shortcuts(false, false, false).contains("[/]properties"));
-        assert!(!shortcuts(false, true, false).contains("[/]properties"));
-    }
-
-    #[test]
-    fn help_text_lists_the_project_shortcut() {
-        assert!(shortcuts(true, false, true).contains("[/] properties"));
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     pending_sync_count: i32,
@@ -133,7 +110,7 @@ pub fn view<'a>(
         .padding([6, 14])
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_secondary())),
+            background: Some(iced::Background::Color(t::base(t::bg_secondary()))),
             border: Border {
                 color: t::border(),
                 width: 1.0,
@@ -142,4 +119,27 @@ pub fn view<'a>(
             ..Default::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_page_hint_shows_the_properties_key_and_keeps_help() {
+        let hint = shortcuts(false, false, true);
+        assert!(hint.contains("[/]properties"));
+        assert!(hint.contains("[?]help"));
+    }
+
+    #[test]
+    fn other_pages_do_not_advertise_properties() {
+        assert!(!shortcuts(false, false, false).contains("[/]properties"));
+        assert!(!shortcuts(false, true, false).contains("[/]properties"));
+    }
+
+    #[test]
+    fn help_text_lists_the_project_shortcut() {
+        assert!(shortcuts(true, false, true).contains("[/] properties"));
+    }
 }

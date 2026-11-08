@@ -386,7 +386,7 @@ fn validate_schedule(
 /// Check the form against the server's rules (title present, interval 1-365,
 /// weekday 0-6 for weekly, day of month 1-31 for monthly, valid starts-on
 /// date). Ok carries the db write; Err every failing field at once.
-pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErrors> {
+pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, Box<FormErrors>> {
     let mut errors = FormErrors::default();
 
     let title = form.title.trim();
@@ -403,7 +403,7 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
     }
 
     if !errors.is_empty() {
-        return Err(errors);
+        return Err(Box::new(errors));
     }
 
     let description = form.description.text();
@@ -431,7 +431,7 @@ pub fn validate(form: &RecurringFormState) -> Result<NewRecurringIssue, FormErro
 /// Check an edit: title, the live schedule fields and the zone. Starts-on
 /// defaults to today and only counts as moving the schedule when changed. A time zone outside [`US_TIME_ZONES`] is accepted when
 /// it is the zone already stored on the row.
-pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, FormErrors> {
+pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, Box<FormErrors>> {
     let mut errors = FormErrors::default();
     let title = form.title.trim();
     if title.is_empty() {
@@ -444,7 +444,7 @@ pub fn validate_edit(form: &RecurringFormState) -> Result<RecurringEdit, FormErr
         }
     }
     if !errors.is_empty() {
-        return Err(errors);
+        return Err(Box::new(errors));
     }
     let description = form.description.text();
     Ok(RecurringEdit {

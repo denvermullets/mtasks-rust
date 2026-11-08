@@ -479,15 +479,15 @@ impl TerminalState {
         let mut shown = shown;
         // A restored Terminal starts its shell when a pane first shows it.
         if on_screen {
-            for slot in 0..layout.slots() {
-                if let Some(started) = shown[slot].and_then(|id| self.start_restored(id)) {
-                    shown[slot] = Some(started);
+            for pane in shown.iter_mut().take(layout.slots()) {
+                if let Some(started) = pane.and_then(|id| self.start_restored(id)) {
+                    *pane = Some(started);
                 }
             }
         }
-        for slot in 0..MAX_PANES {
-            if shown[slot] != self.shown[slot] {
-                self.panes[slot].reset();
+        for ((new, old), pane) in shown.iter().zip(self.shown.iter()).zip(self.panes.iter_mut()) {
+            if new != old {
+                pane.reset();
             }
         }
         self.shown = shown;

@@ -165,7 +165,7 @@ pub fn view<'a>(
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_primary())),
+        background: t::repaint(t::bg_primary()),
         ..Default::default()
     })
     .into()
@@ -898,7 +898,7 @@ mod tests {
         let mut c = CollapsedGroups::new();
         assert!(toggle_group(&mut c, "d1", "g1"));
         assert!(c["d1"].contains("g1"));
-        assert!(c.get("d2").map_or(true, |s| s.is_empty()));
+        assert!(c.get("d2").is_none_or(|s| s.is_empty()));
         assert!(toggle_group(&mut c, "d2", "g1"));
         assert!(!toggle_group(&mut c, "d1", "g1"));
         assert!(!c["d1"].contains("g1"));

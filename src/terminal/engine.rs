@@ -205,7 +205,7 @@ impl Engine {
     pub(super) fn spawn(config: SpawnConfig, wake: Arc<Wake>) -> std::io::Result<Engine> {
         let io = |e: anyhow_like::Error| std::io::Error::other(e.0);
         let size = PtySize { rows: config.rows, cols: config.cols, pixel_width: 0, pixel_height: 0 };
-        let pty = open_pty_with_retry(size).map_err(|e| io(e.into()))?;
+        let pty = open_pty_with_retry(size).map_err(io)?;
         let master_fd = pty.master.as_raw_fd().ok_or_else(|| std::io::Error::other("no pty fd"))?;
         // portable-pty doesn't set IUTF8; without it the line editor erases bytes, not characters.
         unsafe {
@@ -227,10 +227,7 @@ impl Engine {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "jait");
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        match config.cwd.filter(|p| p.is_dir()).or(home) {
-            Some(dir) => cmd.cwd(dir),
-            None => {}
-        }
+        if let Some(dir) = config.cwd.filter(|p| p.is_dir()).or(home) { cmd.cwd(dir) }
         let guard_fd = dup_cloexec(master_fd)?;
         let child = ChildGuard {
             child: Some(pty.slave.spawn_command(cmd).map_err(|e| io(e.into()))?),
@@ -1044,7 +1041,7 @@ fn owner(
 fn floor_enabled() -> bool {
     #[cfg(test)]
     {
-        FLOOR_OFF.load(Relaxed) == false
+        !FLOOR_OFF.load(Relaxed)
     }
     #[cfg(not(test))]
     {
@@ -1121,8 +1118,10 @@ fn build_frame(
         if clean {
             rows.push(prev[y].clone());
         } else {
-            let mut data = RowData::default();
-            data.selected = row.selection().ok().flatten().map(|s| (s.start_x, s.end_x));
+            let mut data = RowData {
+                selected: row.selection().ok().flatten().map(|s| (s.start_x, s.end_x)),
+                ..Default::default()
+            };
             let raw_row = row.raw_row().ok();
             data.wrapped = raw_row.and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
             // Only a row that says it has links is worth a lookup per cell.

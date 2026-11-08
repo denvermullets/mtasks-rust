@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use iced::theme::Palette;
 use iced::widget::button;
@@ -320,6 +320,47 @@ fn index_for_key(key: &str) -> usize {
 /// Select the current theme by key. An unknown key selects `DEFAULT_THEME_KEY`.
 pub fn set_by_key(key: &str) {
     CURRENT.store(index_for_key(key), Ordering::Relaxed);
+}
+
+/// Window opacity in percent (see `set_window_opacity`).
+static OPACITY: AtomicU8 = AtomicU8::new(100);
+
+/// Lowest window opacity Settings offers, in percent.
+pub const MIN_WINDOW_OPACITY: u8 = 30;
+
+/// Set the window background opacity, in percent (clamped to
+/// `MIN_WINDOW_OPACITY..=100`). Only the window's base layers fade (see
+/// `base`); text, cards, inputs and popovers stay opaque.
+pub fn set_window_opacity(pct: u8) {
+    OPACITY.store(pct.clamp(MIN_WINDOW_OPACITY, 100), Ordering::Relaxed);
+}
+
+/// Window background opacity, in percent.
+pub fn window_opacity() -> u8 {
+    OPACITY.load(Ordering::Relaxed)
+}
+
+/// Whether the window background is see-through (opacity below 100%).
+pub fn translucent() -> bool {
+    window_opacity() < 100
+}
+
+/// A base-layer fill: `c` at the window opacity. Base layers are the
+/// window-level surfaces that tile the window without overlapping (sidebar,
+/// tab bar, title strip, main pane, Terminal panel, status bar); stacking two
+/// translucent layers would make the pair nearly opaque.
+pub fn base(c: Color) -> Color {
+    Color {
+        a: c.a * window_opacity() as f32 / 100.0,
+        ..c
+    }
+}
+
+/// A fill that repaints the base layer beneath it in the same color. Kept
+/// while the window is opaque, and dropped while it is translucent so it
+/// doesn't stack on the base layer.
+pub fn repaint(c: Color) -> Option<iced::Background> {
+    (!translucent()).then_some(iced::Background::Color(c))
 }
 
 /// Background of an accent-filled button: `accent`, or `accent_hover` while hovered.
@@ -663,7 +704,7 @@ mod tests {
     fn radius_values_match_the_webs_tailwind_radii() {
         use radius::*;
         assert_eq!([XS, SM, MD, LG, XL, XXL], [2.0, 4.0, 6.0, 8.0, 12.0, 16.0]);
-        assert!(FULL >= 9999.0);
+        const { assert!(FULL >= 9999.0) };
         // The web's markdown: inline code 0.25rem, images 0.375rem, code blocks 0.5rem.
         assert_eq!([SM, MD, LG], [0.25 * 16.0, 0.375 * 16.0, 0.5 * 16.0]);
     }

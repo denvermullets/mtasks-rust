@@ -218,7 +218,7 @@ pub fn view<'a>(
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_primary())),
+        background: t::repaint(t::bg_primary()),
         ..Default::default()
     })
     .into()
@@ -343,9 +343,9 @@ pub fn issue_row<'a>(
 
     let hovered = data.hovered == Some(issue.id.as_str());
     let bg = if focused || hovered {
-        t::bg_card_focused()
+        Some(iced::Background::Color(t::bg_card_focused()))
     } else {
-        t::bg_primary()
+        t::repaint(t::bg_primary())
     };
     // Unfocused rows keep a transparent 1px border so the row width and the
     // header inset don't change with focus.
@@ -357,7 +357,7 @@ pub fn issue_row<'a>(
             .center_y(Length::Fixed(scroll::LIST_ROW_H))
             .width(Length::Fill)
             .style(move |_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(bg)),
+                background: bg,
                 border: Border {
                     color: border_color,
                     width: 1.0,

@@ -1762,7 +1762,8 @@ mod tests {
 
         run(&conn).unwrap();
 
-        let rows: Vec<(String, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+        type CommentRow = (String, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>);
+        let rows: Vec<CommentRow> = conn
             .prepare("SELECT id, remote_id, issue_id, project_id, parent_id, author_id FROM comments ORDER BY id")
             .unwrap()
             .query_map([], |r| {

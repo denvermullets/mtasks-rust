@@ -344,10 +344,14 @@ impl canvas::Program<Message> for Pane {
         let f = &self.frame;
         let size = bounds.size();
         let mut out = Vec::with_capacity(f.rows.len() + 2);
-        out.push(
-            self.bg
-                .draw(renderer, size, |fr| fr.fill_rectangle(Point::ORIGIN, size, col(f.bg))),
-        );
+        // While the window is translucent the panel body's base layer paints
+        // this (see `view`); drawing it here too would stack two layers.
+        if !t::translucent() {
+            out.push(
+                self.bg
+                    .draw(renderer, size, |fr| fr.fill_rectangle(Point::ORIGIN, size, col(f.bg))),
+            );
+        }
         let base = Font::with_name(self.font.family);
         let font_size = self.font.size;
         for (y, data) in f.rows.iter().enumerate() {
@@ -822,7 +826,7 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         .center_y(STRIP_HEIGHT)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
+            background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             border: iced::Border { color: t::border(), width: 1.0, radius: 0.0.into() },
             ..Default::default()
         });
@@ -852,6 +856,12 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         }
         grid = grid.push(line);
     }
+    // While translucent, one base layer behind every pane (the panes skip
+    // their own backgrounds); opaque, the panes paint as before.
+    let grid = container(grid).width(Length::Fill).height(Length::Fill).style(|_theme: &Theme| container::Style {
+        background: t::translucent().then(|| iced::Background::Color(t::base(t::bg_primary()))),
+        ..Default::default()
+    });
     match p.dock {
         Dock::Bottom => column![strip, grid].width(Length::Fill).height(Length::Fixed(p.height)).into(),
         Dock::Right => {
@@ -914,7 +924,7 @@ mod tests {
     #[test]
     fn a_new_row_count_changes_every_row() {
         let a = row_of("a");
-        assert_eq!(changed_rows(&[a.clone()], &[a.clone(), a.clone()]), vec![0, 1]);
+        assert_eq!(changed_rows(std::slice::from_ref(&a), &[a.clone(), a.clone()]), vec![0, 1]);
         assert_eq!(changed_rows(&[], &[a]), vec![0]);
     }
 

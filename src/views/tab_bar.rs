@@ -207,7 +207,7 @@ pub fn view<'a>(
     container(row![scroller, plus].align_y(iced::Alignment::Center))
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
+            background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             border: Border { color: t::border(), width: 0.0, radius: 0.0.into() },
             ..Default::default()
         })
