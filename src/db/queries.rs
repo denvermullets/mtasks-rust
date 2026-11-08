@@ -737,6 +737,8 @@ pub fn set_issue_priority(conn: &Connection, issue_id: &str, priority: i32) -> R
 }
 
 /// Why [`set_issue_parent_queued`] failed.
+// Callers (issue detail parent/sub-issue controls) land in later tickets.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum SetParentError {
     /// The parent breaks a Rails rule; nothing was written.
@@ -769,6 +771,7 @@ impl std::error::Error for SetParentError {}
 /// atomically. Returns the queue entry id, or `Ok(None)` when the parent is
 /// unchanged (nothing written or queued). A refused parent writes nothing.
 /// Attach-as-sub-issue is this call on the child; detach is `None`.
+#[allow(dead_code)]
 pub fn set_issue_parent_queued(
     conn: &Connection,
     issue_id: &str,
