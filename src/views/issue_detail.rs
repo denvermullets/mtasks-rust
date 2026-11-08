@@ -283,6 +283,7 @@ pub fn view<'a>(
         .push_maybe(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
+        .push(parent_block(parent, team))
         .push(sub_issues_section(issue, &sub_issues, team, lanes))
         .push(comments_section(
             comments,
@@ -545,6 +546,42 @@ fn sub_issue_progress_bar<'a>(done: usize, total: usize) -> Element<'a, Message>
         r = r.push(bar(100 - filled, t::text_muted().scale_alpha(0.25)));
     }
     r.width(Length::Fill).into()
+}
+
+/// Parent line above the Sub-issues list. With a parent: "Sub-issue of
+/// IDENT title" (opens it) plus Change / Remove. Without: "Set parent issue…".
+fn parent_block<'a>(parent: Option<&'a Issue>, team: Option<&'a Team>) -> Element<'a, Message> {
+    let link = |label: &'static str, msg: Message| {
+        button(text(label).size(type_scale::XS).color(t::accent()))
+            .on_press(msg)
+            .padding(0)
+            .style(button::text)
+    };
+    match parent {
+        Some(p) => row![]
+            .spacing(space::S3)
+            .align_y(Alignment::Center)
+            .push(text("Sub-issue of").size(type_scale::XS).color(t::text_muted()))
+            .push(
+                button(
+                    row![]
+                        .spacing(space::S1_5)
+                        .push(
+                            text(issue_identifier(p, team))
+                                .size(type_scale::XS)
+                                .color(t::text_muted()),
+                        )
+                        .push(text(&p.title).size(type_scale::XS).color(t::text_primary())),
+                )
+                .on_press(Message::OpenIssueDetail(p.id.clone()))
+                .padding(0)
+                .style(button::text),
+            )
+            .push(link("Change", Message::OpenParentPicker))
+            .push(link("Remove", Message::RemoveParent))
+            .into(),
+        None => link("Set parent issue…", Message::OpenParentPicker).into(),
+    }
 }
 
 /// "Sub-issues" block in the left column, shown on every issue (sub-issues can
