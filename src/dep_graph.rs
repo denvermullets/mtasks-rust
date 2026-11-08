@@ -455,6 +455,61 @@ fn ranks_for<'a>(
     ranks
 }
 
+/// Board dependency lines: [`board_edges`] plus a symmetric neighbors map.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoardEdges {
+    /// Oriented blocking -> blocked, as stored, in `deps` order.
+    pub edges: Vec<Edge>,
+    /// Issue id -> ids it is linked to (either direction). Only issues with a line appear.
+    pub neighbors: HashMap<String, HashSet<String>>,
+}
+
+impl BoardEdges {
+    /// Whether the card has at least one line.
+    pub fn is_linked(&self, id: &str) -> bool {
+        self.neighbors.contains_key(id)
+    }
+}
+
+/// Every link whose two ends are both on the board. `visible_issue_ids` may repeat an id
+/// (an issue under several label groups); each link still appears once.
+pub fn board_edges<I, S>(visible_issue_ids: I, deps: &[IssueDependency]) -> BoardEdges
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let visible: HashSet<String> = visible_issue_ids
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut out = BoardEdges::default();
+    for d in deps {
+        if !visible.contains(&d.blocking_issue_id) || !visible.contains(&d.blocked_issue_id) {
+            continue;
+        }
+        if !seen.insert((&d.blocking_issue_id, &d.blocked_issue_id, &d.kind)) {
+            continue;
+        }
+        out.edges.push(Edge {
+            from: d.blocking_issue_id.clone(),
+            to: d.blocked_issue_id.clone(),
+            kind: d.kind.clone(),
+        });
+        if d.blocking_issue_id != d.blocked_issue_id {
+            out.neighbors
+                .entry(d.blocking_issue_id.clone())
+                .or_default()
+                .insert(d.blocked_issue_id.clone());
+            out.neighbors
+                .entry(d.blocked_issue_id.clone())
+                .or_default()
+                .insert(d.blocking_issue_id.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,6 +912,51 @@ mod tests {
         let g = run(&[a, x], &[dep("a", "x", "blocks")], false);
         assert_eq!(cols(&g), [["a"]]);
         assert!(g.edges.is_empty());
+    }
+
+    #[test]
+    fn board_edges_drop_links_with_a_hidden_end() {
+        let deps = vec![dep("a", "b", "blocks"), dep("b", "hidden", "blocks")];
+        let b = board_edges(["a", "b"], &deps);
+        assert_eq!(b.edges.len(), 1);
+        assert!(!b.is_linked("hidden"));
+        assert!(b.is_linked("a"));
+    }
+
+    #[test]
+    fn board_edges_keep_kinds_and_orientation() {
+        let deps = vec![
+            dep("a", "b", "blocks"),
+            dep("b", "c", "relates"),
+            dep("c", "a", "duplicates"),
+        ];
+        let b = board_edges(vec!["a".to_string(), "b".into(), "c".into()], &deps);
+        let got: Vec<(&str, &str, &str)> = b
+            .edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str(), e.kind.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [("a", "b", "blocks"), ("b", "c", "relates"), ("c", "a", "duplicates")]
+        );
+    }
+
+    #[test]
+    fn board_edges_dedupe_when_an_issue_shows_twice() {
+        let deps = vec![dep("a", "b", "blocks")];
+        let b = board_edges(["a", "b", "a", "b"], &deps);
+        assert_eq!(b.edges.len(), 1);
+    }
+
+    #[test]
+    fn board_neighbors_are_symmetric() {
+        let deps = vec![dep("a", "b", "blocks"), dep("c", "a", "relates")];
+        let b = board_edges(["a", "b", "c", "lonely"], &deps);
+        assert_eq!(b.neighbors["a"], HashSet::from(["b".to_string(), "c".to_string()]));
+        assert_eq!(b.neighbors["b"], HashSet::from(["a".to_string()]));
+        assert_eq!(b.neighbors["c"], HashSet::from(["a".to_string()]));
+        assert!(!b.is_linked("lonely"));
     }
 
     #[test]
