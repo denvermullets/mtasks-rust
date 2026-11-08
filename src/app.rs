@@ -979,6 +979,10 @@ pub struct App {
     detail_from_dashboard: Option<String>,
     /// The team-level page a team Tab's open issue was opened from (Back).
     detail_from_page: Option<View>,
+    /// A dependency map opened from a board card (JRST-452): the issue it
+    /// shows and the view to return to on Back. `None` for every other entry
+    /// (issue detail, palette), which return to the issue detail.
+    map_return: Option<(String, View)>,
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
@@ -2468,6 +2472,23 @@ impl App {
     /// Open `issue` from the board. From My Issues, first select the issue's
     /// own team and restore per-team data so the detail view (lanes, members,
     /// projects) is that team's.
+    /// True when a click on `issue_id` should open its Dependency map: the
+    /// board is showing dependency lines and the card has at least one.
+    fn card_opens_map(&self, issue_id: &str) -> bool {
+        if !matches!(self.view, View::Board | View::MyIssues)
+            || self.board_display().view_mode == ViewMode::List
+            || !self.board_display().show_dependencies
+        {
+            return false;
+        }
+        let columns = self.board_columns();
+        crate::views::dep_overlay::DepLines::new(
+            columns.iter().flat_map(|c| c.issues.iter().map(|i| i.id.as_str())),
+            &self.board_deps,
+        )
+        .is_linked(issue_id)
+    }
+
     fn open_focused_issue(&mut self, issue: Issue) -> Task<Message> {
         // A team or project Tab only shows its own team: another team's
         // issue opens in that team's Tab (`tabs::issue_open_target`).
@@ -3494,6 +3515,7 @@ impl App {
             detail_from_inbox: false,
             detail_from_dashboard: None,
             detail_from_page: None,
+            map_return: None,
             detail_comments: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
@@ -5851,6 +5873,15 @@ impl App {
                 self.focused_issue = issue_idx;
                 self.clamp_focus();
                 if let Some(issue) = self.focused_issue().cloned() {
+                    // With the overlay on, a card that has lines opens its map.
+                    if self.card_opens_map(&issue.id) {
+                        let from = self.view.clone();
+                        let task = self.update(Message::OpenDependencyMap(issue.id.clone()));
+                        if matches!(self.view, View::DependencyMap { .. }) {
+                            self.map_return = Some((issue.id, from));
+                        }
+                        return task;
+                    }
                     return self.open_focused_issue(issue);
                 }
             }
@@ -6032,6 +6063,7 @@ impl App {
                     self.drop_drafts(&[old.composer_files.comment_id, old.composer_files.reply_id]);
                 }
                 self.composer_focused = false;
+                self.map_return = None;
                 self.view = View::dependency_map(issue_id);
             }
             Message::SetDependencyMapTab(next) => {
@@ -6048,6 +6080,13 @@ impl App {
                 let View::DependencyMap { issue_id, .. } = &self.view else {
                     return Task::none();
                 };
+                // Opened from a board card: Back returns to that board.
+                if let Some((id, back)) = self.map_return.take() {
+                    if id == *issue_id {
+                        self.view = back;
+                        return Task::none();
+                    }
+                }
                 let issue = match self.issues.iter().find(|i| i.id == *issue_id).cloned() {
                     Some(issue) => Some(issue),
                     None => queries::get_issue(&self.db(), issue_id).ok().flatten(),

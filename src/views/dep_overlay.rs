@@ -441,6 +441,11 @@ pub struct DepLines {
 }
 
 impl DepLines {
+    /// True when the card has at least one line on the board.
+    pub fn is_linked(&self, id: &str) -> bool {
+        self.neighbors.get(id).is_some_and(|n| !n.is_empty())
+    }
+
     /// Build from the stored dependencies and the ids of the cards on screen.
     pub fn new<I, S>(visible_ids: I, deps: &[crate::db::models::IssueDependency]) -> Self
     where
@@ -562,6 +567,14 @@ mod tests {
         let got: Vec<_> = l.edges.iter().map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.kind)).collect();
         assert_eq!(got, [("a", "b", Blocks), ("b", "c", Relates)]);
         assert!(l.neighbors["b"].contains("a") && l.neighbors["b"].contains("c"));
+    }
+
+    #[test]
+    fn only_cards_with_a_line_are_linked() {
+        let l = DepLines::new(["a", "b", "c"], &[dep("a", "b", "blocks"), dep("c", "z", "blocks")]);
+        assert!(l.is_linked("a") && l.is_linked("b"));
+        assert!(!l.is_linked("c"), "its only link has a hidden end");
+        assert!(!l.is_linked("nope"));
     }
 
     #[test]
