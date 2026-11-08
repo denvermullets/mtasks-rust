@@ -220,6 +220,7 @@ pub fn view<'a>(
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
     let breadcrumb = row![]
+        .width(Length::Fill)
         .spacing(space::S2)
         .align_y(Alignment::Center)
         .push(
@@ -231,7 +232,14 @@ pub fn view<'a>(
         .push(text("›").size(type_scale::SM).color(t::text_muted()))
         .push_maybe(project_name.map(|n| text(n).size(type_scale::SM).color(t::text_secondary())))
         .push_maybe(project_name.map(|_| text("›").size(type_scale::SM).color(t::text_muted())))
-        .push(text(identifier).size(type_scale::SM).color(t::text_secondary()));
+        .push(text(identifier).size(type_scale::SM).color(t::text_secondary()))
+        .push(iced::widget::horizontal_space())
+        .push(
+            button(text("Dependencies").size(type_scale::XS).color(t::accent()))
+                .on_press(Message::OpenDependencyMap(issue.id.clone()))
+                .padding(0)
+                .style(button::text),
+        );
 
     // ---- Left column: title, description, activity stub ----
     let head = column![]
