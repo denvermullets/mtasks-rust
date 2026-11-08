@@ -768,6 +768,18 @@ pub fn card_records(conn: &Connection, issue_id: &str) -> Result<crate::body_hov
     Ok(out)
 }
 
+/// Everything a project's hover card shows: the project and its lead. An
+/// unknown project gives empty records. Local only, never the network.
+pub fn project_card_records(conn: &Connection, project_id: &str) -> Result<crate::body_hover::OwnedRecords> {
+    let mut out = crate::body_hover::OwnedRecords::default();
+    let Some(project) = get_project(conn, project_id)? else { return Ok(out) };
+    if let Some(id) = &project.lead_id {
+        out.members = members_for_team(conn, &project.team_id)?.into_iter().filter(|m| m.id == *id).collect();
+    }
+    out.projects = vec![project];
+    Ok(out)
+}
+
 /// Records for a mention card in a body that belongs to `team_id`: that team's
 /// members and issues (the issues give the open count). The body's team, not
 /// the selected one, so a body opened from My Issues resolves its own people.
@@ -2085,6 +2097,29 @@ mod tests {
             &rec.records()
         )
         .is_none());
+    }
+
+    #[test]
+    fn project_card_records_bring_the_lead() {
+        let conn = setup();
+        for sql in [
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t2', 'Other', 'OTH', '2026-01-01', '2026-01-01')",
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at) VALUES ('m2', 't2', 'Ann', 'a@x.y', '2026-01-01', '2026-01-01')",
+            "INSERT INTO members (id, team_id, name, email, created_at, updated_at) VALUES ('m3', 't2', 'Bob', 'b@x.y', '2026-01-01', '2026-01-01')",
+            "INSERT INTO projects (id, team_id, name, lead_id, created_at, updated_at) VALUES ('p2', 't2', 'Proj', 'm2', '2026-01-01', '2026-01-01')",
+        ] {
+            conn.execute(sql, []).unwrap();
+        }
+        let rec = project_card_records(&conn, "p2").unwrap();
+        assert_eq!(rec.members.len(), 1);
+        let card = crate::body_hover::content_for(
+            &crate::body_hover::Anchor::Project("p2".into()),
+            &rec.records(),
+        );
+        let Some(crate::body_hover::CardContent::Project(card)) = card else { panic!("card expected") };
+        assert_eq!(card.name, "Proj");
+        assert_eq!(card.lead.as_deref(), Some("Ann"));
+        assert!(project_card_records(&conn, "nope").unwrap().projects.is_empty());
     }
 
     #[test]

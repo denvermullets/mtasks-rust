@@ -459,17 +459,28 @@ pub fn view<'a>(
                 .size(type_scale::SM)
                 .style(sidebar_input_style),
         ))
-        .push(sidebar_field(
-            "Project",
-            pick_list(project_options, selected_project, |o: ProjectOption| {
+        .push(sidebar_field("Project", {
+            let picker: Element<'a, Message> = pick_list(project_options, selected_project, |o: ProjectOption| {
                 Message::IssueDetailProjectChanged(o.id)
             })
             .width(Length::Fill)
             .text_size(type_scale::SM)
             .padding(SIDEBAR_CONTROL_PADDING)
             .style(sidebar_pick_list_style)
-            .menu_style(sidebar_menu_style),
-        ))
+            .menu_style(sidebar_menu_style)
+            .into();
+            // Like the web's sidebar pill: a project card while one is set.
+            match &issue.project_id {
+                Some(id) => crate::views::row_hover::row_hover(
+                    picker,
+                    crate::body_hover::Anchor::Project(id.clone()),
+                    Message::RowHover,
+                )
+                .dismiss_on_press()
+                .into(),
+                None => picker,
+            }
+        }))
         .push(sidebar_field("Labels", placeholder_value()))
         .push(dependency_block(DepKind::Blocking, &deps.blocking))
         .push(dependency_block(DepKind::BlockedBy, &deps.blocked_by))

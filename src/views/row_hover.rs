@@ -58,6 +58,7 @@ pub struct RowHover<'a, Message, T = Anchor> {
     content: Element<'a, Message>,
     anchor: T,
     on_hover: OnHover<'a, T, Message>,
+    dismiss_on_press: bool,
 }
 
 /// Wrap `content` as the hover anchor for `anchor`. `on_hover` gets this
@@ -68,7 +69,17 @@ pub fn row_hover<'a, Message, T: Clone + 'a>(
     anchor: T,
     on_hover: impl Fn(u64, Option<(T, Rectangle)>) -> Message + 'a,
 ) -> RowHover<'a, Message, T> {
-    RowHover { content: content.into(), anchor, on_hover: Box::new(on_hover) }
+    RowHover { content: content.into(), anchor, on_hover: Box::new(on_hover), dismiss_on_press: false }
+}
+
+impl<'a, Message, T> RowHover<'a, Message, T> {
+    /// A press inside the row reports a leave, so the card gets out of the
+    /// way of what the press opens (a pick list's menu, say). It comes back
+    /// only after the pointer leaves and re-enters.
+    pub fn dismiss_on_press(mut self) -> Self {
+        self.dismiss_on_press = true;
+        self
+    }
 }
 
 struct State {
@@ -147,6 +158,11 @@ impl<'a, Message: 'a, T: Clone + 'a> Widget<Message, Theme, iced::Renderer> for 
                     None
                 };
                 shell.publish((self.on_hover)(state.owner, hover));
+            } else if self.dismiss_on_press
+                && state.inside.inside
+                && matches!(mouse_event, mouse::Event::ButtonPressed(_))
+            {
+                shell.publish((self.on_hover)(state.owner, None));
             }
         }
 

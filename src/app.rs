@@ -7387,6 +7387,12 @@ impl App {
                     .ok()
                     .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
             }
+            crate::body_hover::Anchor::Project(id) => {
+                let conn = self.db();
+                crate::db::queries::project_card_records(&conn, id)
+                    .ok()
+                    .and_then(|r| crate::body_hover::content_for(&anchor, &r.records()))
+            }
             // A mention resolves on the body's team, whichever team is
             // selected: that team's members and issues, read once as the
             // card opens.
