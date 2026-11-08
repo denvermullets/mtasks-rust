@@ -1857,7 +1857,7 @@ impl App {
     }
     // --- end active board state ----------------------------------------
 
-    fn breadcrumb(&self) -> Vec<String> {
+    fn breadcrumb(&self) -> Vec<header::Crumb> {
         let mut crumbs = breadcrumb(
             &self.view,
             self.selected_team(),
@@ -1866,19 +1866,19 @@ impl App {
         );
         if let View::Dashboard(id) = &self.view {
             if let Some(d) = self.dashboards.iter().find(|d| d.id == *id) {
-                crumbs.push(d.name.clone());
+                crumbs.push(header::Crumb::plain(d.name.clone()));
             }
         }
         if self.detail_from_my_issues && matches!(self.view, View::IssueDetail(_)) {
-            crumbs.insert(0, "My Issues".into());
+            crumbs.insert(0, header::Crumb::new("My Issues", Some(Message::BackToMyIssues)));
         }
         if let (Some(o), View::IssueDetail(_)) = (&self.detail_from_dashboard, &self.view) {
             if let Some(d) = self.dashboards.iter().find(|d| d.id == *o) {
-                crumbs.insert(0, d.name.clone());
+                crumbs.insert(0, header::Crumb::new(d.name.clone(), Some(Message::BackToDashboard)));
             }
         }
         if self.detail_from_inbox && matches!(self.view, View::IssueDetail(_)) {
-            crumbs.insert(0, "Inbox".into());
+            crumbs.insert(0, header::Crumb::new("Inbox", Some(Message::BackToInbox)));
         }
         if let (Some(v), View::Board) = (&self.open_view, &self.view) {
             // The view's name replaces the "Issues" crumb.
@@ -1889,7 +1889,7 @@ impl App {
                     labels: &self.labels,
                     projects: &self.projects,
                 };
-                *last = if v.is_modified(&mirror) {
+                last.label = if v.is_modified(&mirror) {
                     format!("{} (Modified)", v.name)
                 } else {
                     v.name.clone()
@@ -8106,45 +8106,49 @@ fn default_team_id(teams: &[Team]) -> Option<String> {
 }
 
 /// Header breadcrumb for `view`, e.g. ["JAIT", "Projects", "Desktop Application"]
-/// or ["JAIT", "JAIT-111"]. Team-scoped views lead with the team identifier.
+/// or ["JAIT", "JAIT-111"]. Team-scoped views lead with the team identifier,
+/// which links to the team's board; "Projects" on a project links to the list.
 fn breadcrumb(
     view: &View,
     team: Option<&Team>,
     issues: &[Issue],
     projects: &[Project],
-) -> Vec<String> {
+) -> Vec<header::Crumb> {
+    use header::Crumb;
     if *view == View::MyIssues {
-        return vec!["My Issues".into()];
+        return vec![Crumb::plain("My Issues")];
     }
     if *view == View::Inbox {
-        return vec!["Inbox".into()];
+        return vec![Crumb::plain("Inbox")];
     }
     if matches!(view, View::Dashboard(_)) {
-        return vec!["Dashboards".into()];
+        return vec![Crumb::plain("Dashboards")];
     }
-    let mut crumbs = vec![team
-        .map(|t| t.identifier.clone())
-        .unwrap_or_else(|| "JAIT".into())];
+    let team_page = |v: View| team.map(|t| Message::SelectTeamView(t.id.clone(), v));
+    let mut crumbs = vec![match team {
+        Some(t) => Crumb::new(t.identifier.clone(), team_page(View::Board)),
+        None => Crumb::plain("JAIT"),
+    }];
     match view {
-        View::Board => crumbs.push("Issues".into()),
-        View::ProjectList => crumbs.push("Projects".into()),
-        View::Roadmap => crumbs.push("Roadmap".into()),
-        View::RecurringIssues => crumbs.push("Recurring issues".into()),
+        View::Board => crumbs.push(Crumb::plain("Issues")),
+        View::ProjectList => crumbs.push(Crumb::plain("Projects")),
+        View::Roadmap => crumbs.push(Crumb::plain("Roadmap")),
+        View::RecurringIssues => crumbs.push(Crumb::plain("Recurring issues")),
         View::ProjectDetail(id) => {
-            crumbs.push("Projects".into());
+            crumbs.push(Crumb::new("Projects", team_page(View::ProjectList)));
             if let Some(p) = projects.iter().find(|p| p.id == *id) {
-                crumbs.push(p.name.clone());
+                crumbs.push(Crumb::plain(p.name.clone()));
             }
         }
         View::IssueDetail(id) => {
             if let Some(issue) = issues.iter().find(|i| i.id == *id) {
                 let number = issue.team_number.unwrap_or(0);
-                crumbs.push(match team {
+                crumbs.push(Crumb::plain(match team {
                     Some(t) => format!("{}-{number}", t.identifier),
                     None => format!("#{number}"),
-                });
+                }));
             } else {
-                crumbs.push("Issues".into());
+                crumbs.push(Crumb::plain("Issues"));
             }
         }
         View::MyIssues | View::Inbox | View::Dashboard(_) => {}
@@ -8607,7 +8611,9 @@ mod tests {
     fn breadcrumb_follows_view() {
         let jait = team("JAIT", false);
         let issues = vec![issue("i1", "Header bar", 184)];
-        let crumbs = |v: View| breadcrumb(&v, Some(&jait), &issues, &[]);
+        let crumbs = |v: View| -> Vec<String> {
+            breadcrumb(&v, Some(&jait), &issues, &[]).into_iter().map(|c| c.label).collect()
+        };
         assert_eq!(crumbs(View::Board), ["JAIT", "Issues"]);
         assert_eq!(crumbs(View::Roadmap), ["JAIT", "Roadmap"]);
         assert_eq!(crumbs(View::IssueDetail("i1".into())), ["JAIT", "JAIT-184"]);
@@ -8618,6 +8624,22 @@ mod tests {
             crumbs(View::ProjectDetail("gone".into())),
             ["JAIT", "Projects"]
         );
+    }
+
+    #[test]
+    fn breadcrumb_parents_link_up() {
+        let jait = team("JAIT", false);
+        let crumbs = breadcrumb(&View::ProjectDetail("gone".into()), Some(&jait), &[], &[]);
+        assert!(matches!(
+            &crumbs[0].on_press,
+            Some(Message::SelectTeamView(id, View::Board)) if *id == jait.id
+        ));
+        assert!(matches!(
+            &crumbs[1].on_press,
+            Some(Message::SelectTeamView(_, View::ProjectList))
+        ));
+        // Without a team there's nowhere to go.
+        assert!(breadcrumb(&View::Board, None, &[], &[])[0].on_press.is_none());
     }
 
     #[test]
