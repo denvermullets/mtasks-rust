@@ -141,8 +141,20 @@ impl FileCache {
         let name = file_name(blob_key)?;
         let dir = self.cache_dir();
         fs::create_dir_all(&dir)?;
-        let path = dir.join(name);
+        let path = with_image_extension(dir.join(name), bytes);
+        let previous: Option<String> = conn
+            .query_row(
+                "SELECT path FROM file_cache WHERE blob_key = ?1",
+                params![blob_key],
+                |r| r.get(0),
+            )
+            .optional()?;
         fs::write(&path, bytes)?;
+        if let Some(old) = previous.map(PathBuf::from) {
+            if old != path && old.starts_with(&dir) {
+                let _ = fs::remove_file(old);
+            }
+        }
         conn.execute(
             "INSERT INTO file_cache (blob_key, path, byte_size, last_accessed)
              VALUES (?1, ?2, ?3, ?4)
@@ -177,11 +189,56 @@ impl FileCache {
             conn.execute("DELETE FROM file_cache WHERE blob_key = ?1", params![blob_key])?;
             return Ok(None);
         }
+        let path = self.add_missing_extension(path)?;
         conn.execute(
-            "UPDATE file_cache SET last_accessed = ?2 WHERE blob_key = ?1",
-            params![blob_key, now],
+            "UPDATE file_cache SET path = ?3, last_accessed = ?2 WHERE blob_key = ?1",
+            params![blob_key, now, path.to_string_lossy()],
         )?;
         Ok(Some(path))
+    }
+
+    /// Entries cached before images got an extension: rename an image file
+    /// inside `cache/` so Iced can decode it. Anything else is left alone.
+    fn add_missing_extension(&self, path: PathBuf) -> Result<PathBuf> {
+        if path.extension().is_some() || !path.starts_with(self.cache_dir()) {
+            return Ok(path);
+        }
+        let mut head = [0u8; 12];
+        let n = std::io::Read::read(&mut fs::File::open(&path)?, &mut head)?;
+        let renamed = with_image_extension(path.clone(), &head[..n]);
+        if renamed == path {
+            return Ok(path);
+        }
+        fs::rename(&path, &renamed)?;
+        Ok(renamed)
+    }
+}
+
+/// `path` with the extension of the image format `bytes` start with, if any.
+/// Iced decodes a path-backed image by its extension, so a bare cache file
+/// would never render.
+fn with_image_extension(path: PathBuf, bytes: &[u8]) -> PathBuf {
+    match image_extension(bytes) {
+        Some(ext) => path.with_extension(ext),
+        None => path,
+    }
+}
+
+/// Extension for an image Iced can decode (see
+/// `files::images::is_thumbnailable`), sniffed from its magic bytes.
+fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("bmp")
+    } else {
+        None
     }
 }
 
@@ -320,6 +377,66 @@ mod tests {
         let (_t, conn, cache) = setup(1000);
         assert!(matches!(cache.put(&conn, "../x", b"x"), Err(CacheError::InvalidKey(_))));
         assert!(matches!(cache.get(&conn, ""), Err(CacheError::InvalidKey(_))));
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n rest";
+
+    /// Iced decodes a path-backed image by its file extension, so cached
+    /// images must carry one (JRST-456).
+    #[test]
+    fn images_are_cached_with_an_extension_sniffed_from_their_bytes() {
+        let (_t, conn, cache) = setup(1000);
+        let p = cache.put(&conn, "blob-1", PNG).unwrap();
+        assert_eq!(p.file_name().unwrap(), "blob-1.png");
+        assert_eq!(cache.get(&conn, "blob-1").unwrap(), Some(p));
+        let j = cache.put(&conn, "blob-2", b"\xff\xd8\xff\xe0 jpeg").unwrap();
+        assert_eq!(j.extension().unwrap(), "jpg");
+    }
+
+    #[test]
+    fn non_images_keep_a_bare_file_name() {
+        let (_t, conn, cache) = setup(1000);
+        let p = cache.put(&conn, "blob-3", b"%PDF-1.7").unwrap();
+        assert_eq!(p.file_name().unwrap(), "blob-3");
+    }
+
+    #[test]
+    fn an_image_cached_without_an_extension_is_renamed_on_get() {
+        let (_t, conn, cache) = setup(1000);
+        fs::create_dir_all(cache.cache_dir()).unwrap();
+        let old = cache.cache_dir().join("blob-4");
+        fs::write(&old, PNG).unwrap();
+        conn.execute(
+            "INSERT INTO file_cache (blob_key, path, byte_size, last_accessed)
+             VALUES ('blob-4', ?1, 13, '2026-01-01T00:00:00.000Z')",
+            params![old.to_string_lossy()],
+        )
+        .unwrap();
+        let p = cache.get(&conn, "blob-4").unwrap().unwrap();
+        assert_eq!(p.file_name().unwrap(), "blob-4.png");
+        assert!(p.is_file() && !old.exists());
+        assert_eq!(cache.get(&conn, "blob-4").unwrap(), Some(p));
+    }
+
+    #[test]
+    fn replacing_an_entry_under_a_new_name_removes_the_old_file() {
+        let (_t, conn, cache) = setup(1000);
+        let old = cache.put(&conn, "a", b"not an image").unwrap();
+        let new = cache.put(&conn, "a", PNG).unwrap();
+        assert_ne!(old, new);
+        assert!(!old.exists() && new.is_file());
+        assert_eq!(row_count(&conn), 1);
+    }
+
+    #[test]
+    fn sniffs_every_thumbnailable_format() {
+        assert_eq!(image_extension(PNG), Some("png"));
+        assert_eq!(image_extension(b"\xff\xd8\xff\xdb"), Some("jpg"));
+        assert_eq!(image_extension(b"GIF89a.."), Some("gif"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(image_extension(b"BM\0\0\0\0"), Some("bmp"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WAVE"), None);
+        assert_eq!(image_extension(b""), None);
     }
 
     #[test]
