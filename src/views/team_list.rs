@@ -359,7 +359,8 @@ fn team_block<'a>(
                 ("Recurring issues", View::RecurringIssues),
             ];
             for (label, view) in sub_rows {
-                let active = is_selected && *current_view == view && open_view_id.is_none();
+                let active =
+                    is_selected && sidebar_row_view(current_view) == Some(view.clone()) && open_view_id.is_none();
                 col = col.push(nav_row(
                     label,
                     active,
@@ -602,6 +603,22 @@ fn inbox_row<'a>(active: bool, unread_count: i64) -> Element<'a, Message> {
         .into()
 }
 
+/// The team sub-row a view lights up (JRST-453): a list view lights its own
+/// row, and a detail view lights the list it belongs to, so the focused team
+/// stays outlined while an issue or project is open. Cross-team views (My
+/// issues, Inbox, dashboards) light no team row.
+pub fn sidebar_row_view(view: &View) -> Option<View> {
+    match view {
+        View::Board | View::IssueDetail(_) | View::DependencyMap { .. } => Some(View::Board),
+        View::ProjectList | View::ProjectDetail(_) | View::ProjectDependencyMap { .. } => {
+            Some(View::ProjectList)
+        }
+        View::Roadmap => Some(View::Roadmap),
+        View::RecurringIssues => Some(View::RecurringIssues),
+        View::MyIssues | View::Inbox | View::Dashboard(_) => None,
+    }
+}
+
 fn nav_row<'a>(
     label: &'a str,
     active: bool,
@@ -656,7 +673,38 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_label, is_home_dashboard, is_home_team, is_home_view, ordered_dashboards};
+    use super::{
+        badge_label, is_home_dashboard, is_home_team, is_home_view, ordered_dashboards, sidebar_row_view,
+    };
+    use crate::app::{DependencyMapTab, View};
+
+    #[test]
+    fn detail_views_light_their_parent_row() {
+        assert_eq!(sidebar_row_view(&View::IssueDetail("i".into())), Some(View::Board));
+        assert_eq!(
+            sidebar_row_view(&View::DependencyMap {
+                issue_id: "i".into(),
+                tab: DependencyMapTab::Dependencies,
+                depth: 1
+            }),
+            Some(View::Board)
+        );
+        assert_eq!(sidebar_row_view(&View::ProjectDetail("p".into())), Some(View::ProjectList));
+        assert_eq!(
+            sidebar_row_view(&View::ProjectDependencyMap { project_id: "p".into(), active_only: true }),
+            Some(View::ProjectList)
+        );
+    }
+
+    #[test]
+    fn list_views_light_themselves_and_cross_team_views_light_none() {
+        for v in [View::Board, View::ProjectList, View::Roadmap, View::RecurringIssues] {
+            assert_eq!(sidebar_row_view(&v), Some(v.clone()));
+        }
+        for v in [View::MyIssues, View::Inbox, View::Dashboard("d".into())] {
+            assert_eq!(sidebar_row_view(&v), None);
+        }
+    }
     use crate::db::dashboards::Dashboard;
     use crate::db::home_page::HomePage;
     use crate::db::models::Team;
