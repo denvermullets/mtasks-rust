@@ -9,7 +9,7 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Member, Priority, Project, ProjectStatus, RoadmapCommitment};
 use crate::theme as t;
 use crate::theme::{radius, space, type_scale};
-use crate::views::progress_chart;
+use crate::views::{form_page, progress_chart, util};
 
 pub struct ProjectFormState {
     pub name: String,
@@ -91,7 +91,9 @@ const ROADMAPS: [RoadmapOption; 4] = [
     RoadmapOption(Some(RoadmapCommitment::Later)),
 ];
 
-pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Element<'a, Message> {
+/// The full-page "New project" form (web `projects/new`): name and
+/// description on the left, the Properties sidebar on the right.
+pub fn page<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Element<'a, Message> {
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
         id: None,
         name: "—".to_string(),
@@ -108,145 +110,111 @@ pub fn modal_view<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Elem
 
     let selected_roadmap = RoadmapOption(form.roadmap_commitment);
 
-    let mut form_content = column![]
-        .spacing(14)
-        .width(Length::Fixed(460.0))
-        .push(text("New Project").size(type_scale::LG).color(t::text_primary()))
-        .push(
-            text_input("Name", &form.name)
-                .on_input(Message::ProjectNameChanged)
-                .padding(space::S2_5)
-                .size(type_scale::SM),
-        )
-        .push_maybe(
-            form.error
-                .as_deref()
-                .map(|e| text(e).size(type_scale::XS).color(t::danger())),
-        )
-        .push(
-            text_editor(&form.description)
-                .placeholder("Description")
-                .on_action(Message::ProjectDescriptionChanged)
-                .padding(space::S2_5)
-                .size(type_scale::SM)
-                .height(Length::Fixed(120.0)),
-        )
-        .push(
-            row![]
-                .spacing(12)
-                .push(
-                    column![]
-                        .spacing(4)
-                        .width(Length::Fill)
-                        .push(text("Status").size(type_scale::XS).color(t::text_muted()))
-                        .push(pick_list(
-                            STATUSES.as_slice(),
-                            Some(form.status),
-                            Message::ProjectStatusChanged,
-                        )),
-                )
-                .push(
-                    column![]
-                        .spacing(4)
-                        .width(Length::Fill)
-                        .push(text("Priority").size(type_scale::XS).color(t::text_muted()))
-                        .push(pick_list(
-                            PRIORITIES.as_slice(),
-                            Some(form.priority),
-                            Message::ProjectPriorityChanged,
-                        )),
-                ),
-        )
-        .push(
-            column![]
-                .spacing(4)
-                .push(text("Lead").size(type_scale::XS).color(t::text_muted()))
-                .push(pick_list(
-                    member_options,
-                    selected_member,
-                    |opt: MemberOption| Message::ProjectLeadChanged(opt.id),
-                )),
-        )
-        .push(
-            row![]
-                .spacing(12)
-                .push(
-                    column![]
-                        .spacing(4)
-                        .width(Length::Fill)
-                        .push(text("Start date").size(type_scale::XS).color(t::text_muted()))
-                        .push(
-                            text_input("YYYY-MM-DD", &form.start_date)
-                                .on_input(Message::ProjectStartDateChanged)
-                                .padding(space::S2)
-                                .size(type_scale::SM),
-                        ),
-                )
-                .push(
-                    column![]
-                        .spacing(4)
-                        .width(Length::Fill)
-                        .push(text("Due date").size(type_scale::XS).color(t::text_muted()))
-                        .push(
-                            text_input("YYYY-MM-DD", &form.due_date)
-                                .on_input(Message::ProjectDueDateChanged)
-                                .padding(space::S2)
-                                .size(type_scale::SM),
-                        ),
-                ),
-        )
-        .push(
-            column![]
-                .spacing(4)
-                .push(text("Roadmap commitment").size(type_scale::XS).color(t::text_muted()))
-                .push(pick_list(
-                    ROADMAPS.as_slice(),
-                    Some(selected_roadmap),
-                    |opt: RoadmapOption| Message::ProjectRoadmapCommitmentChanged(opt.0),
-                )),
-        );
-
-    let button_row = row![]
-        .spacing(8)
-        .push(
-            button(text("Save").size(type_scale::SM))
-                .on_press(Message::SaveProject)
-                .padding([space::S2, space::S6])
-                .style(accent_button),
-        )
-        .push(
-            button(text("Cancel").size(type_scale::SM))
-                .on_press(Message::CloseModal)
-                .padding([space::S2, space::S6])
-                .style(button::secondary),
-        );
-
-    form_content = form_content.push(button_row);
-
-    let modal = container(form_content)
-        .padding(space::S8)
+    // Left: icon + big name, then the description (web `projects/new`).
+    let icon = container(text("\u{25a3}").size(type_scale::LG).color(t::accent()))
+        .center_x(Length::Fixed(40.0))
+        .center_y(Length::Fixed(40.0))
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_modal())),
-            border: Border {
-                color: t::border(),
-                width: 1.0,
-                radius: radius::LG.into(),
-            },
+            background: Some(iced::Background::Color(Color { a: 0.2, ..t::accent() })),
+            border: Border { radius: radius::SM.into(), ..Default::default() },
+            ..Default::default()
+        });
+    let name = column![]
+        .spacing(space::S2)
+        .width(Length::Fill)
+        .push(form_page::title_input("Project name", &form.name, Message::ProjectNameChanged))
+        .push_maybe(form.error.as_deref().map(form_page::error_text));
+    let left = column![]
+        .spacing(space::S8)
+        .push(row![].spacing(space::S4).align_y(Alignment::Center).push(icon).push(name))
+        .push(
+            column![]
+                .spacing(space::S3)
+                .push(form_page::caption("Description"))
+                .push(
+                    text_editor(&form.description)
+                        .placeholder("Add description\u{2026}")
+                        .on_action(Message::ProjectDescriptionChanged)
+                        .padding(0)
+                        .size(type_scale::SM)
+                        .style(form_page::borderless_editor)
+                        .height(Length::Fixed(160.0)),
+                ),
+        );
+
+    // Right: the Properties sidebar, actions at its foot.
+    let field = |label: &str, control: Element<'a, Message>| -> Element<'a, Message> {
+        column![].spacing(space::S2).push(form_page::small_caption(label)).push(control).into()
+    };
+    let date = |placeholder: &str, value: &str, on_input: fn(String) -> Message| -> Element<'a, Message> {
+        text_input(placeholder, value)
+            .on_input(on_input)
+            .padding(util::SIDEBAR_CONTROL_PADDING)
+            .size(type_scale::SM)
+            .style(util::sidebar_input_style)
+            .into()
+    };
+    let actions = column![]
+        .spacing(space::S3)
+        .push(
+            form_page::submit_button("Create Project", Message::SaveProject)
+                .width(Length::Fill),
+        )
+        .push(form_page::cancel_button().width(Length::Fill));
+    let sidebar = column![]
+        .spacing(space::S6)
+        .push(field(
+            "Status",
+            pick(pick_list(STATUSES.as_slice(), Some(form.status), Message::ProjectStatusChanged)).into(),
+        ))
+        .push(field(
+            "Priority",
+            pick(pick_list(PRIORITIES.as_slice(), Some(form.priority), Message::ProjectPriorityChanged)).into(),
+        ))
+        .push(field(
+            "Lead",
+            pick(pick_list(member_options, selected_member, |opt: MemberOption| {
+                Message::ProjectLeadChanged(opt.id)
+            }))
+            .into(),
+        ))
+        .push(field("Start Date", date("YYYY-MM-DD", &form.start_date, Message::ProjectStartDateChanged)))
+        .push(field("Due Date", date("YYYY-MM-DD", &form.due_date, Message::ProjectDueDateChanged)))
+        .push(field(
+            "Roadmap commitment",
+            pick(pick_list(ROADMAPS.as_slice(), Some(selected_roadmap), |opt: RoadmapOption| {
+                Message::ProjectRoadmapCommitmentChanged(opt.0)
+            }))
+            .into(),
+        ))
+        .push(column![form_page::rule(), actions].spacing(space::S6));
+    let sidebar = container(scrollable(sidebar.padding(space::S6)).height(Length::Fill))
+        .width(Length::Fixed(util::SIDEBAR_WIDTH))
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_menu())),
+            border: Border { color: t::border(), width: 1.0, radius: 0.0.into() },
             ..Default::default()
         });
 
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
+    row![form_page::left(left, form_page::WIDTH_3XL), sidebar]
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        })
         .into()
+}
+
+/// A sidebar pick list on the project page, full width.
+fn pick<'a, T, L, V>(p: iced::widget::PickList<'a, T, L, V, Message>) -> iced::widget::PickList<'a, T, L, V, Message>
+where
+    T: ToString + PartialEq + Clone + 'a,
+    L: std::borrow::Borrow<[T]> + 'a,
+    V: std::borrow::Borrow<T> + 'a,
+{
+    p.width(Length::Fill)
+        .text_size(type_scale::SM)
+        .padding(util::SIDEBAR_CONTROL_PADDING)
+        .style(util::sidebar_pick_list_style)
+        .menu_style(util::sidebar_menu_style)
 }
 
 // ── Projects table (JAIT-181) ──

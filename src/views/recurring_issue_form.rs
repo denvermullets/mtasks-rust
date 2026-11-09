@@ -1,4 +1,5 @@
-//! "New recurring issue" / "Edit recurring issue" modal (JRST-172, JRST-177).
+//! "New recurring issue" / "Edit recurring issue" page (JRST-172, JRST-177;
+//! a full page like the web since JRST-454).
 //!
 //! The same state serves both: `editing: Some(local id)` is edit mode, which
 //! saves through [`validate_edit`] (content, routing and the live schedule
@@ -11,23 +12,24 @@
 //!   to the others (they just assign the field on `App::recurring_form`).
 //! - Validation: add a field to [`FormErrors`] and a check in [`validate`]; an
 //!   extra value that reaches the db goes on [`NewRecurringIssue`].
-//! - View: add a widget (with its inline error) to `view`.
+//! - View: add a widget (with its inline error) to `page`.
 //!
 //! `validate` is pure and mirrors the server's rules, so it is unit tested
 //! without the UI.
 
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{button, column, container, pick_list, row, text_editor, text_input};
+use iced::widget::{column, pick_list, row, text_editor, text_input};
 use crate::views::text;
-use iced::{Border, Element, Length, Theme};
+use iced::{Element, Length};
 
 use crate::app::Message;
 use crate::db::models::{Label, Lane, Member, Priority, Project};
 use crate::db::recurring_issues::{
     NewRecurringIssue, RecurringEdit, RecurringIssue, ScheduleEdit, FIRST_LANE,
 };
-use crate::theme as t;
+use crate::theme::{self as t, space, type_scale};
 use crate::views::labels as labels_view;
+use crate::views::{form_page, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frequency {
@@ -484,7 +486,8 @@ fn choice_pick<'a>(
 ) -> Element<'a, Message> {
     column![]
         .spacing(4)
-        .push(text(label).size(12).color(t::text_muted()))
+        .width(Length::Fill)
+        .push(form_page::caption(label))
         .push(pick_list(options, Some(selected.clone()), on_pick).width(Length::Fill))
         .into()
 }
@@ -497,17 +500,19 @@ fn labels_section<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Elem
             labels,
             |l| form.label_ids.contains(&l.id),
             |l| Message::RecurringFormLabelToggled(l.id.clone()),
-            4,
+            6,
         )
     };
     column![]
         .spacing(6)
-        .push(text("Labels").size(12).color(t::text_muted()))
+        .push(form_page::caption("Labels"))
         .push(content)
         .into()
 }
 
-pub fn view<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a, Message> {
+/// The full-page form (web `recurring_issues/new` and `/edit`): an Issue
+/// section, a Schedule section, then the actions.
+pub fn page<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a, Message> {
     let weekday_options: Vec<WeekdayOption> = (0..7).map(WeekdayOption).collect();
 
     let mut schedule = column![].spacing(10).push(
@@ -598,108 +603,94 @@ pub fn view<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a
         .push_maybe(error_line(&form.errors.time_zone))
         .push_maybe(form.summary().map(|s| text(s).size(13).color(t::text_secondary())));
 
-    let form_content = column![]
-        .spacing(14)
-        .width(Length::Fixed(460.0))
+    let issue_fields = column![]
+        .spacing(space::S4)
+        .push(form_page::heading("Issue"))
         .push(
-            text(if editing { "Edit recurring issue" } else { "New recurring issue" })
-                .size(18)
-                .color(t::text_primary()),
-        )
-        .push(
-            text_input("Title", &form.title)
-                .on_input(Message::RecurringFormTitleChanged)
-                .padding(10)
-                .size(14),
-        )
-        .push_maybe(error_line(&form.errors.title))
-        .push(
-            text_editor(&form.description)
-                .placeholder("Description")
-                .on_action(Message::RecurringFormDescriptionChanged)
-                .padding(10)
-                .size(14)
-                .height(Length::Fixed(120.0)),
+            column![]
+                .spacing(space::S1)
+                .push(form_page::caption("Title"))
+                .push(
+                    text_input("Title", &form.title)
+                        .on_input(Message::RecurringFormTitleChanged)
+                        .padding(util::SIDEBAR_CONTROL_PADDING)
+                        .size(type_scale::SM)
+                        .style(util::sidebar_input_style),
+                )
+                .push_maybe(error_line(&form.errors.title)),
         )
         .push(
             column![]
-                .spacing(4)
-                .push(text("Priority").size(12).color(t::text_muted()))
-                .push(pick_list(
-                    PRIORITIES.as_slice(),
-                    Some(form.priority),
-                    Message::RecurringFormPriorityChanged,
-                )),
+                .spacing(space::S1)
+                .push(form_page::caption("Description"))
+                .push(
+                    text_editor(&form.description)
+                        .placeholder("Description")
+                        .on_action(Message::RecurringFormDescriptionChanged)
+                        .padding(space::S2_5)
+                        .size(type_scale::SM)
+                        .height(Length::Fixed(120.0)),
+                ),
         )
-        .push(schedule)
-        .push(choice_pick(
-            "Assignee",
-            &form.assignee_options,
-            &form.assignee,
-            Message::RecurringFormAssigneeChanged,
-        ))
-        .push(choice_pick(
-            "Project",
-            &form.project_options,
-            &form.project,
-            Message::RecurringFormProjectChanged,
-        ))
-        .push(choice_pick(
-            "Lane",
-            &form.lane_options,
-            &form.lane,
-            Message::RecurringFormLaneChanged,
-        ))
-        .push(labels_section(form, labels))
+        // Web: a two-column grid of Priority / Status / Assignee / Project.
         .push(
             row![]
-                .spacing(8)
+                .spacing(space::S4)
                 .push(
-                    button(text("Save").size(14).color(t::bg_primary()))
-                        .on_press(Message::SaveRecurringIssue)
-                        .padding([8, 24])
-                        .style(move |_theme: &Theme, status| button::Style {
-                            background: Some(iced::Background::Color(t::accent_fill(status))),
-                            text_color: t::on_accent(status),
-                            border: Border {
-                                radius: 4.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
+                    column![]
+                        .spacing(space::S1)
+                        .width(Length::Fill)
+                        .push(form_page::caption("Priority"))
+                        .push(
+                            pick_list(
+                                PRIORITIES.as_slice(),
+                                Some(form.priority),
+                                Message::RecurringFormPriorityChanged,
+                            )
+                            .width(Length::Fill),
+                        ),
                 )
-                .push(
-                    button(text("Cancel").size(14))
-                        .on_press(Message::CloseModal)
-                        .padding([8, 24])
-                        .style(button::secondary),
-                ),
-        );
+                .push(choice_pick("Status", &form.lane_options, &form.lane, Message::RecurringFormLaneChanged)),
+        )
+        .push(
+            row![]
+                .spacing(space::S4)
+                .push(choice_pick(
+                    "Assignee",
+                    &form.assignee_options,
+                    &form.assignee,
+                    Message::RecurringFormAssigneeChanged,
+                ))
+                .push(choice_pick(
+                    "Project",
+                    &form.project_options,
+                    &form.project,
+                    Message::RecurringFormProjectChanged,
+                )),
+        )
+        .push(labels_section(form, labels));
 
-    let modal = container(form_content)
-        .padding(28)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_modal())),
-            border: Border {
-                color: t::border(),
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        });
+    let schedule = column![]
+        .spacing(space::S4)
+        .push(form_page::heading("Schedule"))
+        .push(schedule);
 
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        })
-        .into()
+    let content = column![]
+        .spacing(space::S8)
+        .push(issue_fields)
+        .push(schedule)
+        .push(form_page::actions_bar(
+            None,
+            row![]
+                .spacing(space::S4)
+                .push(form_page::cancel_button())
+                .push(form_page::submit_button(
+                    if editing { "Save" } else { "Create recurring issue" },
+                    Message::SaveRecurringIssue,
+                )),
+        ));
+
+    form_page::centered(content, form_page::WIDTH_3XL)
 }
 
 #[cfg(test)]
