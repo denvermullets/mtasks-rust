@@ -158,6 +158,8 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
     for section in &layout.sections {
         let toggle = std::mem::take(&mut archived_toggle)
             .then(|| archived_toggle_button(show_archived));
+        // Breathing room between sections, like the web's `p-2 mt-1` blocks.
+        col = col.push(iced::widget::vertical_space().height(SECTION_GAP));
         let collapsed = match &section.kind {
             SectionKind::Group { id, name, collapsed } => {
                 col = col.push(group_header(id, name, *collapsed, toggle));
@@ -208,6 +210,9 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         })
         .into()
 }
+
+/// Vertical gap above each team section (group, owned, joined, archived).
+const SECTION_GAP: f32 = 12.0;
 
 /// Per-row inputs shared by every team in the sidebar.
 struct RowCtx<'a, 'b> {
@@ -264,16 +269,12 @@ fn team_block<'a>(
         .padding([2, 4]);
 
         let name_color = if is_selected { t::text_primary() } else { t::text_secondary() };
-        // An admin (not the owner) gets the web's small ADMIN label. The name
-        // then truncates to whatever width the other items leave, so a long
-        // name never pushes the badge out; without the badge the name is the
-        // plain text row it always was.
+        // The name stays on one line and truncates to whatever width the
+        // other items leave (web `truncate`), so every team row is the same
+        // height and a long name never pushes the badges out.
         let show_admin = team.shows_admin_badge();
-        let name_text: Element<'a, Message> = if show_admin {
-            container(truncated(team.name.clone(), 14.0, name_color)).width(Length::Fill).into()
-        } else {
-            text(&team.name).size(14).color(name_color).into()
-        };
+        let name_text: Element<'a, Message> =
+            container(truncated(team.name.clone(), 14.0, name_color)).width(Length::Fill).into();
 
         let header_content = row![]
             .spacing(8)
