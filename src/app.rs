@@ -8754,17 +8754,19 @@ impl App {
             content
         };
 
-        let content = match self.hover_card_overlay() {
-            Some(card) => iced::widget::stack![content, card].into(),
-            None => content,
-        };
-
+        // The hover card and toasts always get a layer, even an empty one:
+        // wrapping `content` in a stack only while they show changes the
+        // tree's shape, and iced then rebuilds the widget state underneath,
+        // which scrolls a long body back to the top.
+        let empty = || Element::from(iced::widget::Space::new(0, 0));
+        let card = self.hover_card_overlay().unwrap_or_else(empty);
         // Toasts sit above everything, including any open modal.
-        if self.toasts.is_empty() {
-            content
+        let toasts = if self.toasts.is_empty() {
+            empty()
         } else {
-            iced::widget::stack![content, toast::overlay(&self.toasts)].into()
-        }
+            toast::overlay(&self.toasts)
+        };
+        iced::widget::stack![content, card, toasts].into()
     }
 }
 
