@@ -1,6 +1,8 @@
 # JAIT Desktop
 
 A native macOS client for [JAIT](https://justanotherissuetracker.com) (Just Another Issue Tracker). It keeps a full local copy of your teams, so it opens instantly, works offline, and syncs both ways with the JAIT web app. It also has built-in terminals tied to teams and projects, so the issue you're working on and the shell you're working in sit in the same window.
+<img width="2113" height="1402" alt="image" src="https://github.com/user-attachments/assets/471b85c9-89d6-4c57-9af4-471f67c4eeaa" />
+
 
 ![JAIT Desktop: a project page with burndown and issue list, beside a terminal running Claude Code](image.png)
 
