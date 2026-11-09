@@ -361,10 +361,11 @@ fn build_issue_params(
                 .as_rails_str()
                 .to_string(),
         ),
-        estimate: issue.estimate.map(|e| e as i64),
-        due_date: issue.due_date.clone(),
-        assignee_id,
-        project_id,
+        // Always sent, so a field cleared locally clears on the server too.
+        estimate: Some(issue.estimate.map(|e| e as i64)),
+        due_date: Some(issue.due_date.clone()),
+        assignee_id: Some(assignee_id),
+        project_id: Some(project_id),
         // Send null only for an explicit clear; otherwise omit when absent.
         parent_issue_id: match parent_issue_id {
             Some(id) => Some(Some(id)),
@@ -541,6 +542,31 @@ mod tests {
             Prep::Ready(p) => assert_eq!(p.params.parent_issue_id, None),
             _ => panic!("expected Ready"),
         }
+    }
+
+    #[test]
+    fn cleared_optional_fields_push_null_so_rails_clears_them() {
+        let (conn, _) = moved_locally();
+        conn.execute(
+            "UPDATE issues SET estimate = NULL, due_date = NULL, assignee_id = NULL, project_id = NULL
+             WHERE id = 'i2'",
+            [],
+        )
+        .unwrap();
+        let json = pushed_parent_json(&build_issue_params(&conn, &issue_row(&conn, "i2"), false).unwrap());
+        for key in ["estimate", "due_date", "assignee_id", "project_id"] {
+            assert_eq!(json.get(key), Some(&serde_json::Value::Null), "{key}");
+        }
+    }
+
+    #[test]
+    fn set_optional_fields_push_their_values() {
+        let (conn, _) = moved_locally();
+        conn.execute("UPDATE issues SET estimate = 5, due_date = '2026-12-01' WHERE id = 'i2'", [])
+            .unwrap();
+        let json = pushed_parent_json(&build_issue_params(&conn, &issue_row(&conn, "i2"), false).unwrap());
+        assert_eq!(json["estimate"], 5);
+        assert_eq!(json["due_date"], "2026-12-01");
     }
 
     #[test]

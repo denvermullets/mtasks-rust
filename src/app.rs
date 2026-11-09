@@ -142,6 +142,23 @@ pub enum Message {
     IssueLabelToggled(String),
     /// Open/close the Labels dropdown on the issue form page.
     IssueFormLabelsToggled,
+    /// Issue form Assignee pick (local member UUID; `None` = no assignee).
+    IssueAssigneeChanged(Option<String>),
+    /// Issue form Project pick (local UUID; `None` = no project).
+    IssueProjectChanged(Option<String>),
+    /// "New Project" at the bottom of the issue form's Project list: open the
+    /// project form, then come back to the issue form with it picked.
+    IssueFormNewProject,
+    /// Issue form Estimate pick, in points.
+    IssueEstimateChanged(Option<f64>),
+    IssueDueDateChanged(String),
+    /// "Attach files" on the issue form page: open the multi-file picker.
+    PickIssueFormFiles,
+    /// Files picked or dropped on the issue form page; held until Save.
+    IssueFormFilesPicked(Vec<std::path::PathBuf>),
+    /// Remove a held file (by position) from the issue form page.
+    RemoveIssueFormFile(usize),
+    IssueCreateMoreToggled(bool),
 
     // Issue detail — buffered text fields (committed on Enter / nav-away)
     IssueDetailTitleChanged(String),
@@ -1088,6 +1105,9 @@ pub struct App {
     /// Buffered edit state while the right pane shows `View::ProjectDetail`.
     /// Lanes and labels of the team a new issue from My Issues goes to.
     new_issue_scope: Option<(Vec<Lane>, Vec<Label>)>,
+    /// The open project form came from the issue form's "New Project": saving
+    /// or cancelling it returns to the issue form.
+    project_form_from_issue: bool,
     project_detail: Option<project_detail::ProjectDetailState>,
     /// Cards and edges of the open `View::ProjectDependencyMap`, rebuilt by
     /// `refresh_project_map` on open, scope change and data reload.
@@ -2108,13 +2128,25 @@ impl App {
                     chip: editing.map(ident).unwrap_or_else(|| team_ident.clone()),
                     parent,
                 };
+                // Members and projects are per team; My Issues loads every
+                // team's, so offer only the issue's own team's.
+                let form_team = editing
+                    .map(|i| i.team_id.as_str())
+                    .or(self.selected_team_id.as_deref())
+                    .unwrap_or_default();
+                let choices = issue_form::Choices {
+                    members: self.members.iter().filter(|m| m.team_id == form_team).collect(),
+                    projects: self.projects.iter().filter(|p| p.team_id == form_team).collect(),
+                    // A new project goes to the selected team.
+                    can_create_project: self.selected_team_id.as_deref() == Some(form_team),
+                };
                 let page = match &self.new_issue_scope {
                     Some((lanes, labels))
                         if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
                     {
-                        issue_form::page(form, lanes, labels, context)
+                        issue_form::page(form, lanes, labels, choices, context)
                     }
-                    _ => issue_form::page(form, &self.lanes, &self.labels, context),
+                    _ => issue_form::page(form, &self.lanes, &self.labels, choices, context),
                 };
                 (label.to_string(), page)
             }
@@ -3712,6 +3744,7 @@ impl App {
             issue_form: None,
             issue_detail: None,
             new_issue_scope: None,
+            project_form_from_issue: false,
             project_detail: None,
             project_map: None,
             project_sort: ProjectSort::Created,
@@ -5454,6 +5487,71 @@ impl App {
                     form.lane_id = lane_id;
                 }
             }
+            Message::IssueAssigneeChanged(member_id) => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.assignee_id = member_id;
+                }
+            }
+            Message::IssueProjectChanged(project_id) => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.project_id = project_id;
+                }
+            }
+            Message::IssueFormNewProject => {
+                if self.issue_form.is_some() && self.selected_team_id.is_some() {
+                    self.project_form = Some(projects_view::ProjectFormState::new());
+                    self.project_form_from_issue = true;
+                    self.modal = Modal::ProjectForm;
+                }
+            }
+            Message::IssueEstimateChanged(points) => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.estimate = points;
+                }
+            }
+            Message::IssueDueDateChanged(v) => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.due_date = v;
+                }
+            }
+            Message::IssueCreateMoreToggled(on) => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.create_more = on;
+                }
+            }
+            Message::PickIssueFormFiles => {
+                if self.issue_form.is_none() {
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .pick_files()
+                            .await
+                            .map(|hs| hs.iter().map(|h| h.path().to_path_buf()).collect())
+                            .unwrap_or_default()
+                    },
+                    Message::IssueFormFilesPicked,
+                );
+            }
+            Message::IssueFormFilesPicked(paths) => {
+                // Screened now so a bad file is refused at once; staged and
+                // queued on Save, once the issue exists to own it.
+                let (ok, refused) = crate::files::intake::screen_files(paths);
+                if let Some(ref mut form) = self.issue_form {
+                    form.add_files(ok);
+                }
+                if !refused.is_empty() {
+                    self.push_toast(refused.join("\n"), ToastKind::Error, false);
+                }
+            }
+            Message::RemoveIssueFormFile(index) => {
+                if let Some(ref mut form) = self.issue_form {
+                    if index < form.files.len() {
+                        form.files.remove(index);
+                    }
+                }
+            }
 
             Message::SaveIssue => {
                 // Client-side validation (mirrors Rails' rules) — show inline
@@ -5467,9 +5565,16 @@ impl App {
                         form.error = Some("Pick a lane".into());
                         return Task::none();
                     }
+                    if let Err(e) = form.parsed_due_date() {
+                        form.error = Some(e);
+                        return Task::none();
+                    }
                     form.error = None;
                 }
+                // The saved issue's id, for queuing the form's files.
+                let mut saved_id = None;
                 if let Some(ref form) = self.issue_form {
+                    let due_date = form.parsed_due_date().ok().flatten();
                     let conn = self.db();
                     let now = crate::db::now_iso();
 
@@ -5489,7 +5594,12 @@ impl App {
                             issue.description = description.clone();
                             issue.priority = form.priority.to_i32();
                             issue.lane_id = form.lane_id.clone();
+                            issue.assignee_id = form.assignee_id.clone();
+                            issue.project_id = form.project_id.clone();
+                            issue.estimate = form.estimate;
+                            issue.due_date = due_date.clone();
                             issue.updated_at = now;
+                            saved_id = Some(issue.id.clone());
                             let payload = serde_json::to_string(&issue).ok();
                             let _ = queries::edit_issue_queued(
                                 &conn,
@@ -5525,8 +5635,8 @@ impl App {
                             description: description.clone(),
                             priority: form.priority.to_i32(),
                             team_number: Some(team_number),
-                            due_date: None,
-                            estimate: None,
+                            due_date,
+                            estimate: form.estimate,
                             started_at: None,
                             completed_at: None,
                             canceled_at: None,
@@ -5534,7 +5644,7 @@ impl App {
                             team_id: team_id.clone(),
                             project_id: form.project_id.clone(),
                             parent_issue_id: form.parent_issue_id.clone(),
-                            assignee_id: None,
+                            assignee_id: form.assignee_id.clone(),
                             creator_id,
                             remote_id: None,
                             created_at: now.clone(),
@@ -5546,10 +5656,44 @@ impl App {
 
                         let payload = serde_json::to_string(&issue).ok();
                         self.enqueue_sync("issue", &issue.id, "create", payload.as_deref());
+                        saved_id = Some(issue.id.clone());
                     }
                 }
-                self.modal = Modal::None;
-                self.issue_form = None;
+                // Queued after the issue's own entry, so its upload waits for
+                // the create to give the issue a remote id.
+                if let (Some(id), Some(form)) = (&saved_id, &self.issue_form) {
+                    if !form.files.is_empty() {
+                        let conn = self.db();
+                        let intake = crate::files::intake::queue_files(
+                            &conn,
+                            &crate::files::outbox::default_root(),
+                            crate::db::attachments::OwnerKind::Issue,
+                            id,
+                            &form.files,
+                        );
+                        if let Some(toast) = intake.refusal_toast() {
+                            self.push_toast(toast, ToastKind::Error, false);
+                        }
+                    }
+                }
+                let more = self
+                    .issue_form
+                    .as_ref()
+                    .filter(|f| f.create_more && f.editing_issue_id.is_none() && saved_id.is_some());
+                if let Some(form) = more {
+                    // "Create more": a blank form for the next issue, as the
+                    // web redirects back to `new` (keeping the parent).
+                    let lanes = match (&self.new_issue_scope, &form.parent_issue_id) {
+                        (Some((lanes, _)), None) => lanes,
+                        _ => &self.lanes,
+                    };
+                    let default_lane = lanes.first().map(|l| l.id.clone()).unwrap_or_default();
+                    self.issue_form = Some(form.next_after_create(default_lane));
+                    self.push_toast("Issue created. Create another?", ToastKind::Info, false);
+                } else {
+                    self.modal = Modal::None;
+                    self.issue_form = None;
+                }
                 self.reload_data();
             }
 
@@ -6325,6 +6469,14 @@ impl App {
                     self.modal = Modal::Labels;
                     return Task::none();
                 }
+                // Cancelling a project started from the issue form returns to it.
+                if self.modal == Modal::ProjectForm && std::mem::take(&mut self.project_form_from_issue) {
+                    self.project_form = None;
+                    if self.issue_form.is_some() {
+                        self.modal = Modal::IssueForm;
+                        return Task::none();
+                    }
+                }
                 self.modal = Modal::None;
                 self.issue_form = None;
                 self.settings_form = None;
@@ -6917,6 +7069,9 @@ impl App {
                     DropTarget::CommentComposer => {
                         return self.update(Message::CommentFilesPicked(paths))
                     }
+                    DropTarget::IssueForm => {
+                        return self.update(Message::IssueFormFilesPicked(paths))
+                    }
                     DropTarget::Ignore => {}
                 }
             }
@@ -7369,6 +7524,7 @@ impl App {
                     return Task::none();
                 }
                 self.project_form = Some(projects_view::ProjectFormState::new());
+                self.project_form_from_issue = false;
                 self.modal = Modal::ProjectForm;
             }
 
@@ -7498,6 +7654,7 @@ impl App {
             }
 
             Message::SaveProject => {
+                let mut created_project = None;
                 if let Some(ref mut form) = self.project_form {
                     if form.name.trim().is_empty() {
                         form.error = Some("Name can't be blank".into());
@@ -7551,9 +7708,17 @@ impl App {
 
                     let payload = serde_json::to_string(&project).ok();
                     self.enqueue_sync("project", &project.id, "create", payload.as_deref());
+                    created_project = Some(project.id);
                 }
                 self.modal = Modal::None;
                 self.project_form = None;
+                // Made from the issue form's "New Project": back to it, picked.
+                if std::mem::take(&mut self.project_form_from_issue) {
+                    if let Some(form) = self.issue_form.as_mut() {
+                        form.project_id = created_project;
+                        self.modal = Modal::IssueForm;
+                    }
+                }
                 self.reload_data();
             }
 
