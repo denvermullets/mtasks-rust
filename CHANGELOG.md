@@ -1,7 +1,14 @@
-<!-- last-sha: 842db75fc5a7365f5bf4c5ad33231d158f1a993d -->
-**Version: v0.8.0**
+<!-- last-sha: c20f642d5a96a82af044cd2887fde913a00c69b3 -->
+**Version: v0.9.0**
 
 # What's new
+
+## 2026-11-09
+- **Terminal alerts.** When a program in a terminal needs you, for example Claude Code waiting on a permission prompt, finishing, or hitting an error, a dot appears on its tab, in the terminal panel and next to the team in the sidebar. If the app is in the background you also get a macOS notification; click it to jump straight to that terminal.
+- **Forms open as full pages.** Creating or editing an issue, project or recurring issue now opens a full page with Back and a breadcrumb trail, like on the web, instead of a pop-up. Leaving the page discards the draft. Labels on the issue form are now picked from a dropdown.
+- **More fields on the issue form.** The issue form now has Project, Assignee, Estimate and Due date fields, and you can attach files by picking or dropping them on the page; they upload once the issue is saved. A "Create more" box opens a fresh form after you create an issue so you can add several in a row.
+- **Sidebar shows where you are.** The team's Board or Projects row stays highlighted while you have one of its issues or projects open. Team sections also have more space between them, and long team names now cut off neatly on one line.
+- **Fixes.** Images in issues load again, and hovering over a card no longer jumps the page back to the top.
 
 ## 2026-11-08
 - **Nervosa theme.** A new dark teal-and-orange theme, available only in the desktop app. Pick it in Settings.
