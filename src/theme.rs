@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use iced::theme::Palette;
 use iced::widget::button;
@@ -96,7 +96,7 @@ macro_rules! light {
     };
 }
 
-pub const THEMES: [Tokens; 15] = [
+pub const THEMES: [Tokens; 16] = [
     dark!(
         "default", "Default", 0x000000, 0x0B0A0A, 0x121111, 0x191818, 0xBAD4F7, 0x22242B, 0x92E8D4,
         0x84d5c2, 0x1E1D1D
@@ -268,6 +268,34 @@ pub const THEMES: [Tokens; 15] = [
         0xc88050,
         0x2a2248
     ),
+    // Desktop-only (no Rails counterpart): ported from the NERV Black VS Code
+    // theme, with its teal-green foreground as the text scale.
+    Tokens {
+        key: "nervosa",
+        name: "Nervosa",
+        light: false,
+        menu: hx(0x070f0d),
+        background: hx(0x0a1612),
+        foreground: hx(0x0f1f1a),
+        context_foreground: hx(0x132620),
+        highlight: hx(0xa8d3c5),
+        stroke: hx(0x2a4a3d),
+        accent: hx(0xe85d04),
+        accent_hover: hx(0xf4820b),
+        hover_highlight: hx(0x1a2e28),
+        gray: [
+            hx(0xd4ebe2),
+            hx(0xa8d3c5),
+            hx(0x8fb3a5),
+            hx(0x6a8a7d),
+            hx(0x4a6a5d),
+            hx(0x3a5a4d),
+            hx(0x2a4a3d),
+            hx(0x1a2e28),
+            hx(0x0f1f1a),
+        ],
+        dep: [hx(0x9a6a9a), hx(0x4a8a9c), hx(0x5aac6c), hx(0xd4a017)],
+    },
 ];
 
 /// Key of the theme used when none (or an unknown one) is configured.
@@ -292,6 +320,47 @@ fn index_for_key(key: &str) -> usize {
 /// Select the current theme by key. An unknown key selects `DEFAULT_THEME_KEY`.
 pub fn set_by_key(key: &str) {
     CURRENT.store(index_for_key(key), Ordering::Relaxed);
+}
+
+/// Window opacity in percent (see `set_window_opacity`).
+static OPACITY: AtomicU8 = AtomicU8::new(100);
+
+/// Lowest window opacity Settings offers, in percent.
+pub const MIN_WINDOW_OPACITY: u8 = 30;
+
+/// Set the window background opacity, in percent (clamped to
+/// `MIN_WINDOW_OPACITY..=100`). Only the window's base layers fade (see
+/// `base`); text, cards, inputs and popovers stay opaque.
+pub fn set_window_opacity(pct: u8) {
+    OPACITY.store(pct.clamp(MIN_WINDOW_OPACITY, 100), Ordering::Relaxed);
+}
+
+/// Window background opacity, in percent.
+pub fn window_opacity() -> u8 {
+    OPACITY.load(Ordering::Relaxed)
+}
+
+/// Whether the window background is see-through (opacity below 100%).
+pub fn translucent() -> bool {
+    window_opacity() < 100
+}
+
+/// A base-layer fill: `c` at the window opacity. Base layers are the
+/// window-level surfaces that tile the window without overlapping (sidebar,
+/// tab bar, title strip, main pane, Terminal panel, status bar); stacking two
+/// translucent layers would make the pair nearly opaque.
+pub fn base(c: Color) -> Color {
+    Color {
+        a: c.a * window_opacity() as f32 / 100.0,
+        ..c
+    }
+}
+
+/// A fill that repaints the base layer beneath it in the same color. Kept
+/// while the window is opaque, and dropped while it is translucent so it
+/// doesn't stack on the base layer.
+pub fn repaint(c: Color) -> Option<iced::Background> {
+    (!translucent()).then_some(iced::Background::Color(c))
 }
 
 /// Background of an accent-filled button: `accent`, or `accent_hover` while hovered.
@@ -635,7 +704,7 @@ mod tests {
     fn radius_values_match_the_webs_tailwind_radii() {
         use radius::*;
         assert_eq!([XS, SM, MD, LG, XL, XXL], [2.0, 4.0, 6.0, 8.0, 12.0, 16.0]);
-        assert!(FULL >= 9999.0);
+        const { assert!(FULL >= 9999.0) };
         // The web's markdown: inline code 0.25rem, images 0.375rem, code blocks 0.5rem.
         assert_eq!([SM, MD, LG], [0.25 * 16.0, 0.375 * 16.0, 0.5 * 16.0]);
     }
@@ -663,7 +732,7 @@ mod tests {
         }
     }
 
-    const RAILS_KEYS: [&str; 15] = [
+    const CATALOG_KEYS: [&str; 16] = [
         "default",
         "warm-paper",
         "cool-linen",
@@ -679,12 +748,13 @@ mod tests {
         "ash",
         "chalk",
         "dusk-redux",
+        "nervosa",
     ];
 
     #[test]
     fn choices_list_all_themes_in_catalog_order_by_name() {
         let c = choices();
-        assert_eq!(c.len(), 15);
+        assert_eq!(c.len(), 16);
         for (choice, t) in c.iter().zip(THEMES.iter()) {
             assert_eq!(choice.key, t.key);
             assert_eq!(choice.to_string(), t.name);
@@ -723,7 +793,7 @@ mod tests {
     fn theme_selection_and_read_functions() {
         let _restore = RestoreDefault;
         let keys: Vec<_> = THEMES.iter().map(|t| t.key).collect();
-        assert_eq!(keys, RAILS_KEYS);
+        assert_eq!(keys, CATALOG_KEYS);
         let light: Vec<_> = THEMES.iter().filter(|t| t.light).map(|t| t.name).collect();
         assert_eq!(light, ["Warm Paper", "Cool Linen", "Chalk"]);
 

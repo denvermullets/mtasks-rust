@@ -34,7 +34,7 @@ pub fn truncated(content: impl Into<String>, size: f32, color: Color) -> Truncat
 fn longest_fitting(len: usize, mut fits: impl FnMut(usize) -> bool) -> usize {
     let (mut low, mut high) = (0, len);
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         if fits(mid) {
             low = mid;
         } else {

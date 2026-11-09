@@ -106,6 +106,22 @@ pub struct Config {
     /// Width of the right-docked Terminal panel; `None` is the default.
     #[serde(default)]
     pub terminal_panel_width: Option<f32>,
+    /// Window background opacity in percent (`theme::MIN_WINDOW_OPACITY..=100`).
+    /// Device-wide, local-only, applied live.
+    #[serde(default = "default_window_opacity")]
+    pub window_opacity: u8,
+    /// Background blur radius behind a translucent window (0 is off, up to
+    /// `window_effects::MAX_BLUR_RADIUS`). Device-wide, local-only, applied live.
+    #[serde(default = "default_window_blur")]
+    pub window_blur: u8,
+}
+
+fn default_window_opacity() -> u8 {
+    100
+}
+
+fn default_window_blur() -> u8 {
+    20
 }
 
 fn default_terminal_dock() -> String {
@@ -159,6 +175,8 @@ impl Default for Config {
             project_cards_stacked: false,
             terminal_dock: default_terminal_dock(),
             terminal_panel_width: None,
+            window_opacity: default_window_opacity(),
+            window_blur: default_window_blur(),
         }
     }
 }
@@ -348,8 +366,7 @@ mod tests {
     fn native_notifications_defaults_on_and_round_trips() {
         let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
         assert!(old.native_notifications);
-        let mut cfg = Config::default();
-        cfg.native_notifications = false;
+        let cfg = Config { native_notifications: false, ..Default::default() };
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert!(!back.native_notifications);
     }
@@ -360,10 +377,12 @@ mod tests {
         assert!(!old.project_cards_stacked);
         assert_eq!(old.terminal_dock, "bottom");
         assert_eq!(old.terminal_panel_width, None);
-        let mut cfg = Config::default();
-        cfg.project_cards_stacked = true;
-        cfg.terminal_dock = "right".into();
-        cfg.terminal_panel_width = Some(512.0);
+        let cfg = Config {
+            project_cards_stacked: true,
+            terminal_dock: "right".into(),
+            terminal_panel_width: Some(512.0),
+            ..Default::default()
+        };
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert!(back.project_cards_stacked);
         assert_eq!(back.terminal_dock, "right");
@@ -439,8 +458,7 @@ mod tests {
 
     #[test]
     fn theme_key_round_trips() {
-        let mut cfg = Config::default();
-        cfg.theme = "warm-paper".to_string();
+        let cfg = Config { theme: "warm-paper".to_string(), ..Default::default() };
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.theme, "warm-paper");
     }

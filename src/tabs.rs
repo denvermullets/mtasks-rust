@@ -550,7 +550,7 @@ mod tests {
     fn a_removed_team_project_or_dashboard_closes_its_tab() {
         for gone in [team("b"), project("p"), TabKey::Dashboard("d".into())] {
             let mut tabs = set(&[team("a"), gone.clone(), team("c")], 0);
-            let pruned = tabs.prune(exists_except(&[gone.clone()]), never, &home());
+            let pruned = tabs.prune(exists_except(std::slice::from_ref(&gone)), never, &home());
             assert_eq!(tabs.tabs(), [team("a"), team("c")]);
             assert_eq!(pruned.closed, [gone]);
             assert!(!pruned.active_changed);

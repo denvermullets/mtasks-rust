@@ -15,6 +15,10 @@ pub enum TabMessage {
     Focus(usize),
     /// Close a Tab from the bar, by position.
     Close(usize),
+    /// Cmd+W: close the active Tab.
+    CloseActive,
+    /// The ask was answered: close this Tab, busy Terminals and all.
+    CloseConfirmed(TabKey),
     /// Back from an issue opened in a project Tab to the project, its root.
     BackToRoot,
     /// Back from a team Tab's issue to the page it was opened from.
@@ -65,7 +69,22 @@ impl App {
                     return self.apply_switch(switch);
                 }
             }
-            TabMessage::Close(index) => return self.close_tab(index),
+            TabMessage::Close(index) => return self.close_tab(index, false),
+            TabMessage::CloseActive => {
+                self.ensure_tab_set();
+                if let Some(index) = self.tab_set.as_ref().map(|s| s.active_index()) {
+                    return self.close_tab(index, false);
+                }
+            }
+            TabMessage::CloseConfirmed(key) => {
+                if self.modal == super::Modal::TabCloseConfirm(key.clone()) {
+                    self.modal = super::Modal::None;
+                }
+                let index = self.tab_set.as_ref().and_then(|s| s.tabs().iter().position(|k| *k == key));
+                if let Some(index) = index {
+                    return self.close_tab(index, true);
+                }
+            }
             TabMessage::BackToRoot => return self.back_to_tab_root(),
             TabMessage::BackToPage(view) => return self.back_to_page(view),
             TabMessage::BarScrolled(x) => self.tab_bar_offset = x,
@@ -111,10 +130,20 @@ impl App {
     /// Close the Tab at `index`. Closing the active Tab (or the last Tab,
     /// which becomes the Home page) restores the Tab that takes over;
     /// closing a background Tab only forgets its parked state, comment draft
-    /// included (ADR 0001).
-    fn close_tab(&mut self, index: usize) -> Task<Message> {
+    /// included (ADR 0001). The Tab's own Terminal strip (a team Tab's team
+    /// Terminals, a project Tab's project Terminals) is killed with it; while
+    /// one of them is busy, the Tab asks first unless `confirmed`.
+    fn close_tab(&mut self, index: usize, confirmed: bool) -> Task<Message> {
         self.ensure_tab_set();
         let home = self.home_tab_key();
+        let Some(key) = self.tab_set.as_ref().and_then(|s| s.tabs().get(index)).cloned() else {
+            return Task::none();
+        };
+        let scope = self.tab_terminal_scope(&key);
+        if !confirmed && scope.as_ref().is_some_and(|s| !self.terminals.busy_names(s).is_empty()) {
+            self.modal = super::Modal::TabCloseConfirm(key);
+            return Task::none();
+        }
         let Some(set) = self.tab_set.as_mut() else {
             return Task::none();
         };
@@ -125,6 +154,9 @@ impl App {
         // The closed Tab's comment draft goes with it, staged files included.
         if let Some(draft) = self.parked_tabs.forget(&closed.closed).and_then(|p| p.comment_draft) {
             self.drop_drafts(&draft.owner_ids());
+        }
+        if let Some(scope) = scope {
+            self.terminals.close_scope(&scope);
         }
         if closed.closed == from {
             self.discard_live_composers();
@@ -141,6 +173,17 @@ impl App {
             return self.restore_tab(&to);
         }
         Task::none()
+    }
+
+    /// The Terminal strip that belongs to the Tab `key` itself, the one
+    /// closing it kills: a team Tab's team strip, a project Tab's project
+    /// strip. Cross-team Tabs have none.
+    pub(super) fn tab_terminal_scope(&self, key: &TabKey) -> Option<crate::terminal::Scope> {
+        let project_team = match key {
+            TabKey::Project(id) => self.tab_projects.get(id).map(|(_, team)| team.as_str()),
+            _ => None,
+        };
+        tab_state::panel_scope(key, project_team, None)
     }
 
     /// Leave the open issue for the active Tab's root page (the project, for a
@@ -513,33 +556,27 @@ impl App {
             reply_id: draft.reply_id.clone(),
         };
         match draft.owner.clone() {
-            View::IssueDetail(id) => match queries::get_issue(&conn, &id) {
-                Ok(Some(issue)) => {
-                    let mut d = crate::views::issue_detail::IssueDetailState::from_issue(&issue);
-                    d.comment_composer = Content::with_text(&draft.comment);
-                    d.reply_to = draft.reply_to;
-                    d.reply_composer = Content::with_text(&draft.reply);
-                    d.composer_files = files;
-                    self.issue_detail = Some(d);
-                    self.load_detail_dependencies(&conn);
-                    self.reload_detail_origin(&conn);
-                    return;
-                }
-                _ => {}
+            View::IssueDetail(id) => if let Ok(Some(issue)) = queries::get_issue(&conn, &id) {
+                let mut d = crate::views::issue_detail::IssueDetailState::from_issue(&issue);
+                d.comment_composer = Content::with_text(&draft.comment);
+                d.reply_to = draft.reply_to;
+                d.reply_composer = Content::with_text(&draft.reply);
+                d.composer_files = files;
+                self.issue_detail = Some(d);
+                self.load_detail_dependencies(&conn);
+                self.reload_detail_origin(&conn);
+                return;
             },
-            View::ProjectDetail(id) => match queries::get_project(&conn, &id) {
-                Ok(Some(project)) => {
-                    let mut d = crate::views::project_detail::ProjectDetailState::from_project(&project);
-                    d.comment_composer = Content::with_text(&draft.comment);
-                    d.reply_to = draft.reply_to;
-                    d.reply_composer = Content::with_text(&draft.reply);
-                    d.composer_files = files;
-                    self.project_detail = Some(d);
-                    self.view = View::ProjectDetail(id);
-                    self.load_detail_dependencies(&conn);
-                    return;
-                }
-                _ => {}
+            View::ProjectDetail(id) => if let Ok(Some(project)) = queries::get_project(&conn, &id) {
+                let mut d = crate::views::project_detail::ProjectDetailState::from_project(&project);
+                d.comment_composer = Content::with_text(&draft.comment);
+                d.reply_to = draft.reply_to;
+                d.reply_composer = Content::with_text(&draft.reply);
+                d.composer_files = files;
+                self.project_detail = Some(d);
+                self.view = View::ProjectDetail(id);
+                self.load_detail_dependencies(&conn);
+                return;
             },
             _ => {}
         }
@@ -651,7 +688,7 @@ impl App {
             self.restore_comment_draft(draft, key);
         }
         if let View::IssueDetail(id) = self.view.clone() {
-            if self.issue_detail.as_ref().map_or(true, |d| d.issue_id != id) {
+            if self.issue_detail.as_ref().is_none_or(|d| d.issue_id != id) {
                 self.restore_issue_detail(&id, key);
             }
         }
@@ -751,6 +788,19 @@ impl App {
         self.tab_set
             .as_ref()
             .map_or((0, 0), |s| (s.active_index(), s.tabs().len()))
+    }
+
+    /// Per Tab in bar order, what the Terminals of its own strip wait on
+    /// the person for. The active Tab shows none for the Terminals on screen
+    /// (they lose theirs at `sync`).
+    pub(super) fn tab_needs(&self) -> Vec<Option<crate::terminal::Need>> {
+        let Some(set) = &self.tab_set else {
+            return Vec::new();
+        };
+        set.tabs()
+            .iter()
+            .map(|key| self.tab_terminal_scope(key).and_then(|s| self.terminals.scope_need(&s)))
+            .collect()
     }
 
     /// Bar labels in order, with whether each is the active Tab.

@@ -32,7 +32,7 @@ You are updating `CHANGELOG.md` at the repo root with a new entry summarizing re
    - **<lead-in>** <plain-language description>
    - …
    ```
-   Use today's date (`date +%Y-%m-%d`). Do not modify any prior dated entries.
+   Use today's date (`date +%Y-%m-%d`). Only one section per date: if the top section already has today's date, add the new bullets to the top of that section instead of creating a second heading, and fold or reword any new bullet that overlaps an existing one there. Otherwise, do not modify any prior dated entries.
 
 6. **Update the SHA marker.** Replace the value in `<!-- last-sha: ... -->` on line 1 with `git rev-parse HEAD`.
 

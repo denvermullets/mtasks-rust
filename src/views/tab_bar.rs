@@ -111,9 +111,11 @@ impl canvas::Program<Message> for DragPlaceholder {
 }
 
 /// `dragging` is the position of the Tab being dragged, once the pointer has
-/// passed the threshold: its slot draws as a dashed placeholder.
+/// passed the threshold: its slot draws as a dashed placeholder. `needs` is,
+/// per Tab, what its Terminals wait on the person for (a dot before the label).
 pub fn view<'a>(
     tabs: &[(String, bool)],
+    needs: &[Option<crate::terminal::Need>],
     window_width: f32,
     dragging: Option<usize>,
 ) -> Element<'a, Message> {
@@ -167,7 +169,18 @@ pub fn view<'a>(
                 border: Border { radius: 4.0.into(), ..Default::default() },
                 ..Default::default()
             });
-        let tab = container(row![label_button, close].align_y(iced::Alignment::Center))
+        let dot = needs.get(i).copied().flatten().map(|n| -> Element<'a, Message> {
+            container(crate::views::terminal_panel::attention_dot(n))
+                .padding(iced::Padding { left: 8.0, ..Default::default() })
+                .into()
+        });
+        let tab = container(
+            row![]
+                .push_maybe(dot)
+                .push(label_button)
+                .push(close)
+                .align_y(iced::Alignment::Center),
+        )
             .width(Length::Fixed(tab_w))
             .padding([0, 4])
             .style(move |_theme: &Theme| container::Style {
@@ -207,7 +220,7 @@ pub fn view<'a>(
     container(row![scroller, plus].align_y(iced::Alignment::Center))
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
+            background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             border: Border { color: t::border(), width: 0.0, radius: 0.0.into() },
             ..Default::default()
         })

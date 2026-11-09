@@ -172,7 +172,36 @@ pub fn update_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.id,
         ],
     )?;
+    if old.as_ref().is_some_and(|o| o.lane_id != issue.lane_id) {
+        apply_lane_timestamps(conn, &issue.id)?;
+    }
     record_local_diff(conn, old, &issue.id)?;
+    Ok(())
+}
+
+/// Mirror Rails' `Issue#apply_lane_timestamps!` after a local lane change, so
+/// the board hides/shows the issue right away instead of waiting for the
+/// pulled copy: `completed_at`/`canceled_at` are kept (or stamped) only while
+/// the lane is in that category, and `started_at` is set once on entering a
+/// started or completed lane. Skipped when the lane's category isn't known
+/// locally (the pull will bring Rails' values).
+fn apply_lane_timestamps(conn: &Connection, issue_id: &str) -> Result<()> {
+    let now = crate::db::now_iso();
+    conn.execute(
+        "UPDATE issues SET
+            completed_at = CASE WHEN c.category = 'completed'
+                                THEN COALESCE(issues.completed_at, ?2) END,
+            canceled_at  = CASE WHEN c.category = 'canceled'
+                                THEN COALESCE(issues.canceled_at, ?2) END,
+            started_at   = CASE
+                WHEN c.category = 'completed' THEN COALESCE(issues.started_at, issues.completed_at, ?2)
+                WHEN c.category = 'started'   THEN COALESCE(issues.started_at, ?2)
+                ELSE issues.started_at END
+         FROM (SELECT l.category FROM issues i JOIN lanes l ON l.id = i.lane_id
+               WHERE i.id = ?1) AS c
+         WHERE issues.id = ?1 AND c.category IS NOT NULL",
+        params![issue_id, now],
+    )?;
     Ok(())
 }
 
@@ -551,6 +580,9 @@ pub fn move_issue_to_lane(conn: &Connection, issue_id: &str, lane_id: &str) -> R
         "UPDATE issues SET lane_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![lane_id, now, issue_id],
     )?;
+    if old.as_ref().is_some_and(|o| o.lane_id != lane_id) {
+        apply_lane_timestamps(conn, issue_id)?;
+    }
     record_local_diff(conn, old, issue_id)?;
     Ok(())
 }
@@ -1343,7 +1375,7 @@ pub fn edit_issue_queued(
 }
 
 fn max_event_id(conn: &Connection) -> Result<i64> {
-    Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM issue_events", [], |r| r.get(0))?)
+    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM issue_events", [], |r| r.get(0))
 }
 
 /// Link every unlinked locally-written Activity row after `events_before` to
@@ -3015,6 +3047,48 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM issue_events WHERE issue_id = 'n0'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stored, 0);
+    }
+
+    #[test]
+    fn a_local_lane_change_follows_the_lane_category() {
+        let conn = setup();
+        for (id, name, pos, cat) in [
+            ("ls", "In Progress", 1, "started"),
+            ("ld", "Done", 2, "completed"),
+            ("lc", "Canceled", 3, "canceled"),
+        ] {
+            conn.execute(
+                "INSERT INTO lanes (id, name, position, team_id, category, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 't1', ?4, ?5, ?5)",
+                params![id, name, pos, cat, NOW],
+            )
+            .unwrap();
+        }
+        let get = |c: &Connection| get_issue(c, "i1").unwrap().unwrap();
+
+        // Backlog (no category) -> Done straight away: completed + started.
+        move_issue_to_lane(&conn, "i1", "ld").unwrap();
+        let done = get(&conn);
+        assert!(done.completed_at.is_some() && done.started_at.is_some());
+        assert!(done.canceled_at.is_none());
+
+        // Done -> Canceled via update_issue (the property picker path).
+        let mut issue = done.clone();
+        issue.lane_id = "lc".into();
+        update_issue(&conn, &issue).unwrap();
+        let canceled = get(&conn);
+        assert!(canceled.completed_at.is_none() && canceled.canceled_at.is_some());
+        assert_eq!(canceled.started_at, done.started_at, "started_at is never reset");
+
+        // Back to a started lane clears both end stamps.
+        move_issue_to_lane(&conn, "i1", "ls").unwrap();
+        let started = get(&conn);
+        assert!(started.completed_at.is_none() && started.canceled_at.is_none());
+        assert_eq!(started.started_at, done.started_at);
+
+        // A non-lane edit leaves the stamps alone.
+        set_issue_priority(&conn, "i1", 1).unwrap();
+        assert_eq!(get(&conn).started_at, done.started_at);
     }
 
     #[test]

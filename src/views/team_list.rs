@@ -34,18 +34,23 @@ pub struct SidebarState<'a> {
     pub open_dashboard_id: Option<&'a str>,
     /// Open Terminals per team id (JRST-407); teams at zero are absent.
     pub open_terminals: HashMap<String, usize>,
+    /// What a team's Terminals wait on the person for, per team id; teams
+    /// with nothing waiting are absent.
+    pub terminal_needs: HashMap<String, crate::terminal::Need>,
     /// Stored sidebar groups and team order; `None` keeps the single list.
     pub sidebar: Option<&'a StoredSidebar>,
 }
 
 /// What a row shows for its team's open Terminals: nothing at zero, else the
-/// ⌨ glyph (in the symbol font) and the count (in the UI font).
-fn open_terminals_badge<'a>(count: usize) -> Option<Element<'a, Message>> {
+/// ⌨ glyph (in the symbol font) and the count (in the UI font), and a dot
+/// while one of them waits on the person.
+fn open_terminals_badge<'a>(count: usize, need: Option<crate::terminal::Need>) -> Option<Element<'a, Message>> {
     (count > 0).then(|| {
         row![
             text("\u{2328}").size(11).font(fonts::SYMBOL).color(t::text_muted()),
             text(count.to_string()).size(11).color(t::text_muted()),
         ]
+        .push_maybe(need.map(crate::views::terminal_panel::attention_dot))
         .spacing(4)
         .align_y(iced::Alignment::Center)
         .into()
@@ -65,6 +70,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         saved_views,
         open_view_id,
         open_terminals,
+        terminal_needs,
         home,
         dashboards,
         open_dashboard_id,
@@ -144,6 +150,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         saved_views,
         open_view_id,
         open_terminals: &open_terminals,
+        terminal_needs: &terminal_needs,
         home,
         read_only,
     };
@@ -151,6 +158,8 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
     for section in &layout.sections {
         let toggle = std::mem::take(&mut archived_toggle)
             .then(|| archived_toggle_button(show_archived));
+        // Breathing room between sections, like the web's `p-2 mt-1` blocks.
+        col = col.push(iced::widget::vertical_space().height(SECTION_GAP));
         let collapsed = match &section.kind {
             SectionKind::Group { id, name, collapsed } => {
                 col = col.push(group_header(id, name, *collapsed, toggle));
@@ -196,11 +205,14 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         .padding(0)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
+            background: t::repaint(t::bg_menu()),
             ..Default::default()
         })
         .into()
 }
+
+/// Vertical gap above each team section (group, owned, joined, archived).
+const SECTION_GAP: f32 = 12.0;
 
 /// Per-row inputs shared by every team in the sidebar.
 struct RowCtx<'a, 'b> {
@@ -211,6 +223,7 @@ struct RowCtx<'a, 'b> {
     saved_views: &'a HashMap<String, Vec<SavedView>>,
     open_view_id: Option<&'a str>,
     open_terminals: &'b HashMap<String, usize>,
+    terminal_needs: &'b HashMap<String, crate::terminal::Need>,
     home: Option<&'a HomePage>,
     read_only: bool,
 }
@@ -229,6 +242,7 @@ fn team_block<'a>(
         saved_views,
         open_view_id,
         open_terminals,
+        terminal_needs,
         home,
         read_only,
     } = *ctx;
@@ -255,16 +269,12 @@ fn team_block<'a>(
         .padding([2, 4]);
 
         let name_color = if is_selected { t::text_primary() } else { t::text_secondary() };
-        // An admin (not the owner) gets the web's small ADMIN label. The name
-        // then truncates to whatever width the other items leave, so a long
-        // name never pushes the badge out; without the badge the name is the
-        // plain text row it always was.
+        // The name stays on one line and truncates to whatever width the
+        // other items leave (web `truncate`), so every team row is the same
+        // height and a long name never pushes the badges out.
         let show_admin = team.shows_admin_badge();
-        let name_text: Element<'a, Message> = if show_admin {
-            container(truncated(team.name.clone(), 14.0, name_color)).width(Length::Fill).into()
-        } else {
-            text(&team.name).size(14).color(name_color).into()
-        };
+        let name_text: Element<'a, Message> =
+            container(truncated(team.name.clone(), 14.0, name_color)).width(Length::Fill).into();
 
         let header_content = row![]
             .spacing(8)
@@ -274,7 +284,10 @@ fn team_block<'a>(
             .push_maybe(show_admin.then(admin_badge))
             .push_maybe(is_home_team(home, team).then(home_marker))
             .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())))
-            .push_maybe(open_terminals_badge(open_terminals.get(&team.id).copied().unwrap_or(0)));
+            .push_maybe(open_terminals_badge(
+                open_terminals.get(&team.id).copied().unwrap_or(0),
+                terminal_needs.get(&team.id).copied(),
+            ));
 
         // The chevron alone collapses or expands; the rest of the row expands
         // the team and focuses (or opens) its Tab.
@@ -347,7 +360,8 @@ fn team_block<'a>(
                 ("Recurring issues", View::RecurringIssues),
             ];
             for (label, view) in sub_rows {
-                let active = is_selected && *current_view == view && open_view_id.is_none();
+                let active =
+                    is_selected && sidebar_row_view(current_view) == Some(view.clone()) && open_view_id.is_none();
                 col = col.push(nav_row(
                     label,
                     active,
@@ -515,7 +529,7 @@ pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
     .padding([6, 0])
     .width(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_menu())),
+        background: t::repaint(t::bg_menu()),
         border: Border {
             color: t::border(),
             width: 1.0,
@@ -590,6 +604,22 @@ fn inbox_row<'a>(active: bool, unread_count: i64) -> Element<'a, Message> {
         .into()
 }
 
+/// The team sub-row a view lights up (JRST-453): a list view lights its own
+/// row, and a detail view lights the list it belongs to, so the focused team
+/// stays outlined while an issue or project is open. Cross-team views (My
+/// issues, Inbox, dashboards) light no team row.
+pub fn sidebar_row_view(view: &View) -> Option<View> {
+    match view {
+        View::Board | View::IssueDetail(_) | View::DependencyMap { .. } => Some(View::Board),
+        View::ProjectList | View::ProjectDetail(_) | View::ProjectDependencyMap { .. } => {
+            Some(View::ProjectList)
+        }
+        View::Roadmap => Some(View::Roadmap),
+        View::RecurringIssues => Some(View::RecurringIssues),
+        View::MyIssues | View::Inbox | View::Dashboard(_) => None,
+    }
+}
+
 fn nav_row<'a>(
     label: &'a str,
     active: bool,
@@ -610,11 +640,11 @@ fn nav_row<'a>(
 
 fn selected_row_style(active: bool) -> button::Style {
     button::Style {
-        background: Some(iced::Background::Color(if active {
-            t::bg_card_focused()
+        background: if active {
+            Some(iced::Background::Color(t::bg_card_focused()))
         } else {
-            t::bg_menu()
-        })),
+            t::repaint(t::bg_menu())
+        },
         text_color: t::text_primary(),
         border: Border {
             color: if active {
@@ -631,7 +661,7 @@ fn selected_row_style(active: bool) -> button::Style {
 
 fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
     button::Style {
-        background: Some(iced::Background::Color(t::bg_menu())),
+        background: t::repaint(t::bg_menu()),
         text_color: t::text_primary(),
         border: Border {
             color: iced::Color::TRANSPARENT,
@@ -644,7 +674,38 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_label, is_home_dashboard, is_home_team, is_home_view, ordered_dashboards};
+    use super::{
+        badge_label, is_home_dashboard, is_home_team, is_home_view, ordered_dashboards, sidebar_row_view,
+    };
+    use crate::app::{DependencyMapTab, View};
+
+    #[test]
+    fn detail_views_light_their_parent_row() {
+        assert_eq!(sidebar_row_view(&View::IssueDetail("i".into())), Some(View::Board));
+        assert_eq!(
+            sidebar_row_view(&View::DependencyMap {
+                issue_id: "i".into(),
+                tab: DependencyMapTab::Dependencies,
+                depth: 1
+            }),
+            Some(View::Board)
+        );
+        assert_eq!(sidebar_row_view(&View::ProjectDetail("p".into())), Some(View::ProjectList));
+        assert_eq!(
+            sidebar_row_view(&View::ProjectDependencyMap { project_id: "p".into(), active_only: true }),
+            Some(View::ProjectList)
+        );
+    }
+
+    #[test]
+    fn list_views_light_themselves_and_cross_team_views_light_none() {
+        for v in [View::Board, View::ProjectList, View::Roadmap, View::RecurringIssues] {
+            assert_eq!(sidebar_row_view(&v), Some(v.clone()));
+        }
+        for v in [View::MyIssues, View::Inbox, View::Dashboard("d".into())] {
+            assert_eq!(sidebar_row_view(&v), None);
+        }
+    }
     use crate::db::dashboards::Dashboard;
     use crate::db::home_page::HomePage;
     use crate::db::models::Team;
@@ -761,7 +822,8 @@ mod terminal_count_tests {
 
     #[test]
     fn the_open_count_is_hidden_at_zero_and_shown_otherwise() {
-        assert!(open_terminals_badge(0).is_none());
-        assert!(open_terminals_badge(3).is_some());
+        assert!(open_terminals_badge(0, None).is_none());
+        assert!(open_terminals_badge(3, None).is_some());
+        assert!(open_terminals_badge(3, Some(crate::terminal::Need::Done)).is_some());
     }
 }

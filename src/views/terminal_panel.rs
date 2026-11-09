@@ -344,10 +344,14 @@ impl canvas::Program<Message> for Pane {
         let f = &self.frame;
         let size = bounds.size();
         let mut out = Vec::with_capacity(f.rows.len() + 2);
-        out.push(
-            self.bg
-                .draw(renderer, size, |fr| fr.fill_rectangle(Point::ORIGIN, size, col(f.bg))),
-        );
+        // While the window is translucent the panel body's base layer paints
+        // this (see `view`); drawing it here too would stack two layers.
+        if !t::translucent() {
+            out.push(
+                self.bg
+                    .draw(renderer, size, |fr| fr.fill_rectangle(Point::ORIGIN, size, col(f.bg))),
+            );
+        }
         let base = Font::with_name(self.font.family);
         let font_size = self.font.size;
         for (y, data) in f.rows.iter().enumerate() {
@@ -557,6 +561,8 @@ pub struct StripItem {
     /// The Terminal the pane is showing.
     pub active: bool,
     pub exited: bool,
+    /// What its program is waiting on the person for, shown as a dot.
+    pub need: Option<crate::terminal::Need>,
     /// The text being typed while this Terminal is renamed.
     pub editing: Option<String>,
 }
@@ -627,7 +633,11 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
     }
     let label = if item.exited { format!("{} (exited)", item.name) } else { item.name };
     let (active, id) = (item.active, item.id);
-    button(text(label).size(12))
+    let content = row![text(label).size(12)]
+        .push_maybe(item.need.map(attention_dot))
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+    button(content)
         .padding([2, 8])
         // Choosing the Terminal already shown renames it.
         .on_press(Message::Terminal(if active {
@@ -639,6 +649,27 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
             background: active.then(|| iced::Background::Color(t::bg_card_focused())),
             text_color: if active { t::text_primary() } else { t::text_secondary() },
             border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Diameter of the attention dot.
+const DOT: f32 = 7.0;
+
+/// The dot a Terminal, a Tab or a team row shows while a Terminal's program
+/// waits on the person: the warning color when it is blocked or failed, the
+/// accent color when it finished or asked for a look.
+pub fn attention_dot<'a>(need: crate::terminal::Need) -> Element<'a, Message> {
+    let color = match need {
+        crate::terminal::Need::Error => t::danger(),
+        n if n.urgent() => t::warning(),
+        _ => t::accent(),
+    };
+    container(iced::widget::Space::new(DOT, DOT))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(color)),
+            border: iced::Border { radius: (DOT / 2.0).into(), ..Default::default() },
             ..Default::default()
         })
         .into()
@@ -822,7 +853,7 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         .center_y(STRIP_HEIGHT)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
+            background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             border: iced::Border { color: t::border(), width: 1.0, radius: 0.0.into() },
             ..Default::default()
         });
@@ -852,6 +883,12 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         }
         grid = grid.push(line);
     }
+    // While translucent, one base layer behind every pane (the panes skip
+    // their own backgrounds); opaque, the panes paint as before.
+    let grid = container(grid).width(Length::Fill).height(Length::Fill).style(|_theme: &Theme| container::Style {
+        background: t::translucent().then(|| iced::Background::Color(t::base(t::bg_primary()))),
+        ..Default::default()
+    });
     match p.dock {
         Dock::Bottom => column![strip, grid].width(Length::Fill).height(Length::Fixed(p.height)).into(),
         Dock::Right => {
@@ -914,7 +951,7 @@ mod tests {
     #[test]
     fn a_new_row_count_changes_every_row() {
         let a = row_of("a");
-        assert_eq!(changed_rows(&[a.clone()], &[a.clone(), a.clone()]), vec![0, 1]);
+        assert_eq!(changed_rows(std::slice::from_ref(&a), &[a.clone(), a.clone()]), vec![0, 1]);
         assert_eq!(changed_rows(&[], &[a]), vec![0]);
     }
 

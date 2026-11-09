@@ -54,6 +54,48 @@ pub(super) enum Cmd {
 struct Shared {
     frame: Mutex<Arc<Frame>>,
     exited: AtomicBool,
+    /// Attention requests (status reports, notifications, bells) the UI hasn't taken.
+    signals: Mutex<Vec<Signal>>,
+}
+
+/// Most signals kept for the UI to take; a program ringing the bell in a loop
+/// while the UI is slow drops the rest.
+const MAX_SIGNALS: usize = 64;
+
+impl Shared {
+    /// Queue a signal and wake the UI, hidden or not: a hidden Terminal is
+    /// exactly the one whose program needs to reach the person.
+    fn signal(&self, signal: Signal, wake: &Wake) {
+        let mut q = self.signals.lock().unwrap_or_else(|p| p.into_inner());
+        if q.len() < MAX_SIGNALS {
+            q.push(signal);
+        }
+        drop(q);
+        wake.fire();
+    }
+}
+
+fn lossy(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+fn program_status(s: libghostty_vt::terminal::ProgramStatus<'_>) -> Option<Signal> {
+    use libghostty_vt::terminal::{ProgramStatusKind as K, ProgramStatusState as S};
+    let state = match s.state().ok()? {
+        S::Idle => ProgramState::Idle,
+        S::Working => ProgramState::Working,
+        S::Done => ProgramState::Done,
+        S::Error => ProgramState::Error,
+        S::Clear => ProgramState::Clear,
+        S::Blocked => ProgramState::Blocked(match s.kind() {
+            Ok(K::Permission) => BlockKind::Permission,
+            Ok(K::Question) => BlockKind::Question,
+            Ok(K::Auth) => BlockKind::Auth,
+            _ => BlockKind::Unspecified,
+        }),
+        _ => return None,
+    };
+    Some(Signal::Status { state, app: lossy(s.app()), title: lossy(s.title()), message: lossy(s.message()) })
 }
 
 pub(super) struct Engine {
@@ -205,7 +247,7 @@ impl Engine {
     pub(super) fn spawn(config: SpawnConfig, wake: Arc<Wake>) -> std::io::Result<Engine> {
         let io = |e: anyhow_like::Error| std::io::Error::other(e.0);
         let size = PtySize { rows: config.rows, cols: config.cols, pixel_width: 0, pixel_height: 0 };
-        let pty = open_pty_with_retry(size).map_err(|e| io(e.into()))?;
+        let pty = open_pty_with_retry(size).map_err(io)?;
         let master_fd = pty.master.as_raw_fd().ok_or_else(|| std::io::Error::other("no pty fd"))?;
         // portable-pty doesn't set IUTF8; without it the line editor erases bytes, not characters.
         unsafe {
@@ -227,10 +269,7 @@ impl Engine {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "jait");
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        match config.cwd.filter(|p| p.is_dir()).or(home) {
-            Some(dir) => cmd.cwd(dir),
-            None => {}
-        }
+        if let Some(dir) = config.cwd.filter(|p| p.is_dir()).or(home) { cmd.cwd(dir) }
         let guard_fd = dup_cloexec(master_fd)?;
         let child = ChildGuard {
             child: Some(pty.slave.spawn_command(cmd).map_err(|e| io(e.into()))?),
@@ -249,6 +288,7 @@ impl Engine {
         let shared = Arc::new(Shared {
             frame: Mutex::new(Arc::new(Frame::default())),
             exited: AtomicBool::new(false),
+            signals: Mutex::new(Vec::new()),
         });
         let inflight = Arc::new(AtomicU64::new(0));
         let (tx, rx) = channel::<Cmd>();
@@ -317,6 +357,11 @@ impl Engine {
 
     pub(super) fn exited(&self) -> bool {
         self.shared.exited.load(Acquire)
+    }
+
+    /// The attention signals queued since the last call, oldest first.
+    pub(super) fn take_signals(&self) -> Vec<Signal> {
+        std::mem::take(&mut *self.shared.signals.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
     /// SIGHUP the shell and its foreground process group, SIGKILL them if the shell
@@ -732,6 +777,23 @@ fn owner(
             Some(if l.load(Relaxed) { ColorScheme::Light } else { ColorScheme::Dark })
         })
         .unwrap();
+        // Attention. Setting the OSC 7501 handler also answers a program's
+        // `OSC 7501 ; ?` probe (through `on_pty_write`), which is how Claude
+        // Code learns it can report "blocked on a permission prompt".
+        let (sh, wk) = (shared.clone(), wake.clone());
+        term.on_program_status(move |_t, s| {
+            if let Some(signal) = program_status(s) {
+                sh.signal(signal, &wk);
+            }
+        })
+        .unwrap();
+        let (sh, wk) = (shared.clone(), wake.clone());
+        term.on_desktop_notification(move |_t, n| {
+            sh.signal(Signal::Notification { title: lossy(n.title()), body: lossy(n.body()) }, &wk);
+        })
+        .unwrap();
+        let (sh, wk) = (shared.clone(), wake.clone());
+        term.on_bell(move |_t| sh.signal(Signal::Bell, &wk)).unwrap();
     }
     apply_theme(&mut term, &theme);
 
@@ -1044,7 +1106,7 @@ fn owner(
 fn floor_enabled() -> bool {
     #[cfg(test)]
     {
-        FLOOR_OFF.load(Relaxed) == false
+        !FLOOR_OFF.load(Relaxed)
     }
     #[cfg(not(test))]
     {
@@ -1121,8 +1183,10 @@ fn build_frame(
         if clean {
             rows.push(prev[y].clone());
         } else {
-            let mut data = RowData::default();
-            data.selected = row.selection().ok().flatten().map(|s| (s.start_x, s.end_x));
+            let mut data = RowData {
+                selected: row.selection().ok().flatten().map(|s| (s.start_x, s.end_x)),
+                ..Default::default()
+            };
             let raw_row = row.raw_row().ok();
             data.wrapped = raw_row.and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
             // Only a row that says it has links is worth a lookup per cell.

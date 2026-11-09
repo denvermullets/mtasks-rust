@@ -81,7 +81,7 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(t::bg_primary())),
+        background: t::repaint(t::bg_primary()),
         ..Default::default()
     })
     .into()

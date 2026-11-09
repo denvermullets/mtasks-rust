@@ -431,7 +431,7 @@ fn paragraph<'a>(inlines: &[Inline], size: f32, plain: Color, ctx: &BodyCtx<'a>)
     hover_rich(spans, Message::OpenBodyLink)
         .size(size)
         .clickable(is_clickable)
-        .on_hover(|owner, h| Message::BodyHover(owner, h))
+        .on_hover(Message::BodyHover)
         .into()
 }
 

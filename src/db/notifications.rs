@@ -232,7 +232,7 @@ impl PendingReads {
                         .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
                         .and_then(|v| v.get("before").and_then(|b| b.as_str().map(String::from)));
                     if let Some(b) = before {
-                        if all_before.as_ref().map_or(true, |cur| b > *cur) {
+                        if all_before.as_ref().is_none_or(|cur| b > *cur) {
                             all_before = Some(b);
                         }
                     }
@@ -369,6 +369,8 @@ pub enum BannerTarget {
     Notification(i64),
     /// The Inbox itself (collapsed "N new notifications" banner).
     Inbox,
+    /// A Terminal whose program wants the person (`TerminalId` number).
+    Terminal(u64),
 }
 
 /// A native banner to post.
@@ -490,7 +492,7 @@ mod tests {
         let mut targets: Vec<_> = b.iter().map(|b| b.target).collect();
         targets.sort_by_key(|t| match t {
             BannerTarget::Notification(id) => *id,
-            BannerTarget::Inbox => 0,
+            BannerTarget::Inbox | BannerTarget::Terminal(_) => 0,
         });
         assert_eq!(
             targets,

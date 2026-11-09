@@ -197,7 +197,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                 current = row![].spacing(6);
             }
         }
-        if labels.len() % 4 != 0 {
+        if !labels.len().is_multiple_of(4) {
             col = col.push(current);
         }
         col.into()

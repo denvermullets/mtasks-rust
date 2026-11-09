@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, text_input};
+use iced::widget::{button, checkbox, column, container, pick_list, row, slider, text_input};
 use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
@@ -6,6 +6,7 @@ use crate::app::Message;
 use crate::config::Config;
 use crate::fonts;
 use crate::theme as t;
+use crate::window_effects;
 
 #[derive(Debug, Clone)]
 pub struct SettingsFormState {
@@ -16,6 +17,10 @@ pub struct SettingsFormState {
     pub terminal_font: fonts::FontChoice,
     pub terminal_size: u16,
     pub native_notifications: bool,
+    /// Window opacity in percent.
+    pub window_opacity: u8,
+    /// Background blur radius.
+    pub window_blur: u8,
     pub status: Option<String>,
     pub testing: bool,
 }
@@ -30,6 +35,8 @@ impl SettingsFormState {
             terminal_font: fonts::terminal_choice_for_key(&cfg.terminal_font),
             terminal_size: fonts::clamp_terminal_size(cfg.terminal_font_size).round() as u16,
             native_notifications: cfg.native_notifications,
+            window_opacity: cfg.window_opacity.clamp(t::MIN_WINDOW_OPACITY, 100),
+            window_blur: cfg.window_blur.min(window_effects::MAX_BLUR_RADIUS),
             status: None,
             testing: false,
         }
@@ -91,6 +98,7 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                     .width(Length::Fill),
                 ),
         )
+        .push(window_section(form))
         .push(
             column![]
                 .spacing(4)
@@ -219,5 +227,47 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
             ))),
             ..Default::default()
         })
+        .into()
+}
+
+/// Window opacity and blur sliders; both apply live and save on release.
+fn window_section<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
+    let label = |name: &'static str, value: String| {
+        row![]
+            .push(text(name).size(12).color(t::text_secondary()))
+            .push(iced::widget::horizontal_space().width(Length::Fill))
+            .push(text(value).size(12).color(t::text_muted()))
+    };
+    let blur_value = if form.window_blur == 0 {
+        "Off".to_string()
+    } else {
+        form.window_blur.to_string()
+    };
+    let blur_hint = if form.window_opacity >= 100 {
+        "Blur shows once the window is below 100% opacity"
+    } else {
+        "Blurs what's behind the window"
+    };
+    column![]
+        .spacing(6)
+        .push(label("Window opacity", format!("{}%", form.window_opacity)))
+        .push(
+            slider(
+                t::MIN_WINDOW_OPACITY..=100,
+                form.window_opacity,
+                Message::SettingsWindowOpacityChanged,
+            )
+            .on_release(Message::SettingsWindowEffectsReleased),
+        )
+        .push(label("Background blur", blur_value))
+        .push(
+            slider(
+                0..=window_effects::MAX_BLUR_RADIUS,
+                form.window_blur,
+                Message::SettingsWindowBlurChanged,
+            )
+            .on_release(Message::SettingsWindowEffectsReleased),
+        )
+        .push(text(blur_hint).size(11).color(t::text_muted()))
         .into()
 }

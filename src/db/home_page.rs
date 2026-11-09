@@ -642,7 +642,7 @@ mod tests {
             updated_at: String::new(),
         };
         assert_eq!(
-            launch_target(home("dashboard", 9).as_ref(), &t, &v, &[d.clone()]),
+            launch_target(home("dashboard", 9).as_ref(), &t, &v, std::slice::from_ref(&d)),
             LaunchTarget::Dashboard("d1".into())
         );
         assert_eq!(launch_target(home("dashboard", 10).as_ref(), &t, &v, &[d]), LaunchTarget::Default);

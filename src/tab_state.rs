@@ -952,8 +952,7 @@ mod tests {
     #[test]
     fn a_modified_view_parks_with_its_tab() {
         use crate::saved_view::{BoardState, OpenView, RawQuery};
-        let mut modified = BoardState::default();
-        modified.search = "changed".into();
+        let modified = BoardState { search: "changed".into(), ..Default::default() };
         let open = OpenView {
             view_id: "v".into(),
             team_id: "a".into(),

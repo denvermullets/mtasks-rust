@@ -1,9 +1,18 @@
-<!-- last-sha: d19a4b2f08e6bb5d591e6b9d6e42fb327064c481 -->
-**Version: v0.6.0**
+<!-- last-sha: 842db75fc5a7365f5bf4c5ad33231d158f1a993d -->
+**Version: v0.8.0**
 
 # What's new
 
 ## 2026-11-08
+- **Nervosa theme.** A new dark teal-and-orange theme, available only in the desktop app. Pick it in Settings.
+- **See-through window.** New Window opacity and Blur sliders in Settings let you make the app's background translucent and blur what's behind it. Changes show up as you drag. Text, cards and menus stay solid.
+- **Close tabs with Cmd+W.** Cmd+W now closes the tab you're on, and closing a tab also closes its terminals. If a program is still running in one of them, you're asked before the tab closes.
+- **Status changes show up right away.** Moving an issue to Done, Canceled or an in-progress column now updates the board straight away, instead of waiting for the next sync to show or hide it.
+- **Sub-issues on every issue.** Each issue page now has a Sub-issues section with a done count and progress bar. You can set, change or remove an issue's parent, add an existing issue as a sub-issue, and detach a sub-issue from its parent.
+- **Dependency maps.** Click "Dependencies" on an issue or project, or use the command palette, to open a map of what's blocking what. An issue's map has a Dependencies tab with a graph, a depth selector and lists of blockers, plus a Hierarchy tab that shows the issue's parent and sub-issues as an outline (also reachable from "View tree →" on the issue). A project's map shows the blockers across all of its issues.
+- **Dependency lines on the board.** Turn on "Dependencies" in the board's Display menu to draw lines between linked cards, with a legend bar along the top. Hover a card to highlight its lines and the cards it's linked to, and click a linked card to open its dependency map. Back takes you to the board.
+- **More detail in project burndown charts.** Hover a project's burndown chart to see a card with the date and its Scope, Started, Completed and Expected counts.
+- **Clicking a tab just focuses it.** A quick click on a tab no longer sometimes starts dragging it.
 - **Clickable breadcrumbs.** The team name at the top of a page now takes you to that team's board, "Projects" on a project page goes back to the project list, and "My Issues", "Inbox" or a dashboard name takes you back to where you opened an issue from. Project pages also show the project's ID once it has synced, and issue pages no longer show the Search, Filter, Display and "+ New" controls.
 - **Hover cards for projects.** Hover the Project field on an issue to see a card with the project's status, progress, lead, due date and the start of its description. The card gets out of the way when you click to open the dropdown.
 - **Issue page shortcuts open the sidebar.** On an issue page, `s`, `p`, `j` and `l` now open the matching dropdown in the issue's sidebar, like on the web, instead of a picker that covered the sidebar. Clicking the field again closes it.

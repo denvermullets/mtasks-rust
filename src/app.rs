@@ -446,6 +446,14 @@ pub enum Message {
     SettingsTerminalFontChanged(fonts::FontChoice),
     SettingsTerminalSizeChanged(u16),
     SettingsNativeNotificationsToggled(bool),
+    /// Window opacity slider moved (percent): applies live.
+    SettingsWindowOpacityChanged(u8),
+    /// Background blur slider moved (radius): applies live.
+    SettingsWindowBlurChanged(u8),
+    /// An opacity/blur slider was released: save both to config.
+    SettingsWindowEffectsReleased,
+    /// A window opened: apply the configured background blur to it.
+    WindowOpened,
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
@@ -607,6 +615,8 @@ pub enum Modal {
     TerminalCloseConfirm(crate::terminal::TerminalId),
     /// Ask before quitting with a busy Terminal.
     QuitConfirm,
+    /// Ask before closing a Tab whose Terminal strip has a busy Terminal.
+    TabCloseConfirm(crate::tabs::TabKey),
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -1583,7 +1593,6 @@ impl App {
                 queries::comments_for_project(conn, project_id).unwrap_or_default();
             self.detail_activity.clear();
             self.load_comment_attachments(conn);
-            return;
         } else {
             self.detail_comment_attachments.clear();
             self.detail_attachments.clear();
@@ -3785,6 +3794,30 @@ impl App {
         t::iced_theme()
     }
 
+    /// The window's clear color: the page background while opaque, and clear
+    /// while translucent so only the base layers (see `theme::base`) tint it.
+    pub fn style(&self, _theme: &Theme) -> iced::application::Appearance {
+        iced::application::Appearance {
+            background_color: if t::translucent() {
+                iced::Color::TRANSPARENT
+            } else {
+                t::bg_primary()
+            },
+            text_color: t::text_primary(),
+        }
+    }
+
+    /// Set the window's background blur from the open Settings form, or the
+    /// config. No blur while the window is opaque: nothing would show it.
+    fn apply_window_blur(&self) -> Task<Message> {
+        let radius = self
+            .settings_form
+            .as_ref()
+            .map_or(self.config.window_blur, |f| f.window_blur);
+        let radius = if t::translucent() { radius } else { 0 };
+        crate::window_effects::set_blur(radius)
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         let keys = event::listen_with(|event, status, _id| {
             if let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
@@ -3827,6 +3860,7 @@ impl App {
         let banner_clicks = crate::sync::banner::clicks().map(Message::BannerClicked);
         let resizes = iced::window::resize_events().map(|(_, size)| Message::WindowResized(size));
         let close_requests = iced::window::close_requests().map(|_| Message::QuitRequested);
+        let opens = iced::window::open_events().map(|_| Message::WindowOpened);
 
         // While a Terminal has focus its key listener replaces the shortcuts.
         let modal_open = self.modal != Modal::None;
@@ -3840,6 +3874,7 @@ impl App {
             activity,
             banner_clicks,
             close_requests,
+            opens,
             resizes,
             self.terminals.subscription(modal_open),
         ];
@@ -4062,6 +4097,49 @@ impl App {
     }
 
     /// Store the panel when it changed since the last message. Local only.
+    /// Post the banners the Terminals queued: only while the window is in
+    /// the background (in front, the Tab and strip dots say it) and banners
+    /// are on.
+    fn post_terminal_alerts(&mut self) {
+        let alerts = self.terminals.take_alerts();
+        if alerts.is_empty() || self.scheduler.is_focused() || !self.config.native_notifications {
+            return;
+        }
+        crate::sync::banner::post(
+            alerts
+                .into_iter()
+                .map(|a| crate::db::notifications::Banner {
+                    title: a.title,
+                    body: a.body,
+                    target: crate::db::notifications::BannerTarget::Terminal(a.id.0),
+                })
+                .collect(),
+        );
+    }
+
+    /// Open the Tab whose strip has Terminal `id`, then show it and give it
+    /// the keyboard. A team Tab on a project's page goes back to the Board,
+    /// whose strip is the team's own.
+    fn reveal_terminal(&mut self, id: crate::terminal::TerminalId) -> Task<Message> {
+        let Some(scope) = self.terminals.scope_of(id) else {
+            return Task::none();
+        };
+        let task = match &scope.project {
+            Some(project) => self.update(Message::OpenProjectDetail(project.clone())),
+            None => {
+                let task = self.focus_team_tab(&scope.team);
+                if self.panel_scope().as_ref() == Some(&scope) {
+                    task
+                } else {
+                    Task::batch([task, self.update(Message::SelectTeamView(scope.team.clone(), View::Board))])
+                }
+            }
+        };
+        let now = self.panel_scope();
+        self.terminals.reveal(id, now.as_ref());
+        task
+    }
+
     fn save_panel(&mut self) {
         let Some(set) = &self.tab_set else {
             return;
@@ -4808,6 +4886,7 @@ impl App {
                         | crate::terminal::TerminalMessage::CloseConfirmed(_)
                 );
                 let task = self.terminals.update(m, scope.as_ref());
+                self.post_terminal_alerts();
                 return if closes {
                     Task::batch([task, self.close_removed_tabs()])
                 } else {
@@ -4863,7 +4942,7 @@ impl App {
                 match crate::inbox::resolve_target(&conn, &n) {
                     crate::inbox::OpenTarget::Local(issue) => {
                         drop(conn);
-                        return self.open_issue_from_inbox(issue);
+                        return self.open_issue_from_inbox(*issue);
                     }
                     crate::inbox::OpenTarget::Fetch { team_remote_id, local_team_id, issue_remote_id } => {
                         let base_url = self.config.api_base_url.trim().to_string();
@@ -4913,6 +4992,9 @@ impl App {
                 // Don't navigate out from under an open modal (unsaved input).
                 if self.modal != Modal::None {
                     return focus;
+                }
+                if let crate::db::notifications::BannerTarget::Terminal(raw) = target {
+                    return Task::batch([focus, self.reveal_terminal(crate::terminal::TerminalId(raw))]);
                 }
                 self.commit_issue_detail();
                 self.commit_project_detail();
@@ -6500,7 +6582,7 @@ impl App {
                     form.terminal_font = choice;
                 }
                 // Applied live: the Terminals re-measure and resize on the next sync.
-                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&choice.key, self.config.terminal_font_size));
+                self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(choice.key, self.config.terminal_font_size));
                 self.save_config_change(new_cfg);
             }
 
@@ -6513,6 +6595,33 @@ impl App {
                 self.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&new_cfg.terminal_font, new_cfg.terminal_font_size));
                 self.save_config_change(new_cfg);
             }
+
+            Message::SettingsWindowOpacityChanged(pct) => {
+                t::set_window_opacity(pct);
+                if let Some(ref mut form) = self.settings_form {
+                    form.window_opacity = t::window_opacity();
+                }
+                // Blur is off at 100%, so crossing it changes the blur too.
+                return self.apply_window_blur();
+            }
+
+            Message::SettingsWindowBlurChanged(radius) => {
+                if let Some(ref mut form) = self.settings_form {
+                    form.window_blur = radius.min(crate::window_effects::MAX_BLUR_RADIUS);
+                }
+                return self.apply_window_blur();
+            }
+
+            Message::SettingsWindowEffectsReleased => {
+                if let Some(form) = self.settings_form.as_ref() {
+                    let mut new_cfg = self.config.clone();
+                    new_cfg.window_opacity = form.window_opacity;
+                    new_cfg.window_blur = form.window_blur;
+                    self.save_config_change(new_cfg);
+                }
+            }
+
+            Message::WindowOpened => return self.apply_window_blur(),
 
             Message::SettingsNativeNotificationsToggled(on) => {
                 let mut new_cfg = self.config.clone();
@@ -6779,7 +6888,7 @@ impl App {
 
             Message::RemoveStagedFile(id) => {
                 let conn = self.db();
-                if let Some(Some(path)) = crate::db::attachments::remove_staged(&conn, &id).ok() {
+                if let Ok(Some(path)) = crate::db::attachments::remove_staged(&conn, &id) {
                     let _ = crate::files::outbox::remove(std::path::Path::new(&path));
                 }
                 if let Some(d) = self.comment_drafts_mut() {
@@ -6971,8 +7080,14 @@ impl App {
                 self.window_width = size.width;
                 self.window_height = size.height;
             }
-            Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
-            Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
+            Message::WindowFocused => {
+                self.terminals.set_window_focused(true);
+                return self.drive_sync(SchedEvent::FocusGained);
+            }
+            Message::WindowUnfocused => {
+                self.terminals.set_window_focused(false);
+                return self.drive_sync(SchedEvent::FocusLost);
+            }
             Message::QuitRequested => return self.quit(),
             Message::QuitConfirmed => return self.quit_with(true),
             Message::QuitReady => return iced::exit(),
@@ -7645,7 +7760,7 @@ impl App {
                 };
                 if let Some(edit_id) = form.editing.clone() {
                     match crate::views::recurring_issue_form::validate_edit(form) {
-                        Err(errors) => form.errors = errors,
+                        Err(errors) => form.errors = *errors,
                         Ok(edit) => {
                             let conn = self.db();
                             if crate::db::recurring_issues::update_content(&conn, &edit_id, &edit)
@@ -7663,7 +7778,7 @@ impl App {
                     return Task::none();
                 }
                 match crate::views::recurring_issue_form::validate(form) {
-                    Err(errors) => form.errors = errors,
+                    Err(errors) => form.errors = *errors,
                     Ok(new) => {
                         let conn = self.db();
                         if crate::db::recurring_issues::create(&conn, &team_id, &new).is_ok() {
@@ -7798,8 +7913,14 @@ impl App {
             .map(|t| (t.id.clone(), self.terminals.open_count(&t.id)))
             .filter(|(_, n)| *n > 0)
             .collect();
+        let terminal_needs: HashMap<String, crate::terminal::Need> = self
+            .teams
+            .iter()
+            .filter_map(|t| Some((t.id.clone(), self.terminals.team_need(&t.id)?)))
+            .collect();
         let team_sidebar = team_list::view(team_list::SidebarState {
             open_terminals,
+            terminal_needs,
             teams: &self.teams,
             selected_team_id: self.selected_team_id.as_deref(),
             expanded_teams: &self.expanded_teams,
@@ -8154,6 +8275,17 @@ impl App {
             main_pane
         };
 
+        // The main pane is one of the window's base layers (see `theme::base`);
+        // the sidebar, bars, Terminal panel and status bar are the others.
+        let main_pane: Element<'_, Message> = iced::widget::container(main_pane)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_theme: &Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(t::base(t::bg_primary()))),
+                ..Default::default()
+            })
+            .into();
+
         let main_pane: Element<'_, Message> = match right_panel {
             Some(panel) => row![main_pane, panel].width(Length::Fill).height(Length::Fill).into(),
             None => main_pane,
@@ -8162,6 +8294,7 @@ impl App {
         let main_content = column![]
             .push(tab_bar::view(
                 &self.tab_labels(),
+                &self.tab_needs(),
                 self.window_width,
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
             ))
@@ -8178,7 +8311,7 @@ impl App {
                     .width(Length::Fixed(220.0))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(t::bg_menu())),
+                        background: Some(iced::Background::Color(t::base(t::bg_menu()))),
                         border: iced::Border {
                             color: t::border(),
                             width: 0.0,
@@ -8195,7 +8328,8 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_theme: &Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(t::bg_primary())),
+                // Under the base layers while opaque; dropped while translucent.
+                background: t::repaint(t::bg_primary()),
                 ..Default::default()
             })
             .into();
@@ -8267,6 +8401,26 @@ impl App {
                     "A program is still running in a Terminal. Quitting will stop it.".to_string(),
                     "Quit",
                     Message::QuitConfirmed,
+                );
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::TabCloseConfirm(key) => {
+                let names = self
+                    .tab_terminal_scope(key)
+                    .map(|s| self.terminals.busy_names(&s))
+                    .unwrap_or_default();
+                let body = match names.as_slice() {
+                    [one] => format!("A program is still running in \"{one}\". Closing this Tab will stop it."),
+                    many => format!(
+                        "Programs are still running in {} Terminals in this Tab. Closing it will stop them.",
+                        many.len()
+                    ),
+                };
+                let confirm = crate::views::terminal_panel::confirm_modal(
+                    "Close Tab?",
+                    body,
+                    "Close",
+                    Message::Tab(TabMessage::CloseConfirmed(key.clone())),
                 );
                 iced::widget::stack![base, confirm].into()
             }
@@ -8598,13 +8752,10 @@ fn breadcrumb(
         }
         View::ProjectDependencyMap { project_id, .. } => {
             crumbs.push(Crumb::new("Projects", team_page(View::ProjectList)));
-            match projects.iter().find(|p| p.id == *project_id) {
-                Some(p) => crumbs.push(Crumb::new(
-                    p.name.clone(),
-                    Some(Message::CloseProjectDependencyMap),
-                )),
-                None => {}
-            }
+            if let Some(p) = projects.iter().find(|p| p.id == *project_id) { crumbs.push(Crumb::new(
+                p.name.clone(),
+                Some(Message::CloseProjectDependencyMap),
+            )) }
             crumbs.push(Crumb::plain("Dependencies"));
         }
         View::DependencyMap { issue_id, tab, .. } => {

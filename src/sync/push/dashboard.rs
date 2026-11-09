@@ -454,8 +454,7 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::migrations::run(&conn).unwrap();
         let d = dashboards::create_local(&conn, "D", "").unwrap();
-        let mut draft = dashboards::GroupDraft::default();
-        draft.name = "G".into();
+        let mut draft = dashboards::GroupDraft { name: "G".into(), ..Default::default() };
         draft.toggle_source(dashboards::SourceType::Team, 3);
         let g = dashboards::create_group_local(&conn, &d.id, &draft).unwrap();
         (conn, d.id, g.id)

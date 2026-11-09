@@ -244,3 +244,42 @@ impl Scope {
         Scope { team: team.into(), project: Some(project.into()) }
     }
 }
+
+/// What a blocked program needs from the user (OSC 7501 `kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// The program didn't say.
+    Unspecified,
+    /// Approval to do something ("Allow this command?").
+    Permission,
+    /// An answer to type.
+    Question,
+    /// A login, password or token.
+    Auth,
+}
+
+/// What a program says it is doing (OSC 7501 `state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked(BlockKind),
+    Error,
+    /// Forget what the program said before.
+    Clear,
+}
+
+/// Something a program in a Terminal asked of the person, from the escape
+/// sequences that ask for attention. Text is what the program sent, lossily
+/// made UTF-8; empty when it sent none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Signal {
+    /// A program status report (OSC 7501), as Claude Code sends: working,
+    /// blocked on a permission prompt, done, and so on.
+    Status { state: ProgramState, app: String, title: String, message: String },
+    /// A desktop notification request (OSC 9 or OSC 777).
+    Notification { title: String, body: String },
+    /// BEL.
+    Bell,
+}

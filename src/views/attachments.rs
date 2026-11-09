@@ -32,9 +32,7 @@ pub fn section_with<'a>(
             .iter()
             .filter(|a| a.upload_kind != crate::db::attachments::UploadKind::InlineImage)
     };
-    if files().next().is_none() {
-        return None;
-    }
+    files().next()?;
     let cards = files()
         .fold(column![].spacing(8), |col, a| col.push(card(a, images, deletable)));
     Some(

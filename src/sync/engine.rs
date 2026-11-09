@@ -339,9 +339,7 @@ mod tests {
         assert!(report_with(Some(SyncErrorKind::Forbidden)).cycle_succeeded());
         assert!(report_with(Some(SyncErrorKind::Validation(vec![]))).cycle_succeeded());
         // A read-only pause is a healthy cycle, not a failure.
-        let mut ro = FullSyncReport::default();
-        ro.push = read_only_report();
-        ro.can_write = Some(false);
+        let ro = FullSyncReport { push: read_only_report(), can_write: Some(false), ..Default::default() };
         assert!(ro.cycle_succeeded());
         // Pull error with no structured failure counts as unhealthy.
         let mut r = FullSyncReport::default();
@@ -430,8 +428,7 @@ mod tests {
     }
 
     fn auth_push_report() -> SyncReport {
-        let mut r = SyncReport::default();
-        r.failed = 1;
+        let mut r = SyncReport { failed: 1, ..Default::default() };
         r.failures.push(SyncFailure {
             entity_type: "issue".into(),
             entity_id: "x".into(),
@@ -442,8 +439,7 @@ mod tests {
     }
 
     fn pull_outcome(processed: usize) -> PullOutcome {
-        let mut report = SyncReport::default();
-        report.processed = processed;
+        let report = SyncReport { processed, ..Default::default() };
         PullOutcome {
             report,
             deleted_teams: Vec::new(),
@@ -460,9 +456,7 @@ mod tests {
             None,
             async {
                 order.borrow_mut().push("push");
-                let mut r = SyncReport::default();
-                r.processed = 2;
-                r
+                SyncReport { processed: 2, ..Default::default() }
             },
             || async {
                 order.borrow_mut().push("pull");

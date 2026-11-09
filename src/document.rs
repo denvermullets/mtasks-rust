@@ -237,7 +237,7 @@ fn find_www_links(text: &str) -> Vec<(usize, usize)> {
     while let Some(off) = lower[from..].find("www.") {
         let start = from + off;
         from = start + 4;
-        let boundary = text[..start].chars().next_back().map_or(true, |c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '('));
+        let boundary = text[..start].chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '('));
         if !boundary {
             continue;
         }
@@ -359,6 +359,9 @@ fn plain_inlines(inlines: &[Inline]) -> String {
     s
 }
 
+/// An inline wrapper's constructor, e.g. `Inline::Strong`.
+type InlineWrap = fn(Vec<Inline>) -> Inline;
+
 #[derive(Default)]
 struct Builder {
     /// Open containers, innermost last. Empty means the document root.
@@ -382,7 +385,7 @@ struct Builder {
     link: Option<(String, String)>,
     /// Open wrappers (strong), innermost last: the buffer each one wraps into
     /// and its constructor. The wrapper's own content is in `current`.
-    wrappers: Vec<(Vec<Inline>, fn(Vec<Inline>) -> Inline)>,
+    wrappers: Vec<(Vec<Inline>, InlineWrap)>,
     /// Level of the heading being read; its text flushes as `Block::Heading`.
     heading: Option<u8>,
     /// The code block being read: (language, text so far).
@@ -1447,7 +1450,7 @@ mod tests {
             (
                 "inline code is not an image",
                 format!("see `![a]({BLOB})` here"),
-                vec![para(vec![text(&format!("see ")), code(&format!("![a]({BLOB})")), text(" here")])],
+                vec![para(vec![text("see "), code(&format!("![a]({BLOB})")), text(" here")])],
             ),
             (
                 "indented code is not an image",
