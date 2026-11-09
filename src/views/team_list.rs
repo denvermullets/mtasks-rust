@@ -34,18 +34,23 @@ pub struct SidebarState<'a> {
     pub open_dashboard_id: Option<&'a str>,
     /// Open Terminals per team id (JRST-407); teams at zero are absent.
     pub open_terminals: HashMap<String, usize>,
+    /// What a team's Terminals wait on the person for, per team id; teams
+    /// with nothing waiting are absent.
+    pub terminal_needs: HashMap<String, crate::terminal::Need>,
     /// Stored sidebar groups and team order; `None` keeps the single list.
     pub sidebar: Option<&'a StoredSidebar>,
 }
 
 /// What a row shows for its team's open Terminals: nothing at zero, else the
-/// ⌨ glyph (in the symbol font) and the count (in the UI font).
-fn open_terminals_badge<'a>(count: usize) -> Option<Element<'a, Message>> {
+/// ⌨ glyph (in the symbol font) and the count (in the UI font), and a dot
+/// while one of them waits on the person.
+fn open_terminals_badge<'a>(count: usize, need: Option<crate::terminal::Need>) -> Option<Element<'a, Message>> {
     (count > 0).then(|| {
         row![
             text("\u{2328}").size(11).font(fonts::SYMBOL).color(t::text_muted()),
             text(count.to_string()).size(11).color(t::text_muted()),
         ]
+        .push_maybe(need.map(crate::views::terminal_panel::attention_dot))
         .spacing(4)
         .align_y(iced::Alignment::Center)
         .into()
@@ -65,6 +70,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         saved_views,
         open_view_id,
         open_terminals,
+        terminal_needs,
         home,
         dashboards,
         open_dashboard_id,
@@ -144,6 +150,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         saved_views,
         open_view_id,
         open_terminals: &open_terminals,
+        terminal_needs: &terminal_needs,
         home,
         read_only,
     };
@@ -211,6 +218,7 @@ struct RowCtx<'a, 'b> {
     saved_views: &'a HashMap<String, Vec<SavedView>>,
     open_view_id: Option<&'a str>,
     open_terminals: &'b HashMap<String, usize>,
+    terminal_needs: &'b HashMap<String, crate::terminal::Need>,
     home: Option<&'a HomePage>,
     read_only: bool,
 }
@@ -229,6 +237,7 @@ fn team_block<'a>(
         saved_views,
         open_view_id,
         open_terminals,
+        terminal_needs,
         home,
         read_only,
     } = *ctx;
@@ -274,7 +283,10 @@ fn team_block<'a>(
             .push_maybe(show_admin.then(admin_badge))
             .push_maybe(is_home_team(home, team).then(home_marker))
             .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())))
-            .push_maybe(open_terminals_badge(open_terminals.get(&team.id).copied().unwrap_or(0)));
+            .push_maybe(open_terminals_badge(
+                open_terminals.get(&team.id).copied().unwrap_or(0),
+                terminal_needs.get(&team.id).copied(),
+            ));
 
         // The chevron alone collapses or expands; the rest of the row expands
         // the team and focuses (or opens) its Tab.
@@ -761,7 +773,8 @@ mod terminal_count_tests {
 
     #[test]
     fn the_open_count_is_hidden_at_zero_and_shown_otherwise() {
-        assert!(open_terminals_badge(0).is_none());
-        assert!(open_terminals_badge(3).is_some());
+        assert!(open_terminals_badge(0, None).is_none());
+        assert!(open_terminals_badge(3, None).is_some());
+        assert!(open_terminals_badge(3, Some(crate::terminal::Need::Done)).is_some());
     }
 }

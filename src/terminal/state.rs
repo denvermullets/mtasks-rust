@@ -20,6 +20,7 @@ use iced::futures::{SinkExt, StreamExt};
 use iced::keyboard::{self, key::Physical};
 use iced::{event, window, Element, Size, Subscription, Task};
 
+use super::attention::{self, Alert, Need};
 use super::input::{self, Route};
 use super::links::Link;
 use super::panel::{self, Dock, Layout, PanelState, Toggle, MAX_PANES};
@@ -161,6 +162,23 @@ pub struct TerminalState {
     /// Restored Terminals whose shell failed to start; `sync` doesn't retry
     /// them every message. Restart does.
     start_failed: Vec<TerminalId>,
+    /// Terminals whose program is waiting on the person (attention.rs).
+    attention: HashMap<TerminalId, Need>,
+    /// Banners to post, for the app to take (`take_alerts`).
+    alerts: Vec<TerminalAlert>,
+    /// The app window has focus. Set by the app.
+    window_focused: bool,
+    /// The panel was on screen at the last `sync`.
+    on_screen: bool,
+}
+
+/// A banner about one Terminal, for the app to post. A click on it reveals
+/// the Terminal (`reveal`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalAlert {
+    pub id: TerminalId,
+    pub title: String,
+    pub body: String,
 }
 
 impl TerminalState {
@@ -196,6 +214,10 @@ impl TerminalState {
             theme_key: t::tok().key,
             error: None,
             start_failed: Vec::new(),
+            attention: HashMap::new(),
+            alerts: Vec::new(),
+            window_focused: true,
+            on_screen: false,
         }
     }
 
@@ -231,6 +253,10 @@ impl TerminalState {
                 // Take the wake first: a frame published after this notifies again.
                 self.terminals.ack_wake();
                 self.refresh_frame();
+                let signals = self.terminals.take_signals();
+                for (id, signal) in signals {
+                    self.take_signal(id, &signal);
+                }
             }
             TerminalMessage::Window(size) => self.window = size,
             TerminalMessage::ToggleFocus => {
@@ -471,6 +497,7 @@ impl TerminalState {
             self.focused = false;
         }
         let on_screen = scope.is_some() && self.panel.visible;
+        self.on_screen = on_screen;
         let layout = self.panel.layout;
         let shown = match scope {
             Some(s) => panel::reconcile(&self.panel.panes, &self.owned_by(s), layout),
@@ -503,6 +530,12 @@ impl TerminalState {
                 if visible {
                     self.refresh_frame_of(id);
                 }
+            }
+        }
+        // Seen is handled: a Terminal on screen in a focused window loses its badge.
+        if on_screen && self.window_focused {
+            for id in visible_ids.iter().flatten() {
+                self.attention.remove(id);
             }
         }
         // A pane takes its Terminal's size; a hidden Terminal keeps its last.
@@ -620,6 +653,7 @@ impl TerminalState {
                 name: r.name.clone(),
                 active: Some(r.id) == focused_id,
                 exited: r.shell && self.terminals.is_exited(r.id),
+                need: self.attention.get(&r.id).copied(),
                 editing: self
                     .renaming
                     .as_ref()
@@ -887,6 +921,7 @@ impl TerminalState {
     /// reaped in the background.
     fn close(&mut self, id: TerminalId) {
         self.roster.remove(id);
+        self.attention.remove(&id);
         self.sent_visible.remove(&id);
         self.sent_size.remove(&id);
         if self.renaming.as_ref().is_some_and(|(r, _)| *r == id) {
@@ -944,6 +979,71 @@ impl TerminalState {
         self.terminals.paste(id, text);
         self.focused = true;
         true
+    }
+
+    /// Fold one attention signal from `id`'s program into its badge, and
+    /// queue a banner when one is due.
+    fn take_signal(&mut self, id: TerminalId, signal: &super::Signal) {
+        let Some(name) = self.roster.get(id).map(|r| r.name.clone()) else { return };
+        let watching = self.watching(id);
+        let (need, alert) = attention::apply(self.attention.get(&id).copied(), signal, watching, &name);
+        match need {
+            Some(n) => self.attention.insert(id, n),
+            None => self.attention.remove(&id),
+        };
+        if let Some(Alert { title, body }) = alert {
+            self.alerts.push(TerminalAlert { id, title, body });
+        }
+    }
+
+    /// The person can see `id` now: it is in a pane of the panel on screen
+    /// and the window has focus.
+    fn watching(&self, id: TerminalId) -> bool {
+        self.window_focused && self.on_screen && self.shown[..self.panel.layout.slots()].contains(&Some(id))
+    }
+
+    /// The app window gained or lost focus.
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.window_focused = focused;
+    }
+
+    /// Banners queued since the last call, oldest first.
+    pub fn take_alerts(&mut self) -> Vec<TerminalAlert> {
+        std::mem::take(&mut self.alerts)
+    }
+
+    /// The most pressing need among the Terminals of the strip of `scope`.
+    pub fn scope_need(&self, scope: &Scope) -> Option<Need> {
+        attention::strongest(self.roster.of_scope(scope).filter_map(|r| self.attention.get(&r.id).copied()))
+    }
+
+    /// The most pressing need among all of a team's Terminals, its projects' included.
+    pub fn team_need(&self, team: &str) -> Option<Need> {
+        attention::strongest(self.roster.of_team(team).filter_map(|r| self.attention.get(&r.id).copied()))
+    }
+
+    /// The strip `id` is in, for the app to open its Tab.
+    pub fn scope_of(&self, id: TerminalId) -> Option<Scope> {
+        let r = self.roster.get(id)?;
+        Some(Scope { team: r.team.clone(), project: r.project.clone() })
+    }
+
+    /// Bring `id` to the person: show the panel, focus the pane showing it
+    /// (or put it in the focused pane) and give it the keyboard. A banner
+    /// click calls this once its Tab is open. Nothing happens unless the
+    /// strip of `scope` has it.
+    pub fn reveal(&mut self, id: TerminalId, scope: Option<&Scope>) {
+        if !scope.is_some_and(|s| self.owned_by(s).contains(&id)) {
+            return;
+        }
+        self.renaming = None;
+        self.panel.visible = true;
+        match self.shown[..self.panel.layout.slots()].iter().position(|p| *p == Some(id)) {
+            Some(slot) => self.focus_slot(slot),
+            None => self.place(self.panel.focused_pane, id),
+        }
+        self.focused = true;
+        self.attention.remove(&id);
     }
 
     fn focused_terminal(&self) -> Option<TerminalId> {
@@ -1005,6 +1105,7 @@ impl TerminalState {
         }
         let Some(new) = self.spawn(&rec.team, rec.cwd.clone()) else { return };
         self.roster.replace_id(id, new);
+        self.attention.remove(&id);
         if let Some(old) = self.terminals.close(id) {
             self.closing.retain(|c| !c.is_done());
             self.closing.push(old);
@@ -1267,6 +1368,73 @@ mod tests {
         // Restored and not started: in the strip, but not open.
         t.restore_records(vec![record("k1", "a")]);
         t.reveal_for_click("a");
+        assert!(!t.stored_panel().visible);
+    }
+
+    fn status(state: super::super::ProgramState) -> super::super::Signal {
+        super::super::Signal::Status { state, app: String::new(), title: String::new(), message: String::new() }
+    }
+
+    #[test]
+    fn a_hidden_terminal_that_needs_the_person_is_flagged_until_seen() {
+        use super::super::{BlockKind, ProgramState};
+        let mut t = TerminalState::new();
+        let id = TerminalId(1);
+        t.roster.add(id, &a(), None);
+        // The panel is hidden: the person can't see the prompt.
+        t.take_signal(id, &status(ProgramState::Blocked(BlockKind::Permission)));
+        let blocked = Some(Need::Blocked(BlockKind::Permission));
+        assert_eq!((t.scope_need(&a()), t.team_need("a")), (blocked, blocked));
+        assert!(t.scope_need(&Scope::project("a", "p")).is_none(), "a project's Tab is not flagged");
+        let alerts = t.take_alerts();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!((alerts[0].id, alerts[0].body.as_str()), (id, "Needs your permission"));
+        // A banner click shows it, focused, and the flag goes.
+        t.reveal(id, Some(&a()));
+        t.sync(Some(&a()));
+        assert!(t.stored_panel().visible && t.focused);
+        assert_eq!(t.focused_terminal(), Some(id));
+        assert!(t.scope_need(&a()).is_none());
+    }
+
+    #[test]
+    fn a_terminal_on_screen_is_flagged_only_while_the_window_is_in_the_background() {
+        use super::super::ProgramState;
+        let mut t = TerminalState::new();
+        let id = TerminalId(1);
+        t.roster.add(id, &a(), None);
+        t.reveal(id, Some(&a()));
+        t.sync(Some(&a()));
+        t.take_signal(id, &status(ProgramState::Done));
+        assert!(t.scope_need(&a()).is_none(), "the person is looking at it");
+        assert!(t.take_alerts().is_empty());
+        t.set_window_focused(false);
+        t.take_signal(id, &status(ProgramState::Done));
+        assert_eq!(t.scope_need(&a()), Some(Need::Done));
+        assert_eq!(t.take_alerts().len(), 1);
+        // Back to the window: on screen, so seen.
+        t.set_window_focused(true);
+        t.sync(Some(&a()));
+        assert!(t.scope_need(&a()).is_none());
+    }
+
+    #[test]
+    fn closing_a_flagged_terminal_drops_its_flag() {
+        let mut t = TerminalState::new();
+        let id = TerminalId(1);
+        t.roster.add(id, &a(), None);
+        t.take_signal(id, &super::super::Signal::Bell);
+        assert_eq!(t.team_need("a"), Some(Need::Bell));
+        let _ = t.update(TerminalMessage::CloseConfirmed(id), Some(&a()));
+        assert!(t.team_need("a").is_none());
+    }
+
+    #[test]
+    fn revealing_a_terminal_from_another_strip_does_nothing() {
+        let mut t = TerminalState::new();
+        let id = TerminalId(1);
+        t.roster.add(id, &Scope::team("b"), None);
+        t.reveal(id, Some(&a()));
         assert!(!t.stored_panel().visible);
     }
 

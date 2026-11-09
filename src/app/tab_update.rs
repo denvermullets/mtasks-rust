@@ -790,6 +790,19 @@ impl App {
             .map_or((0, 0), |s| (s.active_index(), s.tabs().len()))
     }
 
+    /// Per Tab in bar order, what the Terminals of its own strip wait on
+    /// the person for. The active Tab shows none for the Terminals on screen
+    /// (they lose theirs at `sync`).
+    pub(super) fn tab_needs(&self) -> Vec<Option<crate::terminal::Need>> {
+        let Some(set) = &self.tab_set else {
+            return Vec::new();
+        };
+        set.tabs()
+            .iter()
+            .map(|key| self.tab_terminal_scope(key).and_then(|s| self.terminals.scope_need(&s)))
+            .collect()
+    }
+
     /// Bar labels in order, with whether each is the active Tab.
     pub(super) fn tab_labels(&self) -> Vec<(String, bool)> {
         let Some(set) = &self.tab_set else {

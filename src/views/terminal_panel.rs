@@ -561,6 +561,8 @@ pub struct StripItem {
     /// The Terminal the pane is showing.
     pub active: bool,
     pub exited: bool,
+    /// What its program is waiting on the person for, shown as a dot.
+    pub need: Option<crate::terminal::Need>,
     /// The text being typed while this Terminal is renamed.
     pub editing: Option<String>,
 }
@@ -631,7 +633,11 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
     }
     let label = if item.exited { format!("{} (exited)", item.name) } else { item.name };
     let (active, id) = (item.active, item.id);
-    button(text(label).size(12))
+    let content = row![text(label).size(12)]
+        .push_maybe(item.need.map(attention_dot))
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+    button(content)
         .padding([2, 8])
         // Choosing the Terminal already shown renames it.
         .on_press(Message::Terminal(if active {
@@ -643,6 +649,27 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
             background: active.then(|| iced::Background::Color(t::bg_card_focused())),
             text_color: if active { t::text_primary() } else { t::text_secondary() },
             border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Diameter of the attention dot.
+const DOT: f32 = 7.0;
+
+/// The dot a Terminal, a Tab or a team row shows while a Terminal's program
+/// waits on the person: the warning color when it is blocked or failed, the
+/// accent color when it finished or asked for a look.
+pub fn attention_dot<'a>(need: crate::terminal::Need) -> Element<'a, Message> {
+    let color = match need {
+        crate::terminal::Need::Error => t::danger(),
+        n if n.urgent() => t::warning(),
+        _ => t::accent(),
+    };
+    container(iced::widget::Space::new(DOT, DOT))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(color)),
+            border: iced::Border { radius: (DOT / 2.0).into(), ..Default::default() },
             ..Default::default()
         })
         .into()

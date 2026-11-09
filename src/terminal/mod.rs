@@ -12,6 +12,7 @@
 // Parts of the API (paste, close, pid, ...) wait for later tickets.
 #![allow(dead_code)]
 
+pub mod attention;
 mod engine;
 mod input;
 pub mod links;
@@ -22,6 +23,7 @@ mod roster;
 mod state;
 mod types;
 
+pub use attention::Need;
 pub use palette::active_term_theme;
 pub use state::{panel_scope, TerminalMessage, TerminalState};
 pub use types::*;
@@ -249,6 +251,18 @@ impl Terminals {
             .values()
             .filter(|e| e.team == team && !e.engine.exited())
             .count()
+    }
+
+    /// Every Terminal's attention signals since the last call, by Terminal
+    /// in id order, each Terminal's oldest first.
+    pub fn take_signals(&self) -> Vec<(TerminalId, Signal)> {
+        self.ids()
+            .into_iter()
+            .flat_map(|id| {
+                let signals = self.entries.get(&id).map(|e| e.engine.take_signals()).unwrap_or_default();
+                signals.into_iter().map(move |s| (id, s))
+            })
+            .collect()
     }
 
     pub fn ids(&self) -> Vec<TerminalId> {

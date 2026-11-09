@@ -369,6 +369,8 @@ pub enum BannerTarget {
     Notification(i64),
     /// The Inbox itself (collapsed "N new notifications" banner).
     Inbox,
+    /// A Terminal whose program wants the person (`TerminalId` number).
+    Terminal(u64),
 }
 
 /// A native banner to post.
@@ -490,7 +492,7 @@ mod tests {
         let mut targets: Vec<_> = b.iter().map(|b| b.target).collect();
         targets.sort_by_key(|t| match t {
             BannerTarget::Notification(id) => *id,
-            BannerTarget::Inbox => 0,
+            BannerTarget::Inbox | BannerTarget::Terminal(_) => 0,
         });
         assert_eq!(
             targets,

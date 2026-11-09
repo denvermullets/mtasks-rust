@@ -464,6 +464,7 @@ fn mode_2031_pushes_a_report_when_the_theme_changes() {
     close_all(t);
 }
 
+mod attention;
 mod hidden;
 mod keys;
 mod lifecycle;

@@ -54,6 +54,48 @@ pub(super) enum Cmd {
 struct Shared {
     frame: Mutex<Arc<Frame>>,
     exited: AtomicBool,
+    /// Attention requests (status reports, notifications, bells) the UI hasn't taken.
+    signals: Mutex<Vec<Signal>>,
+}
+
+/// Most signals kept for the UI to take; a program ringing the bell in a loop
+/// while the UI is slow drops the rest.
+const MAX_SIGNALS: usize = 64;
+
+impl Shared {
+    /// Queue a signal and wake the UI, hidden or not: a hidden Terminal is
+    /// exactly the one whose program needs to reach the person.
+    fn signal(&self, signal: Signal, wake: &Wake) {
+        let mut q = self.signals.lock().unwrap_or_else(|p| p.into_inner());
+        if q.len() < MAX_SIGNALS {
+            q.push(signal);
+        }
+        drop(q);
+        wake.fire();
+    }
+}
+
+fn lossy(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+fn program_status(s: libghostty_vt::terminal::ProgramStatus<'_>) -> Option<Signal> {
+    use libghostty_vt::terminal::{ProgramStatusKind as K, ProgramStatusState as S};
+    let state = match s.state().ok()? {
+        S::Idle => ProgramState::Idle,
+        S::Working => ProgramState::Working,
+        S::Done => ProgramState::Done,
+        S::Error => ProgramState::Error,
+        S::Clear => ProgramState::Clear,
+        S::Blocked => ProgramState::Blocked(match s.kind() {
+            Ok(K::Permission) => BlockKind::Permission,
+            Ok(K::Question) => BlockKind::Question,
+            Ok(K::Auth) => BlockKind::Auth,
+            _ => BlockKind::Unspecified,
+        }),
+        _ => return None,
+    };
+    Some(Signal::Status { state, app: lossy(s.app()), title: lossy(s.title()), message: lossy(s.message()) })
 }
 
 pub(super) struct Engine {
@@ -246,6 +288,7 @@ impl Engine {
         let shared = Arc::new(Shared {
             frame: Mutex::new(Arc::new(Frame::default())),
             exited: AtomicBool::new(false),
+            signals: Mutex::new(Vec::new()),
         });
         let inflight = Arc::new(AtomicU64::new(0));
         let (tx, rx) = channel::<Cmd>();
@@ -314,6 +357,11 @@ impl Engine {
 
     pub(super) fn exited(&self) -> bool {
         self.shared.exited.load(Acquire)
+    }
+
+    /// The attention signals queued since the last call, oldest first.
+    pub(super) fn take_signals(&self) -> Vec<Signal> {
+        std::mem::take(&mut *self.shared.signals.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
     /// SIGHUP the shell and its foreground process group, SIGKILL them if the shell
@@ -729,6 +777,23 @@ fn owner(
             Some(if l.load(Relaxed) { ColorScheme::Light } else { ColorScheme::Dark })
         })
         .unwrap();
+        // Attention. Setting the OSC 7501 handler also answers a program's
+        // `OSC 7501 ; ?` probe (through `on_pty_write`), which is how Claude
+        // Code learns it can report "blocked on a permission prompt".
+        let (sh, wk) = (shared.clone(), wake.clone());
+        term.on_program_status(move |_t, s| {
+            if let Some(signal) = program_status(s) {
+                sh.signal(signal, &wk);
+            }
+        })
+        .unwrap();
+        let (sh, wk) = (shared.clone(), wake.clone());
+        term.on_desktop_notification(move |_t, n| {
+            sh.signal(Signal::Notification { title: lossy(n.title()), body: lossy(n.body()) }, &wk);
+        })
+        .unwrap();
+        let (sh, wk) = (shared.clone(), wake.clone());
+        term.on_bell(move |_t| sh.signal(Signal::Bell, &wk)).unwrap();
     }
     apply_theme(&mut term, &theme);
 

@@ -4097,6 +4097,49 @@ impl App {
     }
 
     /// Store the panel when it changed since the last message. Local only.
+    /// Post the banners the Terminals queued: only while the window is in
+    /// the background (in front, the Tab and strip dots say it) and banners
+    /// are on.
+    fn post_terminal_alerts(&mut self) {
+        let alerts = self.terminals.take_alerts();
+        if alerts.is_empty() || self.scheduler.is_focused() || !self.config.native_notifications {
+            return;
+        }
+        crate::sync::banner::post(
+            alerts
+                .into_iter()
+                .map(|a| crate::db::notifications::Banner {
+                    title: a.title,
+                    body: a.body,
+                    target: crate::db::notifications::BannerTarget::Terminal(a.id.0),
+                })
+                .collect(),
+        );
+    }
+
+    /// Open the Tab whose strip has Terminal `id`, then show it and give it
+    /// the keyboard. A team Tab on a project's page goes back to the Board,
+    /// whose strip is the team's own.
+    fn reveal_terminal(&mut self, id: crate::terminal::TerminalId) -> Task<Message> {
+        let Some(scope) = self.terminals.scope_of(id) else {
+            return Task::none();
+        };
+        let task = match &scope.project {
+            Some(project) => self.update(Message::OpenProjectDetail(project.clone())),
+            None => {
+                let task = self.focus_team_tab(&scope.team);
+                if self.panel_scope().as_ref() == Some(&scope) {
+                    task
+                } else {
+                    Task::batch([task, self.update(Message::SelectTeamView(scope.team.clone(), View::Board))])
+                }
+            }
+        };
+        let now = self.panel_scope();
+        self.terminals.reveal(id, now.as_ref());
+        task
+    }
+
     fn save_panel(&mut self) {
         let Some(set) = &self.tab_set else {
             return;
@@ -4843,6 +4886,7 @@ impl App {
                         | crate::terminal::TerminalMessage::CloseConfirmed(_)
                 );
                 let task = self.terminals.update(m, scope.as_ref());
+                self.post_terminal_alerts();
                 return if closes {
                     Task::batch([task, self.close_removed_tabs()])
                 } else {
@@ -4948,6 +4992,9 @@ impl App {
                 // Don't navigate out from under an open modal (unsaved input).
                 if self.modal != Modal::None {
                     return focus;
+                }
+                if let crate::db::notifications::BannerTarget::Terminal(raw) = target {
+                    return Task::batch([focus, self.reveal_terminal(crate::terminal::TerminalId(raw))]);
                 }
                 self.commit_issue_detail();
                 self.commit_project_detail();
@@ -7033,8 +7080,14 @@ impl App {
                 self.window_width = size.width;
                 self.window_height = size.height;
             }
-            Message::WindowFocused => return self.drive_sync(SchedEvent::FocusGained),
-            Message::WindowUnfocused => return self.drive_sync(SchedEvent::FocusLost),
+            Message::WindowFocused => {
+                self.terminals.set_window_focused(true);
+                return self.drive_sync(SchedEvent::FocusGained);
+            }
+            Message::WindowUnfocused => {
+                self.terminals.set_window_focused(false);
+                return self.drive_sync(SchedEvent::FocusLost);
+            }
             Message::QuitRequested => return self.quit(),
             Message::QuitConfirmed => return self.quit_with(true),
             Message::QuitReady => return iced::exit(),
@@ -7860,8 +7913,14 @@ impl App {
             .map(|t| (t.id.clone(), self.terminals.open_count(&t.id)))
             .filter(|(_, n)| *n > 0)
             .collect();
+        let terminal_needs: HashMap<String, crate::terminal::Need> = self
+            .teams
+            .iter()
+            .filter_map(|t| Some((t.id.clone(), self.terminals.team_need(&t.id)?)))
+            .collect();
         let team_sidebar = team_list::view(team_list::SidebarState {
             open_terminals,
+            terminal_needs,
             teams: &self.teams,
             selected_team_id: self.selected_team_id.as_deref(),
             expanded_teams: &self.expanded_teams,
@@ -8235,6 +8294,7 @@ impl App {
         let main_content = column![]
             .push(tab_bar::view(
                 &self.tab_labels(),
+                &self.tab_needs(),
                 self.window_width,
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
             ))
