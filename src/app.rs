@@ -140,6 +140,8 @@ pub enum Message {
     IssueLaneChanged(String),
     /// Toggle a label in the issue form's multi-select (by local UUID).
     IssueLabelToggled(String),
+    /// Open/close the Labels dropdown on the issue form page.
+    IssueFormLabelsToggled,
 
     // Issue detail — buffered text fields (committed on Enter / nav-away)
     IssueDetailTitleChanged(String),
@@ -1455,6 +1457,13 @@ impl App {
         self.reload_data();
     }
 
+    fn close_form_page(&mut self) {
+        self.modal = Modal::None;
+        self.issue_form = None;
+        self.project_form = None;
+        self.recurring_form = None;
+    }
+
     fn switch_view(&mut self, view: View) {
         let crossing = self.view.is_cross_team() != view.is_cross_team()
             || matches!(view, View::Dashboard(_));
@@ -2061,6 +2070,73 @@ impl App {
     }
 
     /// The header's Back for an open issue (`tab_state::back_target`).
+    /// Whether a create/edit form fills the page (issue, project, recurring
+    /// issue: the forms the web serves as `new`/`edit` pages).
+    fn form_page_open(&self) -> bool {
+        matches!(self.modal, Modal::IssueForm | Modal::ProjectForm | Modal::RecurringForm)
+    }
+
+    /// The open form page and its header crumbs: the page it was opened from
+    /// (its last crumb goes back), then "New issue" etc.
+    fn form_page_view(&self) -> Option<(Vec<header::Crumb>, Element<'_, Message>)> {
+        let (label, page): (String, Element<'_, Message>) = match self.modal {
+            Modal::IssueForm => {
+                let form = self.issue_form.as_ref()?;
+                let team_ident = self
+                    .selected_team()
+                    .map(|t| t.identifier.clone())
+                    .unwrap_or_default();
+                let ident = |i: &Issue| format!("{team_ident}-{}", i.team_number.unwrap_or(0));
+                let editing = form
+                    .editing_issue_id
+                    .as_ref()
+                    .and_then(|id| self.issues.iter().find(|i| i.id == *id));
+                let parent = form
+                    .parent_issue_id
+                    .as_ref()
+                    .filter(|_| form.editing_issue_id.is_none())
+                    .and_then(|id| self.issues.iter().find(|i| i.id == *id))
+                    .map(|p| (ident(p), p.title.clone()));
+                let label = if form.editing_issue_id.is_some() {
+                    "Edit issue"
+                } else if form.parent_issue_id.is_some() {
+                    "New sub-issue"
+                } else {
+                    "New issue"
+                };
+                let context = issue_form::PageContext {
+                    chip: editing.map(ident).unwrap_or_else(|| team_ident.clone()),
+                    parent,
+                };
+                let page = match &self.new_issue_scope {
+                    Some((lanes, labels))
+                        if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
+                    {
+                        issue_form::page(form, lanes, labels, context)
+                    }
+                    _ => issue_form::page(form, &self.lanes, &self.labels, context),
+                };
+                (label.to_string(), page)
+            }
+            Modal::ProjectForm => (
+                "New project".to_string(),
+                projects_view::page(self.project_form.as_ref()?, &self.members),
+            ),
+            Modal::RecurringForm => {
+                let form = self.recurring_form.as_ref()?;
+                let label = if form.editing.is_some() { "Edit recurring issue" } else { "New recurring issue" };
+                (label.to_string(), crate::views::recurring_issue_form::page(form, &self.labels))
+            }
+            _ => return None,
+        };
+        let mut crumbs = self.breadcrumb();
+        if let Some(last) = crumbs.last_mut() {
+            last.on_press = Some(Message::CloseModal);
+        }
+        crumbs.push(header::Crumb::plain(label));
+        Some((crumbs, page))
+    }
+
     fn back_message(&self) -> Option<Message> {
         use crate::tab_state::{back_target, Back, DetailFrom};
         if matches!(self.view, View::DependencyMap { .. }) {
@@ -4039,7 +4115,22 @@ impl App {
         let view_before = self.view.clone();
         let editing_before = self.editing_description();
         let tabs_before = self.tab_position();
+        // A form page is left by going elsewhere, like a web page: its draft
+        // is dropped (JRST-454).
+        let form_page_before = self.form_page_open();
+        let tab_before = self.active_tab_key().cloned();
+        let saved_view_before = self.open_view.as_ref().map(|v| v.view_id.clone());
+        let team_nav = matches!(message, Message::SelectTeamView(..));
         let mut task = self.update_inner(message);
+        if form_page_before
+            && self.form_page_open()
+            && (team_nav
+                || self.view != view_before
+                || self.active_tab_key() != tab_before.as_ref()
+                || self.open_view.as_ref().map(|v| v.view_id.as_str()) != saved_view_before.as_deref())
+        {
+            self.close_form_page();
+        }
         task = Task::batch([task, self.reveal_active_tab(tabs_before)]);
         // The one place that closes hover cards on a view change, modal open
         // or description editor toggle, whatever message caused it (keyboard
@@ -5336,6 +5427,12 @@ impl App {
                 }
             }
 
+            Message::IssueFormLabelsToggled => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.labels_open = !form.labels_open;
+                }
+            }
+
             Message::IssueTitleChanged(v) => {
                 if let Some(ref mut form) = self.issue_form {
                     form.title = v;
@@ -6219,6 +6316,8 @@ impl App {
                 self.focused_issue = 0;
                 self.persist_display();
             }
+
+            Message::CloseModal if self.form_page_open() => self.close_form_page(),
 
             Message::CloseModal => {
                 // Cancelling the label-delete confirm returns to the panel.
@@ -8260,6 +8359,15 @@ impl App {
             matches!(self.view, View::ProjectDetail(_)),
         );
 
+        // An open create/edit form takes the page, as on the web (JRST-454).
+        let (header, main_pane) = match self.form_page_view() {
+            Some((crumbs, page)) => (
+                header::view(crumbs, false, "", false, None, None, Some(Message::CloseModal), None),
+                page,
+            ),
+            None => (header, main_pane),
+        };
+
         let main_pane = if self.removed_team_tab() {
             iced::widget::container(
                 crate::views::text(
@@ -8357,21 +8465,8 @@ impl App {
                 );
                 iced::widget::stack![base, display_panel::popover(panel)].into()
             }
-            Modal::IssueForm => {
-                if let Some(ref form) = self.issue_form {
-                    let modal = match &self.new_issue_scope {
-                        Some((lanes, labels))
-                            if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
-                        {
-                            issue_form::view(form, lanes, labels)
-                        }
-                        _ => issue_form::view(form, &self.lanes, &self.labels),
-                    };
-                    iced::widget::stack![base, modal].into()
-                } else {
-                    base
-                }
-            }
+            // Full pages in the main pane (see `form_page_view`), not overlays.
+            Modal::IssueForm | Modal::ProjectForm | Modal::RecurringForm => base,
             Modal::Labels => {
                 if let Some(ref form) = self.label_form {
                     let modal = labels_view::modal_view(form, &self.labels);
@@ -8442,21 +8537,6 @@ impl App {
                     base
                 }
             }
-            Modal::ProjectForm => {
-                if let Some(ref form) = self.project_form {
-                    let modal = projects_view::modal_view(form, &self.members);
-                    iced::widget::stack![base, modal].into()
-                } else {
-                    base
-                }
-            }
-            Modal::RecurringForm => match self.recurring_form {
-                Some(ref form) => {
-                    iced::widget::stack![base, crate::views::recurring_issue_form::view(form, &self.labels)]
-                        .into()
-                }
-                None => base,
-            },
             Modal::NewDashboard => iced::widget::stack![
                 base,
                 dashboard_form_modal(

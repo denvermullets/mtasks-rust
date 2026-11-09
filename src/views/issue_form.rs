@@ -1,12 +1,11 @@
-use iced::widget::{button, column, container, pick_list, row, text_editor, text_input};
+use iced::widget::{column, container, pick_list, row, text_editor, Space};
 use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Issue, Label, Lane, Priority};
-use crate::theme as t;
-use crate::views::labels as labels_view;
-use crate::views::lane_icon;
+use crate::theme::{self as t, radius, space, type_scale};
+use crate::views::{form_page, lane_icon, util};
 
 pub struct IssueFormState {
     pub title: String,
@@ -26,6 +25,8 @@ pub struct IssueFormState {
     pub error: Option<String>,
     /// Open `@`/`#` autocomplete list under the description.
     pub suggest: Option<crate::mentions::SuggestState>,
+    /// The Labels dropdown under the property chips is open.
+    pub labels_open: bool,
 }
 
 impl IssueFormState {
@@ -41,6 +42,7 @@ impl IssueFormState {
             project_id: None,
             error: None,
             suggest: None,
+            labels_open: false,
         }
     }
 
@@ -69,6 +71,7 @@ impl IssueFormState {
             project_id: issue.project_id.clone(),
             error: None,
             suggest: None,
+            labels_open: false,
         }
     }
 
@@ -106,18 +109,43 @@ const PRIORITIES: [Priority; 5] = [
     Priority::None,
 ];
 
-pub fn view<'a>(
+/// The description's height until it outgrows it.
+const DESCRIPTION_MIN_HEIGHT: f32 = 110.0;
+
+/// What the page's context row (above the title) names: the team or issue
+/// chip, then "New issue" / "New sub-issue of …" / "Edit issue".
+pub struct PageContext {
+    /// Team identifier on create, the issue's identifier on edit.
+    pub chip: String,
+    /// Parent's identifier and title when creating a sub-issue.
+    pub parent: Option<(String, String)>,
+}
+
+/// The full-page issue form (web `issues/new` and `issues/edit`): context
+/// row, big title, description, a row of property chips, then the actions.
+pub fn page<'a>(
     form: &'a IssueFormState,
     lanes: &'a [Lane],
     labels: &'a [Label],
+    context: PageContext,
 ) -> Element<'a, Message> {
-    let title = if form.editing_issue_id.is_some() {
-        "Edit Issue"
-    } else if form.parent_issue_id.is_some() {
-        "New Sub-issue"
-    } else {
-        "New Issue"
-    };
+    let editing = form.editing_issue_id.is_some();
+
+    let context_row = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(context_chip(context.chip))
+        .push(text("\u{203a}").size(type_scale::SM).color(t::text_muted()))
+        .push(match (&context.parent, editing) {
+            (_, true) => Element::from(text("Edit issue").size(type_scale::SM).color(t::text_secondary())),
+            (Some((id, title)), false) => row![]
+                .spacing(space::S2)
+                .align_y(Alignment::Center)
+                .push(text("New sub-issue of").size(type_scale::SM).color(t::text_secondary()))
+                .push(context_chip(format!("{id}  {title}")))
+                .into(),
+            (None, false) => text("New issue").size(type_scale::SM).color(t::text_secondary()).into(),
+        });
 
     let lane_options: Vec<LaneOption> = lanes
         .iter()
@@ -132,138 +160,101 @@ pub fn view<'a>(
         .find(|l| l.id == form.lane_id)
         .map(|l| crate::lane_icon::icon_for(l.category.as_deref()));
 
-    let form_content = column![]
-        .spacing(14)
-        .width(Length::Fixed(420.0))
-        .push(text(title).size(18).color(t::text_primary()))
+    let lane = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push_maybe(selected_icon.map(lane_icon::view))
         .push(
-            text_input("Title", &form.title)
-                .on_input(Message::IssueTitleChanged)
-                .padding(10)
-                .size(14),
+            pick_list(lane_options, selected_lane, |l: LaneOption| Message::IssueLaneChanged(l.id))
+                .text_size(type_scale::SM)
+                .padding(util::SIDEBAR_CONTROL_PADDING)
+                .style(util::sidebar_pick_list_style)
+                .menu_style(util::sidebar_menu_style),
+        );
+    let priority = pick_list(PRIORITIES.as_slice(), Some(form.priority), Message::IssuePriorityChanged)
+        .text_size(type_scale::SM)
+        .padding(util::SIDEBAR_CONTROL_PADDING)
+        .style(util::sidebar_pick_list_style)
+        .menu_style(util::sidebar_menu_style);
+    let labels_chip = form_page::chip_button(
+        text(form_page::labels_summary(labels, &form.selected_label_ids)).size(type_scale::SM),
+        Message::IssueFormLabelsToggled,
+        form.labels_open,
+    );
+    let properties = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(lane)
+        .push(priority)
+        .push(labels_chip);
+
+    let label_menu = form.labels_open.then(|| {
+        form_page::label_menu(
+            labels,
+            |l| form.selected_label_ids.contains(&l.id),
+            |l| Message::IssueLabelToggled(l.id.clone()),
         )
-        .push_maybe(
-            form.error
-                .as_deref()
-                .map(|e| text(e).size(12).color(t::danger())),
-        )
-        .push(
-            text_editor(&form.description)
-                .placeholder("Description  (@ to mention, # to link an issue)")
-                .on_action(Message::IssueDescriptionChanged)
-                .key_binding(crate::views::issue_detail::editor_binding(
-                    None,
-                    form.suggest.is_some(),
-                ))
-                .padding(10)
-                .size(14)
-                .height(Length::Fixed(160.0)),
-        )
+    });
+
+    let description = text_editor(&form.description)
+        .placeholder("Add description\u{2026}  (@ to mention, # to link an issue)")
+        .on_action(Message::IssueDescriptionChanged)
+        .key_binding(crate::views::issue_detail::editor_binding(None, form.suggest.is_some()))
+        .padding(0)
+        .size(type_scale::SM)
+        .style(form_page::borderless_editor)
+        // Grows with the text like the web's auto-resize textarea, from a
+        // ~5-line floor (iced 0.13's editor has no min height).
+        .height(if form.description.line_count() > 5 {
+            Length::Shrink
+        } else {
+            Length::Fixed(DESCRIPTION_MIN_HEIGHT)
+        });
+
+    let actions = row![]
+        .spacing(space::S4)
+        .align_y(Alignment::Center)
+        .push(form_page::cancel_button())
+        .push(form_page::submit_button(
+            if editing { "Update issue" } else { "Create issue" },
+            Message::SaveIssue,
+        ));
+
+    let content = column![]
+        .push(context_row)
+        .push(Space::with_height(space::S6))
+        .push(form_page::title_input("Issue title", &form.title, Message::IssueTitleChanged))
+        .push_maybe(form.error.as_deref().map(|e| {
+            column![Space::with_height(space::S2), form_page::error_text(e)]
+        }))
+        .push(Space::with_height(space::S6))
+        .push(description)
         .push_maybe(
             form.suggest
                 .as_ref()
                 .map(crate::views::issue_detail::suggestion_rows),
         )
-        .push(
-            row![]
-                .spacing(12)
-                .push(
-                    column![]
-                        .spacing(4)
-                        .width(Length::Fill)
-                        .push(text("Priority").size(12).color(t::text_muted()))
-                        .push(pick_list(
-                            PRIORITIES.as_slice(),
-                            Some(form.priority),
-                            Message::IssuePriorityChanged,
-                        )),
-                )
-                .push(
-                    column![]
-                        .spacing(4)
-                        .width(Length::Fill)
-                        .push(text("Lane").size(12).color(t::text_muted()))
-                        .push(
-                            row![]
-                                .spacing(8)
-                                .align_y(Alignment::Center)
-                                .push_maybe(selected_icon.map(lane_icon::view))
-                                .push(pick_list(lane_options, selected_lane, |l: LaneOption| {
-                                    Message::IssueLaneChanged(l.id)
-                                })),
-                        ),
-                ),
-        )
-        .push(labels_section(form, labels))
-        .push(
-            row![]
-                .spacing(8)
-                .push(
-                    button(text("Save").size(14).color(t::bg_primary()))
-                        .on_press(Message::SaveIssue)
-                        .padding([8, 24])
-                        .style(move |_theme: &Theme, status| button::Style {
-                            background: Some(iced::Background::Color(t::accent_fill(status))),
-                            text_color: t::on_accent(status),
-                            border: Border {
-                                radius: 4.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                )
-                .push(
-                    button(text("Cancel").size(14))
-                        .on_press(Message::CloseModal)
-                        .padding([8, 24])
-                        .style(button::secondary),
-                ),
-        );
+        .push(Space::with_height(space::S6))
+        .push(properties)
+        .push_maybe(label_menu.map(|m| column![Space::with_height(space::S1), m]))
+        .push(Space::with_height(space::S8))
+        .push(form_page::actions_bar(None, actions));
 
-    let modal = container(form_content)
-        .padding(28)
+    form_page::centered(content, form_page::WIDTH_4XL)
+}
+
+/// A read-only chip (web `px-3 py-1.5 rounded-md bg-foreground border`).
+fn context_chip<'a>(label: String) -> Element<'a, Message> {
+    container(text(label).size(type_scale::SM).color(t::text_body()))
+        .padding(util::SIDEBAR_CONTROL_PADDING)
         .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_modal())),
+            background: Some(iced::Background::Color(t::bg_secondary())),
             border: Border {
                 color: t::border(),
                 width: 1.0,
-                radius: 8.0.into(),
+                radius: radius::MD.into(),
             },
             ..Default::default()
-        });
-
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
         })
-        .into()
-}
-
-fn labels_section<'a>(form: &'a IssueFormState, labels: &'a [Label]) -> Element<'a, Message> {
-    let content: Element<'a, Message> = if labels.is_empty() {
-        text("No labels yet — press L on a card to create one.")
-            .size(12)
-            .color(t::text_muted())
-            .into()
-    } else {
-        labels_view::chip_grid(
-            labels,
-            |l| form.selected_label_ids.contains(&l.id),
-            |l| Message::IssueLabelToggled(l.id.clone()),
-            4,
-        )
-    };
-
-    column![]
-        .spacing(6)
-        .push(text("Labels").size(12).color(t::text_muted()))
-        .push(content)
         .into()
 }

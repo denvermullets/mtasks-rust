@@ -12,6 +12,7 @@ pub mod dependency_map;
 pub mod project_dependency_map;
 pub mod dropdown;
 pub mod equal_row;
+pub mod form_page;
 pub mod measure;
 pub mod header;
 pub mod hover_card_view;
