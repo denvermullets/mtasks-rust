@@ -803,6 +803,18 @@ impl App {
             .collect()
     }
 
+    /// Per Tab, whether it has unread Notifications: only the Inbox Tab, while
+    /// the unread count is above zero.
+    pub(super) fn tab_unread(&self) -> Vec<bool> {
+        let Some(set) = &self.tab_set else {
+            return Vec::new();
+        };
+        set.tabs()
+            .iter()
+            .map(|key| *key == TabKey::Inbox && self.notif_unread_count > 0)
+            .collect()
+    }
+
     /// Bar labels in order, with whether each is the active Tab.
     pub(super) fn tab_labels(&self) -> Vec<(String, bool)> {
         let Some(set) = &self.tab_set else {

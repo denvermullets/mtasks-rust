@@ -113,9 +113,12 @@ impl canvas::Program<Message> for DragPlaceholder {
 /// `dragging` is the position of the Tab being dragged, once the pointer has
 /// passed the threshold: its slot draws as a dashed placeholder. `needs` is,
 /// per Tab, what its Terminals wait on the person for (a dot before the label).
+/// `unread` is, per Tab, whether it has unread Notifications (the Inbox Tab);
+/// it shows an accent dot when no Terminal need already takes the slot.
 pub fn view<'a>(
     tabs: &[(String, bool)],
     needs: &[Option<crate::terminal::Need>],
+    unread: &[bool],
     window_width: f32,
     dragging: Option<usize>,
 ) -> Element<'a, Message> {
@@ -169,10 +172,10 @@ pub fn view<'a>(
                 border: Border { radius: 4.0.into(), ..Default::default() },
                 ..Default::default()
             });
-        let dot = needs.get(i).copied().flatten().map(|n| -> Element<'a, Message> {
-            container(crate::views::terminal_panel::attention_dot(n))
-                .padding(iced::Padding { left: 8.0, ..Default::default() })
-                .into()
+        let need_dot = needs.get(i).copied().flatten().map(crate::views::terminal_panel::attention_dot);
+        let unread_dot = || unread.get(i).copied().unwrap_or(false).then(unread_dot);
+        let dot = need_dot.or_else(unread_dot).map(|d| -> Element<'a, Message> {
+            container(d).padding(iced::Padding { left: 8.0, ..Default::default() }).into()
         });
         let tab = container(
             row![]
@@ -222,6 +225,20 @@ pub fn view<'a>(
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             border: Border { color: t::border(), width: 0.0, radius: 0.0.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Diameter of the unread dot, matching the Terminal attention dot.
+const UNREAD_DOT: f32 = 7.0;
+
+/// The accent dot on a Tab with unread Notifications.
+fn unread_dot<'a>() -> Element<'a, Message> {
+    container(iced::widget::Space::new(UNREAD_DOT, UNREAD_DOT))
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::accent())),
+            border: Border { radius: (UNREAD_DOT / 2.0).into(), ..Default::default() },
             ..Default::default()
         })
         .into()

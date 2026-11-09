@@ -8568,6 +8568,7 @@ impl App {
             .push(tab_bar::view(
                 &self.tab_labels(),
                 &self.tab_needs(),
+                &self.tab_unread(),
                 self.window_width,
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
             ))
