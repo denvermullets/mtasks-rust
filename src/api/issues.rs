@@ -14,14 +14,17 @@ pub struct IssueParams {
     pub lane_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+    /// `estimate`, `due_date`, `assignee_id` and `project_id` are tri-state
+    /// like `parent_issue_id`: `None` omits the key, `Some(None)` sends `null`
+    /// (Rails clears it), `Some(Some(v))` sets it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub estimate: Option<i64>,
+    pub estimate: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_date: Option<String>,
+    pub due_date: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee_id: Option<i64>,
+    pub assignee_id: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<i64>,
+    pub project_id: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Tri-state: `None` omits the key (Rails keeps the parent), `Some(None)`
     /// sends `null` (clears it), `Some(Some(id))` sets it.

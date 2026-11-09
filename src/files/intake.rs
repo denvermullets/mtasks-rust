@@ -27,6 +27,40 @@ impl Intake {
     }
 }
 
+/// The file's name and content type when it may be attached, else a
+/// toast-ready reason. Reads only its metadata.
+fn check_file(path: &std::path::Path) -> Result<(String, Option<&'static str>), String> {
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let size = std::fs::metadata(path)
+        .map_err(|e| format!("{filename}: can't read file ({e})."))?
+        .len();
+    let content_type = content_type_for_filename(&filename);
+    if let Validation::Refused(reason) =
+        validate_upload(&filename, size, content_type, UploadKind::Attachment)
+    {
+        return Err(reason);
+    }
+    Ok((filename, content_type))
+}
+
+/// Split picked files into the ones that may be attached and toast-ready
+/// reasons for the rest, without staging anything. The new-issue form holds
+/// files this way until the issue exists to own them.
+pub fn screen_files(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
+    let mut ok = Vec::new();
+    let mut refused = Vec::new();
+    for path in paths {
+        match check_file(&path) {
+            Ok(_) => ok.push(path),
+            Err(reason) => refused.push(reason),
+        }
+    }
+    (ok, refused)
+}
+
 /// Queue each picked file as an Attachment of `owner`. A bad file is refused
 /// (reason in [`Intake::refused`]) without blocking the rest.
 pub fn queue_files(
@@ -38,24 +72,13 @@ pub fn queue_files(
 ) -> Intake {
     let mut out = Intake::default();
     for path in paths {
-        let filename = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let size = match std::fs::metadata(path) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                out.refused.push(format!("{filename}: can't read file ({e})."));
+        let (filename, content_type) = match check_file(path) {
+            Ok(ok) => ok,
+            Err(reason) => {
+                out.refused.push(reason);
                 continue;
             }
         };
-        let content_type = content_type_for_filename(&filename);
-        if let Validation::Refused(reason) =
-            validate_upload(&filename, size, content_type, UploadKind::Attachment)
-        {
-            out.refused.push(reason);
-            continue;
-        }
         let staged = match outbox::stage(outbox_root, path) {
             Ok(s) => s,
             Err(e) => {
@@ -130,6 +153,21 @@ mod tests {
         assert_eq!(std::fs::read(a.outbox_path.as_ref().unwrap()).unwrap(), b"hello");
         // Upload + attach queued for the one good file only.
         assert_eq!(crate::db::sync_queue::pending_count(&c).unwrap(), 2);
+    }
+
+    #[test]
+    fn screening_keeps_good_files_and_stages_nothing() {
+        let d = dir();
+        let good = d.join("notes.txt");
+        let empty = d.join("empty.txt");
+        std::fs::write(&good, b"hello").unwrap();
+        std::fs::write(&empty, b"").unwrap();
+
+        let (ok, refused) = screen_files(vec![empty, good.clone(), d.join("missing.txt")]);
+
+        assert_eq!(ok, vec![good]);
+        assert_eq!(refused.len(), 2);
+        assert!(!d.join("outbox").exists());
     }
 
     #[test]

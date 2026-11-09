@@ -12,6 +12,8 @@ pub enum DropTarget {
     CommentComposer,
     /// Attach to the open project (routes to `Message::FilesPicked`).
     Project,
+    /// Stage on the open issue form page (routes to `Message::IssueFormFilesPicked`).
+    IssueForm,
     /// Nothing to attach to; the drop is ignored.
     Ignore,
 }
@@ -20,6 +22,8 @@ pub enum DropTarget {
 /// user touched (`App.composer_focused`).
 pub fn drop_target(view: &View, modal: &Modal, composer_focused: bool) -> DropTarget {
     match (view, modal) {
+        // The form page covers whatever view is behind it.
+        (_, Modal::IssueForm) => DropTarget::IssueForm,
         (View::IssueDetail(_) | View::ProjectDetail(_), Modal::None) if composer_focused => {
             DropTarget::CommentComposer
         }
@@ -90,6 +94,13 @@ mod tests {
     fn composer_focus_does_not_beat_a_modal_or_other_views() {
         assert_eq!(drop_target(&View::IssueDetail("i".into()), &Modal::Settings, true), DropTarget::Ignore);
         assert_eq!(drop_target(&View::Board, &Modal::None, true), DropTarget::Ignore);
+    }
+
+    #[test]
+    fn drop_on_the_issue_form_page_stages_on_it_whatever_view_is_behind() {
+        for v in [View::Board, View::IssueDetail("i".into()), View::MyIssues] {
+            assert_eq!(drop_target(&v, &Modal::IssueForm, true), DropTarget::IssueForm);
+        }
     }
 
     #[test]
