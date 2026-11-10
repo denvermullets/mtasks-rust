@@ -4288,6 +4288,9 @@ impl App {
 
     /// Store what changed in the Terminal strips since the last message.
     fn save_terminal_records(&mut self) {
+        for note in self.terminals.take_notices() {
+            self.push_toast(note, ToastKind::Error, false);
+        }
         let changes = self.terminals.take_record_changes();
         if changes.is_empty() {
             return;
@@ -4981,7 +4984,19 @@ impl App {
                         None => crate::db::terminal_dirs::set(&self.db(), &scope.team, &dir),
                     };
                     match stored {
-                        Ok(()) => self.terminals.set_dir(&scope, Some(dir)),
+                        Ok(()) => {
+                            let whose = if scope.project.is_some() { "this project" } else { "this team" };
+                            self.push_toast(
+                                format!(
+                                    "Folder saved. New Terminals for {whose} start in {}. Open Terminals stay \
+                                     where they are: close one and open a new one to start there.",
+                                    crate::terminal::display_path(&dir)
+                                ),
+                                ToastKind::Info,
+                                false,
+                            );
+                            self.terminals.set_dir(&scope, Some(dir));
+                        }
                         Err(e) => self.push_toast(format!("Could not save the folder: {e}"), ToastKind::Error, false),
                     }
                 }

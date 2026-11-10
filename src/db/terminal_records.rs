@@ -28,6 +28,9 @@ pub enum Change {
     Added(Stored),
     Renamed { key: String, name: String },
     Removed { key: String },
+    /// The folder the record's next shell starts in (Restart, or the next
+    /// launch) follows a new strip folder; the running shell does not move.
+    Moved { key: String, cwd: Option<PathBuf> },
 }
 
 /// Store `changes` in order, in one transaction. Changes to a record that is
@@ -57,6 +60,12 @@ pub fn apply(conn: &Connection, changes: &[Change]) -> Result<()> {
             }
             Change::Removed { key } => {
                 tx.execute("DELETE FROM terminal_records WHERE id = ?1", params![key])?;
+            }
+            Change::Moved { key, cwd } => {
+                tx.execute(
+                    "UPDATE terminal_records SET cwd = ?2 WHERE id = ?1",
+                    params![key, cwd.as_ref().map(|p| p.to_string_lossy())],
+                )?;
             }
         }
     }
@@ -147,6 +156,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(all(&c).unwrap(), vec![stored("k1", "t1", "claude", None)]);
+    }
+
+    #[test]
+    fn moving_a_record_changes_only_its_folder() {
+        let c = mem();
+        team(&c, "t1");
+        apply(
+            &c,
+            &[
+                Change::Added(stored("k1", "t1", "Terminal 1", None)),
+                Change::Added(stored("k2", "t1", "Terminal 2", Some("/old"))),
+                Change::Moved { key: "k1".into(), cwd: Some("/work".into()) },
+                Change::Moved { key: "k2".into(), cwd: None },
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            all(&c).unwrap(),
+            vec![stored("k1", "t1", "Terminal 1", Some("/work")), stored("k2", "t1", "Terminal 2", None)]
+        );
     }
 
     #[test]

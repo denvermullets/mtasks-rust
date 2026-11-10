@@ -135,6 +135,8 @@ pub struct TerminalState {
     team_dirs: HashMap<String, std::path::PathBuf>,
     /// Each project's starting directory; unset means its team's.
     project_dirs: HashMap<String, std::path::PathBuf>,
+    /// For the app to show (`take_notices`).
+    notices: Vec<String>,
     panel: PanelState,
     /// Where the panel sits. Device-wide, set by the app from its config.
     dock: Dock,
@@ -197,6 +199,7 @@ impl TerminalState {
             shutting_down: false,
             team_dirs: HashMap::new(),
             project_dirs: HashMap::new(),
+            notices: Vec::new(),
             panel: PanelState::default(),
             dock: Dock::Bottom,
             width: None,
@@ -669,9 +672,16 @@ impl TerminalState {
             layout,
             slots,
             items,
-            dir_label: self.dir_for(scope).map(|d| {
-                d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned())
+            dir_label: self.dir_for(scope).zip(self.dir_is_own(scope)).map(|(d, own)| {
+                let name =
+                    d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned());
+                match (&scope.project, own) {
+                    (Some(_), true) => format!("Project folder: {name}"),
+                    (Some(_), false) => format!("Team folder: {name}"),
+                    (None, _) => format!("Team folder: {name}"),
+                }
             }),
+            can_clear_dir: self.dir_is_own(scope) == Some(true),
             note,
             dock: self.dock,
             height: panel::panel_height(self.window.height, self.panel.height),
@@ -857,10 +867,15 @@ impl TerminalState {
         self.project_dirs = dirs;
     }
 
-    /// New shells in the strip of `scope` start in `dir`; existing shells
+    /// New shells in the strip of `scope` start in `dir`; running shells
     /// don't move. A project's folder is its own: clearing it falls back to
-    /// the team's, and setting the team's leaves it alone.
+    /// the team's, and setting the team's leaves it alone. Records that were
+    /// started in a strip's old folder follow it, so their next shell
+    /// (Restart, or the next launch) starts in the new one: that includes the
+    /// team's projects that use the team's folder.
     pub fn set_dir(&mut self, scope: &Scope, dir: Option<std::path::PathBuf>) {
+        let scopes = self.roster.scopes_of_team(&scope.team);
+        let before: Vec<Option<std::path::PathBuf>> = scopes.iter().map(|s| self.dir_for(s).cloned()).collect();
         let (dirs, key) = match &scope.project {
             Some(p) => (&mut self.project_dirs, p),
             None => (&mut self.team_dirs, &scope.team),
@@ -869,6 +884,28 @@ impl TerminalState {
             Some(d) => dirs.insert(key.clone(), d),
             None => dirs.remove(key),
         };
+        for (s, old) in scopes.iter().zip(before) {
+            let new = self.dir_for(s).cloned();
+            if new != old {
+                self.roster.retarget(s, old.as_deref(), new.as_deref());
+            }
+        }
+    }
+
+    /// Whether the strip of `scope` uses its own folder (true) or, on a
+    /// project's strip, the team's (false). `None` when no folder applies.
+    fn dir_is_own(&self, scope: &Scope) -> Option<bool> {
+        match &scope.project {
+            Some(p) if self.project_dirs.contains_key(p) => Some(true),
+            Some(_) => self.team_dirs.contains_key(&scope.team).then_some(false),
+            None => self.team_dirs.contains_key(&scope.team).then_some(true),
+        }
+    }
+
+    /// Messages for the app to show as toasts since the last call: a shell
+    /// that could not start in its folder and started in home instead.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
     }
 
     /// Whether any Terminal, on any team and shown or hidden, is busy.
@@ -1127,6 +1164,11 @@ impl TerminalState {
             pane.set_cell(cell);
         }
         let (cols, rows) = panel::spawn_grid(self.grid(cell));
+        if let Some(note) = cwd.as_deref().and_then(unusable_dir_notice) {
+            if !self.notices.contains(&note) {
+                self.notices.push(note);
+            }
+        }
         let config = SpawnConfig {
             team: team.to_string(),
             cols,
@@ -1186,6 +1228,21 @@ pub fn panel_scope(view: &crate::app::View, selected_team_id: Option<&str>) -> O
         View::ProjectDetail(project) => Some(Scope::project(team, project.clone())),
         _ => Some(Scope::team(team)),
     }
+}
+
+/// The notice for a shell whose folder can't be used: the engine starts it in
+/// home instead (`engine::spawn`). `None` when the folder is fine. A folder in
+/// Documents, Desktop or Downloads can look missing when macOS has not let
+/// JAIT read it.
+fn unusable_dir_notice(dir: &std::path::Path) -> Option<String> {
+    if dir.is_dir() {
+        return None;
+    }
+    Some(format!(
+        "Can't open {}, so the Terminal started in your home folder. If the folder exists, \
+         allow JAIT under System Settings > Privacy & Security > Files and Folders.",
+        crate::terminal::display_path(dir)
+    ))
 }
 
 #[cfg(test)]
@@ -1280,6 +1337,44 @@ mod tests {
         // Clearing is its own message, so a cancelled picker never clears.
         let _ = t.update(TerminalMessage::DirPicked(None), Some(&Scope::team("b")));
         assert!(t.team_dirs.contains_key("b"));
+    }
+
+    #[test]
+    fn a_new_folder_moves_the_records_that_followed_the_old_one() {
+        let mut t = TerminalState::new();
+        let p = Scope::project("a", "p");
+        t.restore_records(vec![record("k1", "a"), project_record("k2", "a", "p"), record("k3", "b")]);
+        let _ = t.take_record_changes();
+        t.set_dir(&a(), Some("/work".into()));
+        let cwd = |t: &TerminalState, k: &str| t.roster.get(t.roster.id_of_key(k).unwrap()).unwrap().cwd.clone();
+        assert_eq!(cwd(&t, "k1"), Some("/work".into()));
+        assert_eq!(cwd(&t, "k2"), Some("/work".into()), "the project used the team's folder");
+        assert_eq!(cwd(&t, "k3"), None, "another team is untouched");
+        t.set_dir(&p, Some("/work/api".into()));
+        assert_eq!(cwd(&t, "k1"), Some("/work".into()));
+        assert_eq!(cwd(&t, "k2"), Some("/work/api".into()));
+        t.set_dir(&a(), None);
+        assert_eq!(cwd(&t, "k1"), None);
+        assert_eq!(cwd(&t, "k2"), Some("/work/api".into()), "the project keeps its own");
+        assert_eq!(t.take_record_changes().len(), 4, "each move is stored");
+    }
+
+    #[test]
+    fn the_folder_label_says_whose_folder_it_is() {
+        let mut t = TerminalState::new();
+        let p = Scope::project("a", "p");
+        assert_eq!(t.dir_is_own(&p), None);
+        t.set_dir(&a(), Some("/work".into()));
+        assert_eq!((t.dir_is_own(&a()), t.dir_is_own(&p)), (Some(true), Some(false)));
+        t.set_dir(&p, Some("/work/api".into()));
+        assert_eq!(t.dir_is_own(&p), Some(true));
+    }
+
+    #[test]
+    fn a_folder_that_is_gone_gets_a_notice() {
+        assert!(unusable_dir_notice(&std::env::temp_dir()).is_none());
+        let note = unusable_dir_notice(std::path::Path::new("/no/such/mtasks-dir")).unwrap();
+        assert!(note.contains("/no/such/mtasks-dir"), "{note}");
     }
 
     #[test]

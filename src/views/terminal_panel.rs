@@ -530,8 +530,12 @@ pub struct PanelView<'a> {
     pub items: Vec<StripItem>,
     /// A line for the strip, such as an exited notice or a spawn error.
     pub note: Option<String>,
-    /// Name of the team's starting folder, if one is set.
+    /// The strip's starting folder and whose it is ("Project folder: api"),
+    /// if one applies.
     pub dir_label: Option<String>,
+    /// Whether the strip has its own folder to clear: false on a project's
+    /// strip that uses the team's.
+    pub can_clear_dir: bool,
     pub dock: Dock,
     /// Panel height docked at the bottom.
     pub height: f32,
@@ -813,22 +817,15 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
         .on_press(Message::ToggleTerminalDock)
         .style(button::text),
     );
-    let has_dir = p.dir_label.is_some();
     strip = strip
         .push(
-            button(
-                text(match p.dir_label {
-                    Some(d) => format!("Folder: {d}"),
-                    None => "Folder".to_string(),
-                })
-                .size(11),
-            )
+            button(text(p.dir_label.unwrap_or_else(|| "Folder".to_string())).size(11))
             .padding([2, 8])
             .on_press(Message::Terminal(TerminalMessage::PickDir))
             .style(button::text),
         );
-    if has_dir {
-        // New shells start in home again.
+    if p.can_clear_dir {
+        // New shells start in the team's folder, or home, again.
         strip = strip.push(
             button(text("\u{00d7}").size(13))
                 .padding([0, 4])

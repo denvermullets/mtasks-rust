@@ -81,6 +81,18 @@ impl Closing {
 /// reports of the closes that finished; one still running at the limit is
 /// left to finish on its own thread (the caller is about to exit). A close
 /// whose owner thread panicked still reports, because the engine catches it.
+/// A folder for a message: under home it reads "~/dev/api".
+pub fn display_path(dir: &std::path::Path) -> String {
+    match std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        Some(home) if !home.as_os_str().is_empty() => match dir.strip_prefix(&home) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => dir.display().to_string(),
+        },
+        _ => dir.display().to_string(),
+    }
+}
+
 pub fn wait_all(closings: Vec<Closing>, limit: std::time::Duration) -> Vec<CloseReport> {
     let deadline = std::time::Instant::now() + limit;
     while !closings.iter().all(Closing::is_done) && std::time::Instant::now() < deadline {

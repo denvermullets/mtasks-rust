@@ -5,7 +5,7 @@
 //! The roster reports each change to the strip (`take_changes`) and the app
 //! stores them (`db::terminal_records::apply`), so the roster itself knows
 //! nothing of the database.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{Scope, TerminalId};
 use crate::db::terminal_records::{Change, Stored};
@@ -159,6 +159,30 @@ impl Roster {
         }
     }
 
+    /// The strips of `team` that have Terminals: its own and its projects'.
+    pub fn scopes_of_team(&self, team: &str) -> Vec<Scope> {
+        let mut scopes: Vec<Scope> = Vec::new();
+        for r in self.of_team(team) {
+            let s = Scope { team: r.team.clone(), project: r.project.clone() };
+            if !scopes.contains(&s) {
+                scopes.push(s);
+            }
+        }
+        scopes
+    }
+
+    /// The strip's folder changed from `old` to `new`: every record of the
+    /// strip that was started in `old` starts its next shell (Restart, or the
+    /// next launch) in `new`. A running shell does not move.
+    pub fn retarget(&mut self, scope: &Scope, old: Option<&Path>, new: Option<&Path>) {
+        for r in self.records.iter_mut() {
+            if r.team == scope.team && r.project == scope.project && r.cwd.as_deref() == old {
+                r.cwd = new.map(Path::to_path_buf);
+                self.changes.push(Change::Moved { key: r.key.clone(), cwd: r.cwd.clone() });
+            }
+        }
+    }
+
     /// A restarted shell has a new id but keeps its name, place and directory.
     pub fn replace_id(&mut self, old: TerminalId, new: TerminalId) {
         if let Some(r) = self.records.iter_mut().find(|r| r.id == old) {
@@ -174,6 +198,22 @@ mod tests {
 
     fn id(n: u64) -> TerminalId {
         TerminalId(n)
+    }
+
+    #[test]
+    fn retargeting_moves_only_the_strips_records_that_followed_the_old_folder() {
+        let mut r = Roster::default();
+        let a = Scope::team("a");
+        r.add(id(1), &a, None);
+        r.add(id(2), &a, Some("/elsewhere".into()));
+        r.add(id(3), &Scope::project("a", "p"), None);
+        r.take_changes();
+        r.retarget(&a, None, Some(Path::new("/work")));
+        assert_eq!(r.get(id(1)).unwrap().cwd, Some("/work".into()));
+        assert_eq!(r.get(id(2)).unwrap().cwd, Some("/elsewhere".into()));
+        assert_eq!(r.get(id(3)).unwrap().cwd, None, "another strip is untouched");
+        let key = r.key_of(id(1)).unwrap();
+        assert_eq!(r.take_changes(), vec![Change::Moved { key, cwd: Some("/work".into()) }]);
     }
 
     #[test]
