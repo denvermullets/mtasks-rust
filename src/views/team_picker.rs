@@ -66,17 +66,7 @@ pub fn view<'a>(teams: &[&'a Team]) -> Element<'a, Message> {
             ..Default::default()
         });
 
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        })
+    crate::views::util::modal_backdrop(modal)
         .into()
 }
 

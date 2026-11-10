@@ -1,7 +1,7 @@
 //! Small view-layer formatting helpers shared across views.
 
 use chrono::{DateTime, Utc};
-use iced::widget::{column, container, pick_list, text_input};
+use iced::widget::{column, container, pick_list, scrollable, text_input};
 use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
@@ -197,4 +197,36 @@ mod date_tests {
         assert_eq!(format_estimate(3.0), "3pt");
         assert_eq!(format_estimate(2.5), "2.5pt");
     }
+}
+
+/// Gap kept between a modal panel and the window edge.
+const MODAL_GUTTER: f32 = 24.0;
+
+/// The dimmed full-window backdrop behind a centered modal panel. The panel
+/// sits in a vertical scrollable, so a panel taller than the window scrolls
+/// instead of being clipped. It stays vertically centered while it fits.
+pub fn modal_backdrop<'a, M: 'a>(panel: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    modal_layer(panel, false)
+}
+
+/// `modal_backdrop` with the panel pinned near the top of the window instead
+/// of centered (the command palette, whose height changes as results filter).
+pub fn modal_backdrop_top<'a, M: 'a>(panel: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    modal_layer(panel, true)
+}
+
+fn modal_layer<'a, M: 'a>(panel: impl Into<Element<'a, M>>, top: bool) -> Element<'a, M> {
+    let pad = if top { iced::Padding::from([96.0, MODAL_GUTTER]) } else { iced::Padding::from(MODAL_GUTTER) };
+    // Shrink height: the scrollable's content must not fill its scroll axis,
+    // and `container` would otherwise inherit a Fill height from the panel.
+    let inner = container(panel).center_x(Length::Fill).height(Length::Shrink).padding(pad);
+    let scroll = scrollable(inner).width(Length::Fill).height(Length::Shrink);
+    let outer = container(scroll).width(Length::Fill).height(Length::Fill);
+    let outer = if top { outer.align_top(Length::Fill) } else { outer.center_y(Length::Fill) };
+    outer
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.7))),
+            ..Default::default()
+        })
+        .into()
 }

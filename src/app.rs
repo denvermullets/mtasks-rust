@@ -9132,17 +9132,7 @@ fn delete_confirm_modal(issue_title: &str) -> Element<'_, Message> {
                 ..Default::default()
             });
 
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        })
+    crate::views::util::modal_backdrop(modal)
         .into()
 }
 
@@ -9232,17 +9222,7 @@ fn dashboard_form_modal<'a>(
                 ..Default::default()
             });
 
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        })
+    crate::views::util::modal_backdrop(modal)
         .into()
 }
 
@@ -9300,17 +9280,7 @@ fn save_view_modal<'a>(title: &'a str, name: &'a str, error: Option<&'static str
                 ..Default::default()
             });
 
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        })
+    crate::views::util::modal_backdrop(modal)
         .into()
 }
 
@@ -9361,17 +9331,7 @@ fn delete_modal<'a>(title: &'a str, body: String, confirm: Message) -> Element<'
                 ..Default::default()
             });
 
-    container(modal)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        })
+    crate::views::util::modal_backdrop(modal)
         .into()
 }
 

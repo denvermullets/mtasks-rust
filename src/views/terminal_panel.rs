@@ -604,15 +604,7 @@ pub fn confirm_modal<'a>(
         border: iced::Border { color: t::border(), width: 1.0, radius: 8.0.into() },
         ..Default::default()
     });
-    container(card)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.7))),
-            ..Default::default()
-        })
+    crate::views::util::modal_backdrop(card)
         .into()
 }
 

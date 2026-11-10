@@ -75,18 +75,7 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
         });
     let panel = mouse_area(panel).on_press(Message::Noop);
 
-    let backdrop = container(panel)
-        .center_x(Length::Fill)
-        .align_top(Length::Fill)
-        .padding([96, 0])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba(
-                0.0, 0.0, 0.0, 0.7,
-            ))),
-            ..Default::default()
-        });
+    let backdrop = crate::views::util::modal_backdrop_top(panel);
     mouse_area(backdrop).on_press(Message::CloseModal).into()
 }
 
