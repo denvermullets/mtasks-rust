@@ -122,6 +122,17 @@ impl Priority {
         self as i32
     }
 
+    /// Human label, as the web's pickers show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Priority::Urgent => "Urgent",
+            Priority::High => "High",
+            Priority::Medium => "Medium",
+            Priority::Low => "Low",
+            Priority::None => "No priority",
+        }
+    }
+
     pub fn as_rails_str(&self) -> &'static str {
         match self {
             Priority::Urgent => "urgent",

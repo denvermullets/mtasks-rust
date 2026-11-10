@@ -140,8 +140,18 @@ pub enum Message {
     IssueLaneChanged(String),
     /// Toggle a label in the issue form's multi-select (by local UUID).
     IssueLabelToggled(String),
-    /// Open/close the Labels dropdown on the issue form page.
-    IssueFormLabelsToggled,
+    /// Open/close one property chip's dropdown on the issue form page.
+    IssueFormMenuToggled(crate::views::issue_form::FormMenu),
+    /// Dismiss the open issue form dropdown (Escape / click outside).
+    IssueFormMenuClosed,
+    /// Open/close a date field's calendar (field, its current text).
+    DatePickerToggled(crate::views::date_picker::DateField, String),
+    /// Step the open calendar by this many months.
+    DatePickerMonth(i32),
+    /// Dismiss the open calendar (Escape / click outside).
+    DatePickerClosed,
+    /// A calendar pick: close it, then run these (set the field, commit).
+    DatePicked(Vec<Message>),
     /// Issue form Assignee pick (local member UUID; `None` = no assignee).
     IssueAssigneeChanged(Option<String>),
     /// Issue form Project pick (local UUID; `None` = no project).
@@ -1100,6 +1110,8 @@ pub struct App {
     scroll_state: HashMap<ScrollKey, (f32, f32)>,
     modal: Modal,
     issue_form: Option<issue_form::IssueFormState>,
+    /// The one open date field calendar, if any.
+    date_picker: Option<crate::views::date_picker::DatePickerState>,
     /// Buffered edit state while the right pane shows `View::IssueDetail`.
     issue_detail: Option<issue_detail::IssueDetailState>,
     /// Buffered edit state while the right pane shows `View::ProjectDetail`.
@@ -2144,20 +2156,20 @@ impl App {
                     Some((lanes, labels))
                         if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
                     {
-                        issue_form::page(form, lanes, labels, choices, context)
+                        issue_form::page(form, lanes, labels, choices, context, self.date_picker.as_ref())
                     }
-                    _ => issue_form::page(form, &self.lanes, &self.labels, choices, context),
+                    _ => issue_form::page(form, &self.lanes, &self.labels, choices, context, self.date_picker.as_ref()),
                 };
                 (label.to_string(), page)
             }
             Modal::ProjectForm => (
                 "New project".to_string(),
-                projects_view::page(self.project_form.as_ref()?, &self.members),
+                projects_view::page(self.project_form.as_ref()?, &self.members, self.date_picker.as_ref()),
             ),
             Modal::RecurringForm => {
                 let form = self.recurring_form.as_ref()?;
                 let label = if form.editing.is_some() { "Edit recurring issue" } else { "New recurring issue" };
-                (label.to_string(), crate::views::recurring_issue_form::page(form, &self.labels))
+                (label.to_string(), crate::views::recurring_issue_form::page(form, &self.labels, self.date_picker.as_ref()))
             }
             _ => return None,
         };
@@ -3742,6 +3754,7 @@ impl App {
             scroll_state: HashMap::new(),
             modal: Modal::None,
             issue_form: None,
+            date_picker: None,
             issue_detail: None,
             new_issue_scope: None,
             project_form_from_issue: false,
@@ -5475,9 +5488,35 @@ impl App {
                 }
             }
 
-            Message::IssueFormLabelsToggled => {
+            Message::IssueFormMenuToggled(which) => {
                 if let Some(ref mut form) = self.issue_form {
-                    form.labels_open = !form.labels_open;
+                    form.open_menu = (form.open_menu != Some(which)).then_some(which);
+                }
+            }
+            Message::DatePickerToggled(field, value) => {
+                self.date_picker = match self.date_picker {
+                    Some(s) if s.field == field => None,
+                    _ => Some(crate::views::date_picker::DatePickerState::open(field, &value, chrono::Local::now().date_naive())),
+                };
+                if let Some(ref mut form) = self.issue_form {
+                    form.open_menu = None;
+                }
+            }
+            Message::DatePickerMonth(delta) => {
+                if let Some(ref mut s) = self.date_picker {
+                    s.shift(delta);
+                }
+            }
+            Message::DatePickerClosed => {
+                self.date_picker = None;
+            }
+            Message::DatePicked(msgs) => {
+                self.date_picker = None;
+                return Task::batch(msgs.into_iter().map(|m| self.update(m)).collect::<Vec<_>>());
+            }
+            Message::IssueFormMenuClosed => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.open_menu = None;
                 }
             }
 
@@ -5495,24 +5534,31 @@ impl App {
             Message::IssuePriorityChanged(p) => {
                 if let Some(ref mut form) = self.issue_form {
                     form.priority = p;
+                    form.open_menu = None;
                 }
             }
             Message::IssueLaneChanged(lane_id) => {
                 if let Some(ref mut form) = self.issue_form {
                     form.lane_id = lane_id;
+                    form.open_menu = None;
                 }
             }
             Message::IssueAssigneeChanged(member_id) => {
                 if let Some(ref mut form) = self.issue_form {
                     form.assignee_id = member_id;
+                    form.open_menu = None;
                 }
             }
             Message::IssueProjectChanged(project_id) => {
                 if let Some(ref mut form) = self.issue_form {
                     form.project_id = project_id;
+                    form.open_menu = None;
                 }
             }
             Message::IssueFormNewProject => {
+                if let Some(ref mut form) = self.issue_form {
+                    form.open_menu = None;
+                }
                 if self.issue_form.is_some() && self.selected_team_id.is_some() {
                     self.project_form = Some(projects_view::ProjectFormState::new());
                     self.project_form_from_issue = true;
@@ -5522,6 +5568,7 @@ impl App {
             Message::IssueEstimateChanged(points) => {
                 if let Some(ref mut form) = self.issue_form {
                     form.estimate = points;
+                    form.open_menu = None;
                 }
             }
             Message::IssueDueDateChanged(v) => {
@@ -6476,7 +6523,10 @@ impl App {
                 self.persist_display();
             }
 
-            Message::CloseModal if self.form_page_open() => self.close_form_page(),
+            Message::CloseModal if self.form_page_open() => {
+                self.date_picker = None;
+                self.close_form_page()
+            }
 
             Message::CloseModal => {
                 // Cancelling the label-delete confirm returns to the panel.
@@ -8395,6 +8445,7 @@ impl App {
                             terminal_width,
                             self.terminals.panel_showing(panel_scope.as_ref()),
                             right_panel.take(),
+                            self.date_picker.as_ref(),
                         )
                     }
                     // Project removed by a background sync, or state desync → fallback.

@@ -4,6 +4,7 @@ pub mod body;
 pub mod command_palette;
 pub mod csv_import;
 pub mod dashboard;
+pub mod date_picker;
 pub mod dep_map_canvas;
 pub mod group_form;
 pub mod display_panel;

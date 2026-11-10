@@ -10,6 +10,7 @@ use crate::views::issue_detail::{new_comment_composer, push_thread, CommentAttac
 use crate::display::{CardProperty, DisplayOptions, ProjectIssueSort};
 use crate::views::util;
 use crate::views::progress_chart;
+use crate::views::date_picker;
 use crate::views::projects::MemberOption;
 
 /// Buffered edit state for the full-page project detail view. Name, description,
@@ -195,6 +196,8 @@ pub fn view<'a>(
     terminal_showing: bool,
     // The right-docked Terminal panel, placed between the page and Properties.
     terminal: Option<Element<'a, Message>>,
+    // The open date field calendar, if any.
+    date_picker_state: Option<&date_picker::DatePickerState>,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Projects › <name> [› #<rails id>]" ----
     let mut breadcrumb = row![].spacing(space::S2).align_y(Alignment::Center);
@@ -381,21 +384,21 @@ pub fn view<'a>(
         .push(util::sidebar_field("Labels", placeholder_value()))
         .push(util::sidebar_field(
             "Start date",
-            text_input("YYYY-MM-DD", &detail.start_date)
-                .on_input(Message::ProjectDetailStartDateChanged)
-                .on_submit(Message::CommitProjectDetail)
-                .padding(util::SIDEBAR_CONTROL_PADDING)
-                .size(type_scale::SM)
-                .style(util::sidebar_input_style),
+            detail_date(
+                date_picker::DateField::ProjectDetailStart,
+                &detail.start_date,
+                Message::ProjectDetailStartDateChanged,
+                date_picker_state,
+            ),
         ))
         .push(util::sidebar_field(
             "Due date",
-            text_input("YYYY-MM-DD", &detail.due_date)
-                .on_input(Message::ProjectDetailDueDateChanged)
-                .on_submit(Message::CommitProjectDetail)
-                .padding(util::SIDEBAR_CONTROL_PADDING)
-                .size(type_scale::SM)
-                .style(util::sidebar_input_style),
+            detail_date(
+                date_picker::DateField::ProjectDetailDue,
+                &detail.due_date,
+                Message::ProjectDetailDueDateChanged,
+                date_picker_state,
+            ),
         ))
         .push(
             column![]
@@ -499,6 +502,27 @@ fn card_style(_theme: &Theme) -> container::Style {
         },
         ..Default::default()
     }
+}
+
+/// A Properties date field: Enter or a calendar pick commits the project.
+fn detail_date<'a>(
+    field: date_picker::DateField,
+    value: &'a str,
+    on_change: fn(String) -> Message,
+    open: Option<&date_picker::DatePickerState>,
+) -> Element<'a, Message> {
+    date_picker::view(
+        date_picker::DateInput {
+            field,
+            value,
+            placeholder: "yyyy-mm-dd",
+            on_change,
+            on_commit: Some(Message::CommitProjectDetail),
+            look: date_picker::Look::Field,
+        },
+        open,
+        chrono::Local::now().date_naive(),
+    )
 }
 
 #[cfg(test)]

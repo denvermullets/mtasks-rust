@@ -121,16 +121,6 @@ const PRIORITIES: [Priority; 5] = [
     Priority::Low,
 ];
 
-fn priority_label(p: Priority) -> &'static str {
-    match p {
-        Priority::Urgent => "Urgent",
-        Priority::High => "High",
-        Priority::Medium => "Medium",
-        Priority::Low => "Low",
-        Priority::None => "No priority",
-    }
-}
-
 fn hex(c: &Option<String>) -> Option<Color> {
     c.as_deref().and_then(t::hex_to_color)
 }
@@ -175,7 +165,7 @@ impl PickerState {
             Field::Priority => PRIORITIES
                 .iter()
                 .map(|p| PickerOption {
-                    label: priority_label(*p).to_string(),
+                    label: p.label().to_string(),
                     color: Some(t::priority_dot_color(*p)),
                     choice: Choice::Priority(p.to_i32()),
                 })

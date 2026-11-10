@@ -3,7 +3,7 @@
 //! floating in a modal (JRST-454). The app header supplies the top bar
 //! (`‹ Back` + crumbs); these pieces lay out the page below it.
 
-use iced::widget::{button, column, container, row, scrollable, text_editor, text_input, Space};
+use iced::widget::{button, column, container, row, scrollable, svg, text_editor, text_input, Column, Space};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::Message;
@@ -61,6 +61,18 @@ fn borderless_input(_theme: &Theme, _status: text_input::Status) -> text_input::
         icon: t::text_muted(),
         placeholder: t::text_muted(),
         value: t::text_strong(),
+        selection: Color { a: 0.35, ..t::accent() },
+    }
+}
+
+/// A borderless text field inside a chip (the due date), in chip text color.
+pub fn borderless_chip_input(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: iced::Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        icon: t::text_muted(),
+        placeholder: t::text_muted(),
+        value: t::text_body(),
         selection: Color { a: 0.35, ..t::accent() },
     }
 }
@@ -191,6 +203,76 @@ pub fn chip_button<'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// A heroicon from the web templates, tinted `color` (`currentColor`).
+pub fn icon<'a>(source: &'static str, size: f32, color: Color) -> Element<'a, Message> {
+    svg(svg::Handle::from_memory(source.as_bytes()))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_theme: &Theme, _status| svg::Style { color: Some(color) })
+        .into()
+}
+
+/// A property chip's face: icon then label (web `inline-flex gap-2`).
+pub fn chip_face<'a>(icon_src: &'static str, label: impl Into<String>) -> Element<'a, Message> {
+    row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(icon(icon_src, space::S4, t::text_body()))
+        .push(text(label.into()).size(type_scale::SM).color(t::text_body()))
+        .into()
+}
+
+/// The chip frame without a button (web `<label>` chips such as the due
+/// date): same padding, fill and stroke as `chip_button`.
+pub fn chip_frame<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .padding(util::SIDEBAR_CONTROL_PADDING)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_secondary())),
+            border: Border { color: t::border(), width: 1.0, radius: radius::MD.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// A chip's open dropdown (web `min-w-[200px] bg-foreground border
+/// rounded-md shadow-lg`): one `px-3 py-2` row per option, the current one
+/// in the strong text color. Scrolls past ~10 rows.
+pub fn option_menu<'a>(options: Vec<(String, bool, Message)>) -> Element<'a, Message> {
+    let rows = options.into_iter().map(|(label, current, msg)| {
+        button(text(label).size(type_scale::SM))
+            .on_press(msg)
+            .width(Length::Fill)
+            .padding([space::S2, space::S3])
+            .style(move |_theme: &Theme, status| button::Style {
+                background: matches!(status, button::Status::Hovered)
+                    .then(|| iced::Background::Color(t::bg_card_focused())),
+                text_color: if current { t::text_strong() } else { t::text_body() },
+                border: Border { radius: radius::MD.into(), ..Default::default() },
+                ..Default::default()
+            })
+            .into()
+    });
+    container(scrollable(Column::with_children(rows).width(Length::Fill)).height(Length::Shrink))
+        .max_height(320.0)
+        .width(Length::Fill)
+        .style(menu_style)
+        .into()
+}
+
+fn menu_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(t::bg_secondary())),
+        border: Border { color: t::border(), width: 1.0, radius: radius::MD.into() },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
+        ..Default::default()
+    }
 }
 
 /// The Labels chip's text: "Labels", or the picked names.

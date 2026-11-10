@@ -1,12 +1,12 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, text_editor, text_input, Space};
+use iced::widget::{button, checkbox, column, container, row, text_editor, Space};
 use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::models::{Issue, Label, Lane, Member, Priority, Project};
 use crate::theme::{self as t, radius, space, type_scale};
-use crate::views::projects::MemberOption;
-use crate::views::{form_page, lane_icon, util};
+use crate::views::dropdown::dropdown;
+use crate::views::{date_picker, form_page, util};
 
 pub struct IssueFormState {
     pub title: String,
@@ -38,8 +38,19 @@ pub struct IssueFormState {
     pub error: Option<String>,
     /// Open `@`/`#` autocomplete list under the description.
     pub suggest: Option<crate::mentions::SuggestState>,
-    /// The Labels dropdown under the property chips is open.
-    pub labels_open: bool,
+    /// The property chip whose dropdown is open.
+    pub open_menu: Option<FormMenu>,
+}
+
+/// The issue form's property chips that open a dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormMenu {
+    Lane,
+    Priority,
+    Assignee,
+    Project,
+    Estimate,
+    Labels,
 }
 
 impl IssueFormState {
@@ -60,7 +71,7 @@ impl IssueFormState {
             create_more: false,
             error: None,
             suggest: None,
-            labels_open: false,
+            open_menu: None,
         }
     }
 
@@ -105,7 +116,7 @@ impl IssueFormState {
             create_more: false,
             error: None,
             suggest: None,
-            labels_open: false,
+            open_menu: None,
         }
     }
 
@@ -205,25 +216,30 @@ pub struct Choices<'a> {
     pub can_create_project: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaneOption {
-    pub id: String,
-    pub name: String,
-}
-
-impl std::fmt::Display for LaneOption {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
-
+/// Web order: "No priority" first.
 const PRIORITIES: [Priority; 5] = [
+    Priority::None,
     Priority::Urgent,
     Priority::High,
     Priority::Medium,
     Priority::Low,
-    Priority::None,
 ];
+
+// Heroicons, as in the web's `issues/new` and `issues/edit`.
+const ICON_LANE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>"##;
+const ICON_PRIORITY: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6h18M3 12h18M3 18h18"/></svg>"##;
+const ICON_USER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>"##;
+const ICON_PROJECT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>"##;
+const ICON_ESTIMATE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>"##;
+const ICON_TAG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>"##;
+const ICON_CHAT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"/></svg>"##;
+const ICON_LOCK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="#000" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>"##;
+const ICON_PAPERCLIP: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>"##;
+
+/// Web `min-w-[200px]` option menus.
+const MENU_WIDTH: f32 = 200.0;
+/// The label picker's width.
+const LABEL_MENU_WIDTH: f32 = 320.0;
 
 /// The description's height until it outgrows it.
 const DESCRIPTION_MIN_HEIGHT: f32 = 110.0;
@@ -245,13 +261,14 @@ pub fn page<'a>(
     labels: &'a [Label],
     choices: Choices<'a>,
     context: PageContext,
+    date_picker_state: Option<&date_picker::DatePickerState>,
 ) -> Element<'a, Message> {
     let editing = form.editing_issue_id.is_some();
 
     let context_row = row![]
         .spacing(space::S2)
         .align_y(Alignment::Center)
-        .push(context_chip(context.chip))
+        .push(context_chip(context.chip, !editing))
         .push(text("\u{203a}").size(type_scale::SM).color(t::text_muted()))
         .push(match (&context.parent, editing) {
             (_, true) => Element::from(text("Edit issue").size(type_scale::SM).color(t::text_secondary())),
@@ -259,105 +276,138 @@ pub fn page<'a>(
                 .spacing(space::S2)
                 .align_y(Alignment::Center)
                 .push(text("New sub-issue of").size(type_scale::SM).color(t::text_secondary()))
-                .push(context_chip(format!("{id}  {title}")))
+                .push(parent_chip(id, title))
                 .into(),
             (None, false) => text("New issue").size(type_scale::SM).color(t::text_secondary()).into(),
         });
 
-    let lane_options: Vec<LaneOption> = lanes
-        .iter()
-        .map(|l| LaneOption {
-            id: l.id.clone(),
-            name: l.name.clone(),
-        })
-        .collect();
-    let selected_lane = lane_options.iter().find(|l| l.id == form.lane_id).cloned();
-    let selected_icon = lanes
+    let open = form.open_menu;
+    // A chip and, while it is the open one, its dropdown.
+    let chip = |which: FormMenu, face: Element<'a, Message>, menu: &dyn Fn() -> Element<'a, Message>| {
+        let is_open = open == Some(which);
+        let width = if which == FormMenu::Labels { LABEL_MENU_WIDTH } else { MENU_WIDTH };
+        Element::from(
+            dropdown(
+                form_page::chip_button(face, Message::IssueFormMenuToggled(which), is_open),
+                is_open.then(menu),
+                width,
+                Message::IssueFormMenuClosed,
+            )
+            .align_left(),
+        )
+    };
+
+    let lane_name = lanes
         .iter()
         .find(|l| l.id == form.lane_id)
-        .map(|l| crate::lane_icon::icon_for(l.category.as_deref()));
+        .map(|l| l.name.clone())
+        .unwrap_or_else(|| "Backlog".to_string());
+    let lane = chip(FormMenu::Lane, form_page::chip_face(ICON_LANE, lane_name), &|| {
+        form_page::option_menu(
+            lanes
+                .iter()
+                .map(|l| (l.name.clone(), l.id == form.lane_id, Message::IssueLaneChanged(l.id.clone())))
+                .collect(),
+        )
+    });
 
-    let lane = row![]
-        .spacing(space::S2)
-        .align_y(Alignment::Center)
-        .push_maybe(selected_icon.map(lane_icon::view))
-        .push(
-            pick_list(lane_options, selected_lane, |l: LaneOption| Message::IssueLaneChanged(l.id))
-                .text_size(type_scale::SM)
-                .padding(util::SIDEBAR_CONTROL_PADDING)
-                .style(util::sidebar_pick_list_style)
-                .menu_style(util::sidebar_menu_style),
-        );
-    let priority = pick_list(PRIORITIES.as_slice(), Some(form.priority), Message::IssuePriorityChanged)
-        .text_size(type_scale::SM)
-        .padding(util::SIDEBAR_CONTROL_PADDING)
-        .style(util::sidebar_pick_list_style)
-        .menu_style(util::sidebar_menu_style);
-    let labels_chip = form_page::chip_button(
-        text(form_page::labels_summary(labels, &form.selected_label_ids)).size(type_scale::SM),
-        Message::IssueFormLabelsToggled,
-        form.labels_open,
-    );
-    let assignee_options: Vec<MemberOption> = std::iter::once(MemberOption {
-        id: None,
-        name: "No assignee".to_string(),
-    })
-    .chain(choices.members.iter().map(|m| MemberOption {
-        id: Some(m.id.clone()),
-        name: m.name.clone(),
-    }))
-    .collect();
-    let selected_assignee = assignee_options.iter().find(|o| o.id == form.assignee_id).cloned();
-    let assignee = pick_list(assignee_options, selected_assignee, |o: MemberOption| {
-        Message::IssueAssigneeChanged(o.id)
-    })
-    .placeholder("No assignee")
-    .text_size(type_scale::SM)
-    .padding(util::SIDEBAR_CONTROL_PADDING)
-    .style(util::sidebar_pick_list_style)
-    .menu_style(util::sidebar_menu_style);
+    let priority = chip(FormMenu::Priority, form_page::chip_face(ICON_PRIORITY, form.priority.label()), &|| {
+        form_page::option_menu(
+            PRIORITIES
+                .iter()
+                .map(|p| (p.label().to_string(), *p == form.priority, Message::IssuePriorityChanged(*p)))
+                .collect(),
+        )
+    });
 
-    let mut project_options: Vec<ProjectOption> = std::iter::once(ProjectOption::None)
-        .chain(choices.projects.iter().map(|p| ProjectOption::Project {
-            id: p.id.clone(),
-            name: p.name.clone(),
-        }))
-        .collect();
-    if choices.can_create_project {
-        project_options.push(ProjectOption::New);
-    }
-    let selected_project = project_options
+    let assignee_name = choices
+        .members
         .iter()
-        .find(|o| match (o, &form.project_id) {
-            (ProjectOption::None, None) => true,
-            (ProjectOption::Project { id, .. }, Some(sel)) => id == sel,
-            _ => false,
-        })
-        .cloned();
-    let project = pick_list(project_options, selected_project, project_message)
-        .placeholder("No project")
-        .text_size(type_scale::SM)
-        .padding(util::SIDEBAR_CONTROL_PADDING)
-        .style(util::sidebar_pick_list_style)
-        .menu_style(util::sidebar_menu_style);
+        .find(|m| Some(&m.id) == form.assignee_id.as_ref())
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "No assignee".to_string());
+    let members = &choices.members;
+    let assignee = chip(FormMenu::Assignee, form_page::chip_face(ICON_USER, assignee_name), &|| {
+        form_page::option_menu(
+            std::iter::once(("No assignee".to_string(), form.assignee_id.is_none(), Message::IssueAssigneeChanged(None)))
+                .chain(members.iter().map(|m| {
+                    (
+                        m.name.clone(),
+                        form.assignee_id.as_ref() == Some(&m.id),
+                        Message::IssueAssigneeChanged(Some(m.id.clone())),
+                    )
+                }))
+                .collect(),
+        )
+    });
 
-    let estimate = pick_list(
-        estimate_options(form.estimate),
-        Some(EstimateOption(form.estimate)),
-        |o: EstimateOption| Message::IssueEstimateChanged(o.0),
-    )
-    .text_size(type_scale::SM)
-    .padding(util::SIDEBAR_CONTROL_PADDING)
-    .style(util::sidebar_pick_list_style)
-    .menu_style(util::sidebar_menu_style);
+    let project_name = choices
+        .projects
+        .iter()
+        .find(|p| Some(&p.id) == form.project_id.as_ref())
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "No project".to_string());
+    let projects = &choices.projects;
+    let can_create_project = choices.can_create_project;
+    let project = chip(FormMenu::Project, form_page::chip_face(ICON_PROJECT, project_name), &|| {
+        let mut opts: Vec<ProjectOption> = std::iter::once(ProjectOption::None)
+            .chain(projects.iter().map(|p| ProjectOption::Project { id: p.id.clone(), name: p.name.clone() }))
+            .collect();
+        if can_create_project {
+            opts.push(ProjectOption::New);
+        }
+        form_page::option_menu(
+            opts.into_iter()
+                .map(|o| {
+                    let current = match (&o, &form.project_id) {
+                        (ProjectOption::None, None) => true,
+                        (ProjectOption::Project { id, .. }, Some(sel)) => id == sel,
+                        _ => false,
+                    };
+                    (o.to_string(), current, project_message(o))
+                })
+                .collect(),
+        )
+    });
 
-    let due_date = text_input("Due date (YYYY-MM-DD)", &form.due_date)
-        .on_input(Message::IssueDueDateChanged)
-        .on_submit(Message::SaveIssue)
-        .width(Length::Fixed(170.0))
-        .padding(util::SIDEBAR_CONTROL_PADDING)
-        .size(type_scale::SM)
-        .style(util::sidebar_input_style);
+    let estimate = chip(
+        FormMenu::Estimate,
+        form_page::chip_face(ICON_ESTIMATE, EstimateOption(form.estimate).to_string()),
+        &|| {
+            form_page::option_menu(
+                estimate_options(form.estimate)
+                    .into_iter()
+                    .map(|o| (o.to_string(), o.0 == form.estimate, Message::IssueEstimateChanged(o.0)))
+                    .collect(),
+            )
+        },
+    );
+
+    // Web: a `<label>` chip around a native date field.
+    let due_date = date_picker::view(
+        date_picker::DateInput {
+            field: date_picker::DateField::IssueDue,
+            value: &form.due_date,
+            placeholder: "yyyy-mm-dd",
+            on_change: Message::IssueDueDateChanged,
+            on_commit: None,
+            look: date_picker::Look::Chip,
+        },
+        date_picker_state,
+        chrono::Local::now().date_naive(),
+    );
+
+    let labels_chip = chip(
+        FormMenu::Labels,
+        form_page::chip_face(ICON_TAG, form_page::labels_summary(labels, &form.selected_label_ids)),
+        &|| {
+            form_page::label_menu(
+                labels,
+                |l| form.selected_label_ids.contains(&l.id),
+                |l| Message::IssueLabelToggled(l.id.clone()),
+            )
+        },
+    );
 
     // Web order: lane, priority, assignee, project, estimate, due date, labels.
     // Wraps to a second line on a narrow window.
@@ -380,16 +430,8 @@ pub fn page<'a>(
             .fold(column![].spacing(space::S2), |col, (i, path)| col.push(file_row(i, path)))
     });
 
-    let label_menu = form.labels_open.then(|| {
-        form_page::label_menu(
-            labels,
-            |l| form.selected_label_ids.contains(&l.id),
-            |l| Message::IssueLabelToggled(l.id.clone()),
-        )
-    });
-
     let description = text_editor(&form.description)
-        .placeholder("Add description (drop files here)\u{2026}  @ to mention, # to link an issue")
+        .placeholder("Add description (drop files here)...")
         .on_action(Message::IssueDescriptionChanged)
         .key_binding(crate::views::issue_detail::editor_binding(None, form.suggest.is_some()))
         .padding(0)
@@ -413,7 +455,8 @@ pub fn page<'a>(
         .spacing(space::S4)
         .align_y(Alignment::Center)
         .push_maybe(create_more)
-        .push(form_page::cancel_button())
+        // Web: Cancel on the edit page only.
+        .push_maybe(editing.then(form_page::cancel_button))
         .push(form_page::submit_button(
             if editing { "Update issue" } else { "Create issue" },
             Message::SaveIssue,
@@ -435,7 +478,6 @@ pub fn page<'a>(
         )
         .push(Space::with_height(space::S6))
         .push(properties)
-        .push_maybe(label_menu.map(|m| column![Space::with_height(space::S1), m]))
         .push_maybe(file_list.map(|l| column![Space::with_height(space::S6), l]))
         .push(Space::with_height(space::S8))
         .push(form_page::actions_bar(Some(attach_button()), actions));
@@ -445,7 +487,13 @@ pub fn page<'a>(
 
 /// "Attach files" at the left of the actions bar (web paperclip link).
 fn attach_button<'a>() -> Element<'a, Message> {
-    button(text("\u{1f4ce}  Attach files").size(type_scale::SM))
+    button(
+        row![]
+            .spacing(space::S2)
+            .align_y(Alignment::Center)
+            .push(form_page::icon(ICON_PAPERCLIP, space::S5, t::text_muted()))
+            .push(text("Attach files").size(type_scale::SM)),
+    )
         .on_press(Message::PickIssueFormFiles)
         .padding([space::S2, 0.0])
         .style(|_theme: &Theme, status| button::Style {
@@ -495,10 +543,30 @@ fn file_row<'a>(index: usize, path: &'a std::path::Path) -> Element<'a, Message>
     .into()
 }
 
-/// A read-only chip (web `px-3 py-1.5 rounded-md bg-foreground border`).
-fn context_chip<'a>(label: String) -> Element<'a, Message> {
-    container(text(label).size(type_scale::SM).color(t::text_body()))
-        .padding(util::SIDEBAR_CONTROL_PADDING)
+/// The read-only team/issue chip (web `px-3 py-1.5 rounded-md bg-foreground
+/// border`): chat icon, identifier, and a lock on create (team is fixed).
+fn context_chip<'a>(label: String, locked: bool) -> Element<'a, Message> {
+    form_page::chip_frame(
+        row![]
+            .spacing(space::S2)
+            .align_y(Alignment::Center)
+            .push(form_page::icon(ICON_CHAT, space::S4, t::text_body()))
+            .push(text(label).size(type_scale::SM).color(t::text_body()))
+            .push_maybe(locked.then(|| form_page::icon(ICON_LOCK, space::S3, t::text_body()))),
+    )
+}
+
+/// The parent issue chip on "New sub-issue of" (web `px-2 py-1`, mono
+/// identifier then the title).
+fn parent_chip<'a>(id: &str, title: &str) -> Element<'a, Message> {
+    container(
+        row![]
+            .spacing(space::S1_5)
+            .align_y(Alignment::Center)
+            .push(text(id.to_string()).size(type_scale::XS).color(t::text_muted()))
+            .push(text(title.to_string()).size(type_scale::SM).color(t::text_body())),
+    )
+    .padding([space::S1, space::S2])
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::bg_secondary())),
             border: Border {

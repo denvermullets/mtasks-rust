@@ -29,7 +29,7 @@ use crate::db::recurring_issues::{
 };
 use crate::theme::{self as t, space, type_scale};
 use crate::views::labels as labels_view;
-use crate::views::{form_page, util};
+use crate::views::{date_picker, form_page, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frequency {
@@ -512,7 +512,11 @@ fn labels_section<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Elem
 
 /// The full-page form (web `recurring_issues/new` and `/edit`): an Issue
 /// section, a Schedule section, then the actions.
-pub fn page<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a, Message> {
+pub fn page<'a>(
+    form: &'a RecurringFormState,
+    labels: &'a [Label],
+    date_picker_state: Option<&date_picker::DatePickerState>,
+) -> Element<'a, Message> {
     let weekday_options: Vec<WeekdayOption> = (0..7).map(WeekdayOption).collect();
 
     let mut schedule = column![].spacing(10).push(
@@ -578,10 +582,18 @@ pub fn page<'a>(form: &'a RecurringFormState, labels: &'a [Label]) -> Element<'a
                 .spacing(4)
                 .push(text("Starts on").size(12).color(t::text_muted()))
                 .push(
-                    text_input("YYYY-MM-DD", &form.starts_on)
-                        .on_input(Message::RecurringFormStartsOnChanged)
-                        .padding(8)
-                        .size(14),
+                    date_picker::view(
+                        date_picker::DateInput {
+                            field: date_picker::DateField::RecurringStartsOn,
+                            value: &form.starts_on,
+                            placeholder: "yyyy-mm-dd",
+                            on_change: Message::RecurringFormStartsOnChanged,
+                            on_commit: None,
+                            look: date_picker::Look::Field,
+                        },
+                        date_picker_state,
+                        chrono::Local::now().date_naive(),
+                    ),
                 ),
         )
         .push_maybe(error_line(&form.errors.starts_on));

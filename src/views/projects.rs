@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, horizontal_rule, pick_list, responsive, row, scrollable, text_editor, text_input};
+use iced::widget::{button, column, container, horizontal_rule, pick_list, responsive, row, scrollable, text_editor};
 use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
@@ -9,7 +9,7 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Member, Priority, Project, ProjectStatus, RoadmapCommitment};
 use crate::theme as t;
 use crate::theme::{radius, space, type_scale};
-use crate::views::{form_page, progress_chart, util};
+use crate::views::{date_picker, form_page, progress_chart, util};
 
 pub struct ProjectFormState {
     pub name: String,
@@ -93,7 +93,11 @@ const ROADMAPS: [RoadmapOption; 4] = [
 
 /// The full-page "New project" form (web `projects/new`): name and
 /// description on the left, the Properties sidebar on the right.
-pub fn page<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Element<'a, Message> {
+pub fn page<'a>(
+    form: &'a ProjectFormState,
+    members: &'a [Member],
+    date_picker_state: Option<&date_picker::DatePickerState>,
+) -> Element<'a, Message> {
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
         id: None,
         name: "—".to_string(),
@@ -146,13 +150,20 @@ pub fn page<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Element<'a
     let field = |label: &str, control: Element<'a, Message>| -> Element<'a, Message> {
         column![].spacing(space::S2).push(form_page::small_caption(label)).push(control).into()
     };
-    let date = |placeholder: &str, value: &str, on_input: fn(String) -> Message| -> Element<'a, Message> {
-        text_input(placeholder, value)
-            .on_input(on_input)
-            .padding(util::SIDEBAR_CONTROL_PADDING)
-            .size(type_scale::SM)
-            .style(util::sidebar_input_style)
-            .into()
+    let today = chrono::Local::now().date_naive();
+    let date = |field: date_picker::DateField, value: &'a str, on_change: fn(String) -> Message| {
+        date_picker::view(
+            date_picker::DateInput {
+                field,
+                value,
+                placeholder: "yyyy-mm-dd",
+                on_change,
+                on_commit: None,
+                look: date_picker::Look::Field,
+            },
+            date_picker_state,
+            today,
+        )
     };
     let actions = column![]
         .spacing(space::S3)
@@ -178,8 +189,8 @@ pub fn page<'a>(form: &'a ProjectFormState, members: &'a [Member]) -> Element<'a
             }))
             .into(),
         ))
-        .push(field("Start Date", date("YYYY-MM-DD", &form.start_date, Message::ProjectStartDateChanged)))
-        .push(field("Due Date", date("YYYY-MM-DD", &form.due_date, Message::ProjectDueDateChanged)))
+        .push(field("Start Date", date(date_picker::DateField::ProjectStart, &form.start_date, Message::ProjectStartDateChanged)))
+        .push(field("Due Date", date(date_picker::DateField::ProjectDue, &form.due_date, Message::ProjectDueDateChanged)))
         .push(field(
             "Roadmap commitment",
             pick(pick_list(ROADMAPS.as_slice(), Some(selected_roadmap), |opt: RoadmapOption| {
