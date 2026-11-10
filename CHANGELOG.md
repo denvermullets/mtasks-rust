@@ -1,7 +1,14 @@
-<!-- last-sha: c20f642d5a96a82af044cd2887fde913a00c69b3 -->
-**Version: v0.9.0**
+<!-- last-sha: d277530180f788741e5869c45ebaf8da58df6986 -->
+**Version: v0.10.0**
 
 # What's new
+
+## 2026-11-10
+- **Calendar for date fields.** Date fields on the issue, project and recurring issue forms, and on a project's page, now have a calendar you can open to pick a day. You can still type the date if you prefer.
+- **Tidier issue form.** The issue form's fields are now chips with icons, like on the web, and each one opens its own dropdown of choices.
+- **Clearer terminal folders.** Saving a terminal folder now confirms where new terminals will start, and terminals you restart or reopen later follow the new folder. The panel shows whether it's using the project's or the team's folder. If a folder can't be opened, you're told the terminal started in your home folder and how to give JAIT access in System Settings.
+- **Inbox dot on the tab.** The Inbox tab shows a dot while you have unread notifications.
+- **Pop-ups scroll.** Dialogs taller than the window, such as Settings or the command palette, now scroll instead of getting cut off.
 
 ## 2026-11-09
 - **Terminal alerts.** When a program in a terminal needs you, for example Claude Code waiting on a permission prompt, finishing, or hitting an error, a dot appears on its tab, in the terminal panel and next to the team in the sidebar. If the app is in the background you also get a macOS notification; click it to jump straight to that terminal.
