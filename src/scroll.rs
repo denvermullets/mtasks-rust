@@ -38,6 +38,32 @@ pub const BOARD_PAD_X: f32 = crate::theme::space::S4;
 /// Breathing room kept between the focused item and the viewport edge.
 pub const MARGIN: f32 = 8.0;
 
+/// Command palette result rows: fixed height, gap between them, and how many
+/// show before the list scrolls.
+pub const PALETTE_ROW_H: f32 = 32.0;
+pub const PALETTE_SPACING: f32 = 2.0;
+pub const PALETTE_VISIBLE_ROWS: usize = 10;
+
+/// Height of the palette list's viewport when it holds `rows` rows.
+pub fn palette_list_height(rows: usize) -> f32 {
+    let n = rows.min(PALETTE_VISIBLE_ROWS) as f32;
+    (n * PALETTE_ROW_H + (n - 1.0).max(0.0) * PALETTE_SPACING).max(0.0)
+}
+
+/// Scroll offset that keeps palette row `idx` in view, given the list's
+/// current `offset` and `viewport` height.
+pub fn palette_offset_to_reveal(idx: usize, offset: f32, viewport: f32) -> f32 {
+    let top = idx as f32 * (PALETTE_ROW_H + PALETTE_SPACING);
+    // No margin: rows butt against the viewport edges.
+    if top < offset {
+        top
+    } else if top + PALETTE_ROW_H > offset + viewport {
+        top + PALETTE_ROW_H - viewport
+    } else {
+        offset
+    }
+}
+
 /// Viewport height assumed until the scrollable reports its real one.
 pub const FALLBACK_VIEWPORT_H: f32 = 500.0;
 
@@ -345,6 +371,8 @@ pub enum ScrollKey {
     IssueDetail,
     ProjectDetail,
     DependencyMap,
+    /// The command palette's result list.
+    Palette,
 }
 
 impl ScrollKey {
@@ -364,6 +392,7 @@ impl ScrollKey {
             ScrollKey::IssueDetail => Id::new("issue-detail"),
             ScrollKey::ProjectDetail => Id::new("project-detail"),
             ScrollKey::DependencyMap => Id::new("dependency-map"),
+            ScrollKey::Palette => Id::new("command-palette-list"),
         }
     }
 
@@ -427,6 +456,7 @@ mod scroll_key_tests {
             ScrollKey::IssueDetail,
             ScrollKey::ProjectDetail,
             ScrollKey::DependencyMap,
+            ScrollKey::Palette,
         ];
         for (i, a) in keys.iter().enumerate() {
             for b in &keys[i + 1..] {
@@ -442,5 +472,31 @@ mod scroll_key_tests {
         assert!(!ScrollKey::Lane(3).horizontal());
         assert_eq!(ScrollKey::Board.absolute(7.0).x, 7.0);
         assert_eq!(ScrollKey::Lane(3).absolute(7.0).y, 7.0);
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    const STRIDE: f32 = PALETTE_ROW_H + PALETTE_SPACING;
+
+    #[test]
+    fn list_height_caps_at_the_visible_rows() {
+        assert_eq!(palette_list_height(0), 0.0);
+        assert_eq!(palette_list_height(1), PALETTE_ROW_H);
+        assert_eq!(palette_list_height(3), 3.0 * PALETTE_ROW_H + 2.0 * PALETTE_SPACING);
+        assert_eq!(palette_list_height(20), palette_list_height(PALETTE_VISIBLE_ROWS));
+    }
+
+    #[test]
+    fn reveal_leaves_visible_rows_alone_and_scrolls_to_hidden_ones() {
+        let vp = palette_list_height(PALETTE_VISIBLE_ROWS);
+        assert_eq!(palette_offset_to_reveal(3, 0.0, vp), 0.0);
+        // One past the last visible row: just enough to show its bottom edge.
+        let below = palette_offset_to_reveal(PALETTE_VISIBLE_ROWS, 0.0, vp);
+        assert_eq!(below, PALETTE_VISIBLE_ROWS as f32 * STRIDE + PALETTE_ROW_H - vp);
+        // Wrapping back to the first row returns to the top.
+        assert_eq!(palette_offset_to_reveal(0, below, vp), 0.0);
     }
 }

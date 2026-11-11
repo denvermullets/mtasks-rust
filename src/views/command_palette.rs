@@ -2,12 +2,13 @@
 //! `PaletteState` (text field plus one button per result row); the state and
 //! results logic live in `palette_results`.
 
-use iced::widget::{button, column, container, mouse_area, row, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text_input};
 use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::palette_results::PaletteState;
+use crate::scroll::{self, ScrollKey};
 use crate::theme as t;
 
 pub fn input_id() -> text_input::Id {
@@ -26,7 +27,7 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
             .size(14)
             .width(Length::Fill),
     );
-    let mut list = column![].spacing(2);
+    let mut list = column![].spacing(scroll::PALETTE_SPACING);
     for (i, r) in state.rows.iter().enumerate() {
         let highlighted = i == state.selected;
         list = list.push(
@@ -45,6 +46,7 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
             .on_press(Message::PaletteChoose(r.nav.clone()))
             .padding([6, 8])
             .width(Length::Fill)
+            .height(Length::Fixed(scroll::PALETTE_ROW_H))
             .style(move |_theme: &Theme, status| button::Style {
                 background: (highlighted || matches!(status, button::Status::Hovered))
                     .then(|| iced::Background::Color(t::bg_card_focused())),
@@ -57,7 +59,19 @@ pub fn view(state: &PaletteState) -> Element<'_, Message> {
             }),
         );
     }
-    content = content.push(list);
+    // The list scrolls past `PALETTE_VISIBLE_ROWS`, keeping the search field
+    // in place; Up/Down scroll the highlighted row into view (see app.rs).
+    if !state.rows.is_empty() {
+        let list = scroll::track(
+            scrollable(list).direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(4),
+            )),
+            ScrollKey::Palette,
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(scroll::palette_list_height(state.rows.len())));
+        content = content.push(list);
+    }
     if state.rows.is_empty() {
         content = content.push(text("No results").size(13).color(t::text_muted()));
     }

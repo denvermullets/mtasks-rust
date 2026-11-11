@@ -48,6 +48,8 @@ pub enum PaletteNav {
     ToggleTerminalDock,
     /// Focus the open Tab at this position (`TabMessage::Focus`).
     Tab(usize),
+    /// Open the Settings modal (`Message::OpenSettings`).
+    Settings,
 }
 
 impl PaletteNav {
@@ -68,7 +70,8 @@ impl PaletteNav {
             | PaletteNav::HidePanel
             | PaletteNav::ToggleProjectProperties
             | PaletteNav::ToggleProjectCardsStacked
-            | PaletteNav::ToggleTerminalDock => "Command",
+            | PaletteNav::ToggleTerminalDock
+            | PaletteNav::Settings => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -354,6 +357,13 @@ fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
             });
         }
     }
+    if name_matches(needle, "Settings") {
+        rows.push(PaletteRow {
+            primary: "Settings".to_string(),
+            secondary: "Shortcut: ,".to_string(),
+            nav: PaletteNav::Settings,
+        });
+    }
 }
 
 fn push_teams(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
@@ -555,7 +565,7 @@ mod tests {
         assert_eq!(rows[0].nav.label(), "Issue");
         assert_eq!(rows[0].primary, "ENG-1");
         assert_eq!(rows[1].nav.label(), "View");
-        assert!(palette_results("", &data).iter().all(|r| r.nav.label() == "View"));
+        assert!(palette_results("", &data).iter().all(|r| r.nav.label() != "Issue"));
     }
 
     #[test]
@@ -580,7 +590,7 @@ mod tests {
     fn empty_query_lists_views_then_teams_in_order() {
         assert_eq!(
             names(""),
-            ["Board", "Projects", "Roadmap", "Recurring issues", "My Issues", "Inbox", "JAIT App", "Rails API"]
+            ["Board", "Projects", "Roadmap", "Recurring issues", "My Issues", "Inbox", "Settings", "JAIT App", "Rails API"]
         );
     }
 
@@ -684,7 +694,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["View", "View", "View", "View", "View", "View", "Project", "Project"]
+            ["View", "View", "View", "View", "View", "View", "Command", "Project", "Project"]
         );
     }
 
@@ -748,7 +758,7 @@ mod tests {
     #[test]
     fn typing_recomputes_rows() {
         let mut state = PaletteState::new(PaletteData::default());
-        assert_eq!(state.rows.len(), 6);
+        assert_eq!(state.rows.len(), 7);
         state.set_query("road".into());
         assert_eq!(state.rows.len(), 1);
     }
@@ -766,7 +776,7 @@ mod tests {
     fn down_wraps_to_first_and_up_wraps_to_last() {
         let mut state = PaletteState::new(PaletteData::default());
         state.move_selection(-1);
-        assert_eq!(state.selected, 5);
+        assert_eq!(state.selected, 6);
         state.move_selection(1);
         assert_eq!(state.selected, 0);
         state.move_selection(1);
@@ -812,7 +822,15 @@ mod tests {
         let mut state = PaletteState::new(PaletteData::default());
         assert_eq!(state.chosen(), Some(PaletteNav::View(View::Board)));
         state.move_selection(-1);
-        assert_eq!(state.chosen(), Some(PaletteNav::View(View::Inbox)));
+        assert_eq!(state.chosen(), Some(PaletteNav::Settings));
+    }
+
+    #[test]
+    fn settings_row_opens_settings() {
+        let rows = palette_results("sett", &PaletteData::default());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nav, PaletteNav::Settings);
+        assert_eq!(rows[0].nav.label(), "Command");
     }
 
     #[test]

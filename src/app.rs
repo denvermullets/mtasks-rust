@@ -6659,17 +6659,32 @@ impl App {
                     self.modal = Modal::CommandPalette(PaletteState::new(
                         self.palette_data(),
                     ));
+                    // A fresh list widget starts at the top.
+                    self.scroll_state.remove(&ScrollKey::Palette);
                     return text_input::focus(command_palette::input_id());
                 }
             }
             Message::PaletteQueryChanged(query) => {
                 if let Modal::CommandPalette(ref mut palette) = self.modal {
                     palette.set_query(query);
+                    // The highlight resets to the first row; follow it.
+                    self.scroll_state.remove(&ScrollKey::Palette);
+                    return ScrollKey::Palette.scroll_to(0.0);
                 }
             }
             Message::PaletteMove(delta) => {
                 if let Modal::CommandPalette(ref mut palette) = self.modal {
                     palette.move_selection(delta);
+                    let (offset, viewport) =
+                        self.scroll_state.get(&ScrollKey::Palette).copied().unwrap_or((
+                            0.0,
+                            scroll::palette_list_height(palette.rows.len()),
+                        ));
+                    let new = scroll::palette_offset_to_reveal(palette.selected, offset, viewport);
+                    if (new - offset).abs() >= 0.5 {
+                        self.scroll_state.insert(ScrollKey::Palette, (new, viewport));
+                        return ScrollKey::Palette.scroll_to(new);
+                    }
                 }
             }
             // An open popover owns the hover context (Rails' `pickerOpen`):
@@ -6779,6 +6794,7 @@ impl App {
                         return self.update(Message::Terminal(crate::terminal::TerminalMessage::FocusApp))
                     }
                     PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
+                    PaletteNav::Settings => return self.update(Message::OpenSettings),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
