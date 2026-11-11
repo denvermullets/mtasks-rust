@@ -95,6 +95,10 @@ pub struct Config {
     /// Device-wide and local-only, hidden by default.
     #[serde(default)]
     pub project_properties_open: bool,
+    /// Whether the issue page shows its Properties (`/` toggles it).
+    /// Device-wide and local-only, shown by default.
+    #[serde(default = "default_true")]
+    pub issue_properties_open: bool,
     /// Whether the project page always stacks Burndown above Issues, at any
     /// width. Device-wide and local-only; off means side by side when roomy.
     #[serde(default)]
@@ -172,6 +176,7 @@ impl Default for Config {
             terminal_font_size: default_terminal_font_size(),
             native_notifications: true,
             project_properties_open: false,
+            issue_properties_open: true,
             project_cards_stacked: false,
             terminal_dock: default_terminal_dock(),
             terminal_panel_width: None,
@@ -387,6 +392,17 @@ mod tests {
         assert!(back.project_cards_stacked);
         assert_eq!(back.terminal_dock, "right");
         assert_eq!(back.terminal_panel_width, Some(512.0));
+    }
+
+    #[test]
+    fn issue_properties_default_shown_and_round_trip() {
+        let old: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert!(old.issue_properties_open);
+        let mut cfg = Config::default();
+        assert!(cfg.issue_properties_open);
+        cfg.issue_properties_open = false;
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(!back.issue_properties_open);
     }
 
     #[test]

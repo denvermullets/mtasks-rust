@@ -37,9 +37,9 @@ pub enum PaletteNav {
     FocusApp,
     /// Hide the Terminal panel (`TerminalMessage::Hide`).
     HidePanel,
-    /// Show or hide the project page's Properties sidebar
-    /// (`Message::ToggleProjectProperties`).
-    ToggleProjectProperties,
+    /// Show or hide the issue or project page's Properties
+    /// (`Message::ToggleProperties`).
+    ToggleProperties,
     /// Switch the project page between always-stacked cards and side by side
     /// when roomy (`Message::ToggleProjectCardsStacked`).
     ToggleProjectCardsStacked,
@@ -68,7 +68,7 @@ impl PaletteNav {
             | PaletteNav::FocusTerminal
             | PaletteNav::FocusApp
             | PaletteNav::HidePanel
-            | PaletteNav::ToggleProjectProperties
+            | PaletteNav::ToggleProperties
             | PaletteNav::ToggleProjectCardsStacked
             | PaletteNav::ToggleTerminalDock
             | PaletteNav::Settings => "Command",
@@ -265,11 +265,18 @@ fn push_commands(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             nav: PaletteNav::OpenProjectDependencyMap,
         });
     }
-    if data.on_project_detail && name_matches(needle, "Toggle project properties") {
+    let properties = if data.on_project_detail {
+        Some("Toggle project properties")
+    } else if data.on_issue_detail {
+        Some("Toggle issue properties")
+    } else {
+        None
+    };
+    if let Some(name) = properties.filter(|n| name_matches(needle, n)) {
         rows.push(PaletteRow {
-            primary: "Toggle project properties".to_string(),
+            primary: name.to_string(),
             secondary: "Shortcut: /".to_string(),
-            nav: PaletteNav::ToggleProjectProperties,
+            nav: PaletteNav::ToggleProperties,
         });
     }
     if data.on_project_detail {
@@ -869,9 +876,15 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].primary, "Toggle project properties");
         assert_eq!(rows[0].secondary, "Shortcut: /");
-        assert_eq!(rows[0].nav, PaletteNav::ToggleProjectProperties);
+        assert_eq!(rows[0].nav, PaletteNav::ToggleProperties);
         assert_eq!(rows[0].nav.label(), "Command");
         assert!(palette_results("toggle project", &PaletteData::default()).is_empty());
+        let issue = PaletteData { on_issue_detail: true, ..PaletteData::default() };
+        let rows = palette_results("toggle issue", &issue);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Toggle issue properties");
+        assert_eq!(rows[0].nav, PaletteNav::ToggleProperties);
+        assert!(palette_results("toggle issue", &on).is_empty());
     }
 
     #[test]

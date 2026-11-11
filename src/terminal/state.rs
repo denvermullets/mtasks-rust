@@ -142,8 +142,8 @@ pub struct TerminalState {
     dock: Dock,
     /// Docked right: the requested width (`None` is the default). Device-wide.
     width: Option<f32>,
-    /// Docked right: room taken right of the panel (the project page's
-    /// Properties), set by the app every message.
+    /// Docked right: room taken right of the panel. Nothing sits there now
+    /// (detail pages move Properties inline beside the panel), so it stays 0.
     right_inset: f32,
     /// Docked right: the panel body's laid-out size, once measured.
     body: Option<Size>,
@@ -807,11 +807,6 @@ impl TerminalState {
 
     pub fn set_width(&mut self, width: Option<f32>) {
         self.width = width;
-    }
-
-    /// Room right of a right-docked panel, which moves its left edge.
-    pub fn set_right_inset(&mut self, inset: f32) {
-        self.right_inset = inset;
     }
 
     /// Width a right-docked panel takes from the page now (its edge handle

@@ -198,6 +198,7 @@ pub fn handle_issue_detail_key(
             "s" => Some(Message::OpenPropertyPicker(Field::Status)),
             "p" => Some(Message::OpenPropertyPicker(Field::Priority)),
             "j" => Some(Message::OpenPropertyPicker(Field::Project)),
+            "/" => Some(Message::ToggleProperties),
             _ => None,
         },
         _ => None,
@@ -221,7 +222,7 @@ pub fn handle_project_detail_key(
     )
     .or_else(|| match key {
         Key::Character(c) if modifiers.is_empty() && c.as_str() == "/" => {
-            Some(Message::ToggleProjectProperties)
+            Some(Message::ToggleProperties)
         }
         _ => None,
     })
@@ -323,11 +324,21 @@ mod tests {
     }
 
     #[test]
+    fn slash_toggles_properties_on_the_issue_page() {
+        let slash = Key::Character("/".into());
+        assert!(matches!(
+            handle_issue_detail_key(&slash, Modifiers::empty(), false),
+            Some(Message::ToggleProperties)
+        ));
+        assert!(handle_issue_detail_key(&slash, Modifiers::COMMAND, false).is_none());
+    }
+
+    #[test]
     fn slash_toggles_properties_on_the_project_page_and_opens_help_elsewhere() {
         let slash = Key::Character("/".into());
         assert!(matches!(
             handle_project_detail_key(&slash, Modifiers::empty(), false),
-            Some(Message::ToggleProjectProperties)
+            Some(Message::ToggleProperties)
         ));
         // `?` is shift+/ and stays help: the project handler leaves it alone.
         let q = Key::Character("?".into());

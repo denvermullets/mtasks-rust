@@ -113,6 +113,161 @@ pub fn sidebar_panel<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'
         .into()
 }
 
+/// Where a detail page (issue or project) draws its Properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertiesPlacement {
+    /// Hidden (`/` shows them).
+    Hidden,
+    /// The fixed-width panel down the page's right side.
+    Sidebar,
+    /// A card under the description, its fields wrapping to the page width.
+    Inline,
+}
+
+/// Properties go under the description while a right-docked Terminal panel
+/// shares the page, which would leave too little room for the panel too.
+pub fn properties_placement(open: bool, terminal_width: f32) -> PropertiesPlacement {
+    match (open, terminal_width > 0.0) {
+        (false, _) => PropertiesPlacement::Hidden,
+        (true, false) => PropertiesPlacement::Sidebar,
+        (true, true) => PropertiesPlacement::Inline,
+    }
+}
+
+/// A detail page's Properties, for `sidebar_properties` or
+/// `inline_properties` to lay out.
+pub struct Properties<'a, M> {
+    /// Each field's label and control: the ones always shown inline.
+    pub fields: Vec<(&'a str, Element<'a, M>)>,
+    /// Fields the inline card shows only once "More" is open. The sidebar
+    /// shows them after `fields`.
+    pub more: Vec<(&'a str, Element<'a, M>)>,
+    /// Text buttons after the fields (e.g. "Move to team…"). Inline, under "More".
+    pub actions: Vec<Element<'a, M>>,
+    /// RFC3339 timestamps for the "Created" / "Updated" lines.
+    pub created_at: &'a str,
+    pub updated_at: &'a str,
+}
+
+/// Width of one label + control cell in the inline Properties card.
+pub const INLINE_FIELD_WIDTH: f32 = 272.0;
+
+/// Width of the label column inside an inline cell.
+const INLINE_LABEL_WIDTH: f32 = 76.0;
+
+/// Width of an inline cell's control: what its dropdown menu should match.
+pub const INLINE_CONTROL_WIDTH: f32 = INLINE_FIELD_WIDTH - INLINE_LABEL_WIDTH - space::S2;
+
+/// The inline Properties card, kept short: each label sits left of its
+/// control and the cells wrap to the page width. Only `fields` show until
+/// `expanded`; then `more` follows, and the actions and timestamps share one
+/// closing line. A trailing "More" / "Less" cell sends `on_toggle`. No
+/// heading; the card is the grouping.
+pub fn inline_properties<'a, M: Clone + 'a>(
+    props: Properties<'a, M>,
+    expanded: bool,
+    on_toggle: M,
+) -> Element<'a, M> {
+    let fields = if expanded {
+        props.fields.into_iter().chain(props.more).collect()
+    } else {
+        props.fields
+    };
+    let toggle = iced::widget::button(
+        text(if expanded { "Less \u{25B4}" } else { "More \u{25BE}" })
+            .size(type_scale::XS)
+            .color(t::accent()),
+    )
+    .on_press(on_toggle)
+    .padding(0)
+    .style(iced::widget::button::text);
+    let cells = fields
+        .into_iter()
+        .map(|(label, control)| {
+            iced::widget::row![]
+                .spacing(space::S2)
+                .align_y(iced::Alignment::Center)
+                .push(text(label).size(type_scale::XS).color(t::text_muted()).width(Length::Fixed(INLINE_LABEL_WIDTH)))
+                .push(container(control).width(Length::Fill))
+                .width(Length::Fixed(INLINE_FIELD_WIDTH))
+                .into()
+        })
+        .chain(std::iter::once(toggle.into()));
+    let footer = expanded.then(|| {
+        iced::widget::Row::with_children(props.actions)
+            .spacing(space::S4)
+            .align_y(iced::Alignment::Center)
+            .push(iced::widget::horizontal_space())
+            .push(
+                text(format!(
+                    "Created {} \u{00B7} Updated {}",
+                    relative_time(props.created_at),
+                    relative_time(props.updated_at)
+                ))
+                .size(type_scale::XS)
+                .color(t::text_muted()),
+            )
+    });
+    container(
+        column![]
+            .spacing(space::S3)
+            .push(
+                // Centered per wrapped line, so a cell shorter than a control
+                // (Creator's text, an empty "+ Add …") lines up with its neighbours.
+                iced::widget::Row::with_children(cells)
+                    .spacing(space::S3)
+                    .align_y(iced::Alignment::Center)
+                    .wrap(),
+            )
+            .push_maybe(footer),
+    )
+    .padding([space::S3, space::S4])
+    .width(Length::Fill)
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(t::bg_secondary())),
+        border: Border { color: t::border(), width: 1.0, radius: radius::MD.into() },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// The Properties panel for `PropertiesPlacement::Sidebar`: heading, each
+/// label above its control, actions, then the timestamps, down a scrolling
+/// fixed-width column.
+pub fn sidebar_properties<'a, M: 'a>(props: Properties<'a, M>) -> Element<'a, M> {
+    let timestamps = column![]
+        .spacing(space::S0_5)
+        .push(text(format!("Created {}", props.created_at)).size(type_scale::XS).color(t::text_muted()))
+        .push(text(format!("Updated {}", props.updated_at)).size(type_scale::XS).color(t::text_muted()));
+    let content = column![]
+        .spacing(space::S6)
+        .padding(space::S6)
+        .width(Length::Fill)
+        .push(sidebar_heading("Properties"))
+        .extend(
+            props
+                .fields
+                .into_iter()
+                .chain(props.more)
+                .map(|(label, control)| sidebar_field(label, control)),
+        )
+        .extend(props.actions)
+        .push(timestamps);
+    sidebar_panel(scrollable(content))
+}
+
+/// Thin full-height rule standing in for a `border-l` between panes.
+pub fn vertical_divider<'a, M: 'a>() -> Element<'a, M> {
+    container(column![])
+        .width(Length::Fixed(1.0))
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::border())),
+            ..Default::default()
+        })
+        .into()
+}
+
 /// Padding for sidebar controls (web `px-3 py-1.5`).
 pub const SIDEBAR_CONTROL_PADDING: [f32; 2] = [space::S1_5, space::S3];
 
@@ -173,6 +328,14 @@ mod sidebar_tests {
     #[test]
     fn sidebar_is_w_80_wide() {
         assert_eq!(SIDEBAR_WIDTH, 320.0);
+    }
+
+    #[test]
+    fn properties_go_inline_beside_a_right_docked_terminal() {
+        assert_eq!(properties_placement(false, 0.0), PropertiesPlacement::Hidden);
+        assert_eq!(properties_placement(false, 480.0), PropertiesPlacement::Hidden);
+        assert_eq!(properties_placement(true, 0.0), PropertiesPlacement::Sidebar);
+        assert_eq!(properties_placement(true, 480.0), PropertiesPlacement::Inline);
     }
 
     #[test]

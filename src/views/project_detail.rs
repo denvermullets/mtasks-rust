@@ -192,6 +192,8 @@ pub fn view<'a>(
     // Width a right-docked Terminal panel takes from the page (0 when none);
     // any width stacks the Burndown and Issues cards.
     terminal_width: f32,
+    // The inline Properties card shows its "More" fields.
+    more_properties: bool,
     // The Terminal panel is on screen: issue rows offer to send their prompt.
     terminal_showing: bool,
     // The right-docked Terminal panel, placed between the page and Properties.
@@ -264,6 +266,18 @@ pub fn view<'a>(
                 .style(title_input_style),
         );
 
+    // ---- Properties: down the right side, or in the header under the title ----
+    let placement = util::properties_placement(properties_open, terminal_width);
+    let props = properties(project, detail, members, date_picker_state);
+    let (inline_props, sidebar_panel) = match placement {
+        util::PropertiesPlacement::Hidden => (None, None),
+        util::PropertiesPlacement::Sidebar => (None, Some(util::sidebar_properties(props))),
+        util::PropertiesPlacement::Inline => (
+            Some(util::inline_properties(props, more_properties, Message::ToggleMoreProperties)),
+            None,
+        ),
+    };
+
     let head = column![]
         .spacing(space::S4)
         .push(breadcrumb)
@@ -273,7 +287,8 @@ pub fn view<'a>(
                 .error
                 .as_deref()
                 .map(|e| text(e).size(type_scale::XS).color(t::danger())),
-        );
+        )
+        .push_maybe(inline_props);
 
     // Title-to-body gap is S6; the sections below are S8 apart. The attach
     // button stays close to the description it belongs to.
@@ -304,7 +319,7 @@ pub fn view<'a>(
                 // column: stack whatever the leftover width.
                 CardLayout::Stacked
             } else {
-                card_layout(page_width(window_width, properties_open))
+                card_layout(page_width(window_width, placement == util::PropertiesPlacement::Sidebar))
             },
             burndown(project, issues),
             issues_section(visible, display, issue_sort, team, lanes, terminal_showing),
@@ -322,7 +337,32 @@ pub fn view<'a>(
         .push(head)
         .push(sections);
 
-    // ---- Right sidebar: properties ----
+    let page = row![]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(
+            container(
+                track(scrollable(left), ScrollKey::ProjectDetail),
+            )
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .push_maybe(terminal);
+    // Properties are hidden until `/` (or the palette) shows them.
+    match sidebar_panel {
+        Some(panel) => page.push(util::vertical_divider()).push(panel).into(),
+        None => page.into(),
+    }
+}
+
+/// The project's Properties, laid out by `util::sidebar_properties` or
+/// `util::inline_properties`.
+fn properties<'a>(
+    project: &'a Project,
+    detail: &'a ProjectDetailState,
+    members: &'a [Member],
+    date_picker_state: Option<&date_picker::DatePickerState>,
+) -> util::Properties<'a, Message> {
     let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
         id: None,
         name: "No lead".to_string(),
@@ -337,12 +377,8 @@ pub fn view<'a>(
         .find(|o| o.id == project.lead_id)
         .cloned();
 
-    let sidebar = column![]
-        .spacing(space::S6)
-        .padding(space::S6)
-        .width(Length::Fill)
-        .push(util::sidebar_heading("Properties"))
-        .push(util::sidebar_field(
+    let fields = vec![
+        (
             "Status",
             pick_list(
                 STATUSES.as_slice(),
@@ -353,9 +389,10 @@ pub fn view<'a>(
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
             .style(util::sidebar_pick_list_style)
-            .menu_style(util::sidebar_menu_style),
-        ))
-        .push(util::sidebar_field(
+            .menu_style(util::sidebar_menu_style)
+            .into(),
+        ),
+        (
             "Priority",
             pick_list(
                 PRIORITIES.as_slice(),
@@ -366,9 +403,10 @@ pub fn view<'a>(
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
             .style(util::sidebar_pick_list_style)
-            .menu_style(util::sidebar_menu_style),
-        ))
-        .push(util::sidebar_field(
+            .menu_style(util::sidebar_menu_style)
+            .into(),
+        ),
+        (
             "Lead",
             pick_list(member_options, selected_lead, |o: MemberOption| {
                 Message::ProjectDetailLeadChanged(o.id)
@@ -377,12 +415,13 @@ pub fn view<'a>(
             .padding(util::SIDEBAR_CONTROL_PADDING)
             .text_size(type_scale::SM)
             .style(util::sidebar_pick_list_style)
-            .menu_style(util::sidebar_menu_style),
-        ))
+            .menu_style(util::sidebar_menu_style)
+            .into(),
+        ),
         // Project labels aren't wired into the data layer yet (see JAIT-181
         // notes); render read-only until the follow-up ticket lands.
-        .push(util::sidebar_field("Labels", placeholder_value()))
-        .push(util::sidebar_field(
+        ("Labels", placeholder_value()),
+        (
             "Start date",
             detail_date(
                 date_picker::DateField::ProjectDetailStart,
@@ -390,8 +429,8 @@ pub fn view<'a>(
                 Message::ProjectDetailStartDateChanged,
                 date_picker_state,
             ),
-        ))
-        .push(util::sidebar_field(
+        ),
+        (
             "Due date",
             detail_date(
                 date_picker::DateField::ProjectDetailDue,
@@ -399,48 +438,16 @@ pub fn view<'a>(
                 Message::ProjectDetailDueDateChanged,
                 date_picker_state,
             ),
-        ))
-        .push(
-            column![]
-                .spacing(space::S0_5)
-                .push(
-                    text(format!("Created {}", project.created_at))
-                        .size(type_scale::XS)
-                        .color(t::text_muted()),
-                )
-                .push(
-                    text(format!("Updated {}", project.updated_at))
-                        .size(type_scale::XS)
-                        .color(t::text_muted()),
-                ),
-        );
-
-    let sidebar_panel = util::sidebar_panel(scrollable(sidebar));
-
-    let divider = container(column![])
-        .width(Length::Fixed(1.0))
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::border())),
-            ..Default::default()
-        });
-
-    let page = row![]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .push(
-            container(
-                track(scrollable(left), ScrollKey::ProjectDetail),
-            )
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .push_maybe(terminal);
-    // Properties are hidden until `/` (or the palette) shows them.
-    if properties_open {
-        page.push(divider).push(sidebar_panel).into()
-    } else {
-        page.into()
+        ),
+    ];
+    // Inline, the read-only Labels placeholder waits behind "More".
+    let (fields, more) = fields.into_iter().partition(|(label, _)| *label != "Labels");
+    util::Properties {
+        fields,
+        more,
+        actions: Vec::new(),
+        created_at: &project.created_at,
+        updated_at: &project.updated_at,
     }
 }
 

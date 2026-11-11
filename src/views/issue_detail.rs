@@ -14,11 +14,13 @@ use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::body::BodyCtx;
 use crate::views::dropdown::dropdown;
 use crate::views::lane_icon;
+use crate::views::truncated::truncated;
 use crate::views::property_picker::{self, Field, PickerState};
 use crate::views::projects::MemberOption;
 use crate::views::util::{
-    relative_time, sidebar_field, sidebar_heading, sidebar_input_style, sidebar_menu_style,
-    sidebar_panel, sidebar_pick_list_style, with_heading, SIDEBAR_CONTROL_PADDING, SIDEBAR_WIDTH,
+    inline_properties, properties_placement, relative_time, sidebar_input_style,
+    sidebar_menu_style, sidebar_pick_list_style, sidebar_properties, vertical_divider,
+    with_heading, Properties, PropertiesPlacement, INLINE_CONTROL_WIDTH, SIDEBAR_CONTROL_PADDING, SIDEBAR_WIDTH,
 };
 
 /// Buffered edit state for the full-page issue detail view. Title, description,
@@ -28,7 +30,8 @@ use crate::views::util::{
 /// is never clobbered by a `reload_data()`.
 pub struct IssueDetailState {
     pub issue_id: String,
-    pub title: String,
+    /// An editor rather than a text input so a long title wraps.
+    pub title: text_editor::Content,
     pub description: text_editor::Content,
     /// True while the description editor is open; otherwise it is drawn rendered.
     pub editing_description: bool,
@@ -95,7 +98,7 @@ impl IssueDetailState {
         let body = issue.description.clone().unwrap_or_default();
         Self {
             issue_id: issue.id.clone(),
-            title: issue.title.clone(),
+            title: text_editor::Content::with_text(&issue.title),
             description: text_editor::Content::with_text(&body),
             editing_description: false,
             due_date: issue.due_date.clone().unwrap_or_default(),
@@ -128,7 +131,7 @@ impl IssueDetailState {
         let body = self.description_text();
         let due = self.due_date.trim();
         IssueFields {
-            title: self.title.trim().to_string(),
+            title: self.title.text().replace('\n', " ").trim().to_string(),
             description: (!body.trim().is_empty()).then(|| body.trim_end().to_string()),
             due_date: (!due.is_empty()).then(|| due.to_string()),
             estimate: self.estimate.trim().to_string(),
@@ -217,6 +220,12 @@ pub fn view<'a>(
     host: &'a str,
     pending_paths: &'a crate::views::body::PendingInlineMap,
     picker: Option<&'a PickerState>,
+    properties_open: bool,
+    // Width a right-docked Terminal panel takes from the page (0 when none);
+    // any width moves Properties under the description.
+    terminal_width: f32,
+    // The inline Properties card shows its "More" fields.
+    more_properties: bool,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -243,25 +252,43 @@ pub fn view<'a>(
         );
 
     // ---- Left column: title, description, activity stub ----
+    // ---- Properties: down the right side, or in the header under the title ----
+    let placement = properties_placement(properties_open, terminal_width);
+    let (inline_props, sidebar) = match placement {
+        PropertiesPlacement::Hidden => (None, None),
+        PropertiesPlacement::Sidebar => {
+            let props =
+                properties(issue, detail, team, lanes, projects, members, deps, parent, picker, SIDEBAR_CONTROL_WIDTH);
+            (None, Some(sidebar_properties(props)))
+        }
+        PropertiesPlacement::Inline => {
+            let props =
+                properties(issue, detail, team, lanes, projects, members, deps, parent, picker, INLINE_CONTROL_WIDTH);
+            (Some(inline_properties(props, more_properties, Message::ToggleMoreProperties)), None)
+        }
+    };
+
     let head = column![]
         .spacing(space::S4)
         .push(breadcrumb)
         .push_maybe(recurring_origin.map(|title| origin_line(title, &issue.team_id)))
         .push(
-            text_input("Title", &detail.title)
-                .on_input(Message::IssueDetailTitleChanged)
-                .on_submit(Message::CommitIssueDetail)
+            text_editor(&detail.title)
+                .placeholder("Title")
+                .on_action(Message::IssueDetailTitleChanged)
+                .key_binding(title_binding)
                 .size(type_scale::XXL)
                 .font(crate::fonts::bold_active())
                 .padding(space::S1)
-                .style(title_input_style),
+                .style(title_editor_style),
         )
         .push_maybe(
             detail
                 .error
                 .as_deref()
                 .map(|e| text(e).size(type_scale::XS).color(t::danger())),
-        );
+        )
+        .push_maybe(inline_props);
 
     // Title-to-body gap is S6; the sections below are S8 apart. The attach
     // button stays close to the description it belongs to.
@@ -320,7 +347,34 @@ pub fn view<'a>(
         .push(head)
         .push(sections);
 
-    // ---- Right sidebar: properties ----
+    let page = row![].width(Length::Fill).height(Length::Fill).push(
+        container(track(scrollable(left), ScrollKey::IssueDetail))
+            .width(Length::Fill)
+            .height(Length::Fill),
+    );
+    // `/` (or the palette) hides and shows Properties.
+    match sidebar {
+        Some(panel) => page.push(vertical_divider()).push(panel).into(),
+        None => page.into(),
+    }
+}
+
+/// The issue's Properties, laid out by `sidebar_properties` or
+/// `inline_properties`. `menu_width` is the width of a field's control, which
+/// its dropdown matches.
+#[allow(clippy::too_many_arguments)]
+fn properties<'a>(
+    issue: &'a Issue,
+    detail: &'a IssueDetailState,
+    team: Option<&'a Team>,
+    lanes: &'a [Lane],
+    projects: &'a [Project],
+    members: &'a [Member],
+    deps: &'a DependencyGroups,
+    parent: Option<&'a Issue>,
+    picker: Option<&'a PickerState>,
+    menu_width: f32,
+) -> Properties<'a, Message> {
     let lane_name = lanes.iter().find(|l| l.id == issue.lane_id).map(|l| l.name.clone());
     let project_label = issue
         .project_id
@@ -349,124 +403,90 @@ pub fn view<'a>(
             .find(|m| &m.id == cid)
             .map(|m| m.name.as_str())
     });
+    let select = |field, value, empty| sidebar_select(field, value, empty, picker, menu_width);
 
-    let sidebar = column![]
-        .spacing(space::S6)
-        .padding(space::S6)
+    let mut fields: Vec<(&'a str, Element<'a, Message>)> = Vec::new();
+    fields.extend(parent.map(|p| ("Parent", parent_link(p, team))));
+    fields.push(("Status", select(Field::Status, lane_name, "No status")));
+    fields.push((
+        "Priority",
+        select(Field::Priority, Some(issue.priority_enum().to_string()), "No priority"),
+    ));
+    fields.push((
+        "Assignee",
+        pick_list(member_options, selected_assignee, |o: MemberOption| {
+            Message::IssueDetailAssigneeChanged(o.id)
+        })
         .width(Length::Fill)
-        .push(sidebar_heading("Properties"))
-        .push_maybe(parent.map(|p| sidebar_field("Parent", parent_link(p, team))))
-        .push(sidebar_field("Status", sidebar_select(Field::Status, lane_name, "No status", picker)))
-        .push(sidebar_field(
-            "Priority",
-            sidebar_select(
-                Field::Priority,
-                Some(issue.priority_enum().to_string()),
-                "No priority",
-                picker,
-            ),
-        ))
-        .push(sidebar_field(
-            "Assignee",
-            pick_list(member_options, selected_assignee, |o: MemberOption| {
-                Message::IssueDetailAssigneeChanged(o.id)
-            })
-            .width(Length::Fill)
-            .text_size(type_scale::SM)
+        .text_size(type_scale::SM)
+        .padding(SIDEBAR_CONTROL_PADDING)
+        .style(sidebar_pick_list_style)
+        .menu_style(sidebar_menu_style)
+        .into(),
+    ));
+    fields.push((
+        "Creator",
+        match creator_name {
+            Some(name) => text(name).size(type_scale::SM).color(t::text_secondary()).into(),
+            None => placeholder_value(),
+        },
+    ));
+    fields.push((
+        "Estimate",
+        text_input("No estimate", &detail.estimate)
+            .on_input(Message::IssueDetailEstimateChanged)
+            .on_submit(Message::CommitIssueDetail)
             .padding(SIDEBAR_CONTROL_PADDING)
-            .style(sidebar_pick_list_style)
-            .menu_style(sidebar_menu_style),
-        ))
-        .push(sidebar_field(
-            "Creator",
-            match creator_name {
-                Some(name) => text(name).size(type_scale::SM).color(t::text_secondary()).into(),
-                None => placeholder_value(),
-            },
-        ))
-        .push(sidebar_field(
-            "Estimate",
-            text_input("No estimate", &detail.estimate)
-                .on_input(Message::IssueDetailEstimateChanged)
-                .on_submit(Message::CommitIssueDetail)
-                .padding(SIDEBAR_CONTROL_PADDING)
-                .size(type_scale::SM)
-                .style(sidebar_input_style),
-        ))
-        .push(sidebar_field(
-            "Due date",
-            text_input("YYYY-MM-DD", &detail.due_date)
-                .on_input(Message::IssueDetailDueDateChanged)
-                .on_submit(Message::CommitIssueDetail)
-                .padding(SIDEBAR_CONTROL_PADDING)
-                .size(type_scale::SM)
-                .style(sidebar_input_style),
-        ))
-        .push(sidebar_field("Project", {
-            let select = sidebar_select(Field::Project, project_label, "No project", picker);
-            // Like the web's sidebar pill: a project card while one is set.
-            match &issue.project_id {
-                Some(id) => crate::views::row_hover::row_hover(
-                    select,
-                    crate::body_hover::Anchor::Project(id.clone()),
-                    Message::RowHover,
-                )
-                .dismiss_on_press()
-                .into(),
-                None => select,
-            }
-        }))
-        .push(sidebar_field("Labels", sidebar_select(Field::Labels, None, "—", picker)))
-        .push(dependency_block(DepKind::Blocking, &deps.blocking))
-        .push(dependency_block(DepKind::BlockedBy, &deps.blocked_by))
-        .push_maybe(optional_dependency_block(DepKind::Related, &deps.related))
-        .push_maybe(optional_dependency_block(DepKind::Duplicates, &deps.duplicates))
-        .push_maybe(optional_dependency_block(DepKind::DuplicatedBy, &deps.duplicated_by))
-        .push(
-            button(text("Move to team…").size(type_scale::XS).color(t::accent()))
-                .on_press(Message::OpenMoveTeamPicker(issue.id.clone()))
-                .padding(0)
-                .style(button::text),
-        )
-        .push(
-            column![]
-                .spacing(space::S0_5)
-                .push(
-                    text(format!("Created {}", issue.created_at))
-                        .size(type_scale::XS)
-                        .color(t::text_muted()),
-                )
-                .push(
-                    text(format!("Updated {}", issue.updated_at))
-                        .size(type_scale::XS)
-                        .color(t::text_muted()),
-                ),
-        );
-
-    let sidebar_panel = sidebar_panel(scrollable(sidebar));
-
-    // Thin vertical rule standing in for a `border-l` between panes.
-    let divider = container(column![])
-        .width(Length::Fixed(1.0))
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::border())),
-            ..Default::default()
-        });
-
-    row![]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .push(
-            container(
-                track(scrollable(left), ScrollKey::IssueDetail),
+            .size(type_scale::SM)
+            .style(sidebar_input_style)
+            .into(),
+    ));
+    fields.push((
+        "Due date",
+        text_input("YYYY-MM-DD", &detail.due_date)
+            .on_input(Message::IssueDetailDueDateChanged)
+            .on_submit(Message::CommitIssueDetail)
+            .padding(SIDEBAR_CONTROL_PADDING)
+            .size(type_scale::SM)
+            .style(sidebar_input_style)
+            .into(),
+    ));
+    fields.push(("Project", {
+        let select = select(Field::Project, project_label, "No project");
+        // Like the web's sidebar pill: a project card while one is set.
+        match &issue.project_id {
+            Some(id) => crate::views::row_hover::row_hover(
+                select,
+                crate::body_hover::Anchor::Project(id.clone()),
+                Message::RowHover,
             )
-            .width(Length::Fill)
-            .height(Length::Fill),
-        )
-        .push(divider)
-        .push(sidebar_panel)
-        .into()
+            .dismiss_on_press()
+            .into(),
+            None => select,
+        }
+    }));
+    fields.push(("Labels", select(Field::Labels, None, "—")));
+    fields.push(dependency_block(DepKind::Blocking, &deps.blocking));
+    fields.push(dependency_block(DepKind::BlockedBy, &deps.blocked_by));
+    fields.extend(optional_dependency_block(DepKind::Related, &deps.related));
+    fields.extend(optional_dependency_block(DepKind::Duplicates, &deps.duplicates));
+    fields.extend(optional_dependency_block(DepKind::DuplicatedBy, &deps.duplicated_by));
+
+    // Inline, the rest wait behind "More".
+    let (fields, more) = fields
+        .into_iter()
+        .partition(|(label, _)| ["Status", "Priority", "Assignee", "Project", "Labels"].contains(label));
+    Properties {
+        fields,
+        more,
+        actions: vec![button(text("Move to team…").size(type_scale::XS).color(t::accent()))
+            .on_press(Message::OpenMoveTeamPicker(issue.id.clone()))
+            .padding(0)
+            .style(button::text)
+            .into()],
+        created_at: &issue.created_at,
+        updated_at: &issue.updated_at,
+    }
 }
 
 /// `IDENT-#` for an issue, or `#N` when the team isn't loaded.
@@ -753,17 +773,20 @@ fn sidebar_select<'a>(
     value: Option<String>,
     empty: &'static str,
     picker: Option<&'a PickerState>,
+    menu_width: f32,
 ) -> Element<'a, Message> {
     let open = picker.filter(|p| p.field == field);
+    // One line, cut with "…" when it doesn't fit (the open menu shows it whole).
     let label = match value {
-        Some(v) => text(v).size(type_scale::SM).color(t::text_body()),
-        None => text(empty).size(type_scale::SM).color(t::text_muted()),
+        Some(v) => truncated(v, type_scale::SM, t::text_body()),
+        None => truncated(empty, type_scale::SM, t::text_muted()),
     };
     let is_open = open.is_some();
     let anchor = button(
         row![]
+            .spacing(space::S1)
             .align_y(Alignment::Center)
-            .push(label.width(Length::Fill))
+            .push(container(label).width(Length::Fill))
             .push(text("▾").size(type_scale::SM).color(t::text_muted())),
     )
     .on_press(Message::OpenPropertyPicker(field))
@@ -786,7 +809,7 @@ fn sidebar_select<'a>(
     dropdown(
         anchor,
         open.map(property_picker::sidebar_menu),
-        SIDEBAR_CONTROL_WIDTH,
+        menu_width,
         Message::CloseModal,
     )
     .into()
@@ -839,15 +862,18 @@ impl DepKind {
 }
 
 /// A titled sidebar section for `kind`.
-fn dependency_block<'a>(kind: DepKind, links: &'a [DependencyLink]) -> Element<'a, Message> {
-    sidebar_field(kind.title(), dependency_section(links, kind))
+fn dependency_block<'a>(
+    kind: DepKind,
+    links: &'a [DependencyLink],
+) -> (&'static str, Element<'a, Message>) {
+    (kind.title(), dependency_section(links, kind))
 }
 
 /// Like [`dependency_block`], but absent when there are no links.
 fn optional_dependency_block<'a>(
     kind: DepKind,
     links: &'a [DependencyLink],
-) -> Option<Element<'a, Message>> {
+) -> Option<(&'static str, Element<'a, Message>)> {
     (!links.is_empty()).then(|| dependency_block(kind, links))
 }
 
@@ -1646,9 +1672,33 @@ fn comment_row<'a>(
     .into()
 }
 
-/// Borderless, transparent style so the title input reads as an inline heading.
-fn title_input_style(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
-    text_input::Style {
+/// Title editor keys: Enter commits instead of starting a new line.
+fn title_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    match press.key.as_ref() {
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) => {
+            Some(text_editor::Binding::Custom(Message::CommitIssueDetail))
+        }
+        _ => text_editor::Binding::from_key_press(press),
+    }
+}
+
+/// Keep the title editor to one logical line: drop new lines and flatten
+/// pasted ones to spaces. `None` drops the action.
+pub fn single_line(action: text_editor::Action) -> Option<text_editor::Action> {
+    use text_editor::{Action, Edit};
+    match action {
+        Action::Edit(Edit::Enter) => None,
+        Action::Edit(Edit::Paste(text)) => {
+            let flat = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
+            Some(Action::Edit(Edit::Paste(std::sync::Arc::new(flat))))
+        }
+        other => Some(other),
+    }
+}
+
+/// Borderless, transparent style so the title editor reads as an inline heading.
+fn title_editor_style(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
         background: iced::Background::Color(iced::Color::TRANSPARENT),
         border: Border {
             color: iced::Color::TRANSPARENT,
@@ -1723,10 +1773,10 @@ mod buffer_tests {
         assert_eq!(clean.fields().description.as_deref(), Some("new"));
 
         let mut dirty = IssueDetailState::from_issue(&issue("old"));
-        dirty.title = "Edited".into();
+        dirty.title = text_editor::Content::with_text("Edited");
         dirty.refresh_from(&issue("new"));
         assert_eq!(dirty.fields().description.as_deref(), Some("old"));
-        assert_eq!(dirty.title, "Edited");
+        assert_eq!(dirty.fields().title, "Edited");
     }
 }
 

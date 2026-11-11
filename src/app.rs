@@ -171,7 +171,8 @@ pub enum Message {
     IssueCreateMoreToggled(bool),
 
     // Issue detail — buffered text fields (committed on Enter / nav-away)
-    IssueDetailTitleChanged(String),
+    /// The title editor (it wraps long titles; Enter commits, no newlines).
+    IssueDetailTitleChanged(iced::widget::text_editor::Action),
     IssueDetailDescriptionChanged(iced::widget::text_editor::Action),
     /// Click on the rendered description: open the editor with focus.
     EditIssueDescription,
@@ -337,8 +338,12 @@ pub enum Message {
     // UI
     CloseModal,
     ToggleHelp,
-    /// `/` or the palette command on the project page: show or hide Properties.
-    ToggleProjectProperties,
+    /// `/` or the palette command on the issue or project page: show or hide
+    /// that page's Properties.
+    ToggleProperties,
+    /// The inline Properties card's "More" / "Less": show or hide its
+    /// secondary fields, on every issue and project page until toggled back.
+    ToggleMoreProperties,
     /// Palette, project page: always stack Burndown above Issues, or not.
     ToggleProjectCardsStacked,
     /// Project page, Terminal showing: type this issue's jait MCP prompt into
@@ -1140,6 +1145,9 @@ pub struct App {
     label_form: Option<labels_view::LabelFormState>,
     csv_import: Option<csv_import::CsvImportState>,
     show_help: bool,
+    /// The inline Properties card (issue and project pages) shows its "More"
+    /// fields. Session-only.
+    more_properties: bool,
     pending_sync_count: i32,
     config: Config,
     config_error: Option<String>,
@@ -3528,7 +3536,7 @@ impl App {
         if !detail.is_dirty() {
             return;
         }
-        if detail.title.trim().is_empty() {
+        if detail.fields().title.is_empty() {
             detail.error = Some("Title can't be blank".into());
             return;
         }
@@ -3771,6 +3779,7 @@ impl App {
             label_form: None,
             csv_import: None,
             show_help: false,
+            more_properties: false,
             pending_sync_count,
             config,
             config_error,
@@ -4199,7 +4208,6 @@ impl App {
         self.save_panel();
         self.save_panel_width();
         let panel_scope = self.panel_scope();
-        self.terminals.set_right_inset(self.terminal_right_inset());
         self.terminals.set_pinned(self.removed_team_tab());
         self.terminals.sync(panel_scope.as_ref());
         let task = Task::batch([task, self.request_visible_images()]);
@@ -4218,19 +4226,6 @@ impl App {
         let mut new_cfg = self.config.clone();
         new_cfg.terminal_panel_width = width;
         self.save_config_change(new_cfg);
-    }
-
-    /// Room right of a right-docked Terminal panel: the project page's
-    /// Properties when open (the panel sits between the page and them).
-    fn terminal_right_inset(&self) -> f32 {
-        let props = matches!(self.view, View::ProjectDetail(_))
-            && self.config.project_properties_open
-            && !self.removed_team_tab();
-        if props {
-            crate::views::util::SIDEBAR_WIDTH + 1.0
-        } else {
-            0.0
-        }
     }
 
     /// Store the panel when it changed since the last message. Local only.
@@ -5760,9 +5755,11 @@ impl App {
             }
 
             // --- Issue detail: buffered fields ---
-            Message::IssueDetailTitleChanged(v) => {
+            Message::IssueDetailTitleChanged(action) => {
                 if let Some(d) = &mut self.issue_detail {
-                    d.title = v;
+                    if let Some(action) = issue_detail::single_line(action) {
+                        d.title.perform(action);
+                    }
                 }
             }
             Message::IssueDetailDescriptionChanged(action) => {
@@ -6713,8 +6710,10 @@ impl App {
                 if let Some((issue, anchor)) = self.key_target() {
                     let issue = issue.clone();
                     let mut state = self.property_picker_state(&issue, field, anchor);
-                    // The issue page opens the sidebar field's own dropdown, as Rails does.
-                    state.in_sidebar = matches!(self.view, View::IssueDetail(_));
+                    // The issue page opens the Properties field's own dropdown, as
+                    // Rails does; with Properties hidden it opens as a modal.
+                    state.in_sidebar = matches!(self.view, View::IssueDetail(_))
+                        && self.config.issue_properties_open;
                     let focus = state.has_search();
                     self.modal = Modal::PropertyPicker(state);
                     if focus {
@@ -6777,8 +6776,8 @@ impl App {
                             return self.update(Message::OpenDependencyMap(id.clone()));
                         }
                     }
-                    PaletteNav::ToggleProjectProperties => {
-                        return self.update(Message::ToggleProjectProperties)
+                    PaletteNav::ToggleProperties => {
+                        return self.update(Message::ToggleProperties)
                     }
                     PaletteNav::ToggleProjectCardsStacked => {
                         return self.update(Message::ToggleProjectCardsStacked)
@@ -6815,12 +6814,26 @@ impl App {
                 self.show_help = !self.show_help;
             }
 
-            Message::ToggleProjectProperties => {
-                if matches!(self.view, View::ProjectDetail(_)) {
-                    let mut new_cfg = self.config.clone();
-                    new_cfg.project_properties_open = !new_cfg.project_properties_open;
-                    self.save_config_change(new_cfg);
+            Message::ToggleMoreProperties => {
+                self.more_properties = !self.more_properties;
+            }
+
+            Message::ToggleProperties => {
+                let mut new_cfg = self.config.clone();
+                match self.view {
+                    View::ProjectDetail(_) => {
+                        new_cfg.project_properties_open = !new_cfg.project_properties_open
+                    }
+                    View::IssueDetail(_) => {
+                        new_cfg.issue_properties_open = !new_cfg.issue_properties_open;
+                        // A sidebar dropdown loses its anchor with them.
+                        if matches!(self.modal, Modal::PropertyPicker(ref p) if p.in_sidebar) {
+                            self.modal = Modal::None;
+                        }
+                    }
+                    _ => return Task::none(),
                 }
+                self.save_config_change(new_cfg);
             }
 
             Message::SendIssuePrompt(issue_id) => {
@@ -8459,6 +8472,7 @@ impl App {
                             self.config.project_properties_open,
                             self.config.project_cards_stacked,
                             terminal_width,
+                            self.more_properties,
                             self.terminals.panel_showing(panel_scope.as_ref()),
                             right_panel.take(),
                             self.date_picker.as_ref(),
@@ -8549,6 +8563,9 @@ impl App {
                                 }
                                 _ => None,
                             },
+                            self.config.issue_properties_open,
+                            terminal_width,
+                            self.more_properties,
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
