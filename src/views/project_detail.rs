@@ -878,7 +878,7 @@ fn issue_row<'a>(
     }
     // Inside the row's button, so it takes the click before the row does.
     if terminal_showing {
-        content = content.push(send_prompt_button(&issue.id));
+        content = content.push(crate::views::issue_detail::claude_prompt_button(&issue.id));
     }
 
     button(content)
@@ -897,31 +897,6 @@ fn issue_row<'a>(
             ..Default::default()
         })
         .into()
-}
-
-/// Types the issue's jait MCP prompt into the focused Terminal.
-fn send_prompt_button<'a>(issue_id: &str) -> Element<'a, Message> {
-    let tip = container(text("Type this issue's prompt into the Terminal").size(type_scale::XS).color(t::text_strong()))
-        .padding([space::S1, space::S2])
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_menu())),
-            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
-            ..Default::default()
-        });
-    let btn = button(text("\u{25B6} Claude").size(type_scale::XS))
-        .padding([2.0, space::S2])
-        .on_press(Message::SendIssuePrompt(issue_id.to_string()))
-        .style(|_theme: &Theme, status| button::Style {
-            background: Some(iced::Background::Color(if status == button::Status::Hovered {
-                t::bg_card_focused()
-            } else {
-                t::bg_secondary()
-            })),
-            text_color: t::text_secondary(),
-            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
-            ..Default::default()
-        });
-    iced::widget::tooltip(btn, tip, iced::widget::tooltip::Position::Left).gap(4).into()
 }
 
 fn placeholder_value<'a>() -> Element<'a, Message> {

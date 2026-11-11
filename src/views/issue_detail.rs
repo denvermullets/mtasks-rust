@@ -495,9 +495,9 @@ fn properties<'a>(
 /// `IDENT-#` for an issue, or `#N` when the team isn't loaded.
 const ICON_ROBOT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>"##;
 
-/// Small robot next to the identifier: types this issue's jait MCP prompt
-/// into the focused Terminal (same as the project view's "▶ Claude").
-fn claude_prompt_button<'a>(issue_id: &str) -> Element<'a, Message> {
+/// Small robot button: types this issue's jait MCP prompt into the focused
+/// Terminal. Used next to the issue view's identifier and on project issue rows.
+pub fn claude_prompt_button<'a>(issue_id: &str) -> Element<'a, Message> {
     let tip = container(text("Type this issue's prompt into the Terminal").size(type_scale::XS).color(t::text_strong()))
         .padding([space::S1, space::S2])
         .style(|_theme: &Theme| container::Style {
