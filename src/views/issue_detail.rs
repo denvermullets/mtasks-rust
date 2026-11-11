@@ -226,6 +226,8 @@ pub fn view<'a>(
     terminal_width: f32,
     // The inline Properties card shows its "More" fields.
     more_properties: bool,
+    // A Terminal panel is open, so the Claude prompt button has somewhere to type.
+    terminal_showing: bool,
 ) -> Element<'a, Message> {
     // ---- Breadcrumb: "← Issues › [Project ›] IDENT-#" ----
     let identifier = issue_identifier(issue, team);
@@ -243,6 +245,7 @@ pub fn view<'a>(
         .push_maybe(project_name.map(|n| text(n).size(type_scale::SM).color(t::text_secondary())))
         .push_maybe(project_name.map(|_| text("›").size(type_scale::SM).color(t::text_muted())))
         .push(text(identifier).size(type_scale::SM).color(t::text_secondary()))
+        .push_maybe(terminal_showing.then(|| claude_prompt_button(&issue.id)))
         .push(iced::widget::horizontal_space())
         .push(
             button(text("Dependencies").size(type_scale::XS).color(t::accent()))
@@ -490,6 +493,30 @@ fn properties<'a>(
 }
 
 /// `IDENT-#` for an issue, or `#N` when the team isn't loaded.
+const ICON_ROBOT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>"##;
+
+/// Small robot next to the identifier: types this issue's jait MCP prompt
+/// into the focused Terminal (same as the project view's "▶ Claude").
+fn claude_prompt_button<'a>(issue_id: &str) -> Element<'a, Message> {
+    let tip = container(text("Type this issue's prompt into the Terminal").size(type_scale::XS).color(t::text_strong()))
+        .padding([space::S1, space::S2])
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_menu())),
+            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
+            ..Default::default()
+        });
+    let btn = button(crate::views::form_page::icon(ICON_ROBOT, space::S4, t::text_secondary()))
+        .padding(2.0)
+        .on_press(Message::SendIssuePrompt(issue_id.to_string()))
+        .style(|_theme: &Theme, status| button::Style {
+            background: (status == button::Status::Hovered)
+                .then(|| iced::Background::Color(t::bg_card_focused())),
+            border: Border { radius: radius::SM.into(), ..Default::default() },
+            ..Default::default()
+        });
+    iced::widget::tooltip(btn, tip, iced::widget::tooltip::Position::Bottom).gap(4).into()
+}
+
 fn issue_identifier(issue: &Issue, team: Option<&Team>) -> String {
     match team {
         Some(tm) => format!("{}-{}", tm.identifier, issue.team_number.unwrap_or(0)),

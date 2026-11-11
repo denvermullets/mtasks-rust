@@ -8566,6 +8566,7 @@ impl App {
                             self.config.issue_properties_open,
                             terminal_width,
                             self.more_properties,
+                            self.terminals.panel_showing(panel_scope.as_ref()),
                         )
                     }
                     // Issue removed by a background sync, or state desync → graceful fallback.
