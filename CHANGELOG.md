@@ -1,7 +1,14 @@
-<!-- last-sha: d277530180f788741e5869c45ebaf8da58df6986 -->
-**Version: v0.10.0**
+<!-- last-sha: bb325378ef33e074bd65cf26b6cd3b40f03be738 -->
+**Version: v0.11.0**
 
 # What's new
+
+## 2026-11-11
+- **Send an issue to Claude from the terminal.** While a terminal panel is open, a small robot button sits next to the issue's ID on its page and on each issue row in a project. Click it to type that issue's prompt into the terminal, ready for Claude Code.
+- **Properties fit beside the terminal.** On issue and project pages, when a terminal panel is docked on the right, Properties move into a compact card under the description instead of squeezing the page. The card shows the main fields first, with "More" for the rest.
+- **Hide issue properties.** Press `/` on an issue page, or use the command palette, to show or hide its Properties, just like on project pages. Your choice is remembered.
+- **Long issue titles wrap.** Editing an issue's title on its page now wraps long titles onto several lines instead of cutting them off.
+- **Command palette improvements.** The Cmd+K palette now scrolls through long result lists, and you can open Settings from it.
 
 ## 2026-11-10
 - **Calendar for date fields.** Date fields on the issue, project and recurring issue forms, and on a project's page, now have a calendar you can open to pick a day. You can still type the date if you prefer.
