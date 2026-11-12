@@ -34,6 +34,7 @@ pub fn handle_key_press(
             "f" | "F" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
             "w" if modifiers.command() => Some(Message::Tab(TabMessage::CloseActive)),
+            "b" | "B" if modifiers.command() && !modifiers.shift() => Some(Message::ToggleSidebar),
             "j" | "J" if modifiers.command() && modifiers.shift() => Some(Message::Terminal(
                 crate::terminal::TerminalMessage::Hide,
             )),
@@ -245,6 +246,25 @@ pub fn handle_lightbox_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmd_b_toggles_the_sidebar() {
+        let b = || Key::Character("b".into());
+        assert!(matches!(
+            handle_key_press(b(), Modifiers::COMMAND, false, false, true),
+            Some(Message::ToggleSidebar)
+        ));
+        assert!(matches!(
+            handle_key_press(b(), Modifiers::COMMAND, false, false, false),
+            Some(Message::ToggleSidebar)
+        ));
+        // Not while a modal is open, and plain `b` is not it.
+        assert!(handle_key_press(b(), Modifiers::COMMAND, true, false, true).is_none());
+        assert!(!matches!(
+            handle_key_press(b(), Modifiers::empty(), false, false, true),
+            Some(Message::ToggleSidebar)
+        ));
+    }
 
     #[test]
     fn o_opens_lightbox_image_in_preview() {

@@ -20,10 +20,10 @@ const PLUS_WIDTH: f32 = 36.0;
 const BAR_PADDING: f32 = 8.0;
 
 /// Width the Tabs have between the sidebar and the `+` button, given the
-/// window width. The sidebar is a fixed width, so this is exact enough to
-/// keep the bar from ever widening the page.
-pub fn tab_viewport(window_width: f32) -> f32 {
-    (window_width - crate::terminal::panel::SIDEBAR_WIDTH - PLUS_WIDTH - 2.0 * BAR_PADDING).max(0.0)
+/// window width and the sidebar's current width (0 while collapsed). Both
+/// are exact, so this keeps the bar from ever widening the page.
+pub fn tab_viewport(window_width: f32, sidebar_w: f32) -> f32 {
+    (window_width - sidebar_w - PLUS_WIDTH - 2.0 * BAR_PADDING).max(0.0)
 }
 
 /// Width of each Tab: shares the viewport evenly, clamped between the minimum
@@ -64,13 +64,13 @@ pub fn reveal_offset(index: usize, count: usize, tab_w: f32, viewport: f32, curr
 /// so a plain click still focuses.
 pub const DRAG_THRESHOLD: f32 = 8.0;
 
-/// The Tab slot under window x `cursor_x`, given the bar's scroll offset.
-/// Clamped to the first and last Tab.
-pub fn drop_index(cursor_x: f32, offset: f32, count: usize, tab_w: f32) -> usize {
+/// The Tab slot under window x `cursor_x`, given the sidebar's current width
+/// and the bar's scroll offset. Clamped to the first and last Tab.
+pub fn drop_index(cursor_x: f32, sidebar_w: f32, offset: f32, count: usize, tab_w: f32) -> usize {
     if count == 0 {
         return 0;
     }
-    let x = cursor_x - crate::terminal::panel::SIDEBAR_WIDTH - BAR_PADDING + offset;
+    let x = cursor_x - sidebar_w - BAR_PADDING + offset;
     let slot = (x / (tab_w + TAB_SPACING)).floor();
     (slot.max(0.0) as usize).min(count - 1)
 }
@@ -120,9 +120,10 @@ pub fn view<'a>(
     needs: &[Option<crate::terminal::Need>],
     unread: &[bool],
     window_width: f32,
+    sidebar_w: f32,
     dragging: Option<usize>,
 ) -> Element<'a, Message> {
-    let tab_w = tab_width(tabs.len(), tab_viewport(window_width));
+    let tab_w = tab_width(tabs.len(), tab_viewport(window_width, sidebar_w));
     let mut bar = row![].spacing(TAB_SPACING).padding([4.0, BAR_PADDING]);
     for (i, (label, active)) in tabs.iter().enumerate() {
         let active = *active;
@@ -248,14 +249,18 @@ fn unread_dot<'a>() -> Element<'a, Message> {
 mod tests {
     use super::*;
 
+    const SIDEBAR: f32 = crate::terminal::panel::SIDEBAR_WIDTH;
+
     #[test]
     fn drop_index_follows_the_pointer_and_the_scroll() {
-        let left = crate::terminal::panel::SIDEBAR_WIDTH + BAR_PADDING;
-        assert_eq!(drop_index(left + 10.0, 0.0, 5, 120.0), 0);
-        assert_eq!(drop_index(left + 130.0, 0.0, 5, 120.0), 1);
-        assert_eq!(drop_index(left + 10.0, 244.0, 5, 120.0), 2);
-        assert_eq!(drop_index(0.0, 0.0, 5, 120.0), 0);
-        assert_eq!(drop_index(5000.0, 0.0, 5, 120.0), 4);
+        let left = SIDEBAR + BAR_PADDING;
+        assert_eq!(drop_index(left + 10.0, SIDEBAR, 0.0, 5, 120.0), 0);
+        assert_eq!(drop_index(left + 130.0, SIDEBAR, 0.0, 5, 120.0), 1);
+        assert_eq!(drop_index(left + 10.0, SIDEBAR, 244.0, 5, 120.0), 2);
+        assert_eq!(drop_index(0.0, SIDEBAR, 0.0, 5, 120.0), 0);
+        assert_eq!(drop_index(5000.0, SIDEBAR, 0.0, 5, 120.0), 4);
+        // Sidebar collapsed: the bar starts at the window's left edge.
+        assert_eq!(drop_index(BAR_PADDING + 130.0, 0.0, 0.0, 5, 120.0), 1);
     }
 
     #[test]
@@ -274,7 +279,7 @@ mod tests {
 
     #[test]
     fn twenty_tabs_at_minimum_window_scroll_inside_the_viewport() {
-        let viewport = tab_viewport(800.0);
+        let viewport = tab_viewport(800.0, SIDEBAR);
         assert!(viewport > 0.0 && viewport < 800.0 - 220.0);
         let w = tab_width(20, viewport);
         assert_eq!(w, MIN_TAB_WIDTH);
@@ -284,9 +289,9 @@ mod tests {
     #[test]
     fn plus_button_has_room_beside_the_tabs_at_every_width() {
         for window in [800.0, 1100.0, 1920.0] {
-            let used = crate::terminal::panel::SIDEBAR_WIDTH
+            let used = SIDEBAR
                 + 2.0 * BAR_PADDING
-                + tab_viewport(window)
+                + tab_viewport(window, SIDEBAR)
                 + PLUS_WIDTH;
             assert!(used <= window + 0.01, "{used} > {window}");
         }

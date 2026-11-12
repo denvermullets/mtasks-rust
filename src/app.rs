@@ -338,6 +338,8 @@ pub enum Message {
     // UI
     CloseModal,
     ToggleHelp,
+    /// Cmd+B: collapse or expand the left teams sidebar.
+    ToggleSidebar,
     /// `/` or the palette command on the issue or project page: show or hide
     /// that page's Properties.
     ToggleProperties,
@@ -3850,6 +3852,7 @@ impl App {
         app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
         app.terminals.set_dock(crate::terminal::panel::Dock::from_name(&app.config.terminal_dock));
         app.terminals.set_width(app.config.terminal_panel_width);
+        app.terminals.set_sidebar_width(app.sidebar_width());
 
         // Restore the stored Tabs and focus the Home page's. Doing this before
         // anything reloads keeps `ensure_tab_set` from opening a stray team Tab.
@@ -3916,6 +3919,16 @@ impl App {
 
     /// Adopt `new_cfg` for this session and persist it, surfacing a save
     /// failure in the Settings form (and clearing a stale `config_error` on success).
+    /// Width the left teams sidebar takes now: its fixed width, or nothing
+    /// while collapsed (Cmd+B).
+    pub(crate) fn sidebar_width(&self) -> f32 {
+        if self.config.sidebar_collapsed {
+            0.0
+        } else {
+            crate::terminal::panel::SIDEBAR_WIDTH
+        }
+    }
+
     fn save_config_change(&mut self, new_cfg: Config) {
         let saved = config::save(&new_cfg);
         self.config = new_cfg;
@@ -6800,6 +6813,7 @@ impl App {
                     }
                     PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Settings => return self.update(Message::OpenSettings),
+                    PaletteNav::ToggleSidebar => return self.update(Message::ToggleSidebar),
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
@@ -6818,6 +6832,13 @@ impl App {
 
             Message::ToggleHelp => {
                 self.show_help = !self.show_help;
+            }
+
+            Message::ToggleSidebar => {
+                let mut new_cfg = self.config.clone();
+                new_cfg.sidebar_collapsed = !new_cfg.sidebar_collapsed;
+                self.save_config_change(new_cfg);
+                self.terminals.set_sidebar_width(self.sidebar_width());
             }
 
             Message::ToggleMoreProperties => {
@@ -8475,7 +8496,7 @@ impl App {
                             &self.images,
                             &self.config.api_base_url,
                             &self.detail_pending_paths,
-                            self.window_width,
+                            self.window_width - self.sidebar_width(),
                             self.config.project_properties_open,
                             self.config.project_cards_stacked,
                             terminal_width,
@@ -8678,6 +8699,7 @@ impl App {
                 &self.tab_needs(),
                 &self.tab_unread(),
                 self.window_width,
+                self.sidebar_width(),
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
             ))
             .push_maybe((!self.removed_team_tab()).then_some(header))
@@ -8687,10 +8709,11 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
+        let sidebar_w = self.sidebar_width();
         let layout = row![]
-            .push(
+            .push_maybe((sidebar_w > 0.0).then(|| {
                 container(sidebar_column)
-                    .width(Length::Fixed(220.0))
+                    .width(Length::Fixed(sidebar_w))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| iced::widget::container::Style {
                         background: Some(iced::Background::Color(t::base(t::bg_menu()))),
@@ -8700,8 +8723,8 @@ impl App {
                             radius: 0.0.into(),
                         },
                         ..Default::default()
-                    }),
-            )
+                    })
+            }))
             .push(main_content)
             .width(Length::Fill)
             .height(Length::Fill);

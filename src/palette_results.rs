@@ -50,6 +50,8 @@ pub enum PaletteNav {
     Tab(usize),
     /// Open the Settings modal (`Message::OpenSettings`).
     Settings,
+    /// Collapse or expand the teams sidebar (`Message::ToggleSidebar`).
+    ToggleSidebar,
 }
 
 impl PaletteNav {
@@ -71,7 +73,8 @@ impl PaletteNav {
             | PaletteNav::ToggleProperties
             | PaletteNav::ToggleProjectCardsStacked
             | PaletteNav::ToggleTerminalDock
-            | PaletteNav::Settings => "Command",
+            | PaletteNav::Settings
+            | PaletteNav::ToggleSidebar => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -369,6 +372,14 @@ fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
             primary: "Settings".to_string(),
             secondary: "Shortcut: ,".to_string(),
             nav: PaletteNav::Settings,
+        });
+    }
+    // Typed for, not listed by default: the empty palette stays views + teams.
+    if !needle.is_empty() && name_matches(needle, "Toggle sidebar") {
+        rows.push(PaletteRow {
+            primary: "Toggle sidebar".to_string(),
+            secondary: "Shortcut: \u{2318}B".to_string(),
+            nav: PaletteNav::ToggleSidebar,
         });
     }
 }
@@ -760,6 +771,13 @@ mod tests {
     #[test]
     fn palette_starts_with_empty_query() {
         assert_eq!(PaletteState::new(PaletteData::default()).query, "");
+    }
+
+    #[test]
+    fn typing_finds_the_sidebar_toggle() {
+        let rows = palette_results("sidebar", &data());
+        assert_eq!(rows[0].nav, PaletteNav::ToggleSidebar);
+        assert!(names("").iter().all(|n| n != "Toggle sidebar"));
     }
 
     #[test]

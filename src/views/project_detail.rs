@@ -187,7 +187,8 @@ pub fn view<'a>(
     images: &'a crate::files::images::ImageStore,
     host: &'a str,
     pending_paths: &'a crate::views::body::PendingInlineMap,
-    window_width: f32,
+    // The window less the app sidebar (which collapses to nothing on Cmd+B).
+    main_width: f32,
     properties_open: bool,
     stack_cards: bool,
     // Width a right-docked Terminal panel takes from the page (0 when none);
@@ -320,7 +321,7 @@ pub fn view<'a>(
                 // column: stack whatever the leftover width.
                 CardLayout::Stacked
             } else {
-                card_layout(page_width(window_width, placement == util::PropertiesPlacement::Sidebar))
+                card_layout(page_width(main_width, placement == util::PropertiesPlacement::Sidebar))
             },
             burndown(project, issues),
             issues_section(visible, display, issue_sort, team, lanes, terminal_showing),
@@ -452,9 +453,6 @@ fn properties<'a>(
     }
 }
 
-/// Width of the app's left sidebar (the literal in `App::view`).
-const APP_SIDEBAR_WIDTH: f32 = 220.0;
-
 /// Narrowest page width at which Burndown and Issues sit side by side. Below
 /// it each card would get under about 300px, so they stack. The 800px window
 /// minimum leaves 516px, so it always stacks; a 1100px window shows them side
@@ -468,11 +466,12 @@ enum CardLayout {
     Stacked,
 }
 
-/// Width the page's content column gets: the window less the app sidebar, the
-/// Properties panel and divider when open, and the page's own padding.
-fn page_width(window_width: f32, properties_open: bool) -> f32 {
+/// Width the page's content column gets: the main area (the window less the
+/// app sidebar) less the Properties panel and divider when open, and the
+/// page's own padding.
+fn page_width(main_width: f32, properties_open: bool) -> f32 {
     let panel = if properties_open { util::SIDEBAR_WIDTH + 1.0 } else { 0.0 };
-    window_width - APP_SIDEBAR_WIDTH - panel - 2.0 * space::S8
+    main_width - panel - 2.0 * space::S8
 }
 
 fn card_layout(page_width: f32) -> CardLayout {
@@ -610,17 +609,22 @@ mod buffer_tests {
 mod layout_tests {
     use super::*;
 
+    /// The main area of a window with the sidebar expanded.
+    fn main(window: f32) -> f32 {
+        window - crate::terminal::panel::SIDEBAR_WIDTH
+    }
+
     #[test]
     fn minimum_window_stacks_the_cards() {
-        assert_eq!(card_layout(page_width(800.0, false)), CardLayout::Stacked);
-        assert_eq!(card_layout(page_width(800.0, true)), CardLayout::Stacked);
+        assert_eq!(card_layout(page_width(main(800.0), false)), CardLayout::Stacked);
+        assert_eq!(card_layout(page_width(main(800.0), true)), CardLayout::Stacked);
     }
 
     #[test]
     fn a_roomy_window_puts_them_side_by_side_until_properties_open() {
-        assert_eq!(card_layout(page_width(1100.0, false)), CardLayout::SideBySide);
-        assert_eq!(card_layout(page_width(1100.0, true)), CardLayout::Stacked);
-        assert_eq!(card_layout(page_width(1440.0, true)), CardLayout::SideBySide);
+        assert_eq!(card_layout(page_width(main(1100.0), false)), CardLayout::SideBySide);
+        assert_eq!(card_layout(page_width(main(1100.0), true)), CardLayout::Stacked);
+        assert_eq!(card_layout(page_width(main(1440.0), true)), CardLayout::SideBySide);
     }
 
     #[test]
@@ -631,8 +635,14 @@ mod layout_tests {
 
     #[test]
     fn page_width_subtracts_sidebars_and_padding() {
-        assert_eq!(page_width(1000.0, false), 1000.0 - 220.0 - 64.0);
-        assert_eq!(page_width(1000.0, true), 1000.0 - 220.0 - 321.0 - 64.0);
+        assert_eq!(page_width(main(1000.0), false), 1000.0 - 220.0 - 64.0);
+        assert_eq!(page_width(main(1000.0), true), 1000.0 - 220.0 - 321.0 - 64.0);
+    }
+
+    #[test]
+    fn a_collapsed_sidebar_gives_the_page_its_width() {
+        assert_eq!(card_layout(page_width(main(800.0), false)), CardLayout::Stacked);
+        assert_eq!(card_layout(page_width(900.0, false)), CardLayout::SideBySide);
     }
 }
 

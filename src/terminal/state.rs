@@ -145,6 +145,8 @@ pub struct TerminalState {
     /// Docked right: room taken right of the panel. Nothing sits there now
     /// (detail pages move Properties inline beside the panel), so it stays 0.
     right_inset: f32,
+    /// Width the app's left sidebar takes now (0 while collapsed).
+    sidebar: f32,
     /// Docked right: the panel body's laid-out size, once measured.
     body: Option<Size>,
     /// The page is a removed team's: its panel stays shown (the Terminals have
@@ -204,6 +206,7 @@ impl TerminalState {
             dock: Dock::Bottom,
             width: None,
             right_inset: 0.0,
+            sidebar: panel::SIDEBAR_WIDTH,
             body: None,
             pinned: false,
             focused: false,
@@ -325,7 +328,7 @@ impl TerminalState {
                 self.drag = Some(Drag { start: None, start_size });
             }
             TerminalMessage::DragMove(x, y) => {
-                let (window, inset) = (self.window, self.right_inset);
+                let (window, inset, sidebar) = (self.window, self.right_inset, self.sidebar);
                 if let Some(drag) = &mut self.drag {
                     match self.dock {
                         Dock::Bottom => {
@@ -335,7 +338,7 @@ impl TerminalState {
                         }
                         Dock::Right => {
                             let start = *drag.start.get_or_insert(x);
-                            self.width = Some(panel::drag_width(window.width, inset, drag.start_size, start, x));
+                            self.width = Some(panel::drag_width(window.width, sidebar, inset, drag.start_size, start, x));
                         }
                     }
                 }
@@ -464,6 +467,7 @@ impl TerminalState {
                     Route::CloseTab => {
                         return Task::done(Message::Tab(crate::app::TabMessage::CloseActive))
                     }
+                    Route::ToggleSidebar => return Task::done(Message::ToggleSidebar),
                     Route::Send(key) => {
                         if let Some(id) = self.focused_terminal() {
                             self.terminals.send_key(id, key);
@@ -754,13 +758,13 @@ impl TerminalState {
 
     /// Width of the panel docked right.
     fn panel_width(&self) -> f32 {
-        panel::panel_width(self.window.width, self.right_inset, self.width)
+        panel::panel_width(self.window.width, self.sidebar, self.right_inset, self.width)
     }
 
     /// Whether a left press at window point (`x`, `y`) is outside the panel.
     fn press_leaves(&self, x: f32, y: f32) -> bool {
         match self.dock {
-            Dock::Bottom => panel::press_leaves_panel(self.window.height, self.panel.height, x, y),
+            Dock::Bottom => panel::press_leaves_panel(self.window.height, self.sidebar, self.panel.height, x, y),
             Dock::Right => panel::press_leaves_right_panel(
                 self.window.width,
                 self.window.height,
@@ -807,6 +811,15 @@ impl TerminalState {
 
     pub fn set_width(&mut self, width: Option<f32>) {
         self.width = width;
+    }
+
+    /// The app sidebar collapsed or expanded: the panel's room changes, so
+    /// the right-docked body is re-measured and each pane resized.
+    pub fn set_sidebar_width(&mut self, width: f32) {
+        if self.sidebar != width {
+            self.sidebar = width;
+            self.body = None;
+        }
     }
 
     /// Width a right-docked panel takes from the page now (its edge handle
@@ -1098,6 +1111,7 @@ impl TerminalState {
         let (w, h) = match self.dock {
             Dock::Bottom => panel::pane_size(
                 self.window.width,
+                self.sidebar,
                 self.window.height,
                 self.panel.height,
                 self.panel.layout,

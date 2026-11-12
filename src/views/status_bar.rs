@@ -10,7 +10,7 @@ use crate::views::util::format_age;
 /// The shortcut hint on the left of the bar.
 fn shortcuts(show_help: bool, in_inbox: bool, on_project: bool) -> &'static str {
     if show_help {
-        "[c]reate  [e]dit  [s]tatus  [p]riority  [l]abels  [j] project  [m]ove  [M]ove back  [t]eam move  [D]elete  [\u{2191}\u{2193}\u{2190}\u{2192}] move focus  [v]iew board/list  [C]ollapse section  [1-4]priority  [S]ync  [P] new project  [L]abels page  [I]nbox  [\u{2318}K]command palette  [\u{2318}\u{21e7}F]search  Pickers: [\u{2191}\u{2193}] move  [Enter] pick  Issue detail: [s]tatus  [p]riority  [l]abels  [j] project  [a]ttach file  [e] edit description  [/] properties  Project detail: [e] edit description  [/] properties  Inbox: [j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]close help"
+        "[c]reate  [e]dit  [s]tatus  [p]riority  [l]abels  [j] project  [m]ove  [M]ove back  [t]eam move  [D]elete  [\u{2191}\u{2193}\u{2190}\u{2192}] move focus  [v]iew board/list  [C]ollapse section  [1-4]priority  [S]ync  [P] new project  [L]abels page  [I]nbox  [\u{2318}K]command palette  [\u{2318}B]sidebar  [\u{2318}\u{21e7}F]search  Pickers: [\u{2191}\u{2193}] move  [Enter] pick  Issue detail: [s]tatus  [p]riority  [l]abels  [j] project  [a]ttach file  [e] edit description  [/] properties  Project detail: [e] edit description  [/] properties  Inbox: [j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]close help"
     } else if in_inbox {
         "[j/k] move  [f] unread/all  [Enter] open  [r] read  [R] read all  [?]help"
     } else if on_project {

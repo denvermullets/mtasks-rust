@@ -9,7 +9,8 @@ pub const MIN_HEIGHT: f32 = 120.0;
 pub const MAIN_MIN: f32 = 200.0;
 /// Height of the strip above the panes.
 pub const STRIP_HEIGHT: f32 = 28.0;
-/// Width of the left sidebar, which the panel doesn't cover.
+/// Width of the left sidebar while expanded, which the panel doesn't cover.
+/// Collapsed (Cmd+B) it takes no width.
 pub const SIDEBAR_WIDTH: f32 = 220.0;
 
 /// Gap between panes, in pixels.
@@ -260,8 +261,8 @@ pub const HANDLE_WIDTH: f32 = 4.0;
 /// what the sidebar leaves, kept between the minimum and what leaves the page
 /// its minimum. `right_inset` is anything right of the panel (the project
 /// page's Properties).
-pub fn panel_width(window_w: f32, right_inset: f32, requested: Option<f32>) -> f32 {
-    let room = (window_w - SIDEBAR_WIDTH - right_inset).max(0.0);
+pub fn panel_width(window_w: f32, sidebar_w: f32, right_inset: f32, requested: Option<f32>) -> f32 {
+    let room = (window_w - sidebar_w - right_inset).max(0.0);
     let wanted = requested.unwrap_or(room * 0.45);
     let max = (room - MAIN_MIN).max(MIN_WIDTH);
     wanted.clamp(MIN_WIDTH, max)
@@ -269,8 +270,15 @@ pub fn panel_width(window_w: f32, right_inset: f32, requested: Option<f32>) -> f
 
 /// Panel width while dragging its left edge: it grows as the pointer moves
 /// left (`x` shrinks), kept within both limits.
-pub fn drag_width(window_w: f32, right_inset: f32, start_width: f32, start_x: f32, x: f32) -> f32 {
-    panel_width(window_w, right_inset, Some(start_width + (start_x - x)))
+pub fn drag_width(
+    window_w: f32,
+    sidebar_w: f32,
+    right_inset: f32,
+    start_width: f32,
+    start_x: f32,
+    x: f32,
+) -> f32 {
+    panel_width(window_w, sidebar_w, right_inset, Some(start_width + (start_x - x)))
 }
 
 /// Whether a left press at (`x`, `y`) lands outside a right-docked panel
@@ -309,22 +317,28 @@ pub const STATUS_HEIGHT: f32 = 28.0;
 /// so keyboard focus belongs to the app. The panel spans the window right of
 /// the sidebar, from its top edge down to the status bar. A press inside it
 /// is the pane's or strip's own business.
-pub fn press_leaves_panel(window_h: f32, requested: Option<f32>, x: f32, y: f32) -> bool {
+pub fn press_leaves_panel(window_h: f32, sidebar_w: f32, requested: Option<f32>, x: f32, y: f32) -> bool {
     let bottom = window_h - STATUS_HEIGHT;
     let top = bottom - panel_height(window_h, requested);
-    x < SIDEBAR_WIDTH || y < top || y > bottom
+    x < sidebar_w || y < top || y > bottom
 }
 
 /// Pixels available to the whole panel body (every pane) for this window.
-pub fn pane_pixels(window_w: f32, window_h: f32, requested: Option<f32>) -> (f32, f32) {
-    let w = (window_w - SIDEBAR_WIDTH).max(0.0);
+pub fn pane_pixels(window_w: f32, sidebar_w: f32, window_h: f32, requested: Option<f32>) -> (f32, f32) {
+    let w = (window_w - sidebar_w).max(0.0);
     let h = (panel_height(window_h, requested) - STRIP_HEIGHT).max(0.0);
     (w, h)
 }
 
 /// Pixels available to each pane of `layout`, which divides the panel evenly.
-pub fn pane_size(window_w: f32, window_h: f32, requested: Option<f32>, layout: Layout) -> (f32, f32) {
-    split_body(pane_pixels(window_w, window_h, requested), layout, Dock::Bottom)
+pub fn pane_size(
+    window_w: f32,
+    sidebar_w: f32,
+    window_h: f32,
+    requested: Option<f32>,
+    layout: Layout,
+) -> (f32, f32) {
+    split_body(pane_pixels(window_w, sidebar_w, window_h, requested), layout, Dock::Bottom)
 }
 
 /// A pane smaller than this many columns by rows says "too small".
@@ -448,14 +462,15 @@ mod tests {
     #[test]
     fn a_press_outside_the_panel_moves_focus_to_the_app() {
         // 1100x900 window: panel is 300 high, above a 28 high status bar.
-        let outside = |x, y| press_leaves_panel(900.0, None, x, y);
+        let outside = |x, y| press_leaves_panel(900.0, SIDEBAR_WIDTH, None, x, y);
         assert!(!outside(600.0, 700.0), "on the pane");
         assert!(!outside(600.0, 575.0), "on the strip");
         assert!(outside(600.0, 300.0), "on the board");
         assert!(outside(100.0, 700.0), "on the sidebar");
+        assert!(!press_leaves_panel(900.0, 0.0, None, 100.0, 700.0), "sidebar collapsed");
         assert!(outside(600.0, 895.0), "on the status bar");
         // A dragged height moves the top edge.
-        assert!(!press_leaves_panel(900.0, Some(500.0), 600.0, 400.0));
+        assert!(!press_leaves_panel(900.0, SIDEBAR_WIDTH, Some(500.0), 600.0, 400.0));
     }
 
     #[test]
@@ -466,7 +481,8 @@ mod tests {
 
     #[test]
     fn the_pane_leaves_the_sidebar_and_strip_out() {
-        assert_eq!(pane_pixels(1100.0, 900.0, None), (880.0, 272.0));
+        assert_eq!(pane_pixels(1100.0, SIDEBAR_WIDTH, 900.0, None), (880.0, 272.0));
+        assert_eq!(pane_pixels(1100.0, 0.0, 900.0, None), (1100.0, 272.0));
     }
 
     fn ids() -> (TerminalId, TerminalId, TerminalId) {
@@ -611,8 +627,8 @@ mod tests {
 
     #[test]
     fn two_columns_split_the_width_and_leave_a_gap() {
-        assert_eq!(pane_size(1100.0, 900.0, None, Layout::Single), (880.0, 272.0));
-        assert_eq!(pane_size(1100.0, 900.0, None, Layout::Columns), (439.5, 272.0));
+        assert_eq!(pane_size(1100.0, SIDEBAR_WIDTH, 900.0, None, Layout::Single), (880.0, 272.0));
+        assert_eq!(pane_size(1100.0, SIDEBAR_WIDTH, 900.0, None, Layout::Columns), (439.5, 272.0));
     }
 
     #[test]
@@ -626,19 +642,19 @@ mod tests {
     #[test]
     fn width_defaults_to_45_percent_and_respects_both_limits() {
         // 1220 wide: 1000 right of the sidebar.
-        assert_eq!(panel_width(1220.0, 0.0, None), 450.0);
-        assert_eq!(panel_width(1220.0, 0.0, Some(100.0)), MIN_WIDTH);
-        assert_eq!(panel_width(1220.0, 0.0, Some(950.0)), 800.0);
+        assert_eq!(panel_width(1220.0, SIDEBAR_WIDTH, 0.0, None), 450.0);
+        assert_eq!(panel_width(1220.0, SIDEBAR_WIDTH, 0.0, Some(100.0)), MIN_WIDTH);
+        assert_eq!(panel_width(1220.0, SIDEBAR_WIDTH, 0.0, Some(950.0)), 800.0);
         // Properties to the right leave less room.
-        assert_eq!(panel_width(1220.0, 321.0, Some(950.0)), 479.0);
+        assert_eq!(panel_width(1220.0, SIDEBAR_WIDTH, 321.0, Some(950.0)), 479.0);
         // A window too small for both still gives the panel its minimum.
-        assert_eq!(panel_width(800.0, 321.0, None), MIN_WIDTH);
+        assert_eq!(panel_width(800.0, SIDEBAR_WIDTH, 321.0, None), MIN_WIDTH);
     }
 
     #[test]
     fn dragging_left_widens_the_right_panel() {
-        assert_eq!(drag_width(1220.0, 0.0, 450.0, 770.0, 670.0), 550.0);
-        assert_eq!(drag_width(1220.0, 0.0, 450.0, 770.0, 1200.0), MIN_WIDTH);
+        assert_eq!(drag_width(1220.0, SIDEBAR_WIDTH, 0.0, 450.0, 770.0, 670.0), 550.0);
+        assert_eq!(drag_width(1220.0, SIDEBAR_WIDTH, 0.0, 450.0, 770.0, 1200.0), MIN_WIDTH);
     }
 
     #[test]
@@ -706,7 +722,7 @@ mod tests {
         assert_eq!(Layout::Grid.slots(), 4);
         assert_eq!(next_pane(&full(), Layout::Grid, 3, 1), 0);
         assert_eq!(next_pane(&full(), Layout::Grid, 0, -1), 3);
-        assert_eq!(pane_size(1100.0, 900.0, None, Layout::Grid), (439.5, 135.5));
+        assert_eq!(pane_size(1100.0, SIDEBAR_WIDTH, 900.0, None, Layout::Grid), (439.5, 135.5));
         assert_eq!(slot_for_new(&[Some(TerminalId(1)), Some(TerminalId(2)), None, None], Layout::Grid, 0), 2);
     }
 
@@ -729,11 +745,11 @@ mod tests {
     #[test]
     fn a_2x2_grid_in_the_minimum_window_is_too_small_until_the_panel_grows() {
         // The default panel there is 166 px; a pane in 2x2 is 68 px tall.
-        let (w, h) = pane_size(800.0, 500.0, None, Layout::Grid);
+        let (w, h) = pane_size(800.0, SIDEBAR_WIDTH, 500.0, None, Layout::Grid);
         let (cols, rows) = grid_for(w, h, 8.0, 18.0);
         assert!(too_small(cols, rows));
         // A taller panel fits it again.
-        let (w, h) = pane_size(800.0, 500.0, Some(300.0), Layout::Grid);
+        let (w, h) = pane_size(800.0, SIDEBAR_WIDTH, 500.0, Some(300.0), Layout::Grid);
         let (cols, rows) = grid_for(w, h, 8.0, 18.0);
         assert!(!too_small(cols, rows));
     }

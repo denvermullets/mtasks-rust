@@ -95,6 +95,10 @@ pub struct Config {
     /// Device-wide and local-only, hidden by default.
     #[serde(default)]
     pub project_properties_open: bool,
+    /// Whether the left teams sidebar is collapsed (Cmd+B toggles it).
+    /// Device-wide and local-only, shown by default.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
     /// Whether the issue page shows its Properties (`/` toggles it).
     /// Device-wide and local-only, shown by default.
     #[serde(default = "default_true")]
@@ -176,6 +180,7 @@ impl Default for Config {
             terminal_font_size: default_terminal_font_size(),
             native_notifications: true,
             project_properties_open: false,
+            sidebar_collapsed: false,
             issue_properties_open: true,
             project_cards_stacked: false,
             terminal_dock: default_terminal_dock(),
