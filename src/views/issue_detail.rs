@@ -204,6 +204,7 @@ pub fn view<'a>(
     lanes: &'a [Lane],
     projects: &'a [Project],
     members: &'a [Member],
+    comment_authors: &'a [Member],
     project_name: Option<&'a str>,
     deps: &'a DependencyGroups,
     comments: &'a [Comment],
@@ -330,6 +331,7 @@ pub fn view<'a>(
             detail,
             &ThreadCtx {
                 members,
+                authors: comment_authors,
                 teams,
                 issues,
                 my_member_ids,
@@ -1403,6 +1405,9 @@ fn small_button_style(
 /// rendering plus the open reply composer. Shared by issue and project detail.
 pub struct ThreadCtx<'a, 'b> {
     pub members: &'a [Member],
+    /// Comment authors from any team, for the author name; `members` is the
+    /// team's and may not include someone who has since left it.
+    pub authors: &'a [Member],
     pub teams: &'a [Team],
     pub issues: &'a [Issue],
     /// Local ids of the current user's members; gates the Delete action.
@@ -1614,7 +1619,12 @@ fn comment_row<'a>(
     let author = comment
         .author_id
         .as_ref()
-        .and_then(|aid| members.iter().find(|m| &m.id == aid))
+        .and_then(|aid| {
+            members
+                .iter()
+                .chain(ctx.authors)
+                .find(|m| &m.id == aid)
+        })
         .map(|m| m.name.as_str())
         .unwrap_or("Unknown");
 

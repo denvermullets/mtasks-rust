@@ -174,6 +174,7 @@ pub fn view<'a>(
     detail: &'a ProjectDetailState,
     team: Option<&'a Team>,
     members: &'a [Member],
+    comment_authors: &'a [Member],
     issues: &'a [Issue],
     visible: Vec<&'a Issue>,
     display: &'a DisplayOptions,
@@ -326,7 +327,7 @@ pub fn view<'a>(
         ))
         .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
-                comments, detail, members, teams, issues, comment_attachments, images, host,
+                comments, detail, members, comment_authors, teams, issues, comment_attachments, images, host,
                 pending_paths,
             )
         }));
@@ -647,6 +648,7 @@ fn discussion_section<'a>(
     comments: &'a [Comment],
     detail: &'a ProjectDetailState,
     members: &'a [Member],
+    comment_authors: &'a [Member],
     teams: &'a [Team],
     issues: &'a [Issue],
     comment_attachments: &'a CommentAttachments,
@@ -660,6 +662,7 @@ fn discussion_section<'a>(
     }
     let ctx = ThreadCtx {
         members,
+        authors: comment_authors,
         teams,
         issues,
         my_member_ids: &[],

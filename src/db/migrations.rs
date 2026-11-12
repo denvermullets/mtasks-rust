@@ -917,6 +917,38 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE teams ADD COLUMN role TEXT;
         ",
     },
+    Migration {
+        version: 44,
+        name: "team_memberships",
+        up: "
+            -- A member row is one Rails user (`members.remote_id` is the user
+            -- id, unique), but a user can be on many teams. Before this, the
+            -- row's single team_id was whichever team pulled it last, so
+            -- everyone on more than one team vanished from the others (shown
+            -- as Unknown on comments, missing from pickers). Membership now
+            -- lives here; members.team_id is just the team that first stored
+            -- the row.
+            CREATE TABLE team_memberships (
+                team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+                PRIMARY KEY (team_id, member_id)
+            );
+            CREATE INDEX idx_team_memberships_member ON team_memberships(member_id);
+            INSERT OR IGNORE INTO team_memberships (team_id, member_id)
+                SELECT team_id, id FROM members;
+            -- A newly stored member belongs to the team it was stored for.
+            -- Insert only: a later team_id rewrite (upsert, purge re-home)
+            -- must not grant a membership Rails didn't report.
+            CREATE TRIGGER members_insert_membership AFTER INSERT ON members
+            BEGIN
+                INSERT OR IGNORE INTO team_memberships (team_id, member_id)
+                VALUES (NEW.team_id, NEW.id);
+            END;
+            -- Refetch every team's member list so the memberships lost to
+            -- the old single team_id come back on the next sync.
+            DELETE FROM list_etags WHERE list = 'members';
+        ",
+    },
 ];
 
 /// Migrations that rebuild a table other tables reference. They must run with
@@ -1034,6 +1066,46 @@ mod tests {
     }
 
     #[test]
+    fn team_memberships_backfill_from_member_rows_and_reset_member_etags() {
+        let conn = open_mem();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 44) {
+            conn.execute_batch(m.up).unwrap();
+            conn.execute("INSERT INTO schema_migrations VALUES (?1, 'x')", rusqlite::params![m.version])
+                .unwrap();
+        }
+        let now = "2026-01-01T00:00:00.000Z";
+        for sql in [
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t1', 'T', 'T', ?1, ?1)",
+            "INSERT INTO teams (id, name, identifier, created_at, updated_at) VALUES ('t2', 'U', 'U', ?1, ?1)",
+            "INSERT INTO members (id, team_id, name, email, remote_id, created_at, updated_at) VALUES ('m1', 't1', 'M', 'm@x', 9, ?1, ?1)",
+        ] {
+            conn.execute(sql, rusqlite::params![now]).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO list_etags (team_id, list, etag) VALUES ('t1', 'members', 'e'), ('t1', 'lanes', 'e');",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT COUNT(*) FROM team_memberships WHERE team_id = 't1' AND member_id = 'm1'"), 1);
+        assert_eq!(n("SELECT COUNT(*) FROM list_etags WHERE list = 'members'"), 0);
+        assert_eq!(n("SELECT COUNT(*) FROM list_etags WHERE list = 'lanes'"), 1);
+        // New member rows join the team they're stored for.
+        conn.execute(
+            "INSERT INTO members (id, team_id, name, email, remote_id, created_at, updated_at) VALUES ('m2', 't2', 'N', 'n@x', 10, ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        assert_eq!(n("SELECT COUNT(*) FROM team_memberships WHERE team_id = 't2' AND member_id = 'm2'"), 1);
+    }
+
+    #[test]
     fn fresh_install_applies_all_migrations() {
         let conn = open_mem();
         run(&conn).unwrap();
@@ -1058,6 +1130,7 @@ mod tests {
             "issue_activity_state",
             "recurring_issues",
             "recurring_issue_labels",
+            "team_memberships",
         ] {
             assert!(table_exists(&conn, table), "missing table: {}", table);
         }

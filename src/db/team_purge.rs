@@ -214,12 +214,22 @@ fn delete_synced_queue_rows(conn: &Connection, team_id: &str, remote_id: i64) ->
     Ok(())
 }
 
-/// A member row is shared across teams: `members.remote_id` is unique, so the
-/// row's `team_id` is whichever team pulled it last. Anyone another team still
-/// references moves to that team instead of being deleted. Dropping the member
-/// list ETags makes the same pull refetch every remaining team's list and put
-/// the rows back where they belong.
+/// A member row is one user shared across teams (`team_memberships`). The
+/// purged team's memberships go; a row whose home `team_id` was this team moves
+/// to another team it's on, or, failing that, to a team that still references
+/// it (assignee, creator, lead, comment author) so those keep a name. Rows left
+/// with neither are deleted. Dropping the member list ETags makes the same pull
+/// refetch every remaining team's list.
 fn settle_members(conn: &Connection, team_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM team_memberships WHERE team_id = ?1", params![team_id])?;
+    conn.execute(
+        "UPDATE members SET team_id = (
+            SELECT tm.team_id FROM team_memberships tm WHERE tm.member_id = members.id LIMIT 1
+         )
+         WHERE team_id = ?1
+           AND EXISTS (SELECT 1 FROM team_memberships tm WHERE tm.member_id = members.id)",
+        params![team_id],
+    )?;
     conn.execute(
         "UPDATE members SET team_id = (
             SELECT owner FROM (
@@ -562,6 +572,26 @@ mod tests {
         assert_eq!(count(&c, "issues WHERE id = 'kept-i' AND creator_id = 'gone-m'"), 1);
         // The next pull refetches the list, even if it would have been a 304.
         assert_eq!(count(&c, "list_etags WHERE list = 'members'"), 0);
+    }
+
+    #[test]
+    fn a_member_on_both_teams_keeps_the_surviving_membership() {
+        let c = mem();
+        team(&c, "gone", 1);
+        team(&c, "kept", 2);
+        // gone-m's home team is "gone", but they're also on "kept".
+        c.execute("INSERT INTO team_memberships (team_id, member_id) VALUES ('kept', 'gone-m')", [])
+            .unwrap();
+
+        let r = reconcile_listed_teams(&c, &[2]).unwrap();
+
+        assert!(r.failed.is_empty(), "{:?}", r.failed);
+        assert_eq!(count(&c, "members WHERE id = 'gone-m' AND team_id = 'kept'"), 1);
+        assert_eq!(count(&c, "team_memberships WHERE team_id = 'gone'"), 0);
+        assert_eq!(
+            count(&c, "team_memberships WHERE team_id = 'kept' AND member_id = 'gone-m'"),
+            1
+        );
     }
 
     #[test]
