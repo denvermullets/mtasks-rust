@@ -19,11 +19,21 @@ const PLUS_WIDTH: f32 = 36.0;
 /// Horizontal padding either side of the Tab row.
 const BAR_PADDING: f32 = 8.0;
 
-/// Width the Tabs have between the sidebar and the `+` button, given the
-/// window width and the sidebar's current width (0 while collapsed). Both
-/// are exact, so this keeps the bar from ever widening the page.
-pub fn tab_viewport(window_width: f32, sidebar_w: f32) -> f32 {
-    (window_width - sidebar_w - PLUS_WIDTH - 2.0 * BAR_PADDING).max(0.0)
+/// Window x where the Tab row's own area starts: right of the sidebar, or
+/// right of the expand button that leads the bar while it is collapsed.
+pub fn bar_left(sidebar_collapsed: bool) -> f32 {
+    if sidebar_collapsed {
+        crate::views::team_list::TOGGLE_WIDTH
+    } else {
+        crate::terminal::panel::SIDEBAR_WIDTH
+    }
+}
+
+/// Width the Tabs have between `left` (see `bar_left`) and the `+` button,
+/// given the window width. Both are exact, so this keeps the bar from ever
+/// widening the page.
+pub fn tab_viewport(window_width: f32, left: f32) -> f32 {
+    (window_width - left - PLUS_WIDTH - 2.0 * BAR_PADDING).max(0.0)
 }
 
 /// Width of each Tab: shares the viewport evenly, clamped between the minimum
@@ -64,13 +74,13 @@ pub fn reveal_offset(index: usize, count: usize, tab_w: f32, viewport: f32, curr
 /// so a plain click still focuses.
 pub const DRAG_THRESHOLD: f32 = 8.0;
 
-/// The Tab slot under window x `cursor_x`, given the sidebar's current width
-/// and the bar's scroll offset. Clamped to the first and last Tab.
-pub fn drop_index(cursor_x: f32, sidebar_w: f32, offset: f32, count: usize, tab_w: f32) -> usize {
+/// The Tab slot under window x `cursor_x`, given where the bar starts (see
+/// `bar_left`) and its scroll offset. Clamped to the first and last Tab.
+pub fn drop_index(cursor_x: f32, left: f32, offset: f32, count: usize, tab_w: f32) -> usize {
     if count == 0 {
         return 0;
     }
-    let x = cursor_x - sidebar_w - BAR_PADDING + offset;
+    let x = cursor_x - left - BAR_PADDING + offset;
     let slot = (x / (tab_w + TAB_SPACING)).floor();
     (slot.max(0.0) as usize).min(count - 1)
 }
@@ -120,10 +130,10 @@ pub fn view<'a>(
     needs: &[Option<crate::terminal::Need>],
     unread: &[bool],
     window_width: f32,
-    sidebar_w: f32,
+    sidebar_collapsed: bool,
     dragging: Option<usize>,
 ) -> Element<'a, Message> {
-    let tab_w = tab_width(tabs.len(), tab_viewport(window_width, sidebar_w));
+    let tab_w = tab_width(tabs.len(), tab_viewport(window_width, bar_left(sidebar_collapsed)));
     let mut bar = row![].spacing(TAB_SPACING).padding([4.0, BAR_PADDING]);
     for (i, (label, active)) in tabs.iter().enumerate() {
         let active = *active;
@@ -221,7 +231,14 @@ pub fn view<'a>(
             border: Border { radius: 4.0.into(), ..Default::default() },
             ..Default::default()
         });
-    container(row![scroller, plus].align_y(iced::Alignment::Center))
+    let expand = sidebar_collapsed.then(|| crate::views::team_list::sidebar_toggle(true));
+    container(
+        row![]
+            .push_maybe(expand)
+            .push(scroller)
+            .push(plus)
+            .align_y(iced::Alignment::Center),
+    )
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::base(t::bg_menu()))),
@@ -259,8 +276,9 @@ mod tests {
         assert_eq!(drop_index(left + 10.0, SIDEBAR, 244.0, 5, 120.0), 2);
         assert_eq!(drop_index(0.0, SIDEBAR, 0.0, 5, 120.0), 0);
         assert_eq!(drop_index(5000.0, SIDEBAR, 0.0, 5, 120.0), 4);
-        // Sidebar collapsed: the bar starts at the window's left edge.
-        assert_eq!(drop_index(BAR_PADDING + 130.0, 0.0, 0.0, 5, 120.0), 1);
+        // Sidebar collapsed: the bar starts right of the expand button.
+        let left = bar_left(true) + BAR_PADDING;
+        assert_eq!(drop_index(left + 130.0, bar_left(true), 0.0, 5, 120.0), 1);
     }
 
     #[test]
@@ -294,6 +312,15 @@ mod tests {
                 + tab_viewport(window, SIDEBAR)
                 + PLUS_WIDTH;
             assert!(used <= window + 0.01, "{used} > {window}");
+        }
+    }
+
+    #[test]
+    fn a_collapsed_sidebar_leaves_room_for_the_expand_button_only() {
+        for window in [800.0, 1100.0, 1920.0] {
+            let used = bar_left(true) + 2.0 * BAR_PADDING + tab_viewport(window, bar_left(true)) + PLUS_WIDTH;
+            assert!((used - window).abs() < 0.01, "{used} != {window}");
+            assert!(tab_viewport(window, bar_left(true)) > tab_viewport(window, bar_left(false)));
         }
     }
 

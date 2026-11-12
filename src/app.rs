@@ -8699,7 +8699,7 @@ impl App {
                 &self.tab_needs(),
                 &self.tab_unread(),
                 self.window_width,
-                self.sidebar_width(),
+                self.config.sidebar_collapsed,
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
             ))
             .push_maybe((!self.removed_team_tab()).then_some(header))

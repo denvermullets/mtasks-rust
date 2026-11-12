@@ -78,8 +78,14 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
     } = state;
     let mut col = column![].spacing(0).width(Length::Fill);
 
-    // Workspace section
-    col = col.push(section_header("WORKSPACE"));
+    // Workspace section, with the collapse button at the column's right.
+    col = col.push(
+        row![]
+            .align_y(iced::Alignment::Center)
+            .push(section_header("WORKSPACE"))
+            .push(iced::widget::horizontal_space())
+            .push(sidebar_toggle(false)),
+    );
     col = col.push(nav_row(
         "My Issues",
         *current_view == View::MyIssues,
@@ -479,6 +485,51 @@ pub fn is_home_dashboard(home: Option<&HomePage>, dashboard: &Dashboard) -> bool
 /// create pushed) by local id.
 pub fn is_home_view(home: Option<&HomePage>, view: &SavedView) -> bool {
     home.is_some_and(|h| h.matches_view(view))
+}
+
+/// Chevrons-left (collapse) and chevrons-right (expand), heroicons outline.
+const ICON_COLLAPSE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18.75 19.5l-7.5-7.5 7.5-7.5m-6 15L5.25 12l7.5-7.5"/></svg>"##;
+const ICON_EXPAND: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 4.5l7.5 7.5-7.5 7.5m6-15l7.5 7.5-7.5 7.5"/></svg>"##;
+
+/// Width the sidebar toggle takes, padding included. The Tab bar leads with
+/// it while the sidebar is collapsed, and its layout math counts it.
+pub const TOGGLE_WIDTH: f32 = 32.0;
+
+/// The button that collapses the sidebar (at the right of its top row) or,
+/// once `collapsed`, expands it again (leading the Tab bar). Cmd+B does both.
+pub fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, Message> {
+    let (icon, tip) = if collapsed {
+        (ICON_EXPAND, "Show sidebar  \u{2318}B")
+    } else {
+        (ICON_COLLAPSE, "Hide sidebar  \u{2318}B")
+    };
+    let btn = button(
+        container(crate::views::form_page::icon(icon, 14.0, t::text_muted()))
+            .center_x(Length::Fill)
+            .center_y(Length::Shrink),
+    )
+    .width(Length::Fixed(TOGGLE_WIDTH))
+    .padding([5, 0])
+    .on_press(Message::ToggleSidebar)
+    .style(|_theme: &Theme, status| button::Style {
+        background: matches!(status, button::Status::Hovered)
+            .then(|| iced::Background::Color(t::bg_card_focused())),
+        border: Border { radius: 4.0.into(), ..Default::default() },
+        ..Default::default()
+    });
+    iced::widget::tooltip(
+        btn,
+        container(text(tip).size(12).color(t::text_strong()))
+            .padding([4, 8])
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::bg_menu())),
+                border: Border { color: t::border(), width: 1.0, radius: 4.0.into() },
+                ..Default::default()
+            }),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
 }
 
 /// A muted glyph-only sidebar button; disabled when `msg` is `None`.
