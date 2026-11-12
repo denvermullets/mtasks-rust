@@ -1,7 +1,11 @@
-<!-- last-sha: bb325378ef33e074bd65cf26b6cd3b40f03be738 -->
-**Version: v0.11.0**
+<!-- last-sha: fc35970e231a7b0f04ec11b049fd8461a234f257 -->
+**Version: v0.12.0**
 
 # What's new
+
+## 2026-11-12
+- **Hide the sidebar.** Press Cmd+B, click the arrows at the top of the sidebar, or choose "Toggle sidebar" in the command palette to hide the teams sidebar and give the page more room. While it's hidden, a button at the left of the tab bar brings it back. Your choice is remembered.
+- **People on several teams.** Members who belong to more than one team now show up on every team they're in, so their names appear on comments and they're available in pickers instead of showing as "Unknown". Comment authors who have left a team keep their names too.
 
 ## 2026-11-11
 - **Send an issue to Claude from the terminal.** While a terminal panel is open, a small robot button sits next to the issue's ID on its page and on each issue row in a project. Click it to type that issue's prompt into the terminal, ready for Claude Code.
