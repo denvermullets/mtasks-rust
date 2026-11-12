@@ -579,33 +579,60 @@ async fn pull_labels_step(
     .await
 }
 
+/// Members are users, and a user can be on many teams, so this doesn't use
+/// `pull_etag_list`: the row is found by user id across all teams, and the
+/// team's membership set is replaced with what Rails lists.
 async fn pull_members_step(
     client: &ApiClient,
     team_remote_id: i64,
     local_team_id: &str,
 ) -> Result<(), String> {
-    pull_etag_list(
-        "member",
-        "members",
-        team_remote_id,
-        local_team_id,
-        |etag| async move { members::list_conditional(client, team_remote_id, etag.as_deref()).await },
-        |dto, team| dto.team_id = team,
-        |dto| dto.updated_at.clone().unwrap_or_default(),
-        |conn, dto| {
-            let found = queries::find_member_by_remote_id(conn, dto.id)
-                .map_err(|e| format!("db (find member): {e}"))?;
-            Ok(found.map(|m| (m.id, m.updated_at)))
-        },
-        |conn, dto, existing, local_team_id| {
-            let mut member = dto
-                .into_model(conn, existing)
-                .map_err(|e| format!("convert member: {e}"))?;
-            member.team_id = local_team_id.to_string();
-            queries::upsert_member(conn, &member).map_err(|e| format!("db (upsert member): {e}"))
-        },
-    )
-    .await
+    let stored = {
+        let conn = open()?;
+        queries::get_list_etag(&conn, local_team_id, "members").unwrap_or(None)
+    };
+    let (dtos, new_etag) =
+        match members::list_conditional(client, team_remote_id, stored.as_deref())
+            .await
+            .map_err(|e| format!("members: {e}"))?
+        {
+            Conditional::NotModified => {
+                sync_log(
+                    &phase_scope("pull_members", Some(team_remote_id)),
+                    "not_modified",
+                    "304",
+                );
+                return Ok(());
+            }
+            Conditional::Modified { data, etag } => (data, etag),
+        };
+
+    let conn = open()?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("db (begin members): {e}"))?;
+    let mut seen = Vec::with_capacity(dtos.len());
+    for mut dto in dtos {
+        // Rails omits team_id on the wire; inject from the URL path.
+        dto.team_id = team_remote_id;
+        seen.push(dto.id);
+        let existing = queries::find_member_by_remote_id(&tx, dto.id)
+            .map_err(|e| format!("db (find member): {e}"))?;
+        // Keep the row's first team; membership is tracked separately.
+        let home_team = existing.as_ref().map(|m| m.team_id.clone());
+        let mut member = dto
+            .into_model(&tx, existing.map(|m| m.id))
+            .map_err(|e| format!("convert member: {e}"))?;
+        member.team_id = home_team.unwrap_or_else(|| local_team_id.to_string());
+        queries::upsert_member(&tx, &member).map_err(|e| format!("db (upsert member): {e}"))?;
+        queries::add_team_membership(&tx, local_team_id, &member.id)
+            .map_err(|e| format!("db (add membership): {e}"))?;
+    }
+    queries::prune_team_memberships(&tx, local_team_id, &seen)
+        .map_err(|e| format!("db (prune memberships): {e}"))?;
+    tx.commit().map_err(|e| format!("db (commit members): {e}"))?;
+    store_list_etag(&conn, local_team_id, "members", new_etag.as_deref());
+    Ok(())
 }
 
 /// Persist the ETag only after the list was fully applied, so a failed apply

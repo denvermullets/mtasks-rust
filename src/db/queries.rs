@@ -635,17 +635,18 @@ pub fn move_issue_to_team(
         .or_else(|| target_lanes.first())
         .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
 
-    // Assignee: members are per-team rows, so keep the person by finding their
-    // row in the target team. `members.remote_id` is the per-team membership id
-    // (unique per row), so it never matches across teams; email is the identity
-    // that does.
+    // Assignee: a member row is one user across all their teams, so the
+    // assignee stays if they're also on the target team. A same-email row on
+    // the target team (local-only members) is the fallback.
     let new_assignee: Option<String> = match &old.assignee_id {
         Some(a) => tx
             .query_row(
-                "SELECT t.id FROM members m JOIN members t ON t.team_id = ?2
-                   AND (t.id = m.id OR (m.remote_id IS NOT NULL AND t.remote_id = m.remote_id)
-                        OR LOWER(t.email) = LOWER(m.email))
-                 WHERE m.id = ?1 LIMIT 1",
+                "SELECT t.id FROM members m
+                 JOIN team_memberships tm ON tm.team_id = ?2
+                 JOIN members t ON t.id = tm.member_id
+                   AND (t.id = m.id OR LOWER(t.email) = LOWER(m.email))
+                 WHERE m.id = ?1
+                 ORDER BY t.id = m.id DESC LIMIT 1",
                 params![a, target_team_id],
                 |r| r.get(0),
             )
@@ -929,16 +930,38 @@ pub fn projects_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Project
     rows.collect()
 }
 
+/// Everyone on the team, via `team_memberships` (a user on several teams is
+/// one member row with several memberships). Each returned `Member` carries
+/// `team_id = team_id`, so callers that filter or scope by `m.team_id` see the
+/// team they asked about rather than the row's first team.
 pub fn members_for_team(conn: &Connection, team_id: &str) -> Result<Vec<Member>> {
     let mut stmt = conn.prepare(
-        "SELECT id, remote_id, team_id, name, email, created_at, updated_at
-         FROM members WHERE team_id = ?1 ORDER BY name",
+        "SELECT m.id, m.remote_id, tm.team_id, m.name, m.email, m.created_at, m.updated_at
+         FROM members m JOIN team_memberships tm ON tm.member_id = m.id
+         WHERE tm.team_id = ?1 ORDER BY m.name",
     )?;
     let rows = stmt.query_map(params![team_id], Member::from_row)?;
     rows.collect()
 }
 
 // ── Comments ──
+
+/// The members who wrote `comments`, whatever team they're on now. Comment
+/// authors are resolved against these rather than the team's members, so a
+/// comment still shows its author after they leave the team.
+pub fn comment_authors(conn: &Connection, comments: &[Comment]) -> Result<Vec<Member>> {
+    let ids: Vec<&str> = comments.iter().filter_map(|c| c.author_id.as_deref()).collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into());
+    let mut stmt = conn.prepare(
+        "SELECT id, remote_id, team_id, name, email, created_at, updated_at
+         FROM members WHERE id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let rows = stmt.query_map(params![ids], Member::from_row)?;
+    rows.collect()
+}
 
 /// Flat list of comments on an issue, oldest first; nesting is in `parent_id`
 /// (see `Comment::thread_order`).
@@ -1860,6 +1883,36 @@ pub fn upsert_label(conn: &Connection, label: &Label) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+/// Record that `member_id` is on `team_id`. Idempotent.
+pub fn add_team_membership(conn: &Connection, team_id: &str, member_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO team_memberships (team_id, member_id) VALUES (?1, ?2)",
+        params![team_id, member_id],
+    )?;
+    Ok(())
+}
+
+/// Drop `team_id`'s memberships for synced members whose user id isn't in
+/// `keep_remote_ids` (the team's full list from Rails). Local-only members
+/// (no remote id) are left alone. The member rows themselves stay, since
+/// other teams or old issues may still reference them.
+pub fn prune_team_memberships(
+    conn: &Connection,
+    team_id: &str,
+    keep_remote_ids: &[i64],
+) -> Result<usize> {
+    let keep = serde_json::to_string(keep_remote_ids).unwrap_or_else(|_| "[]".into());
+    conn.execute(
+        "DELETE FROM team_memberships
+         WHERE team_id = ?1 AND member_id IN (
+            SELECT id FROM members
+            WHERE remote_id IS NOT NULL
+              AND remote_id NOT IN (SELECT value FROM json_each(?2))
+         )",
+        params![team_id, keep],
+    )
 }
 
 pub fn upsert_member(conn: &Connection, member: &Member) -> Result<()> {
@@ -3232,6 +3285,67 @@ mod tests {
         let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
         assert_eq!(issue_row(&conn, "i1").assignee_id.as_deref(), Some("m1t2"));
         assert!(!s.assignee_cleared);
+    }
+
+    #[test]
+    fn move_keeps_the_same_member_row_when_on_both_teams() {
+        let conn = move_setup();
+        add_team_membership(&conn, "t2", "m2").unwrap();
+        conn.execute("UPDATE issues SET assignee_id='m2' WHERE id='i1'", []).unwrap();
+        let s = move_issue_to_team(&conn, "i1", "t2").unwrap();
+        assert_eq!(issue_row(&conn, "i1").assignee_id.as_deref(), Some("m2"));
+        assert!(!s.assignee_cleared);
+    }
+
+    #[test]
+    fn a_member_on_two_teams_is_listed_for_both() {
+        let conn = move_setup();
+        add_team_membership(&conn, "t2", "m2").unwrap();
+        let t1: Vec<String> = members_for_team(&conn, "t1").unwrap().into_iter().map(|m| m.id).collect();
+        let t2 = members_for_team(&conn, "t2").unwrap();
+        assert!(t1.contains(&"m2".to_string()));
+        let bob = t2.iter().find(|m| m.id == "m2").expect("m2 listed on t2");
+        // Scoped to the team asked about, not the row's home team.
+        assert_eq!(bob.team_id, "t2");
+        // Re-pulling the row for t2 doesn't take it off t1.
+        let mut row = find_member_by_remote_id(&conn, 2).unwrap().unwrap();
+        row.team_id = "t2".into();
+        upsert_member(&conn, &row).unwrap();
+        assert!(members_for_team(&conn, "t1").unwrap().iter().any(|m| m.id == "m2"));
+    }
+
+    #[test]
+    fn prune_drops_only_the_teams_missing_synced_members() {
+        let conn = move_setup();
+        add_team_membership(&conn, "t2", "m1").unwrap();
+        add_team_membership(&conn, "t2", "m2").unwrap();
+        // Rails lists only user 1 for t2; m1t2 has no remote id and stays.
+        assert_eq!(prune_team_memberships(&conn, "t2", &[1]).unwrap(), 1);
+        let mut t2: Vec<String> = members_for_team(&conn, "t2").unwrap().into_iter().map(|m| m.id).collect();
+        t2.sort();
+        assert_eq!(t2, ["m1", "m1t2"]);
+        // t1 is untouched.
+        assert_eq!(members_for_team(&conn, "t1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn comment_authors_resolve_across_teams() {
+        let conn = move_setup();
+        let c = Comment {
+            id: "c1".into(),
+            remote_id: None,
+            issue_id: Some("i1".into()),
+            project_id: None,
+            author_id: Some("m1".into()),
+            body: "hi".into(),
+            parent_id: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let authors = comment_authors(&conn, &[c]).unwrap();
+        assert_eq!(authors.len(), 1);
+        assert_eq!(authors[0].name, "Ann");
+        assert!(comment_authors(&conn, &[]).unwrap().is_empty());
     }
 
     #[test]

@@ -1077,6 +1077,9 @@ pub struct App {
     /// Comments on the open detail issue, oldest first. Repopulated each reload
     /// only while `view` is `IssueDetail`.
     detail_comments: Vec<Comment>,
+    /// Members who wrote `detail_comments`, from any team (see
+    /// `queries::comment_authors`).
+    detail_comment_authors: Vec<Member>,
     /// Local change history for the open issue (see `db::activity`).
     detail_activity: Vec<ActivityItem>,
     /// Files attached to the open issue (synced, then pending/failed). Repopulated
@@ -1650,6 +1653,8 @@ impl App {
             self.detail_comments.clear();
             self.detail_activity.clear();
         }
+        self.detail_comment_authors =
+            queries::comment_authors(conn, &self.detail_comments).unwrap_or_default();
     }
 
     /// JRST-214: a failed inline image was removed; drop its placeholder from the
@@ -3745,6 +3750,7 @@ impl App {
             detail_from_page: None,
             map_return: None,
             detail_comments: Vec::new(),
+            detail_comment_authors: Vec::new(),
             detail_activity: Vec::new(),
             detail_attachments: Vec::new(),
             detail_pending_paths: Default::default(),
@@ -8456,6 +8462,7 @@ impl App {
                             detail,
                             self.detail_team(),
                             &self.detail_members,
+                            &self.detail_comment_authors,
                             &self.issues,
                             self.project_detail_issues(project_id, &needle),
                             self.board_display(),
@@ -8542,6 +8549,7 @@ impl App {
                             &self.lanes,
                             &self.projects,
                             &self.detail_members,
+                            &self.detail_comment_authors,
                             project_name,
                             &self.detail_deps,
                             &self.detail_comments,
