@@ -295,7 +295,8 @@ pub fn view<'a>(
     if show_controls {
         content = content
             .push(search)
-            .push(filter)
+            // Filter only shows where it applies (board and My Issues).
+            .push_maybe(board_controls.is_some().then_some(filter))
             .push(display)
             .push(new_button);
     }

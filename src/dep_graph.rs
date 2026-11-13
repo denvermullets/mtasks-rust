@@ -242,7 +242,7 @@ impl ProjectGraph {
 }
 
 /// Not completed or canceled, and not in a completed/canceled lane (Rails `Issue.active`).
-fn is_active(issue: &Issue, lanes: &[Lane]) -> bool {
+pub(crate) fn is_active(issue: &Issue, lanes: &[Lane]) -> bool {
     if issue.completed_at.is_some() || issue.canceled_at.is_some() {
         return false;
     }

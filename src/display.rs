@@ -578,6 +578,28 @@ impl ProjectIssueSort {
     }
 }
 
+/// Which of a project's issues its page lists: Rails' project "Show:" chips
+/// (`@issue_filter`). `Active` (the default there and here) drops completed and
+/// canceled issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectIssueFilter {
+    All,
+    #[default]
+    Active,
+}
+
+impl ProjectIssueFilter {
+    /// In Rails' chip order.
+    pub const ALL: [ProjectIssueFilter; 2] = [ProjectIssueFilter::All, ProjectIssueFilter::Active];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProjectIssueFilter::All => "All",
+            ProjectIssueFilter::Active => "Active",
+        }
+    }
+}
+
 /// Sort a project's issues in place the way Rails does:
 /// Newest = created desc; ID = team number asc; Status = lane position asc,
 /// then created desc; Updated = updated desc; Priority = priority asc, then

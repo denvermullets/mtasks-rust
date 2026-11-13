@@ -7,7 +7,7 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Comment, Issue, Lane, Member, Priority, Project, ProjectStatus, Team};
 use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::issue_detail::{new_comment_composer, push_thread, CommentAttachments, ThreadCtx};
-use crate::display::{CardProperty, DisplayOptions, ProjectIssueSort};
+use crate::display::{CardProperty, DisplayOptions, ProjectIssueFilter, ProjectIssueSort};
 use crate::views::util;
 use crate::views::progress_chart;
 use crate::views::date_picker;
@@ -179,6 +179,7 @@ pub fn view<'a>(
     visible: Vec<&'a Issue>,
     display: &'a DisplayOptions,
     issue_sort: ProjectIssueSort,
+    issue_filter: ProjectIssueFilter,
     lanes: &'a [Lane],
     teams: &'a [Team],
     comments: &'a [Comment],
@@ -324,7 +325,7 @@ pub fn view<'a>(
                 card_layout(page_width(main_width, placement == util::PropertiesPlacement::Sidebar))
             },
             burndown(project, issues),
-            issues_section(visible, display, issue_sort, team, lanes, terminal_showing),
+            issues_section(visible, display, issue_sort, issue_filter, team, lanes, terminal_showing),
         ))
         .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
@@ -756,11 +757,12 @@ fn legend_item<'a>(label: &'a str, color: iced::Color) -> Element<'a, Message> {
 
 /// This project's issues (already scoped and filtered by the caller with the
 /// board's display options, and ordered by `sort`), each a clickable row that
-/// opens detail. The heading carries Rails' "Sort:" chips.
+/// opens detail. The heading carries Rails' "Show:" and "Sort:" chips.
 fn issues_section<'a>(
     scoped: Vec<&'a Issue>,
     display: &'a DisplayOptions,
     sort: ProjectIssueSort,
+    filter: ProjectIssueFilter,
     team: Option<&'a Team>,
     lanes: &'a [Lane],
     terminal_showing: bool,
@@ -775,6 +777,7 @@ fn issues_section<'a>(
                 .color(t::text_secondary()),
         )
         .push(iced::widget::horizontal_space())
+        .push(filter_chips(filter))
         .push(sort_chips(sort));
     let mut col = column![].spacing(space::S1);
 
@@ -793,22 +796,44 @@ fn issues_section<'a>(
         .into()
 }
 
+/// "Show: All Active", the active one boxed.
+fn filter_chips<'a>(active_filter: ProjectIssueFilter) -> Element<'a, Message> {
+    chip_row(
+        "Show:",
+        ProjectIssueFilter::ALL
+            .iter()
+            .map(|&f| (f.label(), f == active_filter, Message::ProjectIssueFilterChanged(f))),
+    )
+}
+
 /// "Sort: Newest ID Status Updated Priority", the active one boxed (as on the
 /// Projects table's sort row).
 fn sort_chips<'a>(active_sort: ProjectIssueSort) -> Element<'a, Message> {
+    chip_row(
+        "Sort:",
+        ProjectIssueSort::ALL
+            .iter()
+            .map(|&o| (o.label(), o == active_sort, Message::ProjectIssueSortChanged(o))),
+    )
+}
+
+/// A muted label followed by text chips; the active chip is boxed.
+fn chip_row<'a>(
+    label: &'a str,
+    chips_in: impl Iterator<Item = (&'static str, bool, Message)>,
+) -> Element<'a, Message> {
     let mut chips = row![]
         .spacing(space::S1)
         .align_y(Alignment::Center)
-        .push(text("Sort:").size(type_scale::XS).color(t::text_muted()));
-    for option in ProjectIssueSort::ALL {
-        let active = option == active_sort;
+        .push(text(label).size(type_scale::XS).color(t::text_muted()));
+    for (chip_label, active, msg) in chips_in {
         chips = chips.push(
-            button(text(option.label()).size(type_scale::XS).color(if active {
+            button(text(chip_label).size(type_scale::XS).color(if active {
                 t::text_strong()
             } else {
                 t::text_secondary()
             }))
-            .on_press(Message::ProjectIssueSortChanged(option))
+            .on_press(msg)
             .padding([space::S0_5, space::S2])
             .style(move |_theme: &Theme, _status| button::Style {
                 background: active.then_some(iced::Background::Color(t::bg_card_focused())),
