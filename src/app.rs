@@ -3980,6 +3980,18 @@ impl App {
         crate::window_effects::set_blur(radius)
     }
 
+    /// What the confirm button of the open running-program dialog sends.
+    fn confirm_accept_message(&self) -> Option<Message> {
+        match &self.modal {
+            Modal::QuitConfirm => Some(Message::QuitConfirmed),
+            Modal::TabCloseConfirm(key) => Some(Message::Tab(TabMessage::CloseConfirmed(key.clone()))),
+            Modal::TerminalCloseConfirm(id) => Some(Message::Terminal(
+                crate::terminal::TerminalMessage::CloseConfirmed(*id),
+            )),
+            _ => None,
+        }
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         let keys = event::listen_with(|event, status, _id| {
             if let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
@@ -4395,6 +4407,12 @@ impl App {
                 }
                 if let Modal::PropertyPicker(_) = self.modal {
                     if let Some(msg) = keys::handle_property_picker_key(&key, modifiers) {
+                        return self.update(msg);
+                    }
+                }
+                // Enter accepts a running-program confirm; Esc cancels it below.
+                if key == keyboard::Key::Named(keyboard::key::Named::Enter) && modifiers.is_empty() {
+                    if let Some(msg) = self.confirm_accept_message() {
                         return self.update(msg);
                     }
                 }
