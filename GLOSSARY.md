@@ -144,3 +144,13 @@ _Avoid_: Running, active
 **Stopped**:
 The state of a Terminal that isn't Open: its shell has exited, or it was restored on launch and hasn't started yet. It stays in its strip and keeps its name and working directory. A restored Terminal starts when a pane first shows it, and Restart starts a new shell in an exited one.
 _Avoid_: Closed (closing removes the Terminal), Dead (a Rust-side failure of the Terminal itself), Not started (only one way to be stopped)
+
+### Updates
+
+**Update**:
+A published version of the app newer than the one installed on this device.
+_Avoid_: Upgrade, patch, new build
+
+**Staged update**:
+An Update that has been downloaded and verified and is waiting to be installed. It's installed the next time the app quits cleanly, and it waits across launches until then. The update notice calls it "ready".
+_Avoid_: Pending update (a Pending change is unsynced edits), downloaded update, queued update

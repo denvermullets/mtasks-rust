@@ -767,6 +767,9 @@ fn issues_section<'a>(
     lanes: &'a [Lane],
     terminal_showing: bool,
 ) -> Element<'a, Message> {
+    // Wraps rather than squeezing: beside the burndown the card is narrow, so
+    // the title and chip groups flow onto extra lines (and each chip group
+    // wraps at chip boundaries) instead of crushing labels character by char.
     let heading = row![]
         .spacing(space::S2)
         .align_y(Alignment::Center)
@@ -774,11 +777,12 @@ fn issues_section<'a>(
             text(format!("Issues ({})", scoped.len()))
                 .size(type_scale::SM)
                 .font(crate::fonts::bold_active())
-                .color(t::text_secondary()),
+                .color(t::text_secondary())
+                .wrapping(text::Wrapping::None),
         )
-        .push(iced::widget::horizontal_space())
         .push(filter_chips(filter))
-        .push(sort_chips(sort));
+        .push(sort_chips(sort))
+        .wrap();
     let mut col = column![].spacing(space::S1);
 
     if scoped.is_empty() {
@@ -825,14 +829,20 @@ fn chip_row<'a>(
     let mut chips = row![]
         .spacing(space::S1)
         .align_y(Alignment::Center)
-        .push(text(label).size(type_scale::XS).color(t::text_muted()));
+        .push(
+            text(label)
+                .size(type_scale::XS)
+                .color(t::text_muted())
+                .wrapping(text::Wrapping::None),
+        );
     for (chip_label, active, msg) in chips_in {
         chips = chips.push(
-            button(text(chip_label).size(type_scale::XS).color(if active {
-                t::text_strong()
-            } else {
-                t::text_secondary()
-            }))
+            button(
+                text(chip_label)
+                    .size(type_scale::XS)
+                    .color(if active { t::text_strong() } else { t::text_secondary() })
+                    .wrapping(text::Wrapping::None),
+            )
             .on_press(msg)
             .padding([space::S0_5, space::S2])
             .style(move |_theme: &Theme, _status| button::Style {
@@ -847,7 +857,7 @@ fn chip_row<'a>(
             }),
         );
     }
-    chips.into()
+    chips.wrap().into()
 }
 
 fn issue_row<'a>(
