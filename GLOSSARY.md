@@ -147,10 +147,26 @@ _Avoid_: Closed (closing removes the Terminal), Dead (a Rust-side failure of the
 
 ### Updates
 
+**Release**:
+One published version of the app, with its update download, its installer and its notes, available to anyone from the release host.
+_Avoid_: Build (a build isn't published), version (a Release has a version)
+
+**Release manifest**:
+The single small public document that describes the latest Release and carries the Release notes of every Release. The app reads it to learn whether an Update exists.
+_Avoid_: Feed (feed is avoided for Notifications), appcast
+
+**Release notes**:
+The user-facing changes in one Release, as written in the changelog. The update notice shows the Release notes of every Release newer than the installed one.
+_Avoid_: Changelog (that's the whole file), what's new
+
 **Update**:
-A published version of the app newer than the one installed on this device.
+A Release newer than the one installed on this device.
 _Avoid_: Upgrade, patch, new build
 
 **Staged update**:
-An Update that has been downloaded and verified and is waiting to be installed. It's installed the next time the app quits cleanly, and it waits across launches until then. The update notice calls it "ready".
+An Update that has been downloaded and verified and is waiting to be installed. It's installed at the next Clean quit, and it waits across launches until then. The update notice calls it "ready".
 _Avoid_: Pending update (a Pending change is unsynced edits), downloaded update, queued update
+
+**Clean quit**:
+The app is asked to quit and finishes quitting, whether from Cmd+Q, the close button, the Dock, Restart now, or a logout, restart or shutdown. A force quit or a crash is not a Clean quit.
+_Avoid_: Normal quit, graceful exit

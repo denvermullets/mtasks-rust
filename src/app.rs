@@ -2079,9 +2079,11 @@ impl App {
     // --- end active board state ----------------------------------------
 
     fn breadcrumb(&self) -> Vec<header::Crumb> {
+        // An open issue/project names its own team (My Issues and dashboards
+        // open other teams' issues), so its id carries the right prefix.
         let mut crumbs = breadcrumb(
             &self.view,
-            self.selected_team(),
+            self.detail_team().or_else(|| self.selected_team()),
             &self.issues,
             &self.projects,
         );
@@ -9130,6 +9132,11 @@ fn breadcrumb(
             crumbs.push(Crumb::new("Projects", team_page(View::ProjectList)));
             if let Some(p) = projects.iter().find(|p| p.id == *id) {
                 crumbs.push(Crumb::plain(p.name.clone()));
+                // The Rails id (what the JAIT MCP's `get_project` takes);
+                // absent until synced.
+                if let Some(rid) = p.remote_id {
+                    crumbs.push(Crumb::plain(format!("#{rid}")));
+                }
             }
         }
         View::IssueDetail(id) => {
@@ -9643,6 +9650,16 @@ mod tests {
             ["JAIT", "Projects", "Proj", "Dependencies"]
         );
         assert!(matches!(map_crumbs[2].on_press, Some(Message::CloseProjectDependencyMap)));
+        // A synced project shows its Rails id after the name.
+        let mut synced = projects.clone();
+        synced[0].remote_id = Some(42);
+        assert_eq!(
+            breadcrumb(&View::ProjectDetail("p1".into()), Some(&jait), &issues, &synced)
+                .into_iter()
+                .map(|c| c.label)
+                .collect::<Vec<_>>(),
+            ["JAIT", "Projects", "Proj", "#42"]
+        );
         assert_eq!(crumbs(View::MyIssues), ["My Issues"]);
         assert_eq!(crumbs(View::Inbox), ["Inbox"]);
         // Missing project falls back to the list crumb rather than a blank.
