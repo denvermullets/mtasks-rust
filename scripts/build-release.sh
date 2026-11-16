@@ -10,7 +10,8 @@
 #
 # A notarized build leaves, in exports/<yymmdd>/jait-<version>/: the stapled
 # JAIT.app, JAIT-<version>.dmg (first-install path) and JAIT-<version>-arm64.zip
-# (the update zip the publish script uploads).
+# (the update zip the publish script uploads) and build-info.json (version,
+# commit, dirty flag).
 #
 # SIGN_IDENTITY overrides the signing identity (default: the only Developer ID
 # Application identity in the keychain). NOTARY_PROFILE overrides the notarytool
@@ -72,7 +73,11 @@ if [[ "$NOTARIZE" == "1" ]]; then
     fi
 fi
 
+# Recorded in build-info.json; read before the build writes anything into the tree.
+COMMIT="$(git rev-parse HEAD)"
+DIRTY=false
 if [[ -n "$(git status --porcelain)" ]]; then
+    DIRTY=true
     echo "warning: working tree has uncommitted changes; this build won't match a commit." >&2
 fi
 
@@ -118,6 +123,14 @@ fi
 echo "==> building"
 rm -rf "$BUNDLED_APP"
 cargo bundle --release
+
+# The bundle's own version (what the app reports, and what the updater compares)
+# must match Cargo.toml.
+PLIST_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$BUNDLED_APP/Contents/Info.plist")"
+if [[ "$PLIST_VERSION" != "$PACKAGE_VERSION" ]]; then
+    echo "Info.plist version '$PLIST_VERSION' differs from Cargo.toml '$PACKAGE_VERSION'." >&2
+    exit 1
+fi
 
 # Never ship a build that talks to the dev server.
 BINARY="$BUNDLED_APP/Contents/MacOS/mtasks-rusty"
@@ -168,6 +181,11 @@ if [[ "$NOTARIZE" == "1" ]]; then
 
     echo "==> zipping the update"
     ditto -c -k --keepParent "$APP" "$ZIP"
+
+    # The publish script reads this to refuse dirty builds and builds whose
+    # commit isn't HEAD. Only notarized builds get one.
+    printf '{\n  "version": "%s",\n  "commit": "%s",\n  "dirty": %s\n}\n' \
+        "$PACKAGE_VERSION" "$COMMIT" "$DIRTY" >"$OUT/build-info.json"
 fi
 
 echo
