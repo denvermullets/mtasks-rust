@@ -514,6 +514,8 @@ pub enum Message {
     OpenUpdatePopover,
     /// Restart now (popover): ask the updater, with the real busy-Terminal state.
     RestartNowClicked,
+    /// "Restart" in the "Restart to update?" confirm.
+    RestartConfirmed,
 
     // Sync
     /// Manual sync (`s`, toast retry): runs immediately.
@@ -676,6 +678,9 @@ pub enum Modal {
     TerminalCloseConfirm(crate::terminal::TerminalId),
     /// Ask before quitting with a busy Terminal.
     QuitConfirm,
+    /// "Restart to update?": Restart now with a busy Terminal. The Quit
+    /// confirm's sibling; Not now keeps the install-on-quit plan.
+    RestartConfirm(semver::Version),
     /// Ask before closing a Tab whose Terminal strip has a busy Terminal.
     TabCloseConfirm(crate::tabs::TabKey),
     /// The update chip's popover (versions, Release notes, Restart now).
@@ -4016,21 +4021,28 @@ impl App {
             QuitPlan::Shutdown => {
                 self.modal = Modal::None;
                 let update = self.on_quit_confirmed();
-                let closings = self.terminals.begin_shutdown();
-                if closings.is_empty() {
-                    return Task::batch([update, iced::exit()]);
-                }
-                let (tx, rx) = iced::futures::channel::oneshot::channel();
-                std::thread::spawn(move || {
-                    crate::terminal::wait_all(closings, QUIT_WAIT);
-                    let _ = tx.send(());
-                });
-                Task::batch([
-                    update,
-                    Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady),
-                ])
+                self.shutdown_after(update)
             }
         }
+    }
+
+    /// Close every Terminal and exit once they have gone (at most `QUIT_WAIT`),
+    /// running `update` alongside. Restart now calls this directly, after its
+    /// own swap, so the quit hook doesn't swap a second time.
+    pub(super) fn shutdown_after(&mut self, update: Task<Message>) -> Task<Message> {
+        let closings = self.terminals.begin_shutdown();
+        if closings.is_empty() {
+            return Task::batch([update, iced::exit()]);
+        }
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            crate::terminal::wait_all(closings, QUIT_WAIT);
+            let _ = tx.send(());
+        });
+        Task::batch([
+            update,
+            Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady),
+        ])
     }
 
     pub fn title(&self) -> String {
@@ -4092,6 +4104,7 @@ impl App {
     fn confirm_accept_message(&self) -> Option<Message> {
         match &self.modal {
             Modal::QuitConfirm => Some(Message::QuitConfirmed),
+            Modal::RestartConfirm(_) => Some(Message::RestartConfirmed),
             Modal::TabCloseConfirm(key) => Some(Message::Tab(TabMessage::CloseConfirmed(key.clone()))),
             Modal::TerminalCloseConfirm(id) => Some(Message::Terminal(
                 crate::terminal::TerminalMessage::CloseConfirmed(*id),
@@ -6686,6 +6699,11 @@ impl App {
             }
 
             Message::CloseModal => {
+                // "Not now": the Staged update stays, installing on the next quit.
+                if matches!(self.modal, Modal::RestartConfirm(_)) {
+                    self.modal = Modal::None;
+                    return self.apply_updater_event(crate::updater::machine::Event::RestartDeclined);
+                }
                 // Cancelling the quit ask also cancels the terminate behind it.
                 if self.modal == Modal::QuitConfirm {
                     crate::quit::reply_to_terminate(false);
@@ -7615,6 +7633,11 @@ impl App {
                 self.modal = Modal::None;
                 let busy_terminals = self.terminals.any_busy();
                 return self.apply_updater_event(crate::updater::machine::Event::RestartRequested { busy_terminals });
+            }
+
+            Message::RestartConfirmed => {
+                self.modal = Modal::None;
+                return self.apply_updater_event(crate::updater::machine::Event::RestartConfirmed);
             }
 
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
@@ -8978,6 +9001,17 @@ impl App {
                     crate::updater::swap::quit_confirm_body(pending.as_ref()),
                     "Quit",
                     Message::QuitConfirmed,
+                );
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::RestartConfirm(version) => {
+                let confirm = crate::views::terminal_panel::confirm_modal_with(
+                    "Restart to update?",
+                    crate::updater::swap::restart_confirm_body(version),
+                    "Restart",
+                    Message::RestartConfirmed,
+                    "Not now",
+                    Message::CloseModal,
                 );
                 iced::widget::stack![base, confirm].into()
             }

@@ -136,11 +136,60 @@ impl App {
     pub(super) fn apply_updater_event(&mut self, event: Event) -> Task<Message> {
         let effects = self.updater.update(event);
         self.persist_updater();
-        let tasks: Vec<_> = effects
-            .into_iter()
-            .map(|effect| self.run_updater_effect(effect))
-            .collect();
+        let mut tasks = Vec::new();
+        // Restart now's effects come in order (swap, relaunch, exit) and a
+        // failed swap must stop the rest.
+        let mut swap_failed = false;
+        for effect in effects {
+            if !swap::runs_after_swap(&effect, swap_failed) {
+                continue;
+            }
+            match effect {
+                Effect::ConfirmRestart { version } => {
+                    self.modal = super::Modal::RestartConfirm(version);
+                    crate::quit::bring_to_front();
+                }
+                Effect::SwapStaged { version } => {
+                    // Failure only means the old version keeps running.
+                    if let Err(e) = self.swap_staged(&version) {
+                        eprintln!("update swap failed: {e}");
+                        swap_failed = true;
+                    }
+                }
+                Effect::Relaunch => {
+                    // Without a reopen the app stays up rather than vanish.
+                    swap_failed = !self.spawn_relaunch();
+                }
+                // Not `on_quit_confirmed`: the swap already ran above.
+                Effect::Exit => tasks.push(self.shutdown_after(Task::none())),
+                other => tasks.push(self.run_updater_effect(other)),
+            }
+        }
         Task::batch(tasks)
+    }
+
+    /// Start the detached waiter that reopens the bundle once we have exited.
+    /// False when it couldn't start, so the caller doesn't exit into nothing.
+    fn spawn_relaunch(&self) -> bool {
+        use std::os::unix::process::CommandExt;
+        let InstallContext::SelfInstall { bundle, .. } = &self.install else {
+            return false;
+        };
+        let args = swap::relaunch_args(std::process::id(), bundle);
+        let spawned = std::process::Command::new("/bin/sh")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn();
+        match spawned {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("update relaunch failed: {e}");
+                false
+            }
+        }
     }
 
     /// Save the updater's persisted fields to the config, only when they changed.
@@ -276,17 +325,12 @@ impl App {
                 self.show_ready_notice(&version);
                 Task::none()
             }
-            // TODO(JRST-524): the "Restart to update?" confirm.
-            Effect::ConfirmRestart { .. } => Task::none(),
-            Effect::SwapStaged { version } => {
-                // Failure only means the old version keeps running.
-                if let Err(e) = self.swap_staged(&version) {
-                    eprintln!("update swap failed: {e}");
-                }
-                Task::none()
-            }
-            // TODO(JRST-524): relaunch, exit.
-            Effect::Relaunch | Effect::Exit => Task::none(),
+            // Restart now's effects run in `apply_updater_event` (they need
+            // `&mut self` and run in order).
+            Effect::ConfirmRestart { .. }
+            | Effect::SwapStaged { .. }
+            | Effect::Relaunch
+            | Effect::Exit => Task::none(),
         }
     }
 }

@@ -65,6 +65,37 @@ pub fn quit_confirm_body(pending: Option<&Version>) -> String {
     }
 }
 
+/// Body of the "Restart to update?" confirm (Restart now with a busy Terminal).
+pub fn restart_confirm_body(version: &Version) -> String {
+    format!(
+        "A program is still running in a Terminal. Restarting will stop it. \
+         JAIT {version} installs now; choose Not now to install it when JAIT quits."
+    )
+}
+
+/// Arguments for the detached `/bin/sh` that reopens JAIT after we exit: wait
+/// until `pid` is gone, then `open` the bundle. Plain `open`, never `-n`, so
+/// there is only ever one JAIT (and one SQLite writer). The pid and bundle are
+/// positional parameters, so no path needs shell quoting. Pure.
+pub fn relaunch_args(pid: u32, bundle: &Path) -> Vec<String> {
+    let script = r#"while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; exec /usr/bin/open "$2""#;
+    vec![
+        "-c".into(),
+        script.into(),
+        "jait-relaunch".into(),
+        pid.to_string(),
+        bundle.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Should this effect of a Restart now run, given whether the swap failed?
+/// After a failed swap nothing relaunches or exits: the old version keeps
+/// running and the Staged update stays for the next quit. Pure.
+pub fn runs_after_swap(effect: &super::machine::Effect, swap_failed: bool) -> bool {
+    use super::machine::Effect;
+    !(swap_failed && matches!(effect, Effect::Relaunch | Effect::Exit))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwapError {
     /// The staged bundle or its verified marker is missing; nothing was touched.
@@ -170,6 +201,32 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::fs;
+
+    #[test]
+    fn relaunch_waits_for_pid_then_opens_once() {
+        let args = relaunch_args(4242, Path::new("/Applications/My JAIT.app"));
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains(r#"kill -0 "$1""#));
+        assert!(args[1].contains(r#"/usr/bin/open "$2""#));
+        assert!(!args[1].contains("-n"), "never open -n");
+        assert_eq!(args[3], "4242");
+        assert_eq!(args[4], "/Applications/My JAIT.app");
+    }
+
+    #[test]
+    fn failed_swap_stops_relaunch_and_exit() {
+        use super::super::machine::Effect;
+        assert!(!runs_after_swap(&Effect::Relaunch, true));
+        assert!(!runs_after_swap(&Effect::Exit, true));
+        assert!(runs_after_swap(&Effect::Relaunch, false));
+        assert!(runs_after_swap(&Effect::Exit, false));
+    }
+
+    #[test]
+    fn restart_confirm_names_the_version_and_not_now() {
+        let body = restart_confirm_body(&Version::new(0, 13, 0));
+        assert!(body.contains("0.13.0") && body.contains("Not now"));
+    }
 
     fn v(s: &str) -> Version {
         Version::parse(s).unwrap()
