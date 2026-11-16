@@ -22,11 +22,11 @@ use super::verify::{self, StageError, StageRequest, SystemTools};
 
 /// Where the Release manifest (`latest.json`) lives. GitHub redirects
 /// `latest/download/` to the newest Release's asset. Never the REST API.
-pub const DEFAULT_FEED_URL: &str =
+pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/denvermullets/jait-releases/releases/latest/download/latest.json";
 
-/// Env var that overrides [`DEFAULT_FEED_URL`] (draft or local manifests).
-pub const FEED_URL_ENV: &str = "JAIT_UPDATE_FEED_URL";
+/// Env var that overrides [`DEFAULT_MANIFEST_URL`] (draft or local manifests).
+pub const MANIFEST_URL_ENV: &str = "JAIT_UPDATE_FEED_URL";
 
 pub type EdgeFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -73,11 +73,11 @@ pub struct DownloadRequest {
 }
 
 /// The manifest URL: the env override if set and non-blank, else the default.
-pub fn feed_url(env_override: Option<String>) -> String {
+pub fn manifest_url(env_override: Option<String>) -> String {
     env_override
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_FEED_URL.to_string())
+        .unwrap_or_else(|| DEFAULT_MANIFEST_URL.to_string())
 }
 
 /// Real edge: reqwest, following redirects.
@@ -90,7 +90,7 @@ impl HttpEdge {
     /// Reads `JAIT_UPDATE_FEED_URL` once, at construction.
     pub fn from_env() -> Self {
         HttpEdge {
-            url: feed_url(std::env::var(FEED_URL_ENV).ok()),
+            url: manifest_url(std::env::var(MANIFEST_URL_ENV).ok()),
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -306,11 +306,11 @@ mod tests {
     }
 
     #[test]
-    fn feed_url_defaults_and_honours_a_non_blank_override() {
-        assert_eq!(feed_url(None), DEFAULT_FEED_URL);
-        assert_eq!(feed_url(Some("  ".into())), DEFAULT_FEED_URL);
+    fn manifest_url_defaults_and_honours_a_non_blank_override() {
+        assert_eq!(manifest_url(None), DEFAULT_MANIFEST_URL);
+        assert_eq!(manifest_url(Some("  ".into())), DEFAULT_MANIFEST_URL);
         assert_eq!(
-            feed_url(Some(" http://localhost:9/latest.json ".into())),
+            manifest_url(Some(" http://localhost:9/latest.json ".into())),
             "http://localhost:9/latest.json"
         );
     }

@@ -205,7 +205,7 @@ impl App {
     /// False when it couldn't start, so the caller doesn't exit into nothing.
     fn spawn_relaunch(&self) -> bool {
         use std::os::unix::process::CommandExt;
-        let InstallContext::SelfInstall { bundle, .. } = &self.install else {
+        let Some(bundle) = self.install.bundle() else {
             return false;
         };
         let args = swap::relaunch_args(std::process::id(), bundle);
@@ -242,7 +242,7 @@ impl App {
     /// `DownloadProgress`; the end as `DownloadFinished`, `BrokenDownload` or
     /// `DownloadFailed`. A cancelled download ends silently.
     fn start_download(&self, info: UpdateInfo) -> Task<Message> {
-        let InstallContext::SelfInstall { staging_dir, .. } = &self.install else {
+        let Some(staging_dir) = self.install.staging_dir() else {
             return Task::none();
         };
         let req = edge::DownloadRequest {
@@ -250,7 +250,7 @@ impl App {
             version: info.version,
             sha256: info.zip_sha256,
             size: info.zip_size,
-            staging_dir: staging_dir.clone(),
+            staging_dir: staging_dir.to_path_buf(),
         };
         let edge = self.update_edge.clone();
         let stream = iced::stream::channel(64, move |mut out| async move {
@@ -277,13 +277,13 @@ impl App {
     /// Unzip and verify the downloaded Update. Ends as `StagingVerified`,
     /// `BrokenDownload` (unzip) or `SecurityFailure` (codesign/spctl/version).
     fn start_stage(&self, info: UpdateInfo) -> Task<Message> {
-        let InstallContext::SelfInstall { bundle, staging_dir } = &self.install else {
+        let (Some(bundle), Some(staging_dir)) = (self.install.bundle(), self.install.staging_dir()) else {
             return Task::none();
         };
         let req = StageRequest {
             version: info.version,
-            staging_dir: staging_dir.clone(),
-            running_bundle: bundle.clone(),
+            staging_dir: staging_dir.to_path_buf(),
+            running_bundle: bundle.to_path_buf(),
             running_version: self.updater.installed().clone(),
         };
         let edge = self.update_edge.clone();
@@ -347,11 +347,11 @@ impl App {
             }
             Effect::Stage(info) => self.start_stage(info),
             Effect::DeleteStaging(version) => {
-                let InstallContext::SelfInstall { staging_dir, .. } = &self.install else {
+                let Some(staging_dir) = self.install.staging_dir() else {
                     return Task::none();
                 };
                 let edge = self.update_edge.clone();
-                let dir = staging_dir.clone();
+                let dir = staging_dir.to_path_buf();
                 Task::perform(async move { edge.delete_staging(dir, version).await }, |_| {
                     Message::Noop
                 })

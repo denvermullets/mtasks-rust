@@ -3945,7 +3945,7 @@ impl App {
 
         // Drop partial downloads and unverified extracts from a past run, once,
         // before any download can take the update lock.
-        if let crate::updater::install::InstallContext::SelfInstall { staging_dir, .. } = &app.install {
+        if let Some(staging_dir) = app.install.staging_dir() {
             let _ = crate::updater::staging::cleanup_at_launch(
                 &crate::updater::staging::RealStagingFs,
                 staging_dir,

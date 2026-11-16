@@ -16,6 +16,24 @@ pub enum InstallContext {
     SelfInstall { bundle: PathBuf, staging_dir: PathBuf },
 }
 
+impl InstallContext {
+    /// Where Staged updates live, when this install can self-install.
+    pub fn staging_dir(&self) -> Option<&Path> {
+        match self {
+            InstallContext::SelfInstall { staging_dir, .. } => Some(staging_dir),
+            _ => None,
+        }
+    }
+
+    /// The running `.app`, when this install can self-install.
+    pub fn bundle(&self) -> Option<&Path> {
+        match self {
+            InstallContext::SelfInstall { bundle, .. } => Some(bundle),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmgReason {
     Translocated,
