@@ -17,6 +17,7 @@ use semver::Version;
 use super::download::{self, DownloadError, ZipSink};
 use super::manifest::{self, ParsedManifest};
 use super::staging::{LockError, UpdateLock};
+use super::swap;
 use super::verify::{self, StageError, StageRequest, SystemTools};
 
 /// Where the Release manifest (`latest.json`) lives. GitHub redirects
@@ -55,6 +56,10 @@ pub trait UpdateEdge: Send + Sync {
 
     /// Delete every staging file of a failed Update (zip, partial, staged dir).
     fn delete_staging(&self, staging_dir: PathBuf, version: Version) -> EdgeFuture<()>;
+
+    /// Swap the Staged update's bundle in for `bundle` (see `swap::run`).
+    /// Synchronous on purpose: it is a few renames, and the quit path can't await.
+    fn swap(&self, bundle: PathBuf, staging_dir: PathBuf, version: Version) -> Result<(), String>;
 }
 
 /// What one download needs.
@@ -152,6 +157,11 @@ impl UpdateEdge for HttpEdge {
 
     fn delete_staging(&self, staging_dir: PathBuf, version: Version) -> EdgeFuture<()> {
         self.remove_staged(staging_dir, version)
+    }
+
+    fn swap(&self, bundle: PathBuf, staging_dir: PathBuf, version: Version) -> Result<(), String> {
+        let plan = swap::SwapPlan::new(&bundle, &staging_dir, &version);
+        swap::run(&swap::SystemOps, &plan).map_err(|e| e.to_string())
     }
 }
 
@@ -281,6 +291,10 @@ mod tests {
 
         fn delete_staging(&self, _d: PathBuf, _v: Version) -> EdgeFuture<()> {
             Box::pin(async {})
+        }
+
+        fn swap(&self, _b: PathBuf, _d: PathBuf, _v: Version) -> Result<(), String> {
+            Ok(())
         }
     }
 

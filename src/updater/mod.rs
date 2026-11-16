@@ -14,4 +14,5 @@ pub mod machine;
 pub mod manifest;
 pub mod install;
 pub mod staging;
+pub mod swap;
 pub mod verify;

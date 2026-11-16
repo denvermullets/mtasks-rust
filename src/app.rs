@@ -3961,10 +3961,12 @@ impl App {
     /// Runs once per quit, after the ask is answered (or skipped because
     /// nothing is busy) and before any Terminal is closed or waited on. Every
     /// quit path lands here: close button, Cmd+Q, Dock, AppleScript, and
-    /// logout/restart/shutdown. JRST-519 hook: do the Staged update's bundle
-    /// swap here. Keep it quick; the Terminal wait that follows can take up to
-    /// `QUIT_WAIT`.
-    fn on_quit_confirmed(&mut self) {}
+    /// logout/restart/shutdown. Installs the Staged update (JRST-519) and
+    /// drops an in-flight download. Keep it quick; the Terminal wait that
+    /// follows can take up to `QUIT_WAIT`.
+    fn on_quit_confirmed(&mut self) -> Task<Message> {
+        self.install_on_quit()
+    }
 
     /// Quit: ask first if any Terminal is busy (any team, shown or hidden),
     /// then close every Terminal and exit as soon as they have all gone,
@@ -3981,17 +3983,20 @@ impl App {
             }
             QuitPlan::Shutdown => {
                 self.modal = Modal::None;
-                self.on_quit_confirmed();
+                let update = self.on_quit_confirmed();
                 let closings = self.terminals.begin_shutdown();
                 if closings.is_empty() {
-                    return iced::exit();
+                    return Task::batch([update, iced::exit()]);
                 }
                 let (tx, rx) = iced::futures::channel::oneshot::channel();
                 std::thread::spawn(move || {
                     crate::terminal::wait_all(closings, QUIT_WAIT);
                     let _ = tx.send(());
                 });
-                Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady)
+                Task::batch([
+                    update,
+                    Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady),
+                ])
             }
         }
     }

@@ -14,6 +14,7 @@ use crate::updater::download::DownloadError;
 use crate::updater::edge;
 use crate::updater::install::InstallContext;
 use crate::updater::machine::{CheckKind, Effect, Event, UpdateInfo};
+use crate::updater::swap;
 use crate::updater::verify::{StageError, StageRequest};
 use iced::futures::SinkExt;
 
@@ -188,6 +189,28 @@ impl App {
         )
     }
 
+    /// Swap the Staged update `version` in for the running bundle. Shared by
+    /// the Clean-quit install and Restart now. Never called at launch.
+    pub(super) fn swap_staged(&self, version: &semver::Version) -> Result<(), String> {
+        let Some((bundle, staging_dir, version)) = swap::quit_plan(&self.install, Some(version))
+        else {
+            return Ok(());
+        };
+        self.update_edge.swap(bundle, staging_dir, version)
+    }
+
+    /// Runs on every Clean quit: drop an in-flight download, then install the
+    /// Staged update if there is one (independent of the auto-check toggle).
+    pub(super) fn install_on_quit(&mut self) -> Task<Message> {
+        let task = self.apply_updater_event(Event::QuitConfirmed);
+        if let Some(ready) = self.updater.view().ready {
+            if let Err(e) = self.swap_staged(&ready.version) {
+                eprintln!("update swap failed: {e}");
+            }
+        }
+        task
+    }
+
     /// Carry out one effect. Exhaustive on purpose: a new `Effect` variant must
     /// be handled (or deliberately ignored) here.
     fn run_updater_effect(&self, effect: Effect) -> Task<Message> {
@@ -224,8 +247,15 @@ impl App {
             }
             // TODO(JRST-524): the ready toast and the "Restart to update?" confirm.
             Effect::ShowReadyNotice { .. } | Effect::ConfirmRestart { .. } => Task::none(),
-            // TODO(JRST-519): swap the Staged update in, relaunch, exit.
-            Effect::SwapStaged { .. } | Effect::Relaunch | Effect::Exit => Task::none(),
+            Effect::SwapStaged { version } => {
+                // Failure only means the old version keeps running.
+                if let Err(e) = self.swap_staged(&version) {
+                    eprintln!("update swap failed: {e}");
+                }
+                Task::none()
+            }
+            // TODO(JRST-524): relaunch, exit.
+            Effect::Relaunch | Effect::Exit => Task::none(),
         }
     }
 }
