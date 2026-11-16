@@ -1,1 +1,330 @@
-//! Updater state machine (JRST-491, JRST-496).
+//! The updater state machine: the deep seam of the self-update feature.
+//!
+//! Pure. Events go in through [`UpdaterState::update`]; the state changes and a
+//! list of [`Effect`]s comes out. The app maps effects to Tasks (HTTP, ditto,
+//! codesign, the swap) and feeds their results back in as [`Event`]s. The UI
+//! only reads [`UpdaterState::view`] and never reimplements a rule.
+//!
+//! Lifted from the prototype's `Updater` reducer (JRST-473). The clock is never
+//! read here: events that need a time carry it (`at`).
+//!
+//! Extending: add a variant to [`Event`] / [`Effect`], a match arm in
+//! `update`, and (if the UI needs it) a field on [`UpdaterView`]. Match arms for
+//! unrelated events stay untouched, so tickets can extend this in parallel.
+
+use chrono::{DateTime, Utc};
+use semver::Version;
+
+use super::manifest::{Manifest, ParsedManifest, ReleaseNotes};
+
+/// Who asked for a check. Manual results are always shown; automatic ones stay
+/// quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckKind {
+    Manual,
+    Automatic,
+}
+
+/// Everything the download and staging effects need about an Update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateInfo {
+    pub version: Version,
+    pub zip_url: String,
+    pub zip_sha256: String,
+    pub zip_size: u64,
+    /// Release notes from the installed version (exclusive) to `version`.
+    pub notes: ReleaseNotes,
+}
+
+impl UpdateInfo {
+    fn from_manifest(m: &Manifest, installed: &Version) -> Self {
+        UpdateInfo {
+            version: m.version.clone(),
+            zip_url: m.zip_url.clone(),
+            zip_sha256: m.zip_sha256.clone(),
+            zip_size: m.zip_size,
+            notes: m.notes_since(installed),
+        }
+    }
+}
+
+/// Things that happened. The app feeds these in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// A check was requested (by the user, or by the launch / timer / wake
+    /// schedule).
+    CheckStarted(CheckKind),
+    /// The manifest was fetched and parsed. `at` is when the check finished.
+    CheckFinished {
+        at: DateTime<Utc>,
+        manifest: ParsedManifest,
+    },
+}
+
+/// Things the app must do. The machine returns these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// Fetch and parse the Release manifest, then send `Event::CheckFinished`.
+    FetchManifest,
+    /// Download the Update's zip.
+    Download(UpdateInfo),
+}
+
+/// What the updater is busy with right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Activity {
+    Idle,
+    Checking,
+    Downloading(UpdateInfo),
+}
+
+/// What the UI should say about the updater. Derived from state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    /// Nothing to show (idle, or an automatic step in progress).
+    Idle,
+    /// "Checking…" (manual checks only).
+    Checking,
+    /// "Up to date ✓" (after a manual check only).
+    UpToDate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdaterView {
+    pub status: Status,
+    pub last_checked: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdaterState {
+    installed: Version,
+    activity: Activity,
+    /// Did the user ask for the step that's running?
+    manual: bool,
+    last_checked: Option<DateTime<Utc>>,
+    up_to_date_shown: bool,
+}
+
+impl UpdaterState {
+    pub fn new(installed: Version) -> Self {
+        UpdaterState {
+            installed,
+            activity: Activity::Idle,
+            manual: false,
+            last_checked: None,
+            up_to_date_shown: false,
+        }
+    }
+
+    pub fn installed(&self) -> &Version {
+        &self.installed
+    }
+
+    /// Is a check or download running?
+    pub fn is_busy(&self) -> bool {
+        !matches!(self.activity, Activity::Idle)
+    }
+
+    pub fn view(&self) -> UpdaterView {
+        let status = match &self.activity {
+            Activity::Checking if self.manual => Status::Checking,
+            Activity::Idle if self.up_to_date_shown => Status::UpToDate,
+            _ => Status::Idle,
+        };
+        UpdaterView {
+            status,
+            last_checked: self.last_checked,
+        }
+    }
+
+    /// Apply an event; returns the effects the app must carry out.
+    pub fn update(&mut self, event: Event) -> Vec<Effect> {
+        match event {
+            Event::CheckStarted(kind) => self.check_started(kind),
+            Event::CheckFinished { at, manifest } => self.check_finished(at, manifest),
+        }
+    }
+
+    fn check_started(&mut self, kind: CheckKind) -> Vec<Effect> {
+        if self.is_busy() {
+            // A step is already running. A manual request adopts it, so its
+            // result is shown. No second check starts.
+            if kind == CheckKind::Manual {
+                self.manual = true;
+            }
+            return vec![];
+        }
+        self.activity = Activity::Checking;
+        self.manual = kind == CheckKind::Manual;
+        self.up_to_date_shown = false;
+        vec![Effect::FetchManifest]
+    }
+
+    fn check_finished(&mut self, at: DateTime<Utc>, manifest: ParsedManifest) -> Vec<Effect> {
+        if self.activity != Activity::Checking {
+            return vec![]; // stale answer, no check is running
+        }
+        self.last_checked = Some(at);
+        match manifest {
+            ParsedManifest::SelfInstall(m) if m.is_update(&self.installed) => {
+                let info = UpdateInfo::from_manifest(&m, &self.installed);
+                self.activity = Activity::Downloading(info.clone());
+                vec![Effect::Download(info)]
+            }
+            // A DMG-only offer is handled by a later ticket (JRST-515); until
+            // then it is treated as nothing to self-install.
+            _ => {
+                self.activity = Activity::Idle;
+                self.up_to_date_shown = self.manual;
+                self.manual = false;
+                vec![]
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::updater::manifest::parse;
+
+    pub fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    pub fn at(h: u32) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&format!("2026-11-17T{h:02}:00:00Z"))
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// A schema 1 manifest for `version`, with notes for each of `notes`.
+    pub fn manifest(version: &str, notes: &[&str]) -> ParsedManifest {
+        let releases: Vec<_> = notes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "version": n, "published_at": "2026-11-17T10:00:00Z", "notes": format!("notes {n}")
+                })
+            })
+            .collect();
+        let base = "https://github.com/denvermullets/jait-releases/releases/download";
+        let j = serde_json::json!({
+            "schema": 1, "version": version, "published_at": "2026-11-17T10:00:00Z",
+            "zip_url": format!("{base}/v{version}/JAIT-{version}-arm64.zip"),
+            "zip_sha256": "0".repeat(64), "zip_size": 1000u64,
+            "dmg_url": format!("{base}/v{version}/JAIT-{version}.dmg"),
+            "releases": releases,
+        });
+        parse(j.to_string().as_bytes()).unwrap()
+    }
+
+    pub fn finished(h: u32, version: &str) -> Event {
+        Event::CheckFinished {
+            at: at(h),
+            manifest: manifest(version, &[version]),
+        }
+    }
+
+    fn state() -> UpdaterState {
+        UpdaterState::new(v("0.12.0"))
+    }
+
+    #[test]
+    fn manual_check_shows_checking_then_up_to_date() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Manual)),
+            vec![Effect::FetchManifest]
+        );
+        assert_eq!(s.view().status, Status::Checking);
+        assert_eq!(s.update(finished(9, "0.12.0")), vec![]);
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn automatic_check_that_finds_nothing_shows_nothing() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Automatic)),
+            vec![Effect::FetchManifest]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        s.update(finished(9, "0.12.0"));
+        assert_eq!(s.view().status, Status::Idle);
+    }
+
+    #[test]
+    fn older_manifest_is_not_an_update() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(finished(9, "0.11.0")), vec![]);
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn finding_an_update_emits_a_download_with_notes_since_installed() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let ev = Event::CheckFinished {
+            at: at(9),
+            manifest: manifest("0.14.0", &["0.12.0", "0.13.0", "0.14.0"]),
+        };
+        let fx = s.update(ev);
+        let [Effect::Download(info)] = fx.as_slice() else {
+            panic!("expected one download effect, got {fx:?}");
+        };
+        assert_eq!(info.version, v("0.14.0"));
+        let ReleaseNotes::Available(n) = &info.notes else {
+            panic!()
+        };
+        assert_eq!(n.len(), 2);
+        assert!(s.is_busy());
+    }
+
+    #[test]
+    fn last_check_time_is_recorded_on_every_finished_check() {
+        let mut s = state();
+        assert_eq!(s.view().last_checked, None);
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        s.update(finished(9, "0.12.0"));
+        assert_eq!(s.view().last_checked, Some(at(9)));
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(finished(11, "0.13.0")); // finds an Update
+        assert_eq!(s.view().last_checked, Some(at(11)));
+    }
+
+    #[test]
+    fn a_new_check_clears_up_to_date() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(finished(9, "0.12.0"));
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.view().status, Status::Idle);
+    }
+
+    #[test]
+    fn manual_request_during_an_automatic_check_adopts_it() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(Event::CheckStarted(CheckKind::Manual)), vec![]);
+        assert_eq!(s.view().status, Status::Checking);
+        s.update(finished(9, "0.12.0"));
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn automatic_request_while_busy_is_ignored() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(Event::CheckStarted(CheckKind::Automatic)), vec![]);
+        assert_eq!(s.view().status, Status::Checking);
+    }
+
+    #[test]
+    fn a_stale_check_result_is_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(finished(9, "0.13.0")), vec![]);
+        assert_eq!(s.view().last_checked, None);
+    }
+}
