@@ -68,6 +68,14 @@ pub enum Event {
     /// Later or x on the ready notice: hide the toast for this version only
     /// (JRST-501). The chip stays.
     NoticeDismissed { version: Version },
+    /// Restart now (JRST-503). `busy_terminals` is whether any Terminal has a
+    /// running foreground process.
+    RestartRequested { busy_terminals: bool },
+    /// The user confirmed "Restart to update?".
+    RestartConfirmed,
+    /// "Not now" on that confirm: the Staged update installs at the next Clean
+    /// quit instead.
+    RestartDeclined,
 }
 
 /// Things the app must do. The machine returns these.
@@ -88,6 +96,15 @@ pub enum Effect {
     /// Delete the staging files of a Staged update that a newer verified one
     /// replaced (JRST-502).
     RemoveStaged { version: Version },
+    /// Ask "Restart to update?" (busy Terminals). The answer comes back as
+    /// `RestartConfirmed` / `RestartDeclined`.
+    ConfirmRestart { version: Version },
+    /// Swap the Staged update in for the installed bundle.
+    SwapStaged { version: Version },
+    /// Relaunch the app (after the swap).
+    Relaunch,
+    /// Exit this process (after the relaunch was spawned).
+    Exit,
 }
 
 /// What the updater is busy with right now.
@@ -141,6 +158,8 @@ pub struct UpdaterState {
     staged: Option<UpdateInfo>,
     /// The one version whose ready toast the user dismissed with Later.
     notice_dismissed: Option<Version>,
+    /// A "Restart to update?" confirm is open.
+    restart_confirming: bool,
 }
 
 impl UpdaterState {
@@ -153,6 +172,7 @@ impl UpdaterState {
             up_to_date_shown: false,
             staged: None,
             notice_dismissed: None,
+            restart_confirming: false,
         }
     }
 
@@ -208,6 +228,46 @@ impl UpdaterState {
             Event::StagingVerified => self.staging_verified(),
             Event::NoticeDismissed { version } => {
                 self.notice_dismissed = Some(version);
+                vec![]
+            }
+            Event::RestartRequested { busy_terminals } => self.restart_requested(busy_terminals),
+            Event::RestartConfirmed => self.restart_confirmed(),
+            Event::RestartDeclined => {
+                self.restart_confirming = false;
+                vec![]
+            }
+        }
+    }
+
+    fn swap_and_relaunch(&mut self, version: Version) -> Vec<Effect> {
+        self.restart_confirming = false;
+        vec![
+            Effect::SwapStaged { version },
+            Effect::Relaunch,
+            Effect::Exit,
+        ]
+    }
+
+    fn restart_requested(&mut self, busy_terminals: bool) -> Vec<Effect> {
+        let Some(version) = self.staged.as_ref().map(|i| i.version.clone()) else {
+            return vec![]; // nothing staged to restart into
+        };
+        if busy_terminals {
+            self.restart_confirming = true;
+            vec![Effect::ConfirmRestart { version }]
+        } else {
+            self.swap_and_relaunch(version)
+        }
+    }
+
+    fn restart_confirmed(&mut self) -> Vec<Effect> {
+        if !self.restart_confirming {
+            return vec![]; // stray answer
+        }
+        match self.staged.as_ref().map(|i| i.version.clone()) {
+            Some(version) => self.swap_and_relaunch(version),
+            None => {
+                self.restart_confirming = false;
                 vec![]
             }
         }
@@ -607,5 +667,56 @@ pub(super) mod tests {
         let mut s = state();
         let fx = stage(&mut s, 9, "0.13.0");
         assert!(!fx.iter().any(|e| matches!(e, Effect::RemoveStaged { .. })));
+    }
+
+    // --- JRST-503: Restart now ---
+
+    fn swap_relaunch_exit(version: &str) -> Vec<Effect> {
+        vec![
+            Effect::SwapStaged { version: v(version) },
+            Effect::Relaunch,
+            Effect::Exit,
+        ]
+    }
+
+    #[test]
+    fn restart_now_without_busy_terminals_swaps_relaunches_exits() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        assert_eq!(
+            s.update(Event::RestartRequested { busy_terminals: false }),
+            swap_relaunch_exit("0.13.0")
+        );
+    }
+
+    #[test]
+    fn restart_now_with_busy_terminals_confirms_first() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        assert_eq!(
+            s.update(Event::RestartRequested { busy_terminals: true }),
+            vec![Effect::ConfirmRestart { version: v("0.13.0") }]
+        );
+        assert_eq!(s.update(Event::RestartConfirmed), swap_relaunch_exit("0.13.0"));
+        // Answered once; a repeat does nothing.
+        assert_eq!(s.update(Event::RestartConfirmed), vec![]);
+    }
+
+    #[test]
+    fn not_now_keeps_the_staged_update_for_the_next_clean_quit() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::RestartRequested { busy_terminals: true });
+        assert_eq!(s.update(Event::RestartDeclined), vec![]);
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+        // The declined confirm can't be confirmed later by a stray event.
+        assert_eq!(s.update(Event::RestartConfirmed), vec![]);
+    }
+
+    #[test]
+    fn restart_with_nothing_staged_does_nothing() {
+        let mut s = state();
+        assert_eq!(s.update(Event::RestartRequested { busy_terminals: false }), vec![]);
+        assert_eq!(s.update(Event::RestartRequested { busy_terminals: true }), vec![]);
     }
 }
