@@ -746,6 +746,13 @@ pub(super) mod tests {
         }
     }
 
+    fn manifest_notes(version: &str, notes: &[&str]) -> ReleaseNotes {
+        match manifest(version, notes) {
+            ParsedManifest::SelfInstall(m) => m.notes_since(&v("0.12.0")),
+            ParsedManifest::DmgOnly(_) => unreachable!(),
+        }
+    }
+
     fn state() -> UpdaterState {
         UpdaterState::new(v("0.12.0"))
     }
@@ -974,6 +981,18 @@ pub(super) mod tests {
         let mut s = state();
         assert_eq!(s.update(Event::StagedRestored { version: v("0.13.0") }), vec![]);
         assert_eq!(s.view().ready.map(|r| r.version), Some(v("0.13.0")));
+    }
+
+    #[test]
+    fn a_restored_staged_update_adopts_its_notes_from_a_later_check() {
+        let mut s = state();
+        s.update(Event::StagedRestored { version: v("0.13.0") });
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        // Same version as staged: no download, no second ready notice.
+        assert_eq!(s.update(finished(9, "0.13.0")), vec![]);
+        let notes = s.view().ready.unwrap().notes;
+        assert_ne!(notes, ReleaseNotes::Unavailable);
+        assert_eq!(notes, manifest_notes("0.13.0", &["0.13.0"]));
     }
 
     #[test]
