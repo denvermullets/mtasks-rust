@@ -150,12 +150,22 @@ echo "All guards passed for $APP_NAME $VERSION (commit ${COMMIT:0:12})."
 # ── Release ──
 
 source "$ROOT/scripts/lib/publish-steps.sh"
+source "$ROOT/scripts/lib/changelog-releases.sh"
+
+# The manifest's releases and the release body both come from CHANGELOG.md.
+# $LIVE only holds a manifest when the guards saw a 200 (not on the first Release).
+[[ -n "$(changelog_notes CHANGELOG.md "$VERSION")" ]] \
+    || refuse "the $VERSION section of CHANGELOG.md has no notes. Run /changelog."
+PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+LIVE_FOR_NOTES=""
+[[ "$STATUS" == "200" ]] && LIVE_FOR_NOTES="$LIVE"
+RELEASES_JSON="$(changelog_releases_json CHANGELOG.md "$LIVE_FOR_NOTES" "$VERSION" "$PUBLISHED_AT")"
 
 NOTES_FILE="$TMP/release-body.md"
-printf 'Direct download: https://github.com/%s/releases/download/%s/%s-%s.dmg\n' \
-    "$RELEASES_REPO" "$TAG" "$APP_NAME" "$VERSION" >"$NOTES_FILE"
+release_body CHANGELOG.md "$VERSION" \
+    "https://github.com/$RELEASES_REPO/releases/download/$TAG/$APP_NAME-$VERSION.dmg" >"$NOTES_FILE"
 
 publish_release "$NOTES_FILE"
 echo "Published $APP_NAME $VERSION."
 
-# Later steps (release notes from the changelog, source tag) are added by their own tickets.
+# The source tag is added by its own ticket.

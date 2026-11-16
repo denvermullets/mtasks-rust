@@ -57,7 +57,8 @@ delete_leftover_draft() {
 }
 
 # Draft, upload, re-download and compare, go live. Needs VERSION, TAG, ZIP,
-# EXPORT_DIR, TMP, RELEASES_REPO. $1 is the release body file.
+# EXPORT_DIR, TMP, RELEASES_REPO, PUBLISHED_AT (RFC 3339), optional RELEASES_JSON.
+# $1 is the release body file.
 publish_release() {
     local notes_file="$1"
     local dmg="$EXPORT_DIR/$APP_NAME-$VERSION.dmg"
@@ -77,7 +78,7 @@ publish_release() {
     local zip_sha zip_size manifest_sha
     zip_sha="$(sha256_of "$up/$zip_name")"
     zip_size="$(size_of "$up/$zip_name")"
-    render_manifest "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$base/$zip_name" "$zip_sha" \
+    render_manifest "$VERSION" "$PUBLISHED_AT" "$base/$zip_name" "$zip_sha" \
         "$zip_size" "$base/$dmg_name" "${RELEASES_JSON:-}" >"$up/latest.json"
     manifest_sha="$(sha256_of "$up/latest.json")"
 
