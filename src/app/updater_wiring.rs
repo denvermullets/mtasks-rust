@@ -9,7 +9,8 @@ use chrono::Utc;
 use iced::Task;
 
 use super::{App, Message};
-use crate::config::UpdaterConfig;
+use crate::config::{SavedRelaunch, UpdaterConfig};
+use crate::views::toast::ToastKind;
 use crate::updater::download::DownloadError;
 use crate::updater::edge;
 use crate::updater::install::InstallContext;
@@ -150,15 +151,22 @@ impl App {
                     crate::quit::bring_to_front();
                 }
                 Effect::SwapStaged { version } => {
+                    let notes = self.updater.view().ready.map(|r| r.notes);
                     // Failure only means the old version keeps running.
                     if let Err(e) = self.swap_staged(&version) {
                         eprintln!("update swap failed: {e}");
                         swap_failed = true;
+                    } else if let Some(notes) = notes {
+                        // For the "JAIT is now X" toast on the next launch.
+                        self.set_relaunch_marker(Some(SavedRelaunch::for_install(&version, &notes)));
                     }
                 }
                 Effect::Relaunch => {
                     // Without a reopen the app stays up rather than vanish.
                     swap_failed = !self.spawn_relaunch();
+                    if swap_failed {
+                        self.set_relaunch_marker(None);
+                    }
                 }
                 // Not `on_quit_confirmed`: the swap already ran above.
                 Effect::Exit => tasks.push(self.shutdown_after(Task::none())),
@@ -166,6 +174,28 @@ impl App {
             }
         }
         Task::batch(tasks)
+    }
+
+    /// Store (or clear) the marker the next launch reads to show "JAIT is now X".
+    fn set_relaunch_marker(&mut self, marker: Option<SavedRelaunch>) {
+        if self.config.updater.relaunch == marker {
+            return;
+        }
+        let mut cfg = self.config.clone();
+        cfg.updater.relaunch = marker;
+        self.save_config_change(cfg);
+    }
+
+    /// Launch step: show "JAIT is now X" once if Restart now installed this
+    /// version, and clear the marker either way (a stale one shows nothing).
+    pub(super) fn show_relaunch_toast(&mut self) {
+        let Some(marker) = self.config.updater.relaunch.clone() else {
+            return;
+        };
+        if let Some(message) = marker.toast_message(self.updater.installed()) {
+            self.push_toast(message, ToastKind::Info, false);
+        }
+        self.set_relaunch_marker(None);
     }
 
     /// Start the detached waiter that reopens the bundle once we have exited.
@@ -194,7 +224,9 @@ impl App {
 
     /// Save the updater's persisted fields to the config, only when they changed.
     fn persist_updater(&mut self) {
-        let saved = UpdaterConfig::from_state(&self.updater);
+        let mut saved = UpdaterConfig::from_state(&self.updater);
+        // The relaunch marker isn't machine state; keep whatever is stored.
+        saved.relaunch = self.config.updater.relaunch.clone();
         if saved == self.config.updater {
             return;
         }

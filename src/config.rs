@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{DisplayOptions, Filters};
+use crate::updater::manifest::ReleaseNotes;
 use crate::updater::machine::{Event, FailureKind, LastFailure, UpdaterState};
 use semver::Version;
 
@@ -149,6 +150,53 @@ pub struct UpdaterConfig {
     /// Broken-download strikes against one version.
     #[serde(default)]
     pub broken: Option<SavedStrikes>,
+    /// Set just before Restart now exits and cleared at the next launch: the
+    /// version it installed, so that launch can say "JAIT is now X" once. Not
+    /// part of the machine's state (`from_state` leaves it empty; the app keeps
+    /// the stored value when it saves).
+    #[serde(default)]
+    pub relaunch: Option<SavedRelaunch>,
+}
+
+/// What the "JAIT is now X" toast needs after a Restart now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedRelaunch {
+    pub version: String,
+    /// That version's own Release notes (Markdown), when they were known.
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl SavedRelaunch {
+    /// The marker for installing `version`: its own entry out of `notes`.
+    pub fn for_install(version: &Version, notes: &ReleaseNotes) -> Self {
+        let notes = match notes {
+            ReleaseNotes::Available(entries) => entries
+                .iter()
+                .find(|e| &e.version == version)
+                .map(|e| e.notes.trim().to_string())
+                .filter(|n| !n.is_empty()),
+            ReleaseNotes::Unavailable => None,
+        };
+        Self { version: version.to_string(), notes }
+    }
+
+    /// The toast text to show on launch, if this marker is for the version now
+    /// running (a stale marker shows nothing). Pure.
+    pub fn toast_message(&self, running: &Version) -> Option<String> {
+        if Version::parse(&self.version).ok().as_ref() != Some(running) {
+            return None;
+        }
+        let mut msg = format!("JAIT is now {}", self.version);
+        if let Some(notes) = &self.notes {
+            let lines: Vec<&str> = notes.lines().map(str::trim).filter(|l| !l.is_empty()).take(4).collect();
+            if !lines.is_empty() {
+                msg.push('\n');
+                msg.push_str(&lines.join("\n"));
+            }
+        }
+        Some(msg)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,6 +221,7 @@ impl Default for UpdaterConfig {
             dismissed_notice: None,
             blocked_version: None,
             broken: None,
+            relaunch: None,
         }
     }
 }
@@ -194,6 +243,7 @@ impl UpdaterConfig {
                 version: v.to_string(),
                 strikes: n,
             }),
+            relaunch: None,
         }
     }
 
@@ -746,6 +796,52 @@ mod tests {
         assert_eq!(r.dismissed_notice(), Some(&Version::new(0, 13, 0)));
         assert_eq!(r.blocked_version(), Some(&Version::new(0, 14, 0)));
         assert_eq!(r.broken_downloads(&Version::new(0, 15, 0)), 2);
+    }
+
+    fn entry(v: Version, notes: &str) -> crate::updater::manifest::ReleaseEntry {
+        crate::updater::manifest::ReleaseEntry {
+            version: v,
+            published_at: chrono::DateTime::parse_from_rfc3339("2026-11-16T00:00:00Z").unwrap(),
+            notes: notes.into(),
+        }
+    }
+
+    #[test]
+    fn relaunch_marker_takes_only_the_installed_versions_notes() {
+        let notes = ReleaseNotes::Available(vec![
+            entry(Version::new(0, 13, 0), "- Faster boards\n- Fix\n"),
+            entry(Version::new(0, 12, 1), "- Older"),
+        ]);
+        let m = SavedRelaunch::for_install(&Version::new(0, 13, 0), &notes);
+        assert_eq!(m.notes.as_deref(), Some("- Faster boards\n- Fix"));
+        let none = SavedRelaunch::for_install(&Version::new(0, 13, 0), &ReleaseNotes::Unavailable);
+        assert_eq!(none.notes, None);
+    }
+
+    #[test]
+    fn relaunch_toast_shows_only_for_the_running_version() {
+        let m = SavedRelaunch { version: "0.13.0".into(), notes: Some("- Faster boards".into()) };
+        assert_eq!(
+            m.toast_message(&Version::new(0, 13, 0)).as_deref(),
+            Some("JAIT is now 0.13.0\n- Faster boards")
+        );
+        assert_eq!(m.toast_message(&Version::new(0, 12, 0)), None);
+        let bare = SavedRelaunch { version: "0.13.0".into(), notes: None };
+        assert_eq!(bare.toast_message(&Version::new(0, 13, 0)).as_deref(), Some("JAIT is now 0.13.0"));
+    }
+
+    #[test]
+    fn relaunch_marker_round_trips_and_is_absent_by_default() {
+        assert_eq!(UpdaterConfig::default().relaunch, None);
+        let cfg = Config {
+            updater: UpdaterConfig {
+                relaunch: Some(SavedRelaunch { version: "0.13.0".into(), notes: None }),
+                ..UpdaterConfig::default()
+            },
+            ..Default::default()
+        };
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.updater.relaunch, cfg.updater.relaunch);
     }
 
     #[test]

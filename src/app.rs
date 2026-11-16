@@ -3982,6 +3982,7 @@ impl App {
         let task = Task::batch([task, Task::done(Message::InstallTerminateHook)]);
         // Launch check, after the staging cleanup and restore above. The stored
         // auto-check setting was already applied by `config.updater.restore`.
+        app.show_relaunch_toast();
         let launch_check = app.updater_background(updater_wiring::Trigger::Launched);
         let task = Task::batch([task, launch_check]);
 
