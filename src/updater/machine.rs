@@ -172,7 +172,8 @@ pub enum Status {
 
 /// What kind of step failed. The system edge picks the kind; the machine
 /// applies the rule for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FailureKind {
     /// The manifest fetch or parse failed.
     Check,
@@ -263,6 +264,38 @@ impl UpdaterState {
     /// Restore a persisted dismissal at launch.
     pub fn set_dismissed_notice(&mut self, version: Option<Version>) {
         self.notice_dismissed = version;
+    }
+
+    /// Restore the last check time at launch (JRST-510).
+    pub fn set_last_checked(&mut self, at: Option<DateTime<Utc>>) {
+        self.last_checked = at;
+    }
+
+    /// The last failure, for persisting.
+    pub fn last_failure(&self) -> Option<&LastFailure> {
+        self.last_failure.as_ref()
+    }
+
+    /// Restore the last failure at launch. It is recorded but not shown: a
+    /// relaunch starts quiet, Settings still lists it.
+    pub fn set_last_failure(&mut self, failure: Option<LastFailure>) {
+        self.last_failure = failure;
+        self.failure_shown = false;
+    }
+
+    /// The version with broken-download strikes, and how many, for persisting.
+    pub fn broken_strikes(&self) -> Option<(&Version, u8)> {
+        self.broken.as_ref().map(|(v, n)| (v, *n))
+    }
+
+    /// Restore broken-download strikes at launch.
+    pub fn set_broken_strikes(&mut self, strikes: Option<(Version, u8)>) {
+        self.broken = strikes;
+    }
+
+    /// Restore the blocked version at launch.
+    pub fn set_blocked_version(&mut self, version: Option<Version>) {
+        self.blocked = version;
     }
 
     pub fn installed(&self) -> &Version {
