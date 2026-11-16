@@ -3902,6 +3902,14 @@ impl App {
         self.quit_with(false)
     }
 
+    /// Runs once per quit, after the ask is answered (or skipped because
+    /// nothing is busy) and before any Terminal is closed or waited on. Every
+    /// quit path lands here: close button, Cmd+Q, Dock, AppleScript, and
+    /// logout/restart/shutdown. JRST-519 hook: do the Staged update's bundle
+    /// swap here. Keep it quick; the Terminal wait that follows can take up to
+    /// `QUIT_WAIT`.
+    fn on_quit_confirmed(&mut self) {}
+
     /// Quit: ask first if any Terminal is busy (any team, shown or hidden),
     /// then close every Terminal and exit as soon as they have all gone,
     /// waiting at most `QUIT_WAIT` so a stuck process can't keep the app open.
@@ -3911,10 +3919,13 @@ impl App {
             QuitPlan::Ignore => Task::none(),
             QuitPlan::Ask => {
                 self.modal = Modal::QuitConfirm;
+                // A logout, restart or shutdown may find the app in the background.
+                crate::quit::bring_to_front();
                 Task::none()
             }
             QuitPlan::Shutdown => {
                 self.modal = Modal::None;
+                self.on_quit_confirmed();
                 let closings = self.terminals.begin_shutdown();
                 if closings.is_empty() {
                     return iced::exit();

@@ -100,6 +100,14 @@ mod mac {
         }
     }
 
+    pub fn bring_to_front() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let _: () = unsafe { msg_send![&app, activateIgnoringOtherApps: true] };
+    }
+
     pub fn reply(allow: bool) {
         if !PENDING.take() {
             return;
@@ -128,6 +136,14 @@ pub fn reply_to_terminate(allow: bool) {
     mac::reply(allow);
     #[cfg(not(target_os = "macos"))]
     let _ = allow;
+}
+
+/// Brings the app and its quit ask in front of other apps. A logout, restart or
+/// shutdown can arrive while JAIT is in the background, and the ask is only seen
+/// (and Cancel only reachable) in the app's window.
+pub fn bring_to_front() {
+    #[cfg(target_os = "macos")]
+    mac::bring_to_front();
 }
 
 /// One item per terminate request from the system.
