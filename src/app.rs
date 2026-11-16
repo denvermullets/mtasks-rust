@@ -6895,7 +6895,12 @@ impl App {
                     PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Settings => return self.update(Message::OpenSettings),
                     PaletteNav::ToggleSidebar => return self.update(Message::ToggleSidebar),
-                    PaletteNav::CheckForUpdates => return self.update(Message::UpdateCheckClicked),
+                    // Status renders only in Settings, so open it to make the check visible.
+                    PaletteNav::CheckForUpdates => {
+                        let open = self.update(Message::OpenSettings);
+                        let check = self.update(Message::UpdateCheckClicked);
+                        return Task::batch([open, check]);
+                    }
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
