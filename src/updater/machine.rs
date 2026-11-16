@@ -17,6 +17,9 @@ use semver::Version;
 
 use super::manifest::{Manifest, ParsedManifest, ReleaseNotes};
 
+/// How often automatic checks run while the app is up.
+const CHECK_INTERVAL: chrono::Duration = chrono::Duration::hours(6);
+
 /// Who asked for a check. Manual results are always shown; automatic ones stay
 /// quiet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +79,13 @@ pub enum Event {
     /// "Not now" on that confirm: the Staged update installs at the next Clean
     /// quit instead.
     RestartDeclined,
+    /// The app just launched. Starts the launch check.
+    Launched { at: DateTime<Utc> },
+    /// The periodic timer fired (the app sends it about every 6 hours, or more
+    /// often; the machine decides whether a check is due).
+    Tick { at: DateTime<Utc> },
+    /// The Mac woke from sleep.
+    Woke { at: DateTime<Utc> },
 }
 
 /// Things the app must do. The machine returns these.
@@ -226,6 +236,9 @@ impl UpdaterState {
             Event::DownloadProgress { received } => self.download_progress(received),
             Event::DownloadFinished => self.download_finished(),
             Event::StagingVerified => self.staging_verified(),
+            Event::Launched { .. } => self.scheduled_check(true),
+            Event::Tick { at } => self.scheduled_check(self.check_due(at, false)),
+            Event::Woke { at } => self.scheduled_check(self.check_due(at, true)),
             Event::NoticeDismissed { version } => {
                 self.notice_dismissed = Some(version);
                 vec![]
@@ -271,6 +284,30 @@ impl UpdaterState {
                 vec![]
             }
         }
+    }
+
+    /// Is the last check old enough for a scheduled check? A tick counts 6h
+    /// exactly; a wake needs strictly more than 6h (`strict`).
+    fn check_due(&self, now: DateTime<Utc>, strict: bool) -> bool {
+        match self.last_checked {
+            None => true,
+            Some(last) => {
+                let age = now - last;
+                if strict {
+                    age > CHECK_INTERVAL
+                } else {
+                    age >= CHECK_INTERVAL
+                }
+            }
+        }
+    }
+
+    /// Start an automatic check when `due`. (Schedule gating lives here.)
+    fn scheduled_check(&mut self, due: bool) -> Vec<Effect> {
+        if !due {
+            return vec![];
+        }
+        self.check_started(CheckKind::Automatic)
     }
 
     fn check_started(&mut self, kind: CheckKind) -> Vec<Effect> {
@@ -718,5 +755,94 @@ pub(super) mod tests {
         let mut s = state();
         assert_eq!(s.update(Event::RestartRequested { busy_terminals: false }), vec![]);
         assert_eq!(s.update(Event::RestartRequested { busy_terminals: true }), vec![]);
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::tests::{at, finished, v};
+    use super::*;
+
+    fn state() -> UpdaterState {
+        UpdaterState::new(v("0.12.0"))
+    }
+
+    /// A state whose last check finished at `h`:00 and found nothing.
+    fn checked_at(h: u32) -> UpdaterState {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        s.update(finished(h, "0.12.0"));
+        s
+    }
+
+    #[test]
+    fn launch_emits_an_automatic_check() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::Launched { at: at(9) }),
+            vec![Effect::FetchManifest]
+        );
+        assert!(s.is_busy());
+        assert_eq!(s.view().status, Status::Idle); // automatic: nothing shown
+    }
+
+    #[test]
+    fn launch_checks_even_if_checked_recently() {
+        let mut s = checked_at(9);
+        assert_eq!(
+            s.update(Event::Launched { at: at(10) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn tick_before_six_hours_does_nothing() {
+        let mut s = checked_at(1);
+        assert_eq!(s.update(Event::Tick { at: at(6) }), vec![]);
+    }
+
+    #[test]
+    fn tick_six_hours_after_last_check_emits_a_check() {
+        let mut s = checked_at(1);
+        assert_eq!(
+            s.update(Event::Tick { at: at(7) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn tick_with_no_check_yet_emits_a_check() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::Tick { at: at(7) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn tick_while_a_check_runs_does_not_start_another() {
+        let mut s = checked_at(1);
+        s.update(Event::Tick { at: at(7) });
+        assert_eq!(s.update(Event::Tick { at: at(8) }), vec![]);
+    }
+
+    #[test]
+    fn wake_only_checks_when_last_check_is_over_six_hours_old() {
+        let mut s = checked_at(1);
+        assert_eq!(s.update(Event::Woke { at: at(5) }), vec![]);
+        assert_eq!(s.update(Event::Woke { at: at(7) }), vec![]); // exactly 6h
+        assert_eq!(
+            s.update(Event::Woke { at: at(8) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn wake_before_any_check_emits_a_check() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::Woke { at: at(8) }),
+            vec![Effect::FetchManifest]
+        );
     }
 }
