@@ -52,6 +52,8 @@ pub enum PaletteNav {
     Settings,
     /// Collapse or expand the teams sidebar (`Message::ToggleSidebar`).
     ToggleSidebar,
+    /// Check for a newer Release (`Message::UpdateCheckClicked`).
+    CheckForUpdates,
 }
 
 impl PaletteNav {
@@ -74,7 +76,8 @@ impl PaletteNav {
             | PaletteNav::ToggleProjectCardsStacked
             | PaletteNav::ToggleTerminalDock
             | PaletteNav::Settings
-            | PaletteNav::ToggleSidebar => "Command",
+            | PaletteNav::ToggleSidebar
+            | PaletteNav::CheckForUpdates => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -380,6 +383,14 @@ fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
             primary: "Toggle sidebar".to_string(),
             secondary: "Shortcut: \u{2318}B".to_string(),
             nav: PaletteNav::ToggleSidebar,
+        });
+    }
+    // Typed for, not listed by default, like the sidebar toggle.
+    if !needle.is_empty() && name_matches(needle, "Check for updates") {
+        rows.push(PaletteRow {
+            primary: "Check for updates".to_string(),
+            secondary: "Look for a newer Release".to_string(),
+            nav: PaletteNav::CheckForUpdates,
         });
     }
 }
@@ -848,6 +859,15 @@ mod tests {
         assert_eq!(state.chosen(), Some(PaletteNav::View(View::Board)));
         state.move_selection(-1);
         assert_eq!(state.chosen(), Some(PaletteNav::Settings));
+    }
+
+    #[test]
+    fn typing_finds_check_for_updates_but_empty_query_does_not() {
+        let rows = palette_results("updates", &PaletteData::default());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nav, PaletteNav::CheckForUpdates);
+        assert_eq!(rows[0].nav.label(), "Command");
+        assert!(names("").iter().all(|n| n != "Check for updates"));
     }
 
     #[test]
