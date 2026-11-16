@@ -90,6 +90,8 @@ pub enum Event {
     /// startup with the stored value; the default is on). Off stops the launch,
     /// tick and wake checks; manual checks and a Staged update are unaffected.
     SetAutoCheck(bool),
+    /// A Clean quit was confirmed and is about to run.
+    QuitConfirmed,
 }
 
 /// Things the app must do. The machine returns these.
@@ -102,6 +104,9 @@ pub enum Effect {
     /// Verify and extract the downloaded zip, then send
     /// `Event::StagingVerified`.
     Stage(UpdateInfo),
+    /// Abort the running download now (fire and forget; the quit must not wait
+    /// for it). Nothing is staged.
+    CancelDownload,
     /// Show the one-time "ready" notice for this version (toast).
     ShowReadyNotice {
         version: Version,
@@ -250,6 +255,7 @@ impl UpdaterState {
                 self.auto_check = on;
                 vec![]
             }
+            Event::QuitConfirmed => self.quit_confirmed(),
             Event::NoticeDismissed { version } => {
                 self.notice_dismissed = Some(version);
                 vec![]
@@ -295,6 +301,17 @@ impl UpdaterState {
                 vec![]
             }
         }
+    }
+
+    /// A Clean quit is going ahead. A running download is dropped (never
+    /// awaited, never staged); the next launch's check starts it over.
+    fn quit_confirmed(&mut self) -> Vec<Effect> {
+        if !matches!(self.activity, Activity::Downloading { .. }) {
+            return vec![];
+        }
+        self.activity = Activity::Idle;
+        self.manual = false;
+        vec![Effect::CancelDownload]
     }
 
     /// Is "Check for updates automatically" on?
@@ -921,5 +938,48 @@ mod auto_check_tests {
             s.update(Event::Tick { at: at(20) }),
             vec![Effect::FetchManifest]
         );
+    }
+}
+
+#[cfg(test)]
+mod quit_drop_tests {
+    use super::tests::{at, finished, v};
+    use super::*;
+
+    fn downloading() -> UpdaterState {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        s.update(Event::Launched { at: at(1) });
+        s.update(finished(1, "0.13.0"));
+        s.update(Event::DownloadProgress { received: 400 });
+        s
+    }
+
+    #[test]
+    fn quit_during_a_download_cancels_it_and_stages_nothing() {
+        let mut s = downloading();
+        assert_eq!(s.update(Event::QuitConfirmed), vec![Effect::CancelDownload]);
+        assert!(!s.is_busy()); // nothing left for the quit to wait on
+        assert_eq!(s.view().ready, None);
+        // The dropped download can't finish into a stage.
+        assert_eq!(s.update(Event::DownloadFinished), vec![]);
+    }
+
+    #[test]
+    fn relaunch_check_finds_the_update_and_downloads_afresh() {
+        let mut s = downloading();
+        s.update(Event::QuitConfirmed);
+        // Next launch: a new state, the launch check, a fresh download.
+        let mut s = UpdaterState::new(v("0.12.0"));
+        assert_eq!(s.update(Event::Launched { at: at(9) }), vec![Effect::FetchManifest]);
+        let fx = s.update(finished(9, "0.13.0"));
+        assert!(matches!(fx.as_slice(), [Effect::Download(i)] if i.version == v("0.13.0")));
+    }
+
+    #[test]
+    fn quit_when_not_downloading_emits_nothing() {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        assert_eq!(s.update(Event::QuitConfirmed), vec![]);
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(Event::QuitConfirmed), vec![]);
     }
 }
