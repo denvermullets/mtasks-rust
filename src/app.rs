@@ -3902,6 +3902,13 @@ impl App {
                 &crate::updater::staging::RealStagingFs,
                 staging_dir,
             );
+            // A verified Staged update from a past run waits across launches.
+            if let Some(version) =
+                crate::updater::verify::restore_staged(staging_dir, app.updater.installed())
+            {
+                app.updater
+                    .update(crate::updater::machine::Event::StagedRestored { version });
+            }
         }
 
         app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));

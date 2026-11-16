@@ -14,7 +14,17 @@ use crate::updater::download::DownloadError;
 use crate::updater::edge;
 use crate::updater::install::InstallContext;
 use crate::updater::machine::{CheckKind, Effect, Event, UpdateInfo};
+use crate::updater::verify::{StageError, StageRequest};
 use iced::futures::SinkExt;
+
+/// The updater event for a stage result. Pure.
+fn stage_event(result: Result<(), StageError>, at: chrono::DateTime<Utc>) -> Event {
+    match result {
+        Ok(()) => Event::StagingVerified,
+        Err(StageError::Broken(reason)) => Event::BrokenDownload { at, reason },
+        Err(StageError::Security(reason)) => Event::SecurityFailure { at, reason },
+    }
+}
 
 /// Shown when the Check button is pressed in a build with no `.app` around it.
 pub const DISABLED_NOTE: &str =
@@ -104,6 +114,25 @@ impl App {
         Task::run(stream, Message::Updater)
     }
 
+    /// Unzip and verify the downloaded Update. Ends as `StagingVerified`,
+    /// `BrokenDownload` (unzip) or `SecurityFailure` (codesign/spctl/version).
+    fn start_stage(&self, info: UpdateInfo) -> Task<Message> {
+        let InstallContext::SelfInstall { bundle, staging_dir } = &self.install else {
+            return Task::none();
+        };
+        let req = StageRequest {
+            version: info.version,
+            staging_dir: staging_dir.clone(),
+            running_bundle: bundle.clone(),
+            running_version: self.updater.installed().clone(),
+        };
+        let edge = self.update_edge.clone();
+        Task::perform(
+            async move { stage_event(edge.stage(req).await, Utc::now()) },
+            Message::Updater,
+        )
+    }
+
     /// Carry out one effect. Exhaustive on purpose: a new `Effect` variant must
     /// be handled (or deliberately ignored) here.
     fn run_updater_effect(&self, effect: Effect) -> Task<Message> {
@@ -127,14 +156,40 @@ impl App {
                 self.update_edge.cancel_download();
                 Task::none()
             }
-            // TODO(JRST-516): verify and extract the zip, delete staging files.
-            Effect::Stage(_) | Effect::RemoveStaged { .. } | Effect::DeleteStaging(_) => {
-                Task::none()
+            Effect::Stage(info) => self.start_stage(info),
+            Effect::RemoveStaged { version } | Effect::DeleteStaging(version) => {
+                let InstallContext::SelfInstall { staging_dir, .. } = &self.install else {
+                    return Task::none();
+                };
+                let edge = self.update_edge.clone();
+                let dir = staging_dir.clone();
+                Task::perform(async move { edge.delete_staging(dir, version).await }, |_| {
+                    Message::Noop
+                })
             }
             // TODO(JRST-524): the ready toast and the "Restart to update?" confirm.
             Effect::ShowReadyNotice { .. } | Effect::ConfirmRestart { .. } => Task::none(),
             // TODO(JRST-519): swap the Staged update in, relaunch, exit.
             Effect::SwapStaged { .. } | Effect::Relaunch | Effect::Exit => Task::none(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_results_map_to_updater_events() {
+        let at = Utc::now();
+        assert_eq!(stage_event(Ok(()), at), Event::StagingVerified);
+        assert_eq!(
+            stage_event(Err(StageError::Broken("x".into())), at),
+            Event::BrokenDownload { at, reason: "x".into() }
+        );
+        assert_eq!(
+            stage_event(Err(StageError::Security("y".into())), at),
+            Event::SecurityFailure { at, reason: "y".into() }
+        );
     }
 }

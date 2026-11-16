@@ -68,6 +68,10 @@ pub enum Event {
     DownloadFinished,
     /// The zip passed every check and is staged next to the installed app.
     StagingVerified,
+    /// Launch found a verified `staged-<ver>/` from a past run: the Staged
+    /// update waits across launches. Ignored unless newer than installed and
+    /// than any Staged update already held.
+    StagedRestored { version: Version },
     /// Later or x on the ready notice: hide the toast for this version only
     /// (JRST-501). The chip stays.
     NoticeDismissed { version: Version },
@@ -370,6 +374,7 @@ impl UpdaterState {
             Event::DownloadProgress { received } => self.download_progress(received),
             Event::DownloadFinished => self.download_finished(),
             Event::StagingVerified => self.staging_verified(),
+            Event::StagedRestored { version } => self.staged_restored(version),
             Event::Launched { .. } => self.scheduled_check(true),
             Event::Tick { at } => self.scheduled_check(self.check_due(at, false)),
             Event::Woke { at } => self.scheduled_check(self.check_due(at, true)),
@@ -578,6 +583,20 @@ impl UpdaterState {
         let info = info.clone();
         self.activity = Activity::Verifying(info.clone());
         vec![Effect::Stage(info)]
+    }
+
+    fn staged_restored(&mut self, version: Version) -> Vec<Effect> {
+        if version <= self.installed || self.has_staged(&version) {
+            return vec![];
+        }
+        self.staged = Some(UpdateInfo {
+            version,
+            zip_url: String::new(),
+            zip_sha256: String::new(),
+            zip_size: 0,
+            notes: ReleaseNotes::Unavailable,
+        });
+        vec![]
     }
 
     fn staging_verified(&mut self) -> Vec<Effect> {
@@ -936,6 +955,23 @@ pub(super) mod tests {
         s.update(Event::CheckStarted(CheckKind::Automatic));
         assert_eq!(s.update(finished(15, "0.13.0")), vec![]);
         assert!(s.view().ready.is_some());
+    }
+
+    #[test]
+    fn a_staged_update_found_at_launch_is_restored_as_ready_without_a_notice() {
+        let mut s = state();
+        assert_eq!(s.update(Event::StagedRestored { version: v("0.13.0") }), vec![]);
+        assert_eq!(s.view().ready.map(|r| r.version), Some(v("0.13.0")));
+    }
+
+    #[test]
+    fn a_restored_staged_update_must_be_newer_than_installed_and_than_staged() {
+        let mut s = state();
+        s.update(Event::StagedRestored { version: v("0.1.0") });
+        assert!(s.view().ready.is_none());
+        s.update(Event::StagedRestored { version: v("0.14.0") });
+        s.update(Event::StagedRestored { version: v("0.13.0") });
+        assert_eq!(s.view().ready.map(|r| r.version), Some(v("0.14.0")));
     }
 
     #[test]

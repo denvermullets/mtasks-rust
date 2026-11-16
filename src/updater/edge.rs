@@ -17,6 +17,7 @@ use semver::Version;
 use super::download::{self, DownloadError, ZipSink};
 use super::manifest::{self, ParsedManifest};
 use super::staging::{LockError, UpdateLock};
+use super::verify::{self, StageError, StageRequest, SystemTools};
 
 /// Where the Release manifest (`latest.json`) lives. GitHub redirects
 /// `latest/download/` to the newest Release's asset. Never the REST API.
@@ -44,6 +45,16 @@ pub trait UpdateEdge: Send + Sync {
 
     /// Stop the running download (it ends as `DownloadError::Cancelled`).
     fn cancel_download(&self);
+
+    /// Unzip, verify and mark the downloaded Update (see `verify::stage`),
+    /// under the update lock.
+    fn stage(&self, req: StageRequest) -> EdgeFuture<Result<(), StageError>>;
+
+    /// Delete a superseded `staged-<ver>/` (an older Staged update).
+    fn remove_staged(&self, staging_dir: PathBuf, version: Version) -> EdgeFuture<()>;
+
+    /// Delete every staging file of a failed Update (zip, partial, staged dir).
+    fn delete_staging(&self, staging_dir: PathBuf, version: Version) -> EdgeFuture<()>;
 }
 
 /// What one download needs.
@@ -119,6 +130,45 @@ impl UpdateEdge for HttpEdge {
     fn cancel_download(&self) {
         self.cancel.store(true, Ordering::SeqCst);
     }
+
+    fn stage(&self, req: StageRequest) -> EdgeFuture<Result<(), StageError>> {
+        Box::pin(async move {
+            run_blocking(move || {
+                let _lock = UpdateLock::acquire(&req.staging_dir).map_err(|e| {
+                    StageError::Broken(format!("could not take the update lock: {e}"))
+                })?;
+                verify::stage(&SystemTools, &req)
+            })
+            .await
+            .unwrap_or_else(|e| Err(StageError::Broken(e)))
+        })
+    }
+
+    fn remove_staged(&self, staging_dir: PathBuf, version: Version) -> EdgeFuture<()> {
+        Box::pin(async move {
+            let _ = run_blocking(move || locked_delete(&staging_dir, &version)).await;
+        })
+    }
+
+    fn delete_staging(&self, staging_dir: PathBuf, version: Version) -> EdgeFuture<()> {
+        self.remove_staged(staging_dir, version)
+    }
+}
+
+/// Delete one version's files under the update lock; skipped if another run
+/// holds it (launch cleanup removes anything unverified later).
+fn locked_delete(staging_dir: &std::path::Path, version: &Version) {
+    if let Ok(_lock) = UpdateLock::acquire(staging_dir) {
+        verify::delete_version(staging_dir, version);
+    }
+}
+
+async fn run_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("the update step crashed: {e}"))
 }
 
 /// How long one chunk may take to arrive before the download counts as dead.
@@ -220,6 +270,18 @@ mod tests {
         }
 
         fn cancel_download(&self) {}
+
+        fn stage(&self, _req: StageRequest) -> EdgeFuture<Result<(), StageError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn remove_staged(&self, _d: PathBuf, _v: Version) -> EdgeFuture<()> {
+            Box::pin(async {})
+        }
+
+        fn delete_staging(&self, _d: PathBuf, _v: Version) -> EdgeFuture<()> {
+            Box::pin(async {})
+        }
     }
 
     fn block_on<T>(f: impl Future<Output = T>) -> T {
