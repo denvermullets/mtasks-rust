@@ -85,6 +85,9 @@ pub enum Effect {
         version: Version,
         notes: ReleaseNotes,
     },
+    /// Delete the staging files of a Staged update that a newer verified one
+    /// replaced (JRST-502).
+    RemoveStaged { version: Version },
 }
 
 /// What the updater is busy with right now.
@@ -253,14 +256,19 @@ impl UpdaterState {
         let info = info.clone();
         self.activity = Activity::Idle;
         self.manual = false;
-        self.staged = Some(info.clone());
-        if self.notice_dismissed.as_ref() == Some(&info.version) {
-            return vec![];
+        let replaced = self.staged.replace(info.clone());
+        let mut fx = Vec::new();
+        if let Some(old) = replaced.filter(|o| o.version != info.version) {
+            fx.push(Effect::RemoveStaged { version: old.version });
         }
-        vec![Effect::ShowReadyNotice {
+        if self.notice_dismissed.as_ref() == Some(&info.version) {
+            return fx;
+        }
+        fx.push(Effect::ShowReadyNotice {
             version: info.version,
             notes: info.notes,
-        }]
+        });
+        fx
     }
 
     fn check_finished(&mut self, at: DateTime<Utc>, manifest: ParsedManifest) -> Vec<Effect> {
@@ -558,6 +566,46 @@ pub(super) mod tests {
         stage(&mut s, 9, "0.13.0");
         s.update(Event::NoticeDismissed { version: v("0.13.0") });
         let fx = stage(&mut s, 15, "0.14.0");
-        assert!(matches!(fx.as_slice(), [Effect::ShowReadyNotice { version, .. }] if *version == v("0.14.0")));
+        assert!(fx.iter().any(|e| matches!(e, Effect::ShowReadyNotice { version, .. } if *version == v("0.14.0"))));
+    }
+
+    // --- JRST-502: a newer Release replaces the Staged update ---
+
+    #[test]
+    fn newer_release_than_staged_is_downloaded() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(15, "0.14.0")));
+        assert_eq!(info.version, v("0.14.0"));
+    }
+
+    #[test]
+    fn old_staged_stays_until_the_new_one_is_verified() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(15, "0.14.0")));
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+        s.update(Event::DownloadFinished);
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn verified_newer_release_replaces_staged_and_removes_old_files() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        let fx = stage(&mut s, 15, "0.14.0");
+        assert_eq!(fx.len(), 2);
+        assert_eq!(fx[0], Effect::RemoveStaged { version: v("0.13.0") });
+        assert!(matches!(&fx[1], Effect::ShowReadyNotice { version, .. } if *version == v("0.14.0")));
+        assert_eq!(s.view().ready.unwrap().version, v("0.14.0"));
+    }
+
+    #[test]
+    fn first_staging_removes_nothing() {
+        let mut s = state();
+        let fx = stage(&mut s, 9, "0.13.0");
+        assert!(!fx.iter().any(|e| matches!(e, Effect::RemoveStaged { .. })));
     }
 }
