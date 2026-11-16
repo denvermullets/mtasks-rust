@@ -97,6 +97,9 @@ pub enum Event {
     /// The zip download failed in transit (network error, HTTP error).
     /// Not a broken download: no strike is counted.
     DownloadFailed { at: DateTime<Utc>, reason: String },
+    /// The download is unusable: sha256 mismatch, truncated, or the unzip
+    /// failed. Valid while downloading or verifying.
+    BrokenDownload { at: DateTime<Utc>, reason: String },
 }
 
 /// Things the app must do. The machine returns these.
@@ -129,7 +132,12 @@ pub enum Effect {
     Relaunch,
     /// Exit this process (after the relaunch was spawned).
     Exit,
+    /// Delete the staging files of this version's failed attempt.
+    DeleteStaging(Version),
 }
+
+/// After this many broken downloads of one version, it is skipped.
+pub const MAX_BROKEN_DOWNLOADS: u8 = 3;
 
 /// What the updater is busy with right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +173,8 @@ pub enum FailureKind {
     Check,
     /// The download failed in transit.
     Download,
+    /// Sha256 mismatch, truncated download, or failed unzip.
+    BrokenDownload,
 }
 
 /// The most recent failure, quiet or shown, for Settings → Updates.
@@ -210,6 +220,9 @@ pub struct UpdaterState {
     last_failure: Option<LastFailure>,
     /// Is the last failure one the user should see right now?
     failure_shown: bool,
+    /// Broken-download strikes against the newest version that had any.
+    /// A newer version starts again from zero.
+    broken: Option<(Version, u8)>,
 }
 
 impl UpdaterState {
@@ -226,6 +239,7 @@ impl UpdaterState {
             auto_check: true,
             last_failure: None,
             failure_shown: false,
+            broken: None,
         }
     }
 
@@ -306,6 +320,7 @@ impl UpdaterState {
             }
             Event::CheckFailed { at, reason } => self.check_failed(at, reason),
             Event::DownloadFailed { at, reason } => self.download_failed(at, reason),
+            Event::BrokenDownload { at, reason } => self.broken_download(at, reason),
         }
     }
 
@@ -415,6 +430,30 @@ impl UpdaterState {
         vec![]
     }
 
+    /// Strikes against `version` so far.
+    pub fn broken_downloads(&self, version: &Version) -> u8 {
+        match &self.broken {
+            Some((v, n)) if v == version => *n,
+            _ => 0,
+        }
+    }
+
+    /// Has this version been broken too often to try again?
+    fn is_skipped(&self, version: &Version) -> bool {
+        self.broken_downloads(version) >= MAX_BROKEN_DOWNLOADS
+    }
+
+    fn broken_download(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        let info = match &self.activity {
+            Activity::Downloading { info, .. } | Activity::Verifying(info) => info.clone(),
+            _ => return vec![],
+        };
+        let strikes = self.broken_downloads(&info.version) + 1;
+        self.broken = Some((info.version.clone(), strikes));
+        self.fail(at, FailureKind::BrokenDownload, reason);
+        vec![Effect::DeleteStaging(info.version)]
+    }
+
     fn download_failed(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
         if !matches!(self.activity, Activity::Downloading { .. }) {
             return vec![];
@@ -473,7 +512,9 @@ impl UpdaterState {
         self.last_checked = Some(at);
         match manifest {
             ParsedManifest::SelfInstall(m)
-                if m.is_update(&self.installed) && !self.has_staged(&m.version) =>
+                if m.is_update(&self.installed)
+                    && !self.has_staged(&m.version)
+                    && !self.is_skipped(&m.version) =>
             {
                 let info = UpdateInfo::from_manifest(&m, &self.installed);
                 self.activity = Activity::Downloading {
@@ -811,6 +852,75 @@ pub(super) mod tests {
         let mut s = state();
         assert_eq!(s.update(failed_check(9)), vec![]);
         assert_eq!(s.update(failed_download(9)), vec![]);
+        assert_eq!(s.view().last_failure, None);
+    }
+
+    // --- broken downloads (JRST-506) ---
+
+    fn broken(h: u32) -> Event {
+        Event::BrokenDownload {
+            at: at(h),
+            reason: "sha256 mismatch".into(),
+        }
+    }
+
+    #[test]
+    fn broken_download_deletes_staging_and_is_quiet_when_automatic() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        assert_eq!(
+            s.update(broken(10)),
+            vec![Effect::DeleteStaging(v("0.13.0"))]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(!s.is_busy());
+        assert_eq!(s.broken_downloads(&v("0.13.0")), 1);
+        assert_eq!(
+            s.view().last_failure.unwrap().kind,
+            FailureKind::BrokenDownload
+        );
+        assert_eq!(s.view().ready, None);
+    }
+
+    #[test]
+    fn broken_unzip_while_verifying_counts_and_manual_is_shown() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(Event::DownloadFinished);
+        assert_eq!(
+            s.update(broken(10)),
+            vec![Effect::DeleteStaging(v("0.13.0"))]
+        );
+        assert!(matches!(s.view().status, Status::Failed { .. }));
+        assert_eq!(s.broken_downloads(&v("0.13.0")), 1);
+    }
+
+    #[test]
+    fn a_version_is_skipped_after_three_broken_downloads_but_a_newer_one_is_not() {
+        let mut s = state();
+        for h in 0..3 {
+            s.update(Event::CheckStarted(CheckKind::Automatic));
+            update_of(s.update(finished(9 + h, "0.13.0"))); // still retried
+            s.update(broken(9 + h));
+        }
+        assert_eq!(s.broken_downloads(&v("0.13.0")), 3);
+        // Fourth check: no download.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(finished(15, "0.13.0")), vec![]);
+        assert!(!s.is_busy());
+        // A newer version downloads normally, with zero strikes.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(16, "0.13.1")));
+        assert_eq!(info.version, v("0.13.1"));
+        assert_eq!(s.broken_downloads(&v("0.13.1")), 0);
+    }
+
+    #[test]
+    fn stray_broken_download_is_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(broken(9)), vec![]);
         assert_eq!(s.view().last_failure, None);
     }
 
