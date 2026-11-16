@@ -32,6 +32,18 @@ impl App {
         self.apply_updater_event(Event::CheckStarted(CheckKind::Manual))
     }
 
+    /// The "Download JAIT X" button: open the manifest's own `dmg_url`.
+    pub(super) fn update_dmg_clicked(&mut self) -> Task<Message> {
+        if let Some(offer) = self.updater.view().dmg_update {
+            if let Err(e) = std::process::Command::new("open").arg(&offer.dmg_url).spawn() {
+                if let Some(form) = self.settings_form.as_mut() {
+                    form.update_note = Some(format!("Couldn't open the download: {e}"));
+                }
+            }
+        }
+        Task::none()
+    }
+
     /// Feed one event to the updater, save its state, and start its effects.
     pub(super) fn apply_updater_event(&mut self, event: Event) -> Task<Message> {
         let effects = self.updater.update(event);

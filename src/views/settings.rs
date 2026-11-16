@@ -296,6 +296,9 @@ fn updates_section<'a>(updates: &UpdatesInfo, note: Option<&str>) -> Element<'a,
                     None => text("").size(12),
                 }),
         );
+    if let Some(offer) = &updates.view.dmg_update {
+        col = col.push(dmg_offer(offer));
+    }
     if let Some(note) = note {
         col = col.push(text(note.to_string()).size(11).color(t::text_muted()));
     }
@@ -311,6 +314,33 @@ fn updates_section<'a>(updates: &UpdatesInfo, note: Option<&str>) -> Element<'a,
         );
     }
     col.into()
+}
+
+/// The DMG offer for an Update this install can't apply itself: the version,
+/// the Release notes when they parse, and a button opening the manifest's URL.
+fn dmg_offer<'a>(offer: &crate::updater::machine::DmgUpdate) -> Element<'a, Message> {
+    use crate::updater::manifest::ReleaseNotes;
+    let mut col = column![].spacing(4).push(
+        text(format!("JAIT {} is available but can't install itself here.", offer.version))
+            .size(12)
+            .color(t::text_secondary()),
+    );
+    if let ReleaseNotes::Available(entries) = &offer.notes {
+        for e in entries {
+            col = col.push(
+                text(format!("{}: {}", e.version, e.notes.trim()))
+                    .size(11)
+                    .color(t::text_muted()),
+            );
+        }
+    }
+    col.push(
+        button(text(format!("Download JAIT {}", offer.version)).size(13))
+            .on_press(Message::UpdateDmgClicked)
+            .padding([6, 14])
+            .style(button::primary),
+    )
+    .into()
 }
 
 /// Window opacity and blur sliders; both apply live and save on release.

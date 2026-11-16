@@ -499,6 +499,8 @@ pub enum Message {
     /// "Check for updates" (Settings button; the palette entry reuses it): a
     /// manual check. Dev builds explain that updates are disabled.
     UpdateCheckClicked,
+    /// Settings → Updates: open the DMG download from the manifest.
+    UpdateDmgClicked,
     /// Any updater input: a task result or a UI action, fed to the machine by
     /// `App::apply_updater_event`.
     Updater(crate::updater::machine::Event),
@@ -3712,6 +3714,11 @@ impl App {
             semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("crate version is semver"),
         );
         config.updater.restore(&mut updater);
+        let install = crate::updater::install::detect(&crate::updater::install::SystemProbe);
+        updater.set_can_self_install(matches!(
+            install,
+            crate::updater::install::InstallContext::SelfInstall { .. }
+        ));
 
         let conn = connection::open().expect("Failed to open database");
         // Skip the local "My Project" seed when the user has configured an API
@@ -3884,7 +3891,7 @@ impl App {
             next_toast_id: 0,
             sync_paused_auth: false,
             updater,
-            install: crate::updater::install::detect(&crate::updater::install::SystemProbe),
+            install,
             update_edge: std::sync::Arc::new(crate::updater::edge::HttpEdge::from_env()),
         };
 
@@ -7524,6 +7531,7 @@ impl App {
             }
 
             Message::UpdateCheckClicked => return self.update_check_clicked(),
+            Message::UpdateDmgClicked => return self.update_dmg_clicked(),
             Message::Updater(event) => return self.apply_updater_event(event),
 
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),

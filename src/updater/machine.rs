@@ -202,6 +202,16 @@ pub struct ReadyUpdate {
     pub notes: ReleaseNotes,
 }
 
+/// An Update the app can't install itself: offered as a DMG download instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmgUpdate {
+    pub version: Version,
+    /// Straight from the manifest; the app never builds a URL itself.
+    pub dmg_url: String,
+    /// Release notes from the installed version (exclusive) to `version`.
+    pub notes: ReleaseNotes,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdaterView {
     pub status: Status,
@@ -209,6 +219,8 @@ pub struct UpdaterView {
     pub ready: Option<ReadyUpdate>,
     pub last_checked: Option<DateTime<Utc>>,
     pub last_failure: Option<LastFailure>,
+    /// A newer Release that can only be installed from its DMG.
+    pub dmg_update: Option<DmgUpdate>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +247,10 @@ pub struct UpdaterState {
     /// Newest version that failed a security check. It and anything older
     /// are never downloaded; a newer manifest version clears the block.
     blocked: Option<Version>,
+    /// Can this install swap in a Staged update? False for a translocated app
+    /// or an unwritable folder: every Update becomes a DMG offer.
+    can_self_install: bool,
+    dmg_update: Option<DmgUpdate>,
 }
 
 impl UpdaterState {
@@ -253,7 +269,15 @@ impl UpdaterState {
             failure_shown: false,
             broken: None,
             blocked: None,
+            can_self_install: true,
+            dmg_update: None,
         }
+    }
+
+    /// Tell the machine whether this install can self-install (set at startup
+    /// from install detection). When it can't, Updates are offered as a DMG.
+    pub fn set_can_self_install(&mut self, can: bool) {
+        self.can_self_install = can;
     }
 
     /// The version whose ready notice was dismissed, for persisting.
@@ -334,6 +358,7 @@ impl UpdaterState {
             }),
             last_checked: self.last_checked,
             last_failure: self.last_failure.clone(),
+            dmg_update: self.dmg_update.clone(),
         }
     }
 
@@ -582,9 +607,11 @@ impl UpdaterState {
             return vec![]; // stale answer, no check is running
         }
         self.last_checked = Some(at);
+        self.dmg_update = None; // re-decided by every finished check
         match manifest {
             ParsedManifest::SelfInstall(m)
-                if m.is_update(&self.installed)
+                if self.can_self_install
+                    && m.is_update(&self.installed)
                     && !self.has_staged(&m.version)
                     && !self.is_skipped(&m.version)
                     && !self.is_blocked(&m.version) =>
@@ -598,8 +625,26 @@ impl UpdaterState {
                 };
                 vec![Effect::Download(info)]
             }
-            // A DMG-only offer is handled by a later ticket (JRST-515); until
-            // then it is treated as nothing to self-install.
+            // An Update this install can't apply itself: offer the DMG. Nothing
+            // is downloaded or staged.
+            ParsedManifest::SelfInstall(m)
+                if !self.can_self_install && m.is_update(&self.installed) =>
+            {
+                self.dmg_update = Some(DmgUpdate {
+                    version: m.version.clone(),
+                    dmg_url: m.dmg_url.clone(),
+                    notes: m.notes_since(&self.installed),
+                });
+                self.finish_check_quietly()
+            }
+            ParsedManifest::DmgOnly(o) if o.is_update(&self.installed) => {
+                self.dmg_update = Some(DmgUpdate {
+                    version: o.version.clone(),
+                    dmg_url: o.dmg_url.clone(),
+                    notes: o.notes_since(&self.installed),
+                });
+                self.finish_check_quietly()
+            }
             _ => {
                 self.activity = Activity::Idle;
                 self.up_to_date_shown = self.manual;
@@ -607,6 +652,16 @@ impl UpdaterState {
                 vec![]
             }
         }
+    }
+}
+
+impl UpdaterState {
+    /// A check ended with a DMG offer: back to idle, no "Up to date" line.
+    fn finish_check_quietly(&mut self) -> Vec<Effect> {
+        self.activity = Activity::Idle;
+        self.up_to_date_shown = false;
+        self.manual = false;
+        vec![]
     }
 }
 
@@ -662,6 +717,62 @@ pub(super) mod tests {
 
     fn state() -> UpdaterState {
         UpdaterState::new(v("0.12.0"))
+    }
+
+    fn dmg_only(version: &str) -> ParsedManifest {
+        let m = serde_json::json!({
+            "schema": 2, "version": version,
+            "dmg_url": format!("https://github.com/denvermullets/jait-releases/releases/download/v{version}/JAIT-{version}.dmg"),
+            "releases": [{ "version": version, "published_at": "2026-11-17T10:00:00Z", "notes": "- n" }],
+        });
+        parse(m.to_string().as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn higher_schema_manifest_offers_the_dmg_without_downloading() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        let fx = s.update(Event::CheckFinished { at: at(9), manifest: dmg_only("0.13.0") });
+        assert!(fx.is_empty());
+        let view = s.view();
+        let offer = view.dmg_update.unwrap();
+        assert_eq!(offer.version, v("0.13.0"));
+        assert!(offer.dmg_url.ends_with("JAIT-0.13.0.dmg"));
+        assert!(matches!(offer.notes, ReleaseNotes::Available(_)));
+        assert_eq!(view.status, Status::Idle);
+        assert!(!s.is_busy());
+    }
+
+    #[test]
+    fn dmg_offer_that_is_not_newer_is_up_to_date() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(Event::CheckFinished { at: at(9), manifest: dmg_only("0.12.0") });
+        assert_eq!(s.view().dmg_update, None);
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn cannot_self_install_turns_an_update_into_a_dmg_offer() {
+        let mut s = state();
+        s.set_can_self_install(false);
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let fx = s.update(Event::CheckFinished { at: at(9), manifest: manifest("0.13.0", &["0.13.0"]) });
+        assert!(fx.is_empty());
+        let offer = s.view().dmg_update.unwrap();
+        assert_eq!(offer.version, v("0.13.0"));
+        assert!(offer.dmg_url.ends_with(".dmg"));
+    }
+
+    #[test]
+    fn a_later_up_to_date_check_clears_the_dmg_offer() {
+        let mut s = state();
+        s.set_can_self_install(false);
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(Event::CheckFinished { at: at(9), manifest: manifest("0.13.0", &[]) });
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(Event::CheckFinished { at: at(10), manifest: manifest("0.12.0", &[]) });
+        assert_eq!(s.view().dmg_update, None);
     }
 
     #[test]
