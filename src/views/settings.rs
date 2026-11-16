@@ -23,6 +23,8 @@ pub struct SettingsFormState {
     pub window_blur: u8,
     pub status: Option<String>,
     pub testing: bool,
+    /// Explains why Check for updates did nothing (dev builds).
+    pub update_note: Option<String>,
 }
 
 impl SettingsFormState {
@@ -39,6 +41,7 @@ impl SettingsFormState {
             window_blur: cfg.window_blur.min(window_effects::MAX_BLUR_RADIUS),
             status: None,
             testing: false,
+            update_note: None,
         }
     }
 }
@@ -164,7 +167,7 @@ pub fn view<'a>(form: &'a SettingsFormState, updates: &UpdatesInfo) -> Element<'
                     .text_size(14),
                 ),
         )
-        .push(updates_section(updates))
+        .push(updates_section(updates, form.update_note.as_deref()))
         .push(status_line)
         .push(
             row![]
@@ -225,6 +228,28 @@ pub fn view<'a>(form: &'a SettingsFormState, updates: &UpdatesInfo) -> Element<'
 pub struct UpdatesInfo {
     pub installed: semver::Version,
     pub view: crate::updater::machine::UpdaterView,
+    /// A check or download is running: the Check button waits.
+    pub busy: bool,
+}
+
+/// The one line for the current step, with whether it is an error. None when
+/// nothing is going on. A found Update shows as available until JRST-514
+/// downloads it.
+fn status_text(status: &crate::updater::machine::Status) -> Option<(String, bool)> {
+    use crate::updater::machine::Status;
+    match status {
+        Status::Idle => None,
+        Status::Checking => Some(("Checking…".into(), false)),
+        Status::UpToDate => Some(("Up to date ✓".into(), false)),
+        Status::Downloading { version, percent: 0 } => {
+            Some((format!("Update available: {version}"), false))
+        }
+        Status::Downloading { version, percent } => {
+            Some((format!("Update available: {version} (downloading {percent}%)"), false))
+        }
+        Status::Verifying { version } => Some((format!("Verifying {version}…"), false)),
+        Status::Failed { message } => Some((format!("Failed: {message}"), true)),
+    }
 }
 
 /// When the last check ran, in local time, or "Never".
@@ -240,7 +265,7 @@ fn last_check_label(last: Option<chrono::DateTime<chrono::Utc>>) -> String {
 
 /// Settings → Updates: the installed version, when the last check ran, and the
 /// last failure (so a quiet one can be found).
-fn updates_section<'a>(updates: &UpdatesInfo) -> Element<'a, Message> {
+fn updates_section<'a>(updates: &UpdatesInfo, note: Option<&str>) -> Element<'a, Message> {
     let line = |name: &'static str, value: String| {
         row![]
             .push(text(name).size(12).color(t::text_secondary()))
@@ -251,7 +276,29 @@ fn updates_section<'a>(updates: &UpdatesInfo) -> Element<'a, Message> {
         .spacing(6)
         .push(text("Updates").size(12).color(t::text_secondary()))
         .push(line("Installed version", updates.installed.to_string()))
-        .push(line("Last checked", last_check_label(updates.view.last_checked)));
+        .push(line("Last checked", last_check_label(updates.view.last_checked)))
+        .push(
+            row![]
+                .spacing(10)
+                .align_y(iced::Alignment::Center)
+                .push(
+                    button(text("Check for updates").size(13))
+                        .on_press_maybe((!updates.busy).then_some(Message::UpdateCheckClicked))
+                        .padding([6, 14])
+                        .style(button::secondary),
+                )
+                .push(match status_text(&updates.view.status) {
+                    Some((s, is_error)) => text(s).size(12).color(if is_error {
+                        t::danger()
+                    } else {
+                        t::text_muted()
+                    }),
+                    None => text("").size(12),
+                }),
+        );
+    if let Some(note) = note {
+        col = col.push(text(note.to_string()).size(11).color(t::text_muted()));
+    }
     if let Some(f) = &updates.view.last_failure {
         col = col.push(
             text(format!(
@@ -311,6 +358,16 @@ fn window_section<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_text_matches_the_ui_rules() {
+        use crate::updater::machine::Status;
+        assert_eq!(status_text(&Status::Idle), None);
+        assert_eq!(status_text(&Status::Checking), Some(("Checking…".into(), false)));
+        assert_eq!(status_text(&Status::UpToDate), Some(("Up to date ✓".into(), false)));
+        let failed = status_text(&Status::Failed { message: "offline".into() }).unwrap();
+        assert_eq!(failed, ("Failed: offline".to_string(), true));
+    }
 
     #[test]
     fn last_check_reads_never_until_one_ran() {

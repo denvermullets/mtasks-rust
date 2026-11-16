@@ -35,6 +35,7 @@ use crate::views::{
 };
 
 mod tab_update;
+mod updater_wiring;
 pub use tab_update::TabMessage;
 
 #[derive(Debug, Clone)]
@@ -493,6 +494,14 @@ pub enum Message {
     TestConnection,
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
+
+    // Updates (project 320)
+    /// "Check for updates" (Settings button; the palette entry reuses it): a
+    /// manual check. Dev builds explain that updates are disabled.
+    UpdateCheckClicked,
+    /// Any updater input: a task result or a UI action, fed to the machine by
+    /// `App::apply_updater_event`.
+    Updater(crate::updater::machine::Event),
 
     // Sync
     /// Manual sync (`s`, toast retry): runs immediately.
@@ -1198,6 +1207,10 @@ pub struct App {
     /// Self-update state (project 320). Restored from `config.updater` at
     /// launch; saved back after every update (see `apply_updater_event`).
     updater: crate::updater::machine::UpdaterState,
+    /// Where the app runs from; `Disabled` in dev builds (no `.app`).
+    install: crate::updater::install::InstallContext,
+    /// The updater's I/O. Tasks hold a clone of the Arc.
+    update_edge: std::sync::Arc<dyn crate::updater::edge::UpdateEdge>,
 }
 
 /// A comment needs text or staged files (Rails: `body_or_files_present`).
@@ -3871,6 +3884,8 @@ impl App {
             next_toast_id: 0,
             sync_paused_auth: false,
             updater,
+            install: crate::updater::install::detect(&crate::updater::install::SystemProbe),
+            update_edge: std::sync::Arc::new(crate::updater::edge::HttpEdge::from_env()),
         };
 
         app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
@@ -7508,6 +7523,9 @@ impl App {
                 }
             }
 
+            Message::UpdateCheckClicked => return self.update_check_clicked(),
+            Message::Updater(event) => return self.apply_updater_event(event),
+
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
             Message::UserInput => return self.drive_sync(SchedEvent::Input),
             Message::WindowResized(size) => {
@@ -8900,6 +8918,7 @@ impl App {
                         &settings::UpdatesInfo {
                             installed: self.updater.installed().clone(),
                             view: self.updater.view(),
+                            busy: self.updater.is_busy(),
                         },
                     );
                     iced::widget::stack![base, modal].into()

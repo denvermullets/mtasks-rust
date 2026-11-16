@@ -8,6 +8,7 @@
 //! the later tickets land.
 #![allow(dead_code)]
 
+pub mod edge;
 pub mod machine;
 pub mod manifest;
 pub mod install;
