@@ -10,7 +10,7 @@ use semver::Version;
 use crate::app::Message;
 use crate::theme as t;
 use crate::updater::machine::{ReadyUpdate, Status, UpdaterView};
-use crate::updater::manifest::ReleaseNotes;
+use crate::updater::manifest::{ReleaseEntry, ReleaseNotes};
 use crate::views::text;
 
 /// What the chip says, or `None` when it's hidden.
@@ -47,24 +47,32 @@ pub fn chip<'a>(view: &UpdaterView) -> Option<Element<'a, Message>> {
     })
 }
 
+/// The entries worth showing: those with notes. A heading with nothing under
+/// it is skipped; an empty result means "Release notes unavailable".
+fn shown_entries(notes: &ReleaseNotes) -> Vec<&ReleaseEntry> {
+    match notes {
+        ReleaseNotes::Available(entries) => entries.iter().filter(|e| !e.notes.trim().is_empty()).collect(),
+        ReleaseNotes::Unavailable => Vec::new(),
+    }
+}
+
 /// The Release notes of every Release newer than the installed version,
 /// newest first, rendered as markdown; or "Release notes unavailable".
 fn notes_section<'a>(
     notes: &ReleaseNotes,
     ctx: &crate::views::body::BodyCtx<'a>,
 ) -> Element<'a, Message> {
-    match notes {
-        ReleaseNotes::Available(entries) if !entries.is_empty() => {
-            let mut col = column![].spacing(10);
-            for e in entries {
-                col = col
-                    .push(text(e.version.to_string()).size(13).color(t::text_primary()))
-                    .push(crate::views::body::view(&e.notes, 12.0, t::text_secondary(), ctx));
-            }
-            col.into()
-        }
-        _ => text("Release notes unavailable").size(12).color(t::text_muted()).into(),
+    let entries = shown_entries(notes);
+    if entries.is_empty() {
+        return text("Release notes unavailable").size(12).color(t::text_muted()).into();
     }
+    let mut col = column![].spacing(10);
+    for e in entries {
+        col = col
+            .push(text(e.version.to_string()).size(13).color(t::text_primary()))
+            .push(crate::views::body::view(&e.notes, 12.0, t::text_secondary(), ctx));
+    }
+    col.into()
 }
 
 /// The popover over the status bar: the new version, the installed one, the
@@ -139,6 +147,25 @@ mod tests {
             dmg_update: None,
             failure_shown: false,
         }
+    }
+
+    fn entry(v: &str, notes: &str) -> ReleaseEntry {
+        ReleaseEntry {
+            version: Version::parse(v).unwrap(),
+            published_at: chrono::DateTime::parse_from_rfc3339("2026-11-17T10:00:00Z").unwrap(),
+            notes: notes.into(),
+        }
+    }
+
+    #[test]
+    fn entries_with_empty_notes_are_skipped() {
+        let n = ReleaseNotes::Available(vec![entry("0.14.0", "  \n"), entry("0.13.0", "- fix")]);
+        let shown = shown_entries(&n);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].version, Version::parse("0.13.0").unwrap());
+        let all_empty = ReleaseNotes::Available(vec![entry("0.14.0", "")]);
+        assert!(shown_entries(&all_empty).is_empty());
+        assert!(shown_entries(&ReleaseNotes::Unavailable).is_empty());
     }
 
     #[test]
