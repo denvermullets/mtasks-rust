@@ -20,6 +20,15 @@ pub enum ToastKind {
     Info,
 }
 
+/// A button on a toast. Pressing it removes the toast and then sends `message`.
+#[derive(Debug, Clone)]
+pub struct ToastAction {
+    pub label: String,
+    pub message: Message,
+    /// Filled accent button instead of plain text.
+    pub primary: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Toast {
     pub id: u64,
@@ -29,6 +38,12 @@ pub struct Toast {
     pub retry: bool,
     /// Creation time, for age-based auto-dismiss of non-error toasts.
     pub created: std::time::Instant,
+    /// Extra buttons shown under the message (e.g. "Restart now").
+    pub actions: Vec<ToastAction>,
+    /// Sent (after removing the toast) when × is pressed; None just removes it.
+    pub on_dismiss: Option<Message>,
+    /// Stays until the user acts, even if it is not an error.
+    pub sticky: bool,
 }
 
 impl ToastKind {
@@ -61,8 +76,12 @@ pub fn overlay(toasts: &[Toast]) -> Element<'_, Message> {
 fn card(toast: &Toast) -> Element<'_, Message> {
     let accent = toast.kind.accent();
 
+    let dismiss_msg = match &toast.on_dismiss {
+        Some(m) => Message::ToastActed(toast.id, Box::new(m.clone())),
+        None => Message::DismissToast(toast.id),
+    };
     let dismiss = button(text("×").size(16).color(t::text_secondary()))
-        .on_press(Message::DismissToast(toast.id))
+        .on_press(dismiss_msg)
         .padding([0, 6])
         .style(button::text);
 
@@ -91,6 +110,29 @@ fn card(toast: &Toast) -> Element<'_, Message> {
                         .style(button::text),
                 ),
         );
+    }
+
+    if !toast.actions.is_empty() {
+        let mut acts = row![].spacing(8);
+        for a in &toast.actions {
+            let b = if a.primary {
+                button(text(&a.label).size(12).color(Color::WHITE)).style(
+                    |_theme: &Theme, status| button::Style {
+                        background: Some(iced::Background::Color(t::accent_fill(status))),
+                        text_color: Color::WHITE,
+                        border: Border { radius: 4.0.into(), ..Default::default() },
+                        ..Default::default()
+                    },
+                )
+            } else {
+                button(text(&a.label).size(12).color(accent)).style(button::text)
+            };
+            acts = acts.push(
+                b.on_press(Message::ToastActed(toast.id, Box::new(a.message.clone())))
+                    .padding([4, 10]),
+            );
+        }
+        body = body.push(acts);
     }
 
     container(body)

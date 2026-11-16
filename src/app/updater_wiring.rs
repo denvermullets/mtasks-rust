@@ -16,6 +16,7 @@ use crate::updater::install::InstallContext;
 use crate::updater::machine::{CheckKind, Effect, Event, UpdateInfo};
 use crate::updater::swap;
 use crate::updater::verify::{StageError, StageRequest};
+use crate::views::toast::ToastAction;
 use iced::futures::SinkExt;
 
 /// The updater event for a stage result. Pure.
@@ -25,6 +26,25 @@ fn stage_event(result: Result<(), StageError>, at: chrono::DateTime<Utc>) -> Eve
         Err(StageError::Broken(reason)) => Event::BrokenDownload { at, reason },
         Err(StageError::Security(reason)) => Event::SecurityFailure { at, reason },
     }
+}
+
+/// The ready toast's text, buttons and × / Later message. Pure.
+fn ready_notice(version: &semver::Version) -> (String, Vec<ToastAction>, Message) {
+    let later = Message::Updater(Event::NoticeDismissed { version: version.clone() });
+    let actions = vec![
+        ToastAction {
+            label: "Restart now".into(),
+            message: Message::RestartNowClicked,
+            primary: true,
+        },
+        ToastAction {
+            label: "What's new".into(),
+            message: Message::OpenUpdatePopover,
+            primary: false,
+        },
+        ToastAction { label: "Later".into(), message: later.clone(), primary: false },
+    ];
+    (format!("JAIT {version} is ready. It installs when you quit."), actions, later)
 }
 
 /// How often the Tick subscription fires. The machine decides whether 6 hours
@@ -211,9 +231,16 @@ impl App {
         task
     }
 
+    /// The one-time "ready" toast. The machine only emits the effect once per
+    /// version (and never for a dismissed one), so this just shows it.
+    fn show_ready_notice(&mut self, version: &semver::Version) {
+        let (body, actions, on_dismiss) = ready_notice(version);
+        self.push_action_toast(body, actions, Some(on_dismiss));
+    }
+
     /// Carry out one effect. Exhaustive on purpose: a new `Effect` variant must
     /// be handled (or deliberately ignored) here.
-    fn run_updater_effect(&self, effect: Effect) -> Task<Message> {
+    fn run_updater_effect(&mut self, effect: Effect) -> Task<Message> {
         match effect {
             Effect::FetchManifest => {
                 let edge = self.update_edge.clone();
@@ -245,8 +272,12 @@ impl App {
                     Message::Noop
                 })
             }
-            // TODO(JRST-524): the ready toast and the "Restart to update?" confirm.
-            Effect::ShowReadyNotice { .. } | Effect::ConfirmRestart { .. } => Task::none(),
+            Effect::ShowReadyNotice { version, .. } => {
+                self.show_ready_notice(&version);
+                Task::none()
+            }
+            // TODO(JRST-524): the "Restart to update?" confirm.
+            Effect::ConfirmRestart { .. } => Task::none(),
             Effect::SwapStaged { version } => {
                 // Failure only means the old version keeps running.
                 if let Err(e) = self.swap_staged(&version) {
@@ -284,6 +315,22 @@ mod tests {
         let at = Utc::now();
         for t in [Trigger::Launched, Trigger::Tick, Trigger::Woke] {
             assert_eq!(background_event(&InstallContext::Disabled, t, at), None);
+        }
+    }
+
+    #[test]
+    fn ready_notice_wires_buttons_and_later() {
+        let ver = semver::Version::new(0, 13, 0);
+        let (body, actions, on_dismiss) = ready_notice(&ver);
+        assert_eq!(body, "JAIT 0.13.0 is ready. It installs when you quit.");
+        let labels: Vec<_> = actions.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["Restart now", "What's new", "Later"]);
+        assert!(matches!(actions[0].message, Message::RestartNowClicked));
+        assert!(matches!(actions[1].message, Message::OpenUpdatePopover));
+        for m in [&actions[2].message, &on_dismiss] {
+            assert!(
+                matches!(m, Message::Updater(Event::NoticeDismissed { version }) if *version == ver)
+            );
         }
     }
 

@@ -26,7 +26,7 @@ use crate::sync::notif_poll::{self, PollOutcome, PollReport};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Run, Scheduler};
 use crate::palette_results::{PaletteData, PaletteNav, PaletteState};
 use crate::theme as t;
-use crate::views::toast::{Toast, ToastKind};
+use crate::views::toast::{Toast, ToastAction, ToastKind};
 use crate::views::{
     board, command_palette, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
@@ -543,6 +543,8 @@ pub enum Message {
     ToastTick,
     /// "Retry now" on a toast: dismiss it and trigger an immediate sync.
     RetrySyncFromToast(u64),
+    /// A toast button (or its ×) was pressed: remove the toast, then handle the message.
+    ToastActed(u64, Box<Message>),
 
     // Project CRUD
     CreateProject,
@@ -1308,6 +1310,30 @@ impl App {
             kind,
             retry,
             created: std::time::Instant::now(),
+            actions: Vec::new(),
+            on_dismiss: None,
+            sticky: false,
+        });
+    }
+
+    /// Queue a toast with buttons. It stays until the user acts on it.
+    fn push_action_toast(
+        &mut self,
+        message: impl Into<String>,
+        actions: Vec<ToastAction>,
+        on_dismiss: Option<Message>,
+    ) {
+        let id = self.next_toast_id;
+        self.next_toast_id += 1;
+        self.toasts.push(Toast {
+            id,
+            message: message.into(),
+            kind: ToastKind::Info,
+            retry: false,
+            created: std::time::Instant::now(),
+            actions,
+            on_dismiss,
+            sticky: true,
         });
     }
 
@@ -7778,7 +7804,12 @@ impl App {
                 // Expire non-error toasts after ~4s; errors persist until the
                 // user dismisses or retries them.
                 self.toasts
-                    .retain(|t| t.kind == ToastKind::Error || t.created.elapsed().as_secs() < 4);
+                    .retain(|t| t.sticky || t.kind == ToastKind::Error || t.created.elapsed().as_secs() < 4);
+            }
+
+            Message::ToastActed(id, inner) => {
+                self.toasts.retain(|t| t.id != id);
+                return self.update(*inner);
             }
 
             Message::RetrySyncFromToast(id) => {
