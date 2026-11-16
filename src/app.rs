@@ -3895,6 +3895,15 @@ impl App {
             update_edge: std::sync::Arc::new(crate::updater::edge::HttpEdge::from_env()),
         };
 
+        // Drop partial downloads and unverified extracts from a past run, once,
+        // before any download can take the update lock.
+        if let crate::updater::install::InstallContext::SelfInstall { staging_dir, .. } = &app.install {
+            let _ = crate::updater::staging::cleanup_at_launch(
+                &crate::updater::staging::RealStagingFs,
+                staging_dir,
+            );
+        }
+
         app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
         app.terminals.set_dock(crate::terminal::panel::Dock::from_name(&app.config.terminal_dock));
         app.terminals.set_width(app.config.terminal_panel_width);

@@ -233,8 +233,8 @@ pub struct UpdatesInfo {
 }
 
 /// The one line for the current step, with whether it is an error. None when
-/// nothing is going on. A found Update shows as available until JRST-514
-/// downloads it.
+/// nothing is going on. Download progress only reaches here for manual checks
+/// (the machine's view decides).
 fn status_text(status: &crate::updater::machine::Status) -> Option<(String, bool)> {
     use crate::updater::machine::Status;
     match status {

@@ -7,7 +7,16 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use semver::Version;
+
+use super::download::{self, DownloadError, ZipSink};
 use super::manifest::{self, ParsedManifest};
+use super::staging::{LockError, UpdateLock};
 
 /// Where the Release manifest (`latest.json`) lives. GitHub redirects
 /// `latest/download/` to the newest Release's asset. Never the REST API.
@@ -24,6 +33,27 @@ pub type EdgeFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub trait UpdateEdge: Send + Sync {
     /// GET the Release manifest's bytes.
     fn fetch_manifest(&self) -> EdgeFuture<Result<Vec<u8>, String>>;
+
+    /// Stream the Update's zip into the staging dir (see `download::zip_path`),
+    /// calling `on_progress(received_bytes)` as whole percents tick over.
+    fn download(
+        &self,
+        req: DownloadRequest,
+        on_progress: Box<dyn Fn(u64) + Send + Sync>,
+    ) -> EdgeFuture<Result<(), DownloadError>>;
+
+    /// Stop the running download (it ends as `DownloadError::Cancelled`).
+    fn cancel_download(&self);
+}
+
+/// What one download needs.
+#[derive(Debug, Clone)]
+pub struct DownloadRequest {
+    pub url: String,
+    pub version: Version,
+    pub sha256: String,
+    pub size: u64,
+    pub staging_dir: PathBuf,
 }
 
 /// The manifest URL: the env override if set and non-blank, else the default.
@@ -37,6 +67,7 @@ pub fn feed_url(env_override: Option<String>) -> String {
 /// Real edge: reqwest, following redirects.
 pub struct HttpEdge {
     url: String,
+    cancel: Arc<AtomicBool>,
 }
 
 impl HttpEdge {
@@ -44,6 +75,7 @@ impl HttpEdge {
     pub fn from_env() -> Self {
         HttpEdge {
             url: feed_url(std::env::var(FEED_URL_ENV).ok()),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -73,6 +105,92 @@ impl UpdateEdge for HttpEdge {
             Ok(bytes.to_vec())
         })
     }
+
+    fn download(
+        &self,
+        req: DownloadRequest,
+        on_progress: Box<dyn Fn(u64) + Send + Sync>,
+    ) -> EdgeFuture<Result<(), DownloadError>> {
+        let cancel = self.cancel.clone();
+        cancel.store(false, Ordering::SeqCst);
+        Box::pin(async move { download_zip(&req, &cancel, on_progress.as_ref()).await })
+    }
+
+    fn cancel_download(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+/// How long one chunk may take to arrive before the download counts as dead.
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Download under the update lock; a failed or cancelled run leaves no `.part`.
+async fn download_zip(
+    req: &DownloadRequest,
+    cancel: &AtomicBool,
+    on_progress: &(dyn Fn(u64) + Send + Sync),
+) -> Result<(), DownloadError> {
+    let _lock = UpdateLock::acquire(&req.staging_dir).map_err(|e| match e {
+        LockError::Held => DownloadError::Failed("another update is already running".into()),
+        LockError::Io(e) => {
+            DownloadError::Failed(format!("could not prepare the update folder: {e}"))
+        }
+    })?;
+    let part = download::part_path(&req.staging_dir, &req.version);
+    match stream_to_part(req, &part, cancel, on_progress).await {
+        Ok(()) => download::promote(&part, &download::zip_path(&req.staging_dir, &req.version)),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+    }
+}
+
+async fn stream_to_part(
+    req: &DownloadRequest,
+    part: &std::path::Path,
+    cancel: &AtomicBool,
+    on_progress: &(dyn Fn(u64) + Send + Sync),
+) -> Result<(), DownloadError> {
+    let net = |what: &str, e: &dyn std::fmt::Display| DownloadError::Failed(format!("{what}: {e}"));
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| net("could not start the download", &e))?;
+    let mut resp = client
+        .get(&req.url)
+        .send()
+        .await
+        .map_err(|e| net("could not reach the update server", &e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(DownloadError::Failed(format!(
+            "the update server answered {status}"
+        )));
+    }
+    let file =
+        std::fs::File::create(part).map_err(|e| net("could not write the download", &e))?;
+    let mut sink = ZipSink::new(std::io::BufWriter::new(file), req.size, &req.sha256);
+    let mut last_percent = 0u8;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(DownloadError::Cancelled);
+        }
+        let chunk = tokio::time::timeout(CHUNK_TIMEOUT, resp.chunk())
+            .await
+            .map_err(|_| DownloadError::Failed("the download stalled".into()))?
+            .map_err(|e| net("the download was interrupted", &e))?;
+        let Some(chunk) = chunk else { break };
+        sink.push(&chunk)?;
+        let pct = download::progress_percent(sink.received(), req.size);
+        if pct != last_percent {
+            last_percent = pct;
+            on_progress(sink.received());
+        }
+    }
+    sink.finish()?;
+    Ok(())
 }
 
 /// Fetch and parse the Release manifest. Any failure is a check failure.
@@ -92,6 +210,16 @@ mod tests {
             let r = self.0.clone();
             Box::pin(async move { r })
         }
+
+        fn download(
+            &self,
+            _req: DownloadRequest,
+            _on_progress: Box<dyn Fn(u64) + Send + Sync>,
+        ) -> EdgeFuture<Result<(), DownloadError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn cancel_download(&self) {}
     }
 
     fn block_on<T>(f: impl Future<Output = T>) -> T {

@@ -24,6 +24,7 @@ arboard = { version = "3", default-features = false, features = ["image-data"] }
 png = "0.17"
 pulldown-cmark = { version = "0.13", default-features = false }
 semver = "1"
+sha2 = "0.10"
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 
 # Terminal engine (docs/adr/0002). Pinned and upgraded together, on purpose:

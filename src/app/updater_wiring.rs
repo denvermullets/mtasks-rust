@@ -10,9 +10,11 @@ use iced::Task;
 
 use super::{App, Message};
 use crate::config::UpdaterConfig;
+use crate::updater::download::DownloadError;
 use crate::updater::edge;
 use crate::updater::install::InstallContext;
-use crate::updater::machine::{CheckKind, Effect, Event};
+use crate::updater::machine::{CheckKind, Effect, Event, UpdateInfo};
+use iced::futures::SinkExt;
 
 /// Shown when the Check button is pressed in a build with no `.app` around it.
 pub const DISABLED_NOTE: &str =
@@ -66,6 +68,42 @@ impl App {
         self.save_config_change(cfg);
     }
 
+    /// Stream the Update's zip into the staging dir. Progress arrives as
+    /// `DownloadProgress`; the end as `DownloadFinished`, `BrokenDownload` or
+    /// `DownloadFailed`. A cancelled download ends silently.
+    fn start_download(&self, info: UpdateInfo) -> Task<Message> {
+        let InstallContext::SelfInstall { staging_dir, .. } = &self.install else {
+            return Task::none();
+        };
+        let req = edge::DownloadRequest {
+            url: info.zip_url,
+            version: info.version,
+            sha256: info.zip_sha256,
+            size: info.zip_size,
+            staging_dir: staging_dir.clone(),
+        };
+        let edge = self.update_edge.clone();
+        let stream = iced::stream::channel(64, move |mut out| async move {
+            let progress_out = std::sync::Mutex::new(out.clone());
+            let on_progress = Box::new(move |received| {
+                // Progress is best-effort: a full channel just skips a tick.
+                if let Ok(mut tx) = progress_out.lock() {
+                    let _ = tx.try_send(Event::DownloadProgress { received });
+                }
+            });
+            let result = edge.download(req, on_progress).await;
+            let at = Utc::now();
+            let event = match result {
+                Ok(()) => Event::DownloadFinished,
+                Err(DownloadError::Failed(reason)) => Event::DownloadFailed { at, reason },
+                Err(DownloadError::Broken(reason)) => Event::BrokenDownload { at, reason },
+                Err(DownloadError::Cancelled) => return,
+            };
+            let _ = out.send(event).await;
+        });
+        Task::run(stream, Message::Updater)
+    }
+
     /// Carry out one effect. Exhaustive on purpose: a new `Effect` variant must
     /// be handled (or deliberately ignored) here.
     fn run_updater_effect(&self, effect: Effect) -> Task<Message> {
@@ -84,9 +122,11 @@ impl App {
                     Message::Updater,
                 )
             }
-            // TODO(JRST-514): download the zip with progress and check its sha256.
-            // TODO(JRST-514): abort the running download.
-            Effect::Download(_) | Effect::CancelDownload => Task::none(),
+            Effect::Download(info) => self.start_download(info),
+            Effect::CancelDownload => {
+                self.update_edge.cancel_download();
+                Task::none()
+            }
             // TODO(JRST-516): verify and extract the zip, delete staging files.
             Effect::Stage(_) | Effect::RemoveStaged { .. } | Effect::DeleteStaging(_) => {
                 Task::none()
