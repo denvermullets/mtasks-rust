@@ -509,8 +509,8 @@ pub enum Message {
     QuitConfirmed,
     /// Every Terminal has closed (or the wait ran out): exit.
     QuitReady,
-    /// Once, at startup: send the native Quit menu item to `QuitRequested`.
-    RouteMenuQuit,
+    /// Once, at startup: route system terminate requests (Cmd+Q, Dock Quit, AppleScript quit) to `QuitRequested`.
+    InstallTerminateHook,
     SyncCompleted(FullSyncReport),
     /// A Notification poll finished.
     NotifPollCompleted(PollOutcome),
@@ -3888,8 +3888,8 @@ impl App {
             app.modal = Modal::Settings;
         }
 
-        // The menu exists once the event loop is up; reroute Cmd+Q then.
-        let task = Task::batch([task, Task::done(Message::RouteMenuQuit)]);
+        // The app delegate exists once the event loop is up; hook terminate then.
+        let task = Task::batch([task, Task::done(Message::InstallTerminateHook)]);
 
         (app, task)
     }
@@ -4052,6 +4052,8 @@ impl App {
             activity,
             banner_clicks,
             close_requests,
+            // Cmd+Q, Dock Quit and AppleScript quit (see `quit.rs`).
+            Subscription::run(crate::quit::terminate_requests).map(|_| Message::QuitRequested),
             opens,
             resizes,
             self.terminals.subscription(modal_open),
@@ -6579,6 +6581,10 @@ impl App {
             }
 
             Message::CloseModal => {
+                // Cancelling the quit ask also cancels the terminate behind it.
+                if self.modal == Modal::QuitConfirm {
+                    crate::quit::reply_to_terminate(false);
+                }
                 // Cancelling the label-delete confirm returns to the panel.
                 if matches!(self.modal, Modal::DeleteLabelConfirm(_)) {
                     self.modal = Modal::Labels;
@@ -7499,8 +7505,12 @@ impl App {
             }
             Message::QuitRequested => return self.quit(),
             Message::QuitConfirmed => return self.quit_with(true),
-            Message::QuitReady => return iced::exit(),
-            Message::RouteMenuQuit => crate::quit::route_menu_quit_to_close(),
+            Message::QuitReady => {
+                // Lets a pending system terminate go ahead (a no-op for the close button).
+                crate::quit::reply_to_terminate(true);
+                return iced::exit();
+            }
+            Message::InstallTerminateHook => crate::quit::install_terminate_hook(),
             Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
             Message::SyncCompleted(report) => {

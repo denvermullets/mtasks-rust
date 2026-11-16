@@ -39,7 +39,7 @@ libc = "0.2"
 # (Update / View / Layout / Primitive generation / Render averages).
 perf = ["iced/debug"]
 
-# Only to retarget the native Quit menu item at the window's close request
+# Only to hook applicationShouldTerminate: onto winit's app delegate
 # (src/quit.rs). Versions match the ones winit 0.30 already pulls in.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
