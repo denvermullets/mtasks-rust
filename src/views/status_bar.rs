@@ -33,6 +33,7 @@ pub fn view<'a>(
     read_only: bool,
     in_inbox: bool,
     on_project: bool,
+    update_chip: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let (sync_text, sync_color) = if let Some(err) = last_sync_error {
         // Transient network failures are non-fatal (sync retries) — surface them
@@ -104,7 +105,9 @@ pub fn view<'a>(
         )
     };
 
-    let bar = bar.push(text(sync_text).size(12).color(sync_color));
+    let bar = bar
+        .push_maybe(update_chip)
+        .push(text(sync_text).size(12).color(sync_color));
 
     container(bar)
         .padding([6, 14])

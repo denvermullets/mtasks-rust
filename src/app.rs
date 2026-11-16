@@ -8785,6 +8785,7 @@ impl App {
             self.sync_read_only,
             self.view == View::Inbox,
             matches!(self.view, View::ProjectDetail(_)),
+            crate::views::update_chip::chip(&self.updater.view()),
         );
 
         // An open create/edit form takes the page, as on the web (JRST-454).

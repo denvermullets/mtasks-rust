@@ -45,5 +45,6 @@ pub mod team_picker;
 pub mod text;
 pub use text::text;
 pub mod toast;
+pub mod update_chip;
 pub mod truncated;
 pub mod util;
