@@ -9075,6 +9075,15 @@ impl App {
             },
             Modal::Settings => {
                 if let Some(ref form) = self.settings_form {
+                    let ctx = crate::views::body::BodyCtx {
+                        teams: &self.teams,
+                        issues: &[],
+                        members: &[],
+                        images: &self.images,
+                        host: &self.config.api_base_url,
+                        pending_paths: None,
+                        on_image: None,
+                    };
                     let modal = settings::view(
                         form,
                         &settings::UpdatesInfo {
@@ -9083,6 +9092,7 @@ impl App {
                             busy: self.updater.is_busy(),
                             auto_check: self.updater.auto_check(),
                         },
+                        &ctx,
                     );
                     iced::widget::stack![base, modal].into()
                 } else {

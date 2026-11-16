@@ -46,7 +46,11 @@ impl SettingsFormState {
     }
 }
 
-pub fn view<'a>(form: &'a SettingsFormState, updates: &UpdatesInfo) -> Element<'a, Message> {
+pub fn view<'a>(
+    form: &'a SettingsFormState,
+    updates: &UpdatesInfo,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
     let status_line: Element<'a, Message> = match form.status.as_deref() {
         Some(s) => {
             let color = if s.starts_with("Failed") || s.starts_with("Error") {
@@ -167,7 +171,7 @@ pub fn view<'a>(form: &'a SettingsFormState, updates: &UpdatesInfo) -> Element<'
                     .text_size(14),
                 ),
         )
-        .push(updates_section(updates, form.update_note.as_deref()))
+        .push(updates_section(updates, form.update_note.as_deref(), ctx))
         .push(status_line)
         .push(
             row![]
@@ -267,7 +271,11 @@ fn last_check_label(last: Option<chrono::DateTime<chrono::Utc>>) -> String {
 
 /// Settings → Updates: the installed version, when the last check ran, and the
 /// last failure (so a quiet one can be found).
-fn updates_section<'a>(updates: &UpdatesInfo, note: Option<&str>) -> Element<'a, Message> {
+fn updates_section<'a>(
+    updates: &UpdatesInfo,
+    note: Option<&str>,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
     let line = |name: &'static str, value: String| {
         row![]
             .push(text(name).size(12).color(t::text_secondary()))
@@ -304,6 +312,9 @@ fn updates_section<'a>(updates: &UpdatesInfo, note: Option<&str>) -> Element<'a,
                     None => text("").size(12),
                 }),
         );
+    if let Some(ready) = &updates.view.ready {
+        col = col.push(ready_update(ready, ctx));
+    }
     if let Some(offer) = &updates.view.dmg_update {
         col = col.push(dmg_offer(offer));
     }
@@ -322,6 +333,28 @@ fn updates_section<'a>(updates: &UpdatesInfo, note: Option<&str>) -> Element<'a,
         );
     }
     col.into()
+}
+
+/// A ready Update: its Release notes and Restart now, as in the popover.
+fn ready_update<'a>(
+    ready: &crate::updater::machine::ReadyUpdate,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
+    column![]
+        .spacing(6)
+        .push(
+            text(format!("JAIT {} is ready", ready.version))
+                .size(12)
+                .color(t::text_secondary()),
+        )
+        .push(crate::views::update_chip::notes_section(&ready.notes, ctx))
+        .push(
+            button(text("Restart now").size(13))
+                .on_press(Message::RestartNowClicked)
+                .padding([6, 14])
+                .style(button::primary),
+        )
+        .into()
 }
 
 /// The DMG offer for an Update this install can't apply itself: the version,

@@ -58,7 +58,7 @@ fn shown_entries(notes: &ReleaseNotes) -> Vec<&ReleaseEntry> {
 
 /// The Release notes of every Release newer than the installed version,
 /// newest first, rendered as markdown; or "Release notes unavailable".
-fn notes_section<'a>(
+pub(crate) fn notes_section<'a>(
     notes: &ReleaseNotes,
     ctx: &crate::views::body::BodyCtx<'a>,
 ) -> Element<'a, Message> {
