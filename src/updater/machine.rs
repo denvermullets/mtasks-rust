@@ -59,6 +59,12 @@ pub enum Event {
         at: DateTime<Utc>,
         manifest: ParsedManifest,
     },
+    /// `received` bytes of the zip have arrived so far.
+    DownloadProgress { received: u64 },
+    /// The whole zip was downloaded.
+    DownloadFinished,
+    /// The zip passed every check and is staged next to the installed app.
+    StagingVerified,
 }
 
 /// Things the app must do. The machine returns these.
@@ -68,6 +74,14 @@ pub enum Effect {
     FetchManifest,
     /// Download the Update's zip.
     Download(UpdateInfo),
+    /// Verify and extract the downloaded zip, then send
+    /// `Event::StagingVerified`.
+    Stage(UpdateInfo),
+    /// Show the one-time "ready" notice for this version (toast).
+    ShowReadyNotice {
+        version: Version,
+        notes: ReleaseNotes,
+    },
 }
 
 /// What the updater is busy with right now.
@@ -75,7 +89,8 @@ pub enum Effect {
 enum Activity {
     Idle,
     Checking,
-    Downloading(UpdateInfo),
+    Downloading { info: UpdateInfo, received: u64 },
+    Verifying(UpdateInfo),
 }
 
 /// What the UI should say about the updater. Derived from state.
@@ -87,11 +102,25 @@ pub enum Status {
     Checking,
     /// "Up to date ✓" (after a manual check only).
     UpToDate,
+    /// Download progress (manual checks only).
+    Downloading { version: Version, percent: u8 },
+    /// Verifying the download (manual checks only).
+    Verifying { version: Version },
+}
+
+/// A Staged update: downloaded, verified, waiting to install at the next
+/// Clean quit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyUpdate {
+    pub version: Version,
+    pub notes: ReleaseNotes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdaterView {
     pub status: Status,
+    /// The Staged update, if any. Independent of `status`.
+    pub ready: Option<ReadyUpdate>,
     pub last_checked: Option<DateTime<Utc>>,
 }
 
@@ -103,6 +132,7 @@ pub struct UpdaterState {
     manual: bool,
     last_checked: Option<DateTime<Utc>>,
     up_to_date_shown: bool,
+    staged: Option<UpdateInfo>,
 }
 
 impl UpdaterState {
@@ -113,6 +143,7 @@ impl UpdaterState {
             manual: false,
             last_checked: None,
             up_to_date_shown: false,
+            staged: None,
         }
     }
 
@@ -128,11 +159,22 @@ impl UpdaterState {
     pub fn view(&self) -> UpdaterView {
         let status = match &self.activity {
             Activity::Checking if self.manual => Status::Checking,
+            Activity::Downloading { info, received } if self.manual => Status::Downloading {
+                version: info.version.clone(),
+                percent: percent(*received, info.zip_size),
+            },
+            Activity::Verifying(info) if self.manual => Status::Verifying {
+                version: info.version.clone(),
+            },
             Activity::Idle if self.up_to_date_shown => Status::UpToDate,
             _ => Status::Idle,
         };
         UpdaterView {
             status,
+            ready: self.staged.as_ref().map(|i| ReadyUpdate {
+                version: i.version.clone(),
+                notes: i.notes.clone(),
+            }),
             last_checked: self.last_checked,
         }
     }
@@ -142,6 +184,9 @@ impl UpdaterState {
         match event {
             Event::CheckStarted(kind) => self.check_started(kind),
             Event::CheckFinished { at, manifest } => self.check_finished(at, manifest),
+            Event::DownloadProgress { received } => self.download_progress(received),
+            Event::DownloadFinished => self.download_finished(),
+            Event::StagingVerified => self.staging_verified(),
         }
     }
 
@@ -160,15 +205,55 @@ impl UpdaterState {
         vec![Effect::FetchManifest]
     }
 
+    /// Is this version already staged (or older than what is)?
+    fn has_staged(&self, version: &Version) -> bool {
+        self.staged.as_ref().is_some_and(|s| &s.version >= version)
+    }
+
+    fn download_progress(&mut self, received: u64) -> Vec<Effect> {
+        if let Activity::Downloading { received: r, .. } = &mut self.activity {
+            *r = received;
+        }
+        vec![]
+    }
+
+    fn download_finished(&mut self) -> Vec<Effect> {
+        let Activity::Downloading { info, .. } = &self.activity else {
+            return vec![];
+        };
+        let info = info.clone();
+        self.activity = Activity::Verifying(info.clone());
+        vec![Effect::Stage(info)]
+    }
+
+    fn staging_verified(&mut self) -> Vec<Effect> {
+        let Activity::Verifying(info) = &self.activity else {
+            return vec![];
+        };
+        let info = info.clone();
+        self.activity = Activity::Idle;
+        self.manual = false;
+        self.staged = Some(info.clone());
+        vec![Effect::ShowReadyNotice {
+            version: info.version,
+            notes: info.notes,
+        }]
+    }
+
     fn check_finished(&mut self, at: DateTime<Utc>, manifest: ParsedManifest) -> Vec<Effect> {
         if self.activity != Activity::Checking {
             return vec![]; // stale answer, no check is running
         }
         self.last_checked = Some(at);
         match manifest {
-            ParsedManifest::SelfInstall(m) if m.is_update(&self.installed) => {
+            ParsedManifest::SelfInstall(m)
+                if m.is_update(&self.installed) && !self.has_staged(&m.version) =>
+            {
                 let info = UpdateInfo::from_manifest(&m, &self.installed);
-                self.activity = Activity::Downloading(info.clone());
+                self.activity = Activity::Downloading {
+                    info: info.clone(),
+                    received: 0,
+                };
                 vec![Effect::Download(info)]
             }
             // A DMG-only offer is handled by a later ticket (JRST-515); until
@@ -181,6 +266,13 @@ impl UpdaterState {
             }
         }
     }
+}
+
+fn percent(received: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    (received.min(total) * 100 / total) as u8
 }
 
 #[cfg(test)]
@@ -319,6 +411,87 @@ pub(super) mod tests {
         s.update(Event::CheckStarted(CheckKind::Manual));
         assert_eq!(s.update(Event::CheckStarted(CheckKind::Automatic)), vec![]);
         assert_eq!(s.view().status, Status::Checking);
+    }
+
+    fn update_of(fx: Vec<Effect>) -> UpdateInfo {
+        match fx.as_slice() {
+            [Effect::Download(i)] => i.clone(),
+            other => panic!("expected one download, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn automatic_update_goes_to_ready_with_no_visible_progress() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(9, "0.13.0")));
+        assert_eq!(s.view().status, Status::Idle);
+        s.update(Event::DownloadProgress { received: 500 });
+        assert_eq!(s.view().status, Status::Idle);
+        assert_eq!(
+            s.update(Event::DownloadFinished),
+            vec![Effect::Stage(info.clone())]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        assert_eq!(s.view().ready, None);
+        let fx = s.update(Event::StagingVerified);
+        assert_eq!(
+            fx,
+            vec![Effect::ShowReadyNotice {
+                version: v("0.13.0"),
+                notes: info.notes.clone()
+            }]
+        );
+        let ready = s.view().ready.unwrap();
+        assert_eq!(ready.version, v("0.13.0"));
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(!s.is_busy());
+    }
+
+    #[test]
+    fn manual_check_exposes_download_progress_then_verifying() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        update_of(s.update(finished(9, "0.13.0")));
+        let downloading = |percent| Status::Downloading {
+            version: v("0.13.0"),
+            percent,
+        };
+        assert_eq!(s.view().status, downloading(0));
+        s.update(Event::DownloadProgress { received: 250 });
+        assert_eq!(s.view().status, downloading(25));
+        s.update(Event::DownloadProgress { received: 5000 }); // past the size
+        assert_eq!(s.view().status, downloading(100));
+        s.update(Event::DownloadFinished);
+        assert_eq!(s.view().status, Status::Verifying { version: v("0.13.0") });
+        s.update(Event::StagingVerified);
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(s.view().ready.is_some());
+    }
+
+    #[test]
+    fn ready_notice_is_emitted_once_per_staging() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(Event::DownloadFinished);
+        let fx = s.update(Event::StagingVerified);
+        assert_eq!(fx.len(), 1);
+        // A repeated or stray verified event does nothing.
+        assert_eq!(s.update(Event::StagingVerified), vec![]);
+        // A later check that finds the same version doesn't re-download it.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(finished(15, "0.13.0")), vec![]);
+        assert!(s.view().ready.is_some());
+    }
+
+    #[test]
+    fn download_events_outside_a_download_are_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(Event::DownloadProgress { received: 1 }), vec![]);
+        assert_eq!(s.update(Event::DownloadFinished), vec![]);
+        assert_eq!(s.update(Event::StagingVerified), vec![]);
+        assert_eq!(s.view().ready, None);
     }
 
     #[test]
