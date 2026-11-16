@@ -8,6 +8,11 @@
 # refuses to go on if anything is off. There is deliberately no --force; a bad
 # Release is fixed by bumping the version, never by overwriting one.
 #
+# After the guards: a draft release is created, the zip, DMG, JAIT.dmg and
+# latest.json are uploaded, the manifest and zip are re-downloaded and checked
+# against their sha256, and only then does the release go live as latest. gh is
+# the mise-pinned one, with a Keychain token (see scripts/lib/publish-steps.sh).
+#
 # Guards, each exits non-zero with its own message:
 #   - the folder has build-info.json and the notarized zip (an unnotarized build
 #     makes no zip)
@@ -142,4 +147,15 @@ esac
 
 echo "All guards passed for $APP_NAME $VERSION (commit ${COMMIT:0:12})."
 
-# Later steps (draft release, upload, verify, go live, tag) are added by their own tickets.
+# ── Release ──
+
+source "$ROOT/scripts/lib/publish-steps.sh"
+
+NOTES_FILE="$TMP/release-body.md"
+printf 'Direct download: https://github.com/%s/releases/download/%s/%s-%s.dmg\n' \
+    "$RELEASES_REPO" "$TAG" "$APP_NAME" "$VERSION" >"$NOTES_FILE"
+
+publish_release "$NOTES_FILE"
+echo "Published $APP_NAME $VERSION."
+
+# Later steps (release notes from the changelog, source tag) are added by their own tickets.
