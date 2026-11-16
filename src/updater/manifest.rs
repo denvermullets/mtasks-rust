@@ -93,7 +93,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
     let releases = parse_releases(obj.get("releases"));
 
     if schema > KNOWN_SCHEMA {
-        let dmg_url = req_str(obj.get("dmg_url"), "dmg_url")?;
+        let dmg_url = req_url(obj.get("dmg_url"), "dmg_url")?;
         return Ok(ParsedManifest::DmgOnly(DmgOffer {
             version,
             dmg_url,
@@ -102,7 +102,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
     }
 
     let published_at = parse_time(obj.get("published_at"), "published_at")?;
-    let zip_url = req_str(obj.get("zip_url"), "zip_url")?;
+    let zip_url = req_url(obj.get("zip_url"), "zip_url")?;
     let zip_sha256 = req_str(obj.get("zip_sha256"), "zip_sha256")?;
     if !is_sha256_hex(&zip_sha256) {
         return Err(ManifestError::InvalidField(
@@ -116,7 +116,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
             ManifestError::InvalidField("zip_size", "not a non-negative integer".into())
         })?,
     };
-    let dmg_url = req_str(obj.get("dmg_url"), "dmg_url")?;
+    let dmg_url = req_url(obj.get("dmg_url"), "dmg_url")?;
 
     Ok(ParsedManifest::SelfInstall(Manifest {
         version,
@@ -127,6 +127,37 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
         dmg_url,
         releases,
     }))
+}
+
+/// The only host a manifest may point downloads at.
+pub const RELEASES_HOST: &str = "github.com";
+/// Path prefix of the public releases-only repo's download URLs.
+pub const RELEASES_PATH_PREFIX: &str = "/denvermullets/jait-releases/releases/download/";
+
+/// Whether `url` is an absolute https URL on the releases host. The app only
+/// ever uses URLs that pass this.
+pub fn is_releases_url(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    u.scheme() == "https"
+        && u.host_str() == Some(RELEASES_HOST)
+        && u.port().is_none()
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.path().starts_with(RELEASES_PATH_PREFIX)
+}
+
+fn req_url(v: Option<&Value>, field: &'static str) -> Result<String, ManifestError> {
+    let s = req_str(v, field)?;
+    if is_releases_url(&s) {
+        Ok(s)
+    } else {
+        Err(ManifestError::InvalidField(
+            field,
+            "not an https URL on the releases host".into(),
+        ))
+    }
 }
 
 fn req_str(v: Option<&Value>, field: &'static str) -> Result<String, ManifestError> {
@@ -192,10 +223,10 @@ mod tests {
             "schema": 1,
             "version": "0.13.0",
             "published_at": "2026-11-17T10:00:00Z",
-            "zip_url": "https://example.com/JAIT-0.13.0-arm64.zip",
+            "zip_url": "https://github.com/denvermullets/jait-releases/releases/download/v0.13.0/JAIT-0.13.0-arm64.zip",
             "zip_sha256": HASH,
             "zip_size": 48213504u64,
-            "dmg_url": "https://example.com/JAIT-0.13.0.dmg",
+            "dmg_url": "https://github.com/denvermullets/jait-releases/releases/download/v0.13.0/JAIT-0.13.0.dmg",
             "releases": [
                 { "version": "0.13.0", "published_at": "2026-11-17T10:00:00Z", "notes": "- a" }
             ]
@@ -290,6 +321,43 @@ mod tests {
                 ),
                 "{bad:?}"
             );
+        }
+    }
+
+    #[test]
+    fn https_url_on_the_releases_host_is_accepted() {
+        assert!(is_releases_url(
+            "https://github.com/denvermullets/jait-releases/releases/download/v1.0.0/JAIT.dmg"
+        ));
+    }
+
+    #[test]
+    fn other_urls_are_check_failures() {
+        let base = "github.com/denvermullets/jait-releases/releases/download/v1/x.zip";
+        let bad = [
+            format!("http://{base}"),
+            "/releases/download/v1/x.zip".to_string(),
+            "x.zip".to_string(),
+            "https://evil.example/denvermullets/jait-releases/releases/download/v1/x.zip"
+                .to_string(),
+            "https://github.com.evil.example/denvermullets/jait-releases/releases/download/v1/x.zip"
+                .to_string(),
+            "https://github.com/other/repo/releases/download/v1/x.zip".to_string(),
+            format!("https://user@{base}"),
+            format!("https://github.com:8443/{}", &base[11..]),
+            "file:///tmp/x.zip".to_string(),
+            "".to_string(),
+        ];
+        for url in bad {
+            for field in ["zip_url", "dmg_url"] {
+                assert!(
+                    matches!(
+                        parse_value(&with(field, url.clone().into())),
+                        Err(ManifestError::InvalidField(f, _)) if f == field
+                    ),
+                    "{field} {url:?}"
+                );
+            }
         }
     }
 
