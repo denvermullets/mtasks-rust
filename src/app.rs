@@ -1195,6 +1195,9 @@ pub struct App {
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
     /// fresh token in Settings, so we don't hammer the API with a dead token.
     sync_paused_auth: bool,
+    /// Self-update state (project 320). Restored from `config.updater` at
+    /// launch; saved back after every update (see `apply_updater_event`).
+    updater: crate::updater::machine::UpdaterState,
 }
 
 /// A comment needs text or staged files (Rails: `body_or_files_present`).
@@ -3692,6 +3695,10 @@ impl App {
 impl App {
     pub fn new() -> (Self, Task<Message>) {
         let (config, config_error) = config::load();
+        let mut updater = crate::updater::machine::UpdaterState::new(
+            semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("crate version is semver"),
+        );
+        config.updater.restore(&mut updater);
 
         let conn = connection::open().expect("Failed to open database");
         // Skip the local "My Project" seed when the user has configured an API
@@ -3863,6 +3870,7 @@ impl App {
             hover_content: None,
             next_toast_id: 0,
             sync_paused_auth: false,
+            updater,
         };
 
         app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
@@ -8887,7 +8895,13 @@ impl App {
             }
             Modal::Settings => {
                 if let Some(ref form) = self.settings_form {
-                    let modal = settings::view(form);
+                    let modal = settings::view(
+                        form,
+                        &settings::UpdatesInfo {
+                            installed: self.updater.installed().clone(),
+                            view: self.updater.view(),
+                        },
+                    );
                     iced::widget::stack![base, modal].into()
                 } else {
                     base

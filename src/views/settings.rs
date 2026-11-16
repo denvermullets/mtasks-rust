@@ -43,7 +43,7 @@ impl SettingsFormState {
     }
 }
 
-pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
+pub fn view<'a>(form: &'a SettingsFormState, updates: &UpdatesInfo) -> Element<'a, Message> {
     let status_line: Element<'a, Message> = match form.status.as_deref() {
         Some(s) => {
             let color = if s.starts_with("Failed") || s.starts_with("Error") {
@@ -164,6 +164,7 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                     .text_size(14),
                 ),
         )
+        .push(updates_section(updates))
         .push(status_line)
         .push(
             row![]
@@ -220,6 +221,51 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
         .into()
 }
 
+/// What Settings → Updates shows, read from the updater state.
+pub struct UpdatesInfo {
+    pub installed: semver::Version,
+    pub view: crate::updater::machine::UpdaterView,
+}
+
+/// When the last check ran, in local time, or "Never".
+fn last_check_label(last: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    match last {
+        Some(at) => at
+            .with_timezone(&chrono::Local)
+            .format("%b %-d, %Y at %-I:%M %p")
+            .to_string(),
+        None => "Never".to_string(),
+    }
+}
+
+/// Settings → Updates: the installed version, when the last check ran, and the
+/// last failure (so a quiet one can be found).
+fn updates_section<'a>(updates: &UpdatesInfo) -> Element<'a, Message> {
+    let line = |name: &'static str, value: String| {
+        row![]
+            .push(text(name).size(12).color(t::text_secondary()))
+            .push(iced::widget::horizontal_space().width(Length::Fill))
+            .push(text(value).size(12).color(t::text_muted()))
+    };
+    let mut col = column![]
+        .spacing(6)
+        .push(text("Updates").size(12).color(t::text_secondary()))
+        .push(line("Installed version", updates.installed.to_string()))
+        .push(line("Last checked", last_check_label(updates.view.last_checked)));
+    if let Some(f) = &updates.view.last_failure {
+        col = col.push(
+            text(format!(
+                "Last failure ({}): {}",
+                last_check_label(Some(f.at)),
+                f.message
+            ))
+            .size(11)
+            .color(t::danger()),
+        );
+    }
+    col.into()
+}
+
 /// Window opacity and blur sliders; both apply live and save on release.
 fn window_section<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
     let label = |name: &'static str, value: String| {
@@ -260,4 +306,15 @@ fn window_section<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
         )
         .push(text(blur_hint).size(11).color(t::text_muted()))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_check_reads_never_until_one_ran() {
+        assert_eq!(last_check_label(None), "Never");
+        assert_ne!(last_check_label(Some(chrono::Utc::now())), "Never");
+    }
 }
