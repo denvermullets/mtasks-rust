@@ -55,6 +55,16 @@ pub fn quit_plan(
     }
 }
 
+/// Body of the "Quit JAIT?" confirm; mentions the install when an Update is
+/// staged (and will install, see [`quit_plan`]). Pure.
+pub fn quit_confirm_body(pending: Option<&Version>) -> String {
+    let base = "A program is still running in a Terminal. Quitting will stop it.";
+    match pending {
+        Some(v) => format!("{base} JAIT {v} will install when JAIT quits."),
+        None => base.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwapError {
     /// The staged bundle or its verified marker is missing; nothing was touched.
@@ -190,6 +200,18 @@ mod tests {
         );
         assert_eq!(quit_plan(&si, None), None);
         assert_eq!(quit_plan(&InstallContext::Disabled, Some(&ver)), None);
+    }
+
+    #[test]
+    fn quit_confirm_mentions_the_install_only_when_one_is_staged() {
+        assert_eq!(
+            quit_confirm_body(None),
+            "A program is still running in a Terminal. Quitting will stop it."
+        );
+        assert_eq!(
+            quit_confirm_body(Some(&v("0.13.0"))),
+            "A program is still running in a Terminal. Quitting will stop it. JAIT 0.13.0 will install when JAIT quits."
+        );
     }
 
     #[test]

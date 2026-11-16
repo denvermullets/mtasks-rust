@@ -8922,9 +8922,12 @@ impl App {
                 iced::widget::stack![base, confirm].into()
             }
             Modal::QuitConfirm => {
+                let pending = self.updater.view().ready.map(|r| r.version);
+                let pending = crate::updater::swap::quit_plan(&self.install, pending.as_ref())
+                    .map(|(_, _, v)| v);
                 let confirm = crate::views::terminal_panel::confirm_modal(
                     "Quit JAIT?",
-                    "A program is still running in a Terminal. Quitting will stop it.".to_string(),
+                    crate::updater::swap::quit_confirm_body(pending.as_ref()),
                     "Quit",
                     Message::QuitConfirmed,
                 );
