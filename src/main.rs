@@ -35,6 +35,7 @@ mod tab_state;
 mod tabs;
 mod terminal;
 mod theme;
+mod updater;
 mod views;
 mod window_effects;
 
