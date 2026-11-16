@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::models::{Label, Lane, Member, Project};
 use crate::display::{DisplayOptions, Filters};
+use crate::updater::manifest::ReleaseNotes;
+use crate::updater::machine::{Event, FailureKind, LastFailure, UpdaterState};
+use semver::Version;
 
 /// Default API server. Only dev builds know about localhost; release builds talk
 /// to prod. `scripts/build-release.sh` checks the shipped binary for this.
@@ -122,6 +125,150 @@ pub struct Config {
     /// `window_effects::MAX_BLUR_RADIUS`). Device-wide, local-only, applied live.
     #[serde(default = "default_window_blur")]
     pub window_blur: u8,
+    /// Self-update state that must survive a relaunch (`[updater]`).
+    #[serde(default)]
+    pub updater: UpdaterConfig,
+}
+
+/// The updater's saved state. Versions are stored as strings; a value that
+/// doesn't parse is dropped on restore rather than failing the whole config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdaterConfig {
+    /// "Check for updates automatically". On by default.
+    #[serde(default = "default_true")]
+    pub auto_check: bool,
+    #[serde(default)]
+    pub last_checked: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_failure: Option<SavedFailure>,
+    /// The version whose ready notice Later hid.
+    #[serde(default)]
+    pub dismissed_notice: Option<String>,
+    /// Newest version that failed a security check.
+    #[serde(default)]
+    pub blocked_version: Option<String>,
+    /// Broken-download strikes against one version.
+    #[serde(default)]
+    pub broken: Option<SavedStrikes>,
+    /// Set just before Restart now exits and cleared at the next launch: the
+    /// version it installed, so that launch can say "JAIT is now X" once. Not
+    /// part of the machine's state (`from_state` leaves it empty; the app keeps
+    /// the stored value when it saves).
+    #[serde(default)]
+    pub relaunch: Option<SavedRelaunch>,
+}
+
+/// What the "JAIT is now X" toast needs after a Restart now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedRelaunch {
+    pub version: String,
+    /// That version's own Release notes (Markdown), when they were known.
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl SavedRelaunch {
+    /// The marker for installing `version`: its own entry out of `notes`.
+    pub fn for_install(version: &Version, notes: &ReleaseNotes) -> Self {
+        let notes = match notes {
+            ReleaseNotes::Available(entries) => entries
+                .iter()
+                .find(|e| &e.version == version)
+                .map(|e| e.notes.trim().to_string())
+                .filter(|n| !n.is_empty()),
+            ReleaseNotes::Unavailable => None,
+        };
+        Self { version: version.to_string(), notes }
+    }
+
+    /// The toast text to show on launch, if this marker is for the version now
+    /// running (a stale marker shows nothing). Pure.
+    pub fn toast_message(&self, running: &Version) -> Option<String> {
+        if Version::parse(&self.version).ok().as_ref() != Some(running) {
+            return None;
+        }
+        let mut msg = format!("JAIT is now {}", self.version);
+        if let Some(notes) = &self.notes {
+            let lines: Vec<&str> = notes.lines().map(str::trim).filter(|l| !l.is_empty()).take(4).collect();
+            if !lines.is_empty() {
+                msg.push('\n');
+                msg.push_str(&lines.join("\n"));
+            }
+        }
+        Some(msg)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedFailure {
+    pub at: DateTime<Utc>,
+    pub kind: FailureKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedStrikes {
+    pub version: String,
+    pub strikes: u8,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            last_checked: None,
+            last_failure: None,
+            dismissed_notice: None,
+            blocked_version: None,
+            broken: None,
+            relaunch: None,
+        }
+    }
+}
+
+impl UpdaterConfig {
+    /// Snapshot the state's persisted fields.
+    pub fn from_state(state: &UpdaterState) -> Self {
+        Self {
+            auto_check: state.auto_check(),
+            last_checked: state.view().last_checked,
+            last_failure: state.last_failure().map(|f| SavedFailure {
+                at: f.at,
+                kind: f.kind,
+                message: f.message.clone(),
+            }),
+            dismissed_notice: state.dismissed_notice().map(|v| v.to_string()),
+            blocked_version: state.blocked_version().map(|v| v.to_string()),
+            broken: state.broken_strikes().map(|(v, n)| SavedStrikes {
+                version: v.to_string(),
+                strikes: n,
+            }),
+            relaunch: None,
+        }
+    }
+
+    /// Restore a freshly created state from the saved fields. The auto-check
+    /// setting goes in through `Event::SetAutoCheck`, as the machine documents.
+    pub fn restore(&self, state: &mut UpdaterState) {
+        state.update(Event::SetAutoCheck(self.auto_check));
+        state.set_last_checked(self.last_checked);
+        state.set_last_failure(self.last_failure.as_ref().map(|f| LastFailure {
+            at: f.at,
+            kind: f.kind,
+            message: f.message.clone(),
+        }));
+        state.set_dismissed_notice(parse_version(&self.dismissed_notice));
+        state.set_blocked_version(parse_version(&self.blocked_version));
+        state.set_broken_strikes(
+            self.broken
+                .as_ref()
+                .and_then(|b| Version::parse(&b.version).ok().map(|v| (v, b.strikes))),
+        );
+    }
+}
+
+fn parse_version(s: &Option<String>) -> Option<Version> {
+    s.as_deref().and_then(|s| Version::parse(s).ok())
 }
 
 fn default_window_opacity() -> u8 {
@@ -187,6 +334,7 @@ impl Default for Config {
             terminal_panel_width: None,
             window_opacity: default_window_opacity(),
             window_blur: default_window_blur(),
+            updater: UpdaterConfig::default(),
         }
     }
 }
@@ -606,6 +754,118 @@ mod tests {
         cfg.filters_for_mut(&team).clear();
         assert_eq!(cfg.display_for(&BoardScope::MyIssues).group_by, GroupBy::Priority);
         assert_eq!(cfg.filters_for(&BoardScope::MyIssues).priorities, vec!["1", "2"]);
+    }
+
+    fn at(h: u32) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&format!("2026-11-17T{h:02}:00:00Z"))
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn missing_updater_section_loads_as_defaults() {
+        let cfg: Config = toml::from_str("api_base_url = \"http://x\"\n").unwrap();
+        assert!(cfg.updater.auto_check);
+        assert_eq!(cfg.updater, UpdaterConfig::default());
+        let state = UpdaterState::new(Version::new(0, 12, 0));
+        assert_eq!(UpdaterConfig::from_state(&state), UpdaterConfig::default());
+    }
+
+    #[test]
+    fn updater_state_survives_a_relaunch_through_the_config() {
+        let mut s = UpdaterState::new(Version::new(0, 12, 0));
+        s.update(Event::SetAutoCheck(false));
+        s.set_last_checked(Some(at(9)));
+        s.set_last_failure(Some(LastFailure {
+            at: at(10),
+            kind: FailureKind::Security,
+            message: "codesign failed".into(),
+        }));
+        s.set_dismissed_notice(Some(Version::new(0, 13, 0)));
+        s.set_blocked_version(Some(Version::new(0, 14, 0)));
+        s.set_broken_strikes(Some((Version::new(0, 15, 0), 2)));
+
+        let cfg = Config { updater: UpdaterConfig::from_state(&s), ..Default::default() };
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let mut r = UpdaterState::new(Version::new(0, 12, 0));
+        back.updater.restore(&mut r);
+        assert!(!r.auto_check());
+        assert_eq!(r.view().last_checked, Some(at(9)));
+        assert_eq!(r.view().last_failure, s.view().last_failure);
+        assert_eq!(r.dismissed_notice(), Some(&Version::new(0, 13, 0)));
+        assert_eq!(r.blocked_version(), Some(&Version::new(0, 14, 0)));
+        assert_eq!(r.broken_downloads(&Version::new(0, 15, 0)), 2);
+    }
+
+    fn entry(v: Version, notes: &str) -> crate::updater::manifest::ReleaseEntry {
+        crate::updater::manifest::ReleaseEntry {
+            version: v,
+            published_at: chrono::DateTime::parse_from_rfc3339("2026-11-16T00:00:00Z").unwrap(),
+            notes: notes.into(),
+        }
+    }
+
+    #[test]
+    fn relaunch_marker_takes_only_the_installed_versions_notes() {
+        let notes = ReleaseNotes::Available(vec![
+            entry(Version::new(0, 13, 0), "- Faster boards\n- Fix\n"),
+            entry(Version::new(0, 12, 1), "- Older"),
+        ]);
+        let m = SavedRelaunch::for_install(&Version::new(0, 13, 0), &notes);
+        assert_eq!(m.notes.as_deref(), Some("- Faster boards\n- Fix"));
+        let none = SavedRelaunch::for_install(&Version::new(0, 13, 0), &ReleaseNotes::Unavailable);
+        assert_eq!(none.notes, None);
+    }
+
+    #[test]
+    fn relaunch_toast_shows_only_for_the_running_version() {
+        let m = SavedRelaunch { version: "0.13.0".into(), notes: Some("- Faster boards".into()) };
+        assert_eq!(
+            m.toast_message(&Version::new(0, 13, 0)).as_deref(),
+            Some("JAIT is now 0.13.0\n- Faster boards")
+        );
+        assert_eq!(m.toast_message(&Version::new(0, 12, 0)), None);
+        let bare = SavedRelaunch { version: "0.13.0".into(), notes: None };
+        assert_eq!(bare.toast_message(&Version::new(0, 13, 0)).as_deref(), Some("JAIT is now 0.13.0"));
+    }
+
+    #[test]
+    fn relaunch_marker_round_trips_and_is_absent_by_default() {
+        assert_eq!(UpdaterConfig::default().relaunch, None);
+        let cfg = Config {
+            updater: UpdaterConfig {
+                relaunch: Some(SavedRelaunch { version: "0.13.0".into(), notes: None }),
+                ..UpdaterConfig::default()
+            },
+            ..Default::default()
+        };
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.updater.relaunch, cfg.updater.relaunch);
+    }
+
+    #[test]
+    fn restored_failure_is_recorded_but_not_shown() {
+        let mut s = UpdaterState::new(Version::new(0, 12, 0));
+        s.set_last_failure(Some(LastFailure {
+            at: at(10),
+            kind: FailureKind::Check,
+            message: "offline".into(),
+        }));
+        assert_eq!(s.view().status, crate::updater::machine::Status::Idle);
+        assert!(s.view().last_failure.is_some());
+    }
+
+    #[test]
+    fn unparseable_saved_versions_are_dropped_not_fatal() {
+        let cfg: Config = toml::from_str(
+            "[updater]\nblocked_version = \"nope\"\n[updater.broken]\nversion = \"x\"\nstrikes = 2\n",
+        )
+        .unwrap();
+        let mut s = UpdaterState::new(Version::new(0, 12, 0));
+        cfg.updater.restore(&mut s);
+        assert_eq!(s.blocked_version(), None);
+        assert_eq!(s.broken_strikes(), None);
     }
 
     #[test]

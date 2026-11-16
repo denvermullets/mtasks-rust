@@ -23,6 +23,8 @@ pub struct SettingsFormState {
     pub window_blur: u8,
     pub status: Option<String>,
     pub testing: bool,
+    /// Explains why Check for updates did nothing (dev builds).
+    pub update_note: Option<String>,
 }
 
 impl SettingsFormState {
@@ -39,11 +41,16 @@ impl SettingsFormState {
             window_blur: cfg.window_blur.min(window_effects::MAX_BLUR_RADIUS),
             status: None,
             testing: false,
+            update_note: None,
         }
     }
 }
 
-pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
+pub fn view<'a>(
+    form: &'a SettingsFormState,
+    updates: &UpdatesInfo,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
     let status_line: Element<'a, Message> = match form.status.as_deref() {
         Some(s) => {
             let color = if s.starts_with("Failed") || s.starts_with("Error") {
@@ -164,6 +171,7 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
                     .text_size(14),
                 ),
         )
+        .push(updates_section(updates, form.update_note.as_deref(), ctx))
         .push(status_line)
         .push(
             row![]
@@ -220,6 +228,162 @@ pub fn view<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
         .into()
 }
 
+/// What Settings → Updates shows, read from the updater state.
+pub struct UpdatesInfo {
+    pub installed: semver::Version,
+    pub view: crate::updater::machine::UpdaterView,
+    /// A check or download is running: the Check button waits.
+    pub busy: bool,
+    /// "Check for updates automatically" is on.
+    pub auto_check: bool,
+}
+
+/// The one line for the current step, with whether it is an error. None when
+/// nothing is going on. Download progress only reaches here for manual checks
+/// (the machine's view decides).
+fn status_text(status: &crate::updater::machine::Status) -> Option<(String, bool)> {
+    use crate::updater::machine::Status;
+    match status {
+        Status::Idle => None,
+        Status::Checking => Some(("Checking…".into(), false)),
+        Status::UpToDate => Some(("Up to date ✓".into(), false)),
+        Status::Downloading { version, percent: 0 } => {
+            Some((format!("Update available: {version}"), false))
+        }
+        Status::Downloading { version, percent } => {
+            Some((format!("Update available: {version} (downloading {percent}%)"), false))
+        }
+        Status::Verifying { version } => Some((format!("Verifying {version}…"), false)),
+        Status::Failed { message } => Some((format!("Failed: {message}"), true)),
+    }
+}
+
+/// When the last check ran, in local time, or "Never".
+fn last_check_label(last: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    match last {
+        Some(at) => at
+            .with_timezone(&chrono::Local)
+            .format("%b %-d, %Y at %-I:%M %p")
+            .to_string(),
+        None => "Never".to_string(),
+    }
+}
+
+/// Settings → Updates: the installed version, when the last check ran, and the
+/// last failure (so a quiet one can be found).
+fn updates_section<'a>(
+    updates: &UpdatesInfo,
+    note: Option<&str>,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
+    let line = |name: &'static str, value: String| {
+        row![]
+            .push(text(name).size(12).color(t::text_secondary()))
+            .push(iced::widget::horizontal_space().width(Length::Fill))
+            .push(text(value).size(12).color(t::text_muted()))
+    };
+    let mut col = column![]
+        .spacing(6)
+        .push(text("Updates").size(12).color(t::text_secondary()))
+        .push(line("Installed version", updates.installed.to_string()))
+        .push(line("Last checked", last_check_label(updates.view.last_checked)))
+        .push(
+            iced::widget::checkbox("Check for updates automatically", updates.auto_check)
+                .on_toggle(Message::UpdateAutoCheckToggled)
+                .size(16)
+                .text_size(12),
+        )
+        .push(
+            row![]
+                .spacing(10)
+                .align_y(iced::Alignment::Center)
+                .push(
+                    button(text("Check for updates").size(13))
+                        .on_press_maybe((!updates.busy).then_some(Message::UpdateCheckClicked))
+                        .padding([6, 14])
+                        .style(button::secondary),
+                )
+                .push(match status_text(&updates.view.status) {
+                    Some((s, is_error)) => text(s).size(12).color(if is_error {
+                        t::danger()
+                    } else {
+                        t::text_muted()
+                    }),
+                    None => text("").size(12),
+                }),
+        );
+    if let Some(ready) = &updates.view.ready {
+        col = col.push(ready_update(ready, ctx));
+    }
+    if let Some(offer) = &updates.view.dmg_update {
+        col = col.push(dmg_offer(offer));
+    }
+    if let Some(note) = note {
+        col = col.push(text(note.to_string()).size(11).color(t::text_muted()));
+    }
+    if let Some(f) = &updates.view.last_failure {
+        col = col.push(
+            text(format!(
+                "Last failure ({}): {}",
+                last_check_label(Some(f.at)),
+                f.message
+            ))
+            .size(11)
+            .color(t::danger()),
+        );
+    }
+    col.into()
+}
+
+/// A ready Update: its Release notes and Restart now, as in the popover.
+fn ready_update<'a>(
+    ready: &crate::updater::machine::ReadyUpdate,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
+    column![]
+        .spacing(6)
+        .push(
+            text(format!("JAIT {} is ready", ready.version))
+                .size(12)
+                .color(t::text_secondary()),
+        )
+        .push(crate::views::update_chip::notes_section(&ready.notes, ctx))
+        .push(
+            button(text("Restart now").size(13))
+                .on_press(Message::RestartNowClicked)
+                .padding([6, 14])
+                .style(button::primary),
+        )
+        .into()
+}
+
+/// The DMG offer for an Update this install can't apply itself: the version,
+/// the Release notes when they parse, and a button opening the manifest's URL.
+fn dmg_offer<'a>(offer: &crate::updater::machine::DmgUpdate) -> Element<'a, Message> {
+    use crate::updater::manifest::ReleaseNotes;
+    let mut col = column![].spacing(4).push(
+        text(format!("JAIT {} is available but can't install itself here.", offer.version))
+            .size(12)
+            .color(t::text_secondary()),
+    );
+    if let ReleaseNotes::Available(entries) = &offer.notes {
+        for e in entries {
+            col = col.push(
+                text(format!("{}: {}", e.version, e.notes.trim()))
+                    .size(11)
+                    .color(t::text_muted()),
+            );
+        }
+    }
+    col.push(
+        button(text(format!("Download JAIT {}", offer.version)).size(13))
+            .on_press(Message::UpdateDmgClicked)
+            .padding([6, 14])
+            .style(button::primary),
+    )
+    .into()
+}
+
 /// Window opacity and blur sliders; both apply live and save on release.
 fn window_section<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
     let label = |name: &'static str, value: String| {
@@ -260,4 +424,25 @@ fn window_section<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
         )
         .push(text(blur_hint).size(11).color(t::text_muted()))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_text_matches_the_ui_rules() {
+        use crate::updater::machine::Status;
+        assert_eq!(status_text(&Status::Idle), None);
+        assert_eq!(status_text(&Status::Checking), Some(("Checking…".into(), false)));
+        assert_eq!(status_text(&Status::UpToDate), Some(("Up to date ✓".into(), false)));
+        let failed = status_text(&Status::Failed { message: "offline".into() }).unwrap();
+        assert_eq!(failed, ("Failed: offline".to_string(), true));
+    }
+
+    #[test]
+    fn last_check_reads_never_until_one_ran() {
+        assert_eq!(last_check_label(None), "Never");
+        assert_ne!(last_check_label(Some(chrono::Utc::now())), "Never");
+    }
 }

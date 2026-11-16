@@ -26,7 +26,7 @@ use crate::sync::notif_poll::{self, PollOutcome, PollReport};
 use crate::sync::scheduler::{CycleKind, Event as SchedEvent, Run, Scheduler};
 use crate::palette_results::{PaletteData, PaletteNav, PaletteState};
 use crate::theme as t;
-use crate::views::toast::{Toast, ToastKind};
+use crate::views::toast::{Toast, ToastAction, ToastKind};
 use crate::views::{
     board, command_palette, csv_import, display_panel, header, issue_detail, issue_form, issue_list,
     issue_picker, labels as labels_view, placeholder,
@@ -35,6 +35,7 @@ use crate::views::{
 };
 
 mod tab_update;
+mod updater_wiring;
 pub use tab_update::TabMessage;
 
 #[derive(Debug, Clone)]
@@ -494,6 +495,28 @@ pub enum Message {
     TestConnectionResult(Result<usize, String>),
     SaveSettings,
 
+    // Updates (project 320)
+    /// "Check for updates" (Settings button; the palette entry reuses it): a
+    /// manual check. Dev builds explain that updates are disabled.
+    UpdateCheckClicked,
+    /// Settings → Updates: open the DMG download from the manifest.
+    UpdateDmgClicked,
+    /// Settings → Updates: the "Check for updates automatically" toggle.
+    UpdateAutoCheckToggled(bool),
+    /// Periodic background check trigger (the machine decides if one is due).
+    UpdaterTick,
+    /// The Mac woke from sleep.
+    UpdaterWoke,
+    /// Any updater input: a task result or a UI action, fed to the machine by
+    /// `App::apply_updater_event`.
+    Updater(crate::updater::machine::Event),
+    /// The status bar's "↑ X ready" chip: open its popover.
+    OpenUpdatePopover,
+    /// Restart now (popover): ask the updater, with the real busy-Terminal state.
+    RestartNowClicked,
+    /// "Restart" in the "Restart to update?" confirm.
+    RestartConfirmed,
+
     // Sync
     /// Manual sync (`s`, toast retry): runs immediately.
     SyncNow,
@@ -509,8 +532,8 @@ pub enum Message {
     QuitConfirmed,
     /// Every Terminal has closed (or the wait ran out): exit.
     QuitReady,
-    /// Once, at startup: send the native Quit menu item to `QuitRequested`.
-    RouteMenuQuit,
+    /// Once, at startup: route system terminate requests (Cmd+Q, Dock Quit, AppleScript quit) to `QuitRequested`.
+    InstallTerminateHook,
     SyncCompleted(FullSyncReport),
     /// A Notification poll finished.
     NotifPollCompleted(PollOutcome),
@@ -522,6 +545,8 @@ pub enum Message {
     ToastTick,
     /// "Retry now" on a toast: dismiss it and trigger an immediate sync.
     RetrySyncFromToast(u64),
+    /// A toast button (or its ×) was pressed: remove the toast, then handle the message.
+    ToastActed(u64, Box<Message>),
 
     // Project CRUD
     CreateProject,
@@ -653,8 +678,13 @@ pub enum Modal {
     TerminalCloseConfirm(crate::terminal::TerminalId),
     /// Ask before quitting with a busy Terminal.
     QuitConfirm,
+    /// "Restart to update?": Restart now with a busy Terminal. The Quit
+    /// confirm's sibling; Not now keeps the install-on-quit plan.
+    RestartConfirm(semver::Version),
     /// Ask before closing a Tab whose Terminal strip has a busy Terminal.
     TabCloseConfirm(crate::tabs::TabKey),
+    /// The update chip's popover (versions, Release notes, Restart now).
+    UpdatePopover,
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -1195,6 +1225,16 @@ pub struct App {
     /// Set when sync hit a 401; pauses the sync timer until the user saves a
     /// fresh token in Settings, so we don't hammer the API with a dead token.
     sync_paused_auth: bool,
+    /// Self-update state (project 320). Restored from `config.updater` at
+    /// launch; saved back after every update (see `apply_updater_event`).
+    updater: crate::updater::machine::UpdaterState,
+    /// Where the app runs from; `Disabled` in dev builds (no `.app`).
+    install: crate::updater::install::InstallContext,
+    /// The updater's I/O. Tasks hold a clone of the Arc.
+    update_edge: std::sync::Arc<dyn crate::updater::edge::UpdateEdge>,
+    /// Restart now has swapped and is closing Terminals before it exits. A
+    /// quit request in this window must not swap again.
+    restart_exiting: bool,
 }
 
 /// A comment needs text or staged files (Rails: `body_or_files_present`).
@@ -1231,6 +1271,7 @@ impl App {
             terminal_panel_showing: self.terminals.panel_showing(self.panel_scope().as_ref()),
             project_cards_stacked: self.config.project_cards_stacked,
             terminal_dock_right: self.terminals.dock() == crate::terminal::panel::Dock::Right,
+            update_ready: self.updater.view().ready.is_some(),
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -1278,6 +1319,30 @@ impl App {
             kind,
             retry,
             created: std::time::Instant::now(),
+            actions: Vec::new(),
+            on_dismiss: None,
+            sticky: false,
+        });
+    }
+
+    /// Queue a toast with buttons. It stays until the user acts on it.
+    fn push_action_toast(
+        &mut self,
+        message: impl Into<String>,
+        actions: Vec<ToastAction>,
+        on_dismiss: Option<Message>,
+    ) {
+        let id = self.next_toast_id;
+        self.next_toast_id += 1;
+        self.toasts.push(Toast {
+            id,
+            message: message.into(),
+            kind: ToastKind::Info,
+            retry: false,
+            created: std::time::Instant::now(),
+            actions,
+            on_dismiss,
+            sticky: true,
         });
     }
 
@@ -3692,6 +3757,15 @@ impl App {
 impl App {
     pub fn new() -> (Self, Task<Message>) {
         let (config, config_error) = config::load();
+        let mut updater = crate::updater::machine::UpdaterState::new(
+            semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("crate version is semver"),
+        );
+        config.updater.restore(&mut updater);
+        let install = crate::updater::install::detect(&crate::updater::install::SystemProbe);
+        updater.set_can_self_install(matches!(
+            install,
+            crate::updater::install::InstallContext::SelfInstall { .. }
+        ));
 
         let conn = connection::open().expect("Failed to open database");
         // Skip the local "My Project" seed when the user has configured an API
@@ -3863,7 +3937,27 @@ impl App {
             hover_content: None,
             next_toast_id: 0,
             sync_paused_auth: false,
+            updater,
+            install,
+            update_edge: std::sync::Arc::new(crate::updater::edge::HttpEdge::from_env()),
+            restart_exiting: false,
         };
+
+        // Drop partial downloads and unverified extracts from a past run, once,
+        // before any download can take the update lock.
+        if let Some(staging_dir) = app.install.staging_dir() {
+            let _ = crate::updater::staging::cleanup_at_launch(
+                &crate::updater::staging::RealStagingFs,
+                staging_dir,
+            );
+            // A verified Staged update from a past run waits across launches.
+            if let Some(version) =
+                crate::updater::verify::restore_staged(staging_dir, app.updater.installed())
+            {
+                app.updater
+                    .update(crate::updater::machine::Event::StagedRestored { version });
+            }
+        }
 
         app.terminals.set_font(crate::views::terminal_panel::TermFont::from_key(&app.config.terminal_font, app.config.terminal_font_size));
         app.terminals.set_dock(crate::terminal::panel::Dock::from_name(&app.config.terminal_dock));
@@ -3888,8 +3982,13 @@ impl App {
             app.modal = Modal::Settings;
         }
 
-        // The menu exists once the event loop is up; reroute Cmd+Q then.
-        let task = Task::batch([task, Task::done(Message::RouteMenuQuit)]);
+        // The app delegate exists once the event loop is up; hook terminate then.
+        let task = Task::batch([task, Task::done(Message::InstallTerminateHook)]);
+        // Launch check, after the staging cleanup and restore above. The stored
+        // auto-check setting was already applied by `config.updater.restore`.
+        app.show_relaunch_toast();
+        let launch_check = app.updater_background(updater_wiring::Trigger::Launched);
+        let task = Task::batch([task, launch_check]);
 
         (app, task)
     }
@@ -3902,31 +4001,59 @@ impl App {
         self.quit_with(false)
     }
 
+    /// Runs once per quit, after the ask is answered (or skipped because
+    /// nothing is busy) and before any Terminal is closed or waited on. Every
+    /// quit path lands here: close button, Cmd+Q, Dock, AppleScript, and
+    /// logout/restart/shutdown. Installs the Staged update (JRST-519) and
+    /// drops an in-flight download. Keep it quick; the Terminal wait that
+    /// follows can take up to `QUIT_WAIT`.
+    fn on_quit_confirmed(&mut self) -> Task<Message> {
+        self.install_on_quit()
+    }
+
     /// Quit: ask first if any Terminal is busy (any team, shown or hidden),
     /// then close every Terminal and exit as soon as they have all gone,
     /// waiting at most `QUIT_WAIT` so a stuck process can't keep the app open.
     fn quit_with(&mut self, confirmed: bool) -> Task<Message> {
         use crate::terminal::panel::QuitPlan;
+        // The restart already swapped and will exit; a pending terminate is
+        // answered by `QuitReady` when the Terminals are gone.
+        if crate::updater::swap::ignores_quit(self.restart_exiting) {
+            return Task::none();
+        }
         match self.terminals.quit_plan(confirmed) {
             QuitPlan::Ignore => Task::none(),
             QuitPlan::Ask => {
                 self.modal = Modal::QuitConfirm;
+                // A logout, restart or shutdown may find the app in the background.
+                crate::quit::bring_to_front();
                 Task::none()
             }
             QuitPlan::Shutdown => {
                 self.modal = Modal::None;
-                let closings = self.terminals.begin_shutdown();
-                if closings.is_empty() {
-                    return iced::exit();
-                }
-                let (tx, rx) = iced::futures::channel::oneshot::channel();
-                std::thread::spawn(move || {
-                    crate::terminal::wait_all(closings, QUIT_WAIT);
-                    let _ = tx.send(());
-                });
-                Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady)
+                let update = self.on_quit_confirmed();
+                self.shutdown_after(update)
             }
         }
+    }
+
+    /// Close every Terminal and exit once they have gone (at most `QUIT_WAIT`),
+    /// running `update` alongside. Restart now calls this directly, after its
+    /// own swap, so the quit hook doesn't swap a second time.
+    pub(super) fn shutdown_after(&mut self, update: Task<Message>) -> Task<Message> {
+        let closings = self.terminals.begin_shutdown();
+        if closings.is_empty() {
+            return Task::batch([update, iced::exit()]);
+        }
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            crate::terminal::wait_all(closings, QUIT_WAIT);
+            let _ = tx.send(());
+        });
+        Task::batch([
+            update,
+            Task::perform(async move { let _ = rx.await; }, |_| Message::QuitReady),
+        ])
     }
 
     pub fn title(&self) -> String {
@@ -3988,6 +4115,7 @@ impl App {
     fn confirm_accept_message(&self) -> Option<Message> {
         match &self.modal {
             Modal::QuitConfirm => Some(Message::QuitConfirmed),
+            Modal::RestartConfirm(_) => Some(Message::RestartConfirmed),
             Modal::TabCloseConfirm(key) => Some(Message::Tab(TabMessage::CloseConfirmed(key.clone()))),
             Modal::TerminalCloseConfirm(id) => Some(Message::Terminal(
                 crate::terminal::TerminalMessage::CloseConfirmed(*id),
@@ -4052,9 +4180,12 @@ impl App {
             activity,
             banner_clicks,
             close_requests,
+            // Cmd+Q, Dock Quit and AppleScript quit (see `quit.rs`).
+            Subscription::run(crate::quit::terminate_requests).map(|_| Message::QuitRequested),
             opens,
             resizes,
             self.terminals.subscription(modal_open),
+            self.updater_subscription(),
         ];
         // A pressed Tab follows the pointer until release.
         if self.tab_drag.is_some() {
@@ -6579,6 +6710,15 @@ impl App {
             }
 
             Message::CloseModal => {
+                // "Not now": the Staged update stays, installing on the next quit.
+                if matches!(self.modal, Modal::RestartConfirm(_)) {
+                    self.modal = Modal::None;
+                    return self.apply_updater_event(crate::updater::machine::Event::RestartDeclined);
+                }
+                // Cancelling the quit ask also cancels the terminate behind it.
+                if self.modal == Modal::QuitConfirm {
+                    crate::quit::reply_to_terminate(false);
+                }
                 // Cancelling the label-delete confirm returns to the panel.
                 if matches!(self.modal, Modal::DeleteLabelConfirm(_)) {
                     self.modal = Modal::Labels;
@@ -6847,7 +6987,14 @@ impl App {
                     }
                     PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Settings => return self.update(Message::OpenSettings),
+                    PaletteNav::RestartToUpdate => return self.update(Message::RestartNowClicked),
                     PaletteNav::ToggleSidebar => return self.update(Message::ToggleSidebar),
+                    // Status renders only in Settings, so open it to make the check visible.
+                    PaletteNav::CheckForUpdates => {
+                        let open = self.update(Message::OpenSettings);
+                        let check = self.update(Message::UpdateCheckClicked);
+                        return Task::batch([open, check]);
+                    }
                     PaletteNav::Issue(id) => {
                         let Ok(Some(issue)) = queries::get_issue(&self.db(), &id) else {
                             return Task::none();
@@ -7483,6 +7630,28 @@ impl App {
                 }
             }
 
+            Message::UpdateCheckClicked => return self.update_check_clicked(),
+            Message::UpdateAutoCheckToggled(on) => return self.update_auto_check_toggled(on),
+            Message::UpdaterTick => return self.updater_background(updater_wiring::Trigger::Tick),
+            Message::UpdaterWoke => return self.updater_background(updater_wiring::Trigger::Woke),
+            Message::UpdateDmgClicked => return self.update_dmg_clicked(),
+            Message::Updater(event) => return self.apply_updater_event(event),
+            Message::OpenUpdatePopover => {
+                if self.updater.view().ready.is_some() {
+                    self.modal = Modal::UpdatePopover;
+                }
+            }
+            Message::RestartNowClicked => {
+                self.modal = Modal::None;
+                let busy_terminals = self.terminals.any_busy();
+                return self.apply_updater_event(crate::updater::machine::Event::RestartRequested { busy_terminals });
+            }
+
+            Message::RestartConfirmed => {
+                self.modal = Modal::None;
+                return self.apply_updater_event(crate::updater::machine::Event::RestartConfirmed);
+            }
+
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
             Message::UserInput => return self.drive_sync(SchedEvent::Input),
             Message::WindowResized(size) => {
@@ -7499,8 +7668,12 @@ impl App {
             }
             Message::QuitRequested => return self.quit(),
             Message::QuitConfirmed => return self.quit_with(true),
-            Message::QuitReady => return iced::exit(),
-            Message::RouteMenuQuit => crate::quit::route_menu_quit_to_close(),
+            Message::QuitReady => {
+                // Lets a pending system terminate go ahead (a no-op for the close button).
+                crate::quit::reply_to_terminate(true);
+                return iced::exit();
+            }
+            Message::InstallTerminateHook => crate::quit::install_terminate_hook(),
             Message::SyncNow => return self.drive_sync(SchedEvent::ManualSync),
 
             Message::SyncCompleted(report) => {
@@ -7666,7 +7839,12 @@ impl App {
                 // Expire non-error toasts after ~4s; errors persist until the
                 // user dismisses or retries them.
                 self.toasts
-                    .retain(|t| t.kind == ToastKind::Error || t.created.elapsed().as_secs() < 4);
+                    .retain(|t| t.sticky || t.kind == ToastKind::Error || t.created.elapsed().as_secs() < 4);
+            }
+
+            Message::ToastActed(id, inner) => {
+                self.toasts.retain(|t| t.id != id);
+                return self.update(*inner);
             }
 
             Message::RetrySyncFromToast(id) => {
@@ -8363,7 +8541,7 @@ impl App {
         });
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
-            team_list::footer(self.selected_team_id.is_some()),
+            team_list::footer(self.selected_team_id.is_some(), self.updater.view().needs_attention()),
         ];
 
         let search = self.active_search();
@@ -8689,6 +8867,7 @@ impl App {
             self.sync_read_only,
             self.view == View::Inbox,
             matches!(self.view, View::ProjectDetail(_)),
+            crate::views::update_chip::chip(&self.updater.view()),
         );
 
         // An open create/edit form takes the page, as on the web (JRST-454).
@@ -8826,11 +9005,25 @@ impl App {
                 iced::widget::stack![base, confirm].into()
             }
             Modal::QuitConfirm => {
+                let pending = self.updater.view().ready.map(|r| r.version);
+                let pending = crate::updater::swap::quit_plan(&self.install, pending.as_ref())
+                    .map(|(_, _, v)| v);
                 let confirm = crate::views::terminal_panel::confirm_modal(
                     "Quit JAIT?",
-                    "A program is still running in a Terminal. Quitting will stop it.".to_string(),
+                    crate::updater::swap::quit_confirm_body(pending.as_ref()),
                     "Quit",
                     Message::QuitConfirmed,
+                );
+                iced::widget::stack![base, confirm].into()
+            }
+            Modal::RestartConfirm(version) => {
+                let confirm = crate::views::terminal_panel::confirm_modal_with(
+                    "Restart to update?",
+                    crate::updater::swap::restart_confirm_body(version),
+                    "Restart",
+                    Message::RestartConfirmed,
+                    "Not now",
+                    Message::CloseModal,
                 );
                 iced::widget::stack![base, confirm].into()
             }
@@ -8864,9 +9057,43 @@ impl App {
                 );
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::UpdatePopover => match self.updater.view().ready {
+                Some(ready) => {
+                    let ctx = crate::views::body::BodyCtx {
+                        teams: &self.teams,
+                        issues: &[],
+                        members: &[],
+                        images: &self.images,
+                        host: &self.config.api_base_url,
+                        pending_paths: None,
+                        on_image: None,
+                    };
+                    let pop = crate::views::update_chip::popover(&ready, self.updater.installed(), &ctx);
+                    iced::widget::stack![base, pop].into()
+                }
+                None => base,
+            },
             Modal::Settings => {
                 if let Some(ref form) = self.settings_form {
-                    let modal = settings::view(form);
+                    let ctx = crate::views::body::BodyCtx {
+                        teams: &self.teams,
+                        issues: &[],
+                        members: &[],
+                        images: &self.images,
+                        host: &self.config.api_base_url,
+                        pending_paths: None,
+                        on_image: None,
+                    };
+                    let modal = settings::view(
+                        form,
+                        &settings::UpdatesInfo {
+                            installed: self.updater.installed().clone(),
+                            view: self.updater.view(),
+                            busy: self.updater.is_busy(),
+                            auto_check: self.updater.auto_check(),
+                        },
+                        &ctx,
+                    );
                     iced::widget::stack![base, modal].into()
                 } else {
                     base

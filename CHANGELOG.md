@@ -1,7 +1,7 @@
 <!-- last-sha: fc35970e231a7b0f04ec11b049fd8461a234f257 -->
-**Version: v0.12.0**
-
 # What's new
+
+## 0.12.0 · 2026-11-16
 
 ## 2026-11-12
 - **Hide the sidebar.** Press Cmd+B, click the arrows at the top of the sidebar, or choose "Toggle sidebar" in the command palette to hide the teams sidebar and give the page more room. While it's hidden, a button at the left of the tab bar brings it back. Your choice is remembered.

@@ -23,6 +23,8 @@ base64 = "0.22"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 png = "0.17"
 pulldown-cmark = { version = "0.13", default-features = false }
+semver = "1"
+sha2 = "0.10"
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 
 # Terminal engine (docs/adr/0002). Pinned and upgraded together, on purpose:
@@ -38,12 +40,12 @@ libc = "0.2"
 # (Update / View / Layout / Primitive generation / Render averages).
 perf = ["iced/debug"]
 
-# Only to retarget the native Quit menu item at the window's close request
+# Only to hook applicationShouldTerminate: onto winit's app delegate
 # (src/quit.rs). Versions match the ones winit 0.30 already pulls in.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", default-features = false, features = ["NSApplication", "NSResponder", "NSMenu", "NSMenuItem"] }
-objc2-foundation = { version = "0.2", default-features = false }
+objc2-foundation = { version = "0.2", default-features = false, features = ["NSString"] }
 
 # Bundle metadata for `cargo bundle` (cargo-bundle). The identifier is fixed:
 # macOS keys notification permission and settings off it. Do not change it.

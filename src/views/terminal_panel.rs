@@ -578,6 +578,18 @@ pub fn confirm_modal<'a>(
     confirm_label: &'a str,
     confirm: Message,
 ) -> Element<'a, Message> {
+    confirm_modal_with(title, body, confirm_label, confirm, "Cancel", Message::CloseModal)
+}
+
+/// [`confirm_modal`] with its own label and message for the dismiss button.
+pub fn confirm_modal_with<'a>(
+    title: &'a str,
+    body: String,
+    confirm_label: &'a str,
+    confirm: Message,
+    cancel_label: &'a str,
+    cancel: Message,
+) -> Element<'a, Message> {
     let content = column![]
         .spacing(16)
         .push(text(title).size(18).color(t::text_primary()))
@@ -597,8 +609,8 @@ pub fn confirm_modal<'a>(
                         }),
                 )
                 .push(
-                    button(text("Cancel").size(14))
-                        .on_press(Message::CloseModal)
+                    button(text(cancel_label).size(14))
+                        .on_press(cancel)
                         .padding([8, 24])
                         .style(button::secondary),
                 ),

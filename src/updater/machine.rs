@@ -1,0 +1,1606 @@
+//! The updater state machine: the deep seam of the self-update feature.
+//!
+//! Pure. Events go in through [`UpdaterState::update`]; the state changes and a
+//! list of [`Effect`]s comes out. The app maps effects to Tasks (HTTP, ditto,
+//! codesign, the swap) and feeds their results back in as [`Event`]s. The UI
+//! only reads [`UpdaterState::view`] and never reimplements a rule.
+//!
+//! Lifted from the prototype's `Updater` reducer (JRST-473). The clock is never
+//! read here: events that need a time carry it (`at`).
+//!
+//! Extending: add a variant to [`Event`] / [`Effect`], a match arm in
+//! `update`, and (if the UI needs it) a field on [`UpdaterView`]. Match arms for
+//! unrelated events stay untouched, so tickets can extend this in parallel.
+
+use chrono::{DateTime, Utc};
+use semver::Version;
+
+use super::manifest::{Manifest, ParsedManifest, ReleaseNotes};
+
+/// How often automatic checks run while the app is up.
+const CHECK_INTERVAL: chrono::Duration = chrono::Duration::hours(6);
+
+/// Who asked for a check. Manual results are always shown; automatic ones stay
+/// quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckKind {
+    Manual,
+    Automatic,
+}
+
+/// Everything the download and staging effects need about an Update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateInfo {
+    pub version: Version,
+    pub zip_url: String,
+    pub zip_sha256: String,
+    pub zip_size: u64,
+    /// Release notes from the installed version (exclusive) to `version`.
+    pub notes: ReleaseNotes,
+}
+
+impl UpdateInfo {
+    fn from_manifest(m: &Manifest, installed: &Version) -> Self {
+        UpdateInfo {
+            version: m.version.clone(),
+            zip_url: m.zip_url.clone(),
+            zip_sha256: m.zip_sha256.clone(),
+            zip_size: m.zip_size,
+            notes: m.notes_since(installed),
+        }
+    }
+}
+
+/// Things that happened. The app feeds these in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// A check was requested (by the user, or by the launch / timer / wake
+    /// schedule).
+    CheckStarted(CheckKind),
+    /// The manifest was fetched and parsed. `at` is when the check finished.
+    CheckFinished {
+        at: DateTime<Utc>,
+        manifest: ParsedManifest,
+    },
+    /// `received` bytes of the zip have arrived so far.
+    DownloadProgress { received: u64 },
+    /// The whole zip was downloaded.
+    DownloadFinished,
+    /// The zip passed every check and is staged next to the installed app.
+    StagingVerified,
+    /// Launch found a verified `staged-<ver>/` from a past run: the Staged
+    /// update waits across launches. Ignored unless newer than installed and
+    /// than any Staged update already held.
+    StagedRestored { version: Version },
+    /// Later or x on the ready notice: hide the toast for this version only
+    /// (JRST-501). The chip stays.
+    NoticeDismissed { version: Version },
+    /// Restart now (JRST-503). `busy_terminals` is whether any Terminal has a
+    /// running foreground process.
+    RestartRequested { busy_terminals: bool },
+    /// The user confirmed "Restart to update?".
+    RestartConfirmed,
+    /// "Not now" on that confirm: the Staged update installs at the next Clean
+    /// quit instead.
+    RestartDeclined,
+    /// The app just launched. Starts the launch check.
+    Launched { at: DateTime<Utc> },
+    /// The periodic timer fired (the app sends it about every 6 hours, or more
+    /// often; the machine decides whether a check is due).
+    Tick { at: DateTime<Utc> },
+    /// The Mac woke from sleep.
+    Woke { at: DateTime<Utc> },
+    /// The "Check for updates automatically" setting changed (also send it at
+    /// startup with the stored value; the default is on). Off stops the launch,
+    /// tick and wake checks; manual checks and a Staged update are unaffected.
+    SetAutoCheck(bool),
+    /// A Clean quit was confirmed and is about to run.
+    QuitConfirmed,
+    /// The manifest could not be fetched, or was malformed / had a bad URL.
+    CheckFailed { at: DateTime<Utc>, reason: String },
+    /// The zip download failed in transit (network error, HTTP error).
+    /// Not a broken download: no strike is counted.
+    DownloadFailed { at: DateTime<Utc>, reason: String },
+    /// The download is unusable: sha256 mismatch, truncated, or the unzip
+    /// failed. Valid while downloading or verifying.
+    BrokenDownload { at: DateTime<Utc>, reason: String },
+    /// Staging found a security problem: failed `codesign` verify, failed
+    /// `spctl` assessment, or an `Info.plist` version that doesn't match the
+    /// manifest or isn't newer than the running app. Valid while downloading
+    /// or verifying.
+    SecurityFailure { at: DateTime<Utc>, reason: String },
+}
+
+/// Things the app must do. The machine returns these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// Fetch and parse the Release manifest, then send `Event::CheckFinished`.
+    FetchManifest,
+    /// Download the Update's zip.
+    Download(UpdateInfo),
+    /// Verify and extract the downloaded zip, then send
+    /// `Event::StagingVerified`.
+    Stage(UpdateInfo),
+    /// Abort the running download now (fire and forget; the quit must not wait
+    /// for it). Nothing is staged.
+    CancelDownload,
+    /// Show the one-time "ready" notice for this version (toast).
+    ShowReadyNotice {
+        version: Version,
+        notes: ReleaseNotes,
+    },
+    /// Ask "Restart to update?" (busy Terminals). The answer comes back as
+    /// `RestartConfirmed` / `RestartDeclined`.
+    ConfirmRestart { version: Version },
+    /// Swap the Staged update in for the installed bundle.
+    SwapStaged { version: Version },
+    /// Relaunch the app (after the swap).
+    Relaunch,
+    /// Exit this process (after the relaunch was spawned).
+    Exit,
+    /// Delete this version's staging files: a failed attempt, or a Staged
+    /// update that a newer verified one replaced.
+    DeleteStaging(Version),
+}
+
+/// After this many broken downloads of one version, it is skipped.
+pub const MAX_BROKEN_DOWNLOADS: u8 = 3;
+
+/// What the updater is busy with right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Activity {
+    Idle,
+    Checking,
+    Downloading { info: UpdateInfo, received: u64 },
+    Verifying(UpdateInfo),
+}
+
+/// What the UI should say about the updater. Derived from state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    /// Nothing to show (idle, or an automatic step in progress).
+    Idle,
+    /// "Checking…" (manual checks only).
+    Checking,
+    /// "Up to date ✓" (after a manual check only).
+    UpToDate,
+    /// Download progress (manual checks only).
+    Downloading { version: Version, percent: u8 },
+    /// Verifying the download (manual checks only).
+    Verifying { version: Version },
+    /// A step the user asked for failed. Cleared by the next check.
+    Failed { message: String },
+}
+
+/// What kind of step failed. The system edge picks the kind; the machine
+/// applies the rule for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    /// The manifest fetch or parse failed.
+    Check,
+    /// The download failed in transit.
+    Download,
+    /// Sha256 mismatch, truncated download, or failed unzip.
+    BrokenDownload,
+    /// codesign / spctl / version check failed. Always shown, and blocks the
+    /// version.
+    Security,
+}
+
+/// The most recent failure, quiet or shown, for Settings → Updates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastFailure {
+    pub at: DateTime<Utc>,
+    pub kind: FailureKind,
+    pub message: String,
+}
+
+/// A Staged update: downloaded, verified, waiting to install at the next
+/// Clean quit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyUpdate {
+    pub version: Version,
+    pub notes: ReleaseNotes,
+}
+
+/// An Update the app can't install itself: offered as a DMG download instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmgUpdate {
+    pub version: Version,
+    /// Straight from the manifest; the app never builds a URL itself.
+    pub dmg_url: String,
+    /// Release notes from the installed version (exclusive) to `version`.
+    pub notes: ReleaseNotes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdaterView {
+    pub status: Status,
+    /// The Staged update, if any. Independent of `status`.
+    pub ready: Option<ReadyUpdate>,
+    pub last_checked: Option<DateTime<Utc>>,
+    pub last_failure: Option<LastFailure>,
+    /// A newer Release that can only be installed from its DMG.
+    pub dmg_update: Option<DmgUpdate>,
+    /// A failure is on screen (a manual step failed, or a security failure).
+    /// Quiet failures are recorded in `last_failure` but never shown.
+    pub failure_shown: bool,
+}
+
+impl UpdaterView {
+    /// Should the Settings sidebar entry carry a dot? While an Update is
+    /// ready or a shown failure is active.
+    pub fn needs_attention(&self) -> bool {
+        self.ready.is_some() || self.failure_shown
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdaterState {
+    installed: Version,
+    activity: Activity,
+    /// Did the user ask for the step that's running?
+    manual: bool,
+    last_checked: Option<DateTime<Utc>>,
+    up_to_date_shown: bool,
+    staged: Option<UpdateInfo>,
+    /// The one version whose ready toast the user dismissed with Later.
+    notice_dismissed: Option<Version>,
+    /// A "Restart to update?" confirm is open.
+    restart_confirming: bool,
+    /// Do launch / 6h / wake checks run? On by default.
+    auto_check: bool,
+    last_failure: Option<LastFailure>,
+    /// Is the last failure one the user should see right now?
+    failure_shown: bool,
+    /// Broken-download strikes against the newest version that had any.
+    /// A newer version starts again from zero.
+    broken: Option<(Version, u8)>,
+    /// Newest version that failed a security check. It and anything older
+    /// are never downloaded; a newer manifest version clears the block.
+    blocked: Option<Version>,
+    /// Can this install swap in a Staged update? False for a translocated app
+    /// or an unwritable folder: every Update becomes a DMG offer.
+    can_self_install: bool,
+    dmg_update: Option<DmgUpdate>,
+}
+
+impl UpdaterState {
+    pub fn new(installed: Version) -> Self {
+        UpdaterState {
+            installed,
+            activity: Activity::Idle,
+            manual: false,
+            last_checked: None,
+            up_to_date_shown: false,
+            staged: None,
+            notice_dismissed: None,
+            restart_confirming: false,
+            auto_check: true,
+            last_failure: None,
+            failure_shown: false,
+            broken: None,
+            blocked: None,
+            can_self_install: true,
+            dmg_update: None,
+        }
+    }
+
+    /// Tell the machine whether this install can self-install (set at startup
+    /// from install detection). When it can't, Updates are offered as a DMG.
+    pub fn set_can_self_install(&mut self, can: bool) {
+        self.can_self_install = can;
+    }
+
+    /// The version whose ready notice was dismissed, for persisting.
+    pub fn dismissed_notice(&self) -> Option<&Version> {
+        self.notice_dismissed.as_ref()
+    }
+
+    /// Restore a persisted dismissal at launch.
+    pub fn set_dismissed_notice(&mut self, version: Option<Version>) {
+        self.notice_dismissed = version;
+    }
+
+    /// Restore the last check time at launch (JRST-510).
+    pub fn set_last_checked(&mut self, at: Option<DateTime<Utc>>) {
+        self.last_checked = at;
+    }
+
+    /// The last failure, for persisting.
+    pub fn last_failure(&self) -> Option<&LastFailure> {
+        self.last_failure.as_ref()
+    }
+
+    /// Restore the last failure at launch. It is recorded but not shown: a
+    /// relaunch starts quiet, Settings still lists it.
+    pub fn set_last_failure(&mut self, failure: Option<LastFailure>) {
+        self.last_failure = failure;
+        self.failure_shown = false;
+    }
+
+    /// The version with broken-download strikes, and how many, for persisting.
+    pub fn broken_strikes(&self) -> Option<(&Version, u8)> {
+        self.broken.as_ref().map(|(v, n)| (v, *n))
+    }
+
+    /// Restore broken-download strikes at launch.
+    pub fn set_broken_strikes(&mut self, strikes: Option<(Version, u8)>) {
+        self.broken = strikes;
+    }
+
+    /// Restore the blocked version at launch.
+    pub fn set_blocked_version(&mut self, version: Option<Version>) {
+        self.blocked = version;
+    }
+
+    pub fn installed(&self) -> &Version {
+        &self.installed
+    }
+
+    /// Is a check or download running?
+    pub fn is_busy(&self) -> bool {
+        !matches!(self.activity, Activity::Idle)
+    }
+
+    pub fn view(&self) -> UpdaterView {
+        let status = match &self.activity {
+            Activity::Checking if self.manual => Status::Checking,
+            Activity::Downloading { info, received } if self.manual => Status::Downloading {
+                version: info.version.clone(),
+                percent: percent(*received, info.zip_size),
+            },
+            Activity::Verifying(info) if self.manual => Status::Verifying {
+                version: info.version.clone(),
+            },
+            Activity::Idle if self.up_to_date_shown => Status::UpToDate,
+            Activity::Idle if self.failure_shown => match &self.last_failure {
+                Some(f) => Status::Failed {
+                    message: f.message.clone(),
+                },
+                None => Status::Idle,
+            },
+            _ => Status::Idle,
+        };
+        UpdaterView {
+            status,
+            ready: self.staged.as_ref().map(|i| ReadyUpdate {
+                version: i.version.clone(),
+                notes: i.notes.clone(),
+            }),
+            last_checked: self.last_checked,
+            last_failure: self.last_failure.clone(),
+            dmg_update: self.dmg_update.clone(),
+            failure_shown: self.failure_shown,
+        }
+    }
+
+    /// Apply an event; returns the effects the app must carry out.
+    pub fn update(&mut self, event: Event) -> Vec<Effect> {
+        match event {
+            Event::CheckStarted(kind) => self.check_started(kind),
+            Event::CheckFinished { at, manifest } => self.check_finished(at, manifest),
+            Event::DownloadProgress { received } => self.download_progress(received),
+            Event::DownloadFinished => self.download_finished(),
+            Event::StagingVerified => self.staging_verified(),
+            Event::StagedRestored { version } => self.staged_restored(version),
+            Event::Launched { .. } => self.scheduled_check(true),
+            Event::Tick { at } => self.scheduled_check(self.check_due(at, false)),
+            Event::Woke { at } => self.scheduled_check(self.check_due(at, true)),
+            Event::SetAutoCheck(on) => {
+                self.auto_check = on;
+                vec![]
+            }
+            Event::QuitConfirmed => self.quit_confirmed(),
+            Event::NoticeDismissed { version } => {
+                self.notice_dismissed = Some(version);
+                vec![]
+            }
+            Event::RestartRequested { busy_terminals } => self.restart_requested(busy_terminals),
+            Event::RestartConfirmed => self.restart_confirmed(),
+            Event::RestartDeclined => {
+                self.restart_confirming = false;
+                vec![]
+            }
+            Event::CheckFailed { at, reason } => self.check_failed(at, reason),
+            Event::DownloadFailed { at, reason } => self.download_failed(at, reason),
+            Event::BrokenDownload { at, reason } => self.broken_download(at, reason),
+            Event::SecurityFailure { at, reason } => self.security_failure(at, reason),
+        }
+    }
+
+    fn swap_and_relaunch(&mut self, version: Version) -> Vec<Effect> {
+        self.restart_confirming = false;
+        vec![
+            Effect::SwapStaged { version },
+            Effect::Relaunch,
+            Effect::Exit,
+        ]
+    }
+
+    fn restart_requested(&mut self, busy_terminals: bool) -> Vec<Effect> {
+        let Some(version) = self.staged.as_ref().map(|i| i.version.clone()) else {
+            return vec![]; // nothing staged to restart into
+        };
+        if busy_terminals {
+            self.restart_confirming = true;
+            vec![Effect::ConfirmRestart { version }]
+        } else {
+            self.swap_and_relaunch(version)
+        }
+    }
+
+    fn restart_confirmed(&mut self) -> Vec<Effect> {
+        if !self.restart_confirming {
+            return vec![]; // stray answer
+        }
+        match self.staged.as_ref().map(|i| i.version.clone()) {
+            Some(version) => self.swap_and_relaunch(version),
+            None => {
+                self.restart_confirming = false;
+                vec![]
+            }
+        }
+    }
+
+    /// A Clean quit is going ahead. A running download is dropped (never
+    /// awaited, never staged); the next launch's check starts it over.
+    fn quit_confirmed(&mut self) -> Vec<Effect> {
+        if !matches!(self.activity, Activity::Downloading { .. }) {
+            return vec![];
+        }
+        self.activity = Activity::Idle;
+        self.manual = false;
+        vec![Effect::CancelDownload]
+    }
+
+    /// Is "Check for updates automatically" on?
+    pub fn auto_check(&self) -> bool {
+        self.auto_check
+    }
+
+    /// Is the last check old enough for a scheduled check? A tick counts 6h
+    /// exactly; a wake needs strictly more than 6h (`strict`).
+    fn check_due(&self, now: DateTime<Utc>, strict: bool) -> bool {
+        match self.last_checked {
+            None => true,
+            Some(last) => {
+                let age = now - last;
+                if strict {
+                    age > CHECK_INTERVAL
+                } else {
+                    age >= CHECK_INTERVAL
+                }
+            }
+        }
+    }
+
+    /// Start an automatic check when `due`. (Schedule gating lives here.)
+    fn scheduled_check(&mut self, due: bool) -> Vec<Effect> {
+        if !due || !self.auto_check {
+            return vec![];
+        }
+        self.check_started(CheckKind::Automatic)
+    }
+
+    fn check_started(&mut self, kind: CheckKind) -> Vec<Effect> {
+        if self.is_busy() {
+            // A step is already running. A manual request adopts it, so its
+            // result is shown. No second check starts.
+            if kind == CheckKind::Manual {
+                self.manual = true;
+            }
+            return vec![];
+        }
+        self.activity = Activity::Checking;
+        self.manual = kind == CheckKind::Manual;
+        self.up_to_date_shown = false;
+        // A security failure stays on screen through quiet automatic checks.
+        let keep_security = kind == CheckKind::Automatic
+            && self
+                .last_failure
+                .as_ref()
+                .is_some_and(|f| f.kind == FailureKind::Security);
+        self.failure_shown = self.failure_shown && keep_security;
+        vec![Effect::FetchManifest]
+    }
+
+    /// Record a failure and go idle. Quiet unless the user asked for the step.
+    fn fail(&mut self, at: DateTime<Utc>, kind: FailureKind, message: String) {
+        self.activity = Activity::Idle;
+        self.failure_shown = self.manual;
+        self.manual = false;
+        self.last_failure = Some(LastFailure { at, kind, message });
+    }
+
+    fn check_failed(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        if self.activity != Activity::Checking {
+            return vec![]; // stale answer, no check is running
+        }
+        self.fail(at, FailureKind::Check, reason);
+        vec![]
+    }
+
+    /// Strikes against `version` so far.
+    pub fn broken_downloads(&self, version: &Version) -> u8 {
+        match &self.broken {
+            Some((v, n)) if v == version => *n,
+            _ => 0,
+        }
+    }
+
+    /// The version blocked by a security failure, if any.
+    pub fn blocked_version(&self) -> Option<&Version> {
+        self.blocked.as_ref()
+    }
+
+    fn is_blocked(&self, version: &Version) -> bool {
+        self.blocked.as_ref().is_some_and(|b| version <= b)
+    }
+
+    fn security_failure(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        let info = match &self.activity {
+            Activity::Downloading { info, .. } | Activity::Verifying(info) => info.clone(),
+            _ => return vec![],
+        };
+        self.blocked = Some(info.version.clone());
+        self.fail(at, FailureKind::Security, reason);
+        self.failure_shown = true; // always shown, even for automatic checks
+        vec![Effect::DeleteStaging(info.version)]
+    }
+
+    /// Has this version been broken too often to try again?
+    fn is_skipped(&self, version: &Version) -> bool {
+        self.broken_downloads(version) >= MAX_BROKEN_DOWNLOADS
+    }
+
+    fn broken_download(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        let info = match &self.activity {
+            Activity::Downloading { info, .. } | Activity::Verifying(info) => info.clone(),
+            _ => return vec![],
+        };
+        let strikes = self.broken_downloads(&info.version) + 1;
+        self.broken = Some((info.version.clone(), strikes));
+        self.fail(at, FailureKind::BrokenDownload, reason);
+        vec![Effect::DeleteStaging(info.version)]
+    }
+
+    fn download_failed(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        if !matches!(self.activity, Activity::Downloading { .. }) {
+            return vec![];
+        }
+        self.fail(at, FailureKind::Download, reason);
+        vec![]
+    }
+
+    /// Is this version already staged (or older than what is)?
+    fn has_staged(&self, version: &Version) -> bool {
+        self.staged.as_ref().is_some_and(|s| &s.version >= version)
+    }
+
+    fn download_progress(&mut self, received: u64) -> Vec<Effect> {
+        if let Activity::Downloading { received: r, .. } = &mut self.activity {
+            *r = received;
+        }
+        vec![]
+    }
+
+    fn download_finished(&mut self) -> Vec<Effect> {
+        let Activity::Downloading { info, .. } = &self.activity else {
+            return vec![];
+        };
+        let info = info.clone();
+        self.activity = Activity::Verifying(info.clone());
+        vec![Effect::Stage(info)]
+    }
+
+    fn staged_restored(&mut self, version: Version) -> Vec<Effect> {
+        if version <= self.installed || self.has_staged(&version) {
+            return vec![];
+        }
+        self.staged = Some(UpdateInfo {
+            version,
+            zip_url: String::new(),
+            zip_sha256: String::new(),
+            zip_size: 0,
+            notes: ReleaseNotes::Unavailable,
+        });
+        vec![]
+    }
+
+    fn staging_verified(&mut self) -> Vec<Effect> {
+        let Activity::Verifying(info) = &self.activity else {
+            return vec![];
+        };
+        let info = info.clone();
+        self.activity = Activity::Idle;
+        self.manual = false;
+        let replaced = self.staged.replace(info.clone());
+        let mut fx = Vec::new();
+        if let Some(old) = replaced.filter(|o| o.version != info.version) {
+            fx.push(Effect::DeleteStaging(old.version));
+        }
+        if self.notice_dismissed.as_ref() == Some(&info.version) {
+            return fx;
+        }
+        fx.push(Effect::ShowReadyNotice {
+            version: info.version,
+            notes: info.notes,
+        });
+        fx
+    }
+
+    fn check_finished(&mut self, at: DateTime<Utc>, manifest: ParsedManifest) -> Vec<Effect> {
+        if self.activity != Activity::Checking {
+            return vec![]; // stale answer, no check is running
+        }
+        self.last_checked = Some(at);
+        self.dmg_update = None; // re-decided by every finished check
+        // A restored Staged update has no notes; this manifest describes it.
+        if let ParsedManifest::SelfInstall(m) = &manifest {
+            if let Some(staged) = self.staged.as_mut() {
+                if staged.version == m.version && staged.notes == ReleaseNotes::Unavailable {
+                    staged.notes = m.notes_since(&self.installed);
+                }
+            }
+        }
+        match manifest {
+            ParsedManifest::SelfInstall(m)
+                if self.can_self_install
+                    && m.is_update(&self.installed)
+                    && !self.has_staged(&m.version)
+                    && !self.is_skipped(&m.version)
+                    && !self.is_blocked(&m.version) =>
+            {
+                let info = UpdateInfo::from_manifest(&m, &self.installed);
+                self.blocked = None; // only reached for a version past the block
+                self.failure_shown = false;
+                self.activity = Activity::Downloading {
+                    info: info.clone(),
+                    received: 0,
+                };
+                vec![Effect::Download(info)]
+            }
+            // An Update this install can't apply itself: offer the DMG. Nothing
+            // is downloaded or staged.
+            ParsedManifest::SelfInstall(m)
+                if !self.can_self_install && m.is_update(&self.installed) =>
+            {
+                self.dmg_update = Some(DmgUpdate {
+                    version: m.version.clone(),
+                    dmg_url: m.dmg_url.clone(),
+                    notes: m.notes_since(&self.installed),
+                });
+                self.finish_check_quietly()
+            }
+            ParsedManifest::DmgOnly(o) if o.is_update(&self.installed) => {
+                self.dmg_update = Some(DmgUpdate {
+                    version: o.version.clone(),
+                    dmg_url: o.dmg_url.clone(),
+                    notes: o.notes_since(&self.installed),
+                });
+                self.finish_check_quietly()
+            }
+            _ => {
+                self.activity = Activity::Idle;
+                self.up_to_date_shown = self.manual;
+                self.manual = false;
+                vec![]
+            }
+        }
+    }
+}
+
+impl UpdaterState {
+    /// A check ended with a DMG offer: back to idle, no "Up to date" line.
+    fn finish_check_quietly(&mut self) -> Vec<Effect> {
+        self.activity = Activity::Idle;
+        self.up_to_date_shown = false;
+        self.manual = false;
+        vec![]
+    }
+}
+
+fn percent(received: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    (received.min(total) * 100 / total) as u8
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::updater::manifest::parse;
+
+    pub fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    pub fn at(h: u32) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&format!("2026-11-17T{h:02}:00:00Z"))
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// A schema 1 manifest for `version`, with notes for each of `notes`.
+    pub fn manifest(version: &str, notes: &[&str]) -> ParsedManifest {
+        let releases: Vec<_> = notes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "version": n, "published_at": "2026-11-17T10:00:00Z", "notes": format!("notes {n}")
+                })
+            })
+            .collect();
+        let base = "https://github.com/denvermullets/jait-releases/releases/download";
+        let j = serde_json::json!({
+            "schema": 1, "version": version, "published_at": "2026-11-17T10:00:00Z",
+            "zip_url": format!("{base}/v{version}/JAIT-{version}-arm64.zip"),
+            "zip_sha256": "0".repeat(64), "zip_size": 1000u64,
+            "dmg_url": format!("{base}/v{version}/JAIT-{version}.dmg"),
+            "releases": releases,
+        });
+        parse(j.to_string().as_bytes()).unwrap()
+    }
+
+    pub fn finished(h: u32, version: &str) -> Event {
+        Event::CheckFinished {
+            at: at(h),
+            manifest: manifest(version, &[version]),
+        }
+    }
+
+    fn manifest_notes(version: &str, notes: &[&str]) -> ReleaseNotes {
+        match manifest(version, notes) {
+            ParsedManifest::SelfInstall(m) => m.notes_since(&v("0.12.0")),
+            ParsedManifest::DmgOnly(_) => unreachable!(),
+        }
+    }
+
+    fn state() -> UpdaterState {
+        UpdaterState::new(v("0.12.0"))
+    }
+
+    fn dmg_only(version: &str) -> ParsedManifest {
+        let m = serde_json::json!({
+            "schema": 2, "version": version,
+            "dmg_url": format!("https://github.com/denvermullets/jait-releases/releases/download/v{version}/JAIT-{version}.dmg"),
+            "releases": [{ "version": version, "published_at": "2026-11-17T10:00:00Z", "notes": "- n" }],
+        });
+        parse(m.to_string().as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn higher_schema_manifest_offers_the_dmg_without_downloading() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        let fx = s.update(Event::CheckFinished { at: at(9), manifest: dmg_only("0.13.0") });
+        assert!(fx.is_empty());
+        let view = s.view();
+        let offer = view.dmg_update.unwrap();
+        assert_eq!(offer.version, v("0.13.0"));
+        assert!(offer.dmg_url.ends_with("JAIT-0.13.0.dmg"));
+        assert!(matches!(offer.notes, ReleaseNotes::Available(_)));
+        assert_eq!(view.status, Status::Idle);
+        assert!(!s.is_busy());
+    }
+
+    #[test]
+    fn dmg_offer_that_is_not_newer_is_up_to_date() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(Event::CheckFinished { at: at(9), manifest: dmg_only("0.12.0") });
+        assert_eq!(s.view().dmg_update, None);
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn cannot_self_install_turns_an_update_into_a_dmg_offer() {
+        let mut s = state();
+        s.set_can_self_install(false);
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let fx = s.update(Event::CheckFinished { at: at(9), manifest: manifest("0.13.0", &["0.13.0"]) });
+        assert!(fx.is_empty());
+        let offer = s.view().dmg_update.unwrap();
+        assert_eq!(offer.version, v("0.13.0"));
+        assert!(offer.dmg_url.ends_with(".dmg"));
+    }
+
+    #[test]
+    fn a_later_up_to_date_check_clears_the_dmg_offer() {
+        let mut s = state();
+        s.set_can_self_install(false);
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(Event::CheckFinished { at: at(9), manifest: manifest("0.13.0", &[]) });
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(Event::CheckFinished { at: at(10), manifest: manifest("0.12.0", &[]) });
+        assert_eq!(s.view().dmg_update, None);
+    }
+
+    #[test]
+    fn manual_check_shows_checking_then_up_to_date() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Manual)),
+            vec![Effect::FetchManifest]
+        );
+        assert_eq!(s.view().status, Status::Checking);
+        assert_eq!(s.update(finished(9, "0.12.0")), vec![]);
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn automatic_check_that_finds_nothing_shows_nothing() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Automatic)),
+            vec![Effect::FetchManifest]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        s.update(finished(9, "0.12.0"));
+        assert_eq!(s.view().status, Status::Idle);
+    }
+
+    #[test]
+    fn older_manifest_is_not_an_update() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(finished(9, "0.11.0")), vec![]);
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn finding_an_update_emits_a_download_with_notes_since_installed() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let ev = Event::CheckFinished {
+            at: at(9),
+            manifest: manifest("0.14.0", &["0.12.0", "0.13.0", "0.14.0"]),
+        };
+        let fx = s.update(ev);
+        let [Effect::Download(info)] = fx.as_slice() else {
+            panic!("expected one download effect, got {fx:?}");
+        };
+        assert_eq!(info.version, v("0.14.0"));
+        let ReleaseNotes::Available(n) = &info.notes else {
+            panic!()
+        };
+        assert_eq!(n.len(), 2);
+        assert!(s.is_busy());
+    }
+
+    #[test]
+    fn last_check_time_is_recorded_on_every_finished_check() {
+        let mut s = state();
+        assert_eq!(s.view().last_checked, None);
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        s.update(finished(9, "0.12.0"));
+        assert_eq!(s.view().last_checked, Some(at(9)));
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(finished(11, "0.13.0")); // finds an Update
+        assert_eq!(s.view().last_checked, Some(at(11)));
+    }
+
+    #[test]
+    fn a_new_check_clears_up_to_date() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(finished(9, "0.12.0"));
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.view().status, Status::Idle);
+    }
+
+    #[test]
+    fn manual_request_during_an_automatic_check_adopts_it() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(Event::CheckStarted(CheckKind::Manual)), vec![]);
+        assert_eq!(s.view().status, Status::Checking);
+        s.update(finished(9, "0.12.0"));
+        assert_eq!(s.view().status, Status::UpToDate);
+    }
+
+    #[test]
+    fn automatic_request_while_busy_is_ignored() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(Event::CheckStarted(CheckKind::Automatic)), vec![]);
+        assert_eq!(s.view().status, Status::Checking);
+    }
+
+    fn update_of(fx: Vec<Effect>) -> UpdateInfo {
+        match fx.as_slice() {
+            [Effect::Download(i)] => i.clone(),
+            other => panic!("expected one download, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn automatic_update_goes_to_ready_with_no_visible_progress() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(9, "0.13.0")));
+        assert_eq!(s.view().status, Status::Idle);
+        s.update(Event::DownloadProgress { received: 500 });
+        assert_eq!(s.view().status, Status::Idle);
+        assert_eq!(
+            s.update(Event::DownloadFinished),
+            vec![Effect::Stage(info.clone())]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        assert_eq!(s.view().ready, None);
+        let fx = s.update(Event::StagingVerified);
+        assert_eq!(
+            fx,
+            vec![Effect::ShowReadyNotice {
+                version: v("0.13.0"),
+                notes: info.notes.clone()
+            }]
+        );
+        let ready = s.view().ready.unwrap();
+        assert_eq!(ready.version, v("0.13.0"));
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(!s.is_busy());
+    }
+
+    #[test]
+    fn manual_check_exposes_download_progress_then_verifying() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        update_of(s.update(finished(9, "0.13.0")));
+        let downloading = |percent| Status::Downloading {
+            version: v("0.13.0"),
+            percent,
+        };
+        assert_eq!(s.view().status, downloading(0));
+        s.update(Event::DownloadProgress { received: 250 });
+        assert_eq!(s.view().status, downloading(25));
+        s.update(Event::DownloadProgress { received: 5000 }); // past the size
+        assert_eq!(s.view().status, downloading(100));
+        s.update(Event::DownloadFinished);
+        assert_eq!(s.view().status, Status::Verifying { version: v("0.13.0") });
+        s.update(Event::StagingVerified);
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(s.view().ready.is_some());
+    }
+
+    #[test]
+    fn ready_notice_is_emitted_once_per_staging() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(Event::DownloadFinished);
+        let fx = s.update(Event::StagingVerified);
+        assert_eq!(fx.len(), 1);
+        // A repeated or stray verified event does nothing.
+        assert_eq!(s.update(Event::StagingVerified), vec![]);
+        // A later check that finds the same version doesn't re-download it.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(finished(15, "0.13.0")), vec![]);
+        assert!(s.view().ready.is_some());
+    }
+
+    #[test]
+    fn a_staged_update_found_at_launch_is_restored_as_ready_without_a_notice() {
+        let mut s = state();
+        assert_eq!(s.update(Event::StagedRestored { version: v("0.13.0") }), vec![]);
+        assert_eq!(s.view().ready.map(|r| r.version), Some(v("0.13.0")));
+    }
+
+    #[test]
+    fn a_restored_staged_update_adopts_its_notes_from_a_later_check() {
+        let mut s = state();
+        s.update(Event::StagedRestored { version: v("0.13.0") });
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        // Same version as staged: no download, no second ready notice.
+        assert_eq!(s.update(finished(9, "0.13.0")), vec![]);
+        let notes = s.view().ready.unwrap().notes;
+        assert_ne!(notes, ReleaseNotes::Unavailable);
+        assert_eq!(notes, manifest_notes("0.13.0", &["0.13.0"]));
+    }
+
+    #[test]
+    fn a_restored_staged_update_must_be_newer_than_installed_and_than_staged() {
+        let mut s = state();
+        s.update(Event::StagedRestored { version: v("0.1.0") });
+        assert!(s.view().ready.is_none());
+        s.update(Event::StagedRestored { version: v("0.14.0") });
+        s.update(Event::StagedRestored { version: v("0.13.0") });
+        assert_eq!(s.view().ready.map(|r| r.version), Some(v("0.14.0")));
+    }
+
+    #[test]
+    fn download_events_outside_a_download_are_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(Event::DownloadProgress { received: 1 }), vec![]);
+        assert_eq!(s.update(Event::DownloadFinished), vec![]);
+        assert_eq!(s.update(Event::StagingVerified), vec![]);
+        assert_eq!(s.view().ready, None);
+    }
+
+    // --- failures (JRST-500) ---
+
+    fn failed_check(h: u32) -> Event {
+        Event::CheckFailed {
+            at: at(h),
+            reason: "offline".into(),
+        }
+    }
+
+    fn failed_download(h: u32) -> Event {
+        Event::DownloadFailed {
+            at: at(h),
+            reason: "connection reset".into(),
+        }
+    }
+
+    #[test]
+    fn automatic_check_failure_is_quiet_but_recorded() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(failed_check(9)), vec![]);
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(!s.is_busy());
+        let f = s.view().last_failure.unwrap();
+        assert_eq!(f.kind, FailureKind::Check);
+        assert_eq!(f.at, at(9));
+        assert_eq!(f.message, "offline");
+    }
+
+    #[test]
+    fn attention_dot_follows_ready_update_and_shown_failures_only() {
+        let mut s = state();
+        assert!(!s.view().needs_attention());
+        // A quiet failure adds no dot.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        s.update(failed_check(9));
+        assert!(s.view().last_failure.is_some());
+        assert!(!s.view().needs_attention());
+        // A shown failure does.
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(failed_check(10));
+        assert!(s.view().failure_shown);
+        assert!(s.view().needs_attention());
+        // The next check clears it.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert!(!s.view().needs_attention());
+    }
+
+    #[test]
+    fn attention_dot_while_an_update_is_staged() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        assert!(s.view().needs_attention());
+    }
+
+    #[test]
+    fn manual_check_failure_is_shown_and_recorded() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(failed_check(9));
+        assert_eq!(
+            s.view().status,
+            Status::Failed {
+                message: "offline".into()
+            }
+        );
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Check);
+    }
+
+    #[test]
+    fn manual_download_failure_is_shown_automatic_is_quiet() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(failed_download(10));
+        assert_eq!(
+            s.view().status,
+            Status::Failed {
+                message: "connection reset".into()
+            }
+        );
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Download);
+
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(failed_download(10));
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(s.view().last_failure.is_some());
+        assert_eq!(s.view().ready, None);
+    }
+
+    #[test]
+    fn next_check_retries_after_a_quiet_failure_and_clears_the_shown_failure() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(failed_download(10));
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(failed_check(11));
+        assert!(matches!(s.view().status, Status::Failed { .. }));
+        // The next check retries the Update; the shown failure goes away.
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Automatic)),
+            vec![Effect::FetchManifest]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        update_of(s.update(finished(12, "0.13.0")));
+        // The last failure stays recorded until replaced.
+        assert_eq!(s.view().last_failure.unwrap().at, at(11));
+    }
+
+    #[test]
+    fn stray_failure_events_are_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(failed_check(9)), vec![]);
+        assert_eq!(s.update(failed_download(9)), vec![]);
+        assert_eq!(s.view().last_failure, None);
+    }
+
+    // --- broken downloads (JRST-506) ---
+
+    fn broken(h: u32) -> Event {
+        Event::BrokenDownload {
+            at: at(h),
+            reason: "sha256 mismatch".into(),
+        }
+    }
+
+    #[test]
+    fn broken_download_deletes_staging_and_is_quiet_when_automatic() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        assert_eq!(
+            s.update(broken(10)),
+            vec![Effect::DeleteStaging(v("0.13.0"))]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(!s.is_busy());
+        assert_eq!(s.broken_downloads(&v("0.13.0")), 1);
+        assert_eq!(
+            s.view().last_failure.unwrap().kind,
+            FailureKind::BrokenDownload
+        );
+        assert_eq!(s.view().ready, None);
+    }
+
+    #[test]
+    fn broken_unzip_while_verifying_counts_and_manual_is_shown() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(Event::DownloadFinished);
+        assert_eq!(
+            s.update(broken(10)),
+            vec![Effect::DeleteStaging(v("0.13.0"))]
+        );
+        assert!(matches!(s.view().status, Status::Failed { .. }));
+        assert_eq!(s.broken_downloads(&v("0.13.0")), 1);
+    }
+
+    #[test]
+    fn a_version_is_skipped_after_three_broken_downloads_but_a_newer_one_is_not() {
+        let mut s = state();
+        for h in 0..3 {
+            s.update(Event::CheckStarted(CheckKind::Automatic));
+            update_of(s.update(finished(9 + h, "0.13.0"))); // still retried
+            s.update(broken(9 + h));
+        }
+        assert_eq!(s.broken_downloads(&v("0.13.0")), 3);
+        // Fourth check: no download.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(finished(15, "0.13.0")), vec![]);
+        assert!(!s.is_busy());
+        // A newer version downloads normally, with zero strikes.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(16, "0.13.1")));
+        assert_eq!(info.version, v("0.13.1"));
+        assert_eq!(s.broken_downloads(&v("0.13.1")), 0);
+    }
+
+    #[test]
+    fn stray_broken_download_is_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(broken(9)), vec![]);
+        assert_eq!(s.view().last_failure, None);
+    }
+
+    // --- security failures (JRST-507) ---
+
+    fn insecure(h: u32) -> Event {
+        Event::SecurityFailure {
+            at: at(h),
+            reason: "codesign verify failed".into(),
+        }
+    }
+
+    #[test]
+    fn automatic_security_failure_is_shown_deletes_staging_and_blocks() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(Event::DownloadFinished);
+        assert_eq!(
+            s.update(insecure(10)),
+            vec![Effect::DeleteStaging(v("0.13.0"))]
+        );
+        assert_eq!(
+            s.view().status,
+            Status::Failed {
+                message: "codesign verify failed".into()
+            }
+        );
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Security);
+        assert_eq!(s.blocked_version(), Some(&v("0.13.0")));
+        assert_eq!(s.view().ready, None);
+    }
+
+    #[test]
+    fn blocked_version_is_never_downloaded_and_a_newer_one_clears_the_block() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(insecure(10));
+        // A later automatic check still shows it, and does not retry.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(finished(11, "0.13.0")), vec![]);
+        assert!(matches!(s.view().status, Status::Failed { .. }));
+        // A newer manifest version clears the block and downloads.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(12, "0.13.1")));
+        assert_eq!(info.version, v("0.13.1"));
+        assert_eq!(s.blocked_version(), None);
+        assert_eq!(s.view().status, Status::Idle);
+    }
+
+    #[test]
+    fn manual_check_clears_the_shown_security_failure_but_keeps_the_block() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(insecure(10));
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(finished(11, "0.13.0")), vec![]);
+        assert_eq!(s.blocked_version(), Some(&v("0.13.0")));
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Security);
+    }
+
+    #[test]
+    fn stray_security_failure_is_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(insecure(9)), vec![]);
+        assert_eq!(s.blocked_version(), None);
+    }
+
+    #[test]
+    fn a_stale_check_result_is_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(finished(9, "0.13.0")), vec![]);
+        assert_eq!(s.view().last_checked, None);
+    }
+
+    // --- JRST-501: Later hides the notice for one version ---
+
+    fn stage(s: &mut UpdaterState, h: u32, version: &str) -> Vec<Effect> {
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(h, version)));
+        s.update(Event::DownloadFinished);
+        s.update(Event::StagingVerified)
+    }
+
+    #[test]
+    fn later_hides_the_notice_on_a_re_ready_of_the_same_version() {
+        let mut s = state();
+        assert_eq!(stage(&mut s, 9, "0.13.0").len(), 1);
+        s.update(Event::NoticeDismissed { version: v("0.13.0") });
+        assert_eq!(s.dismissed_notice(), Some(&v("0.13.0")));
+        // The same version is staged again (e.g. after a relaunch re-verify).
+        s.staged = None;
+        assert_eq!(stage(&mut s, 15, "0.13.0"), vec![]);
+    }
+
+    #[test]
+    fn later_keeps_the_chip_ready() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::NoticeDismissed { version: v("0.13.0") });
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn a_newer_version_shows_its_notice_after_later() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::NoticeDismissed { version: v("0.13.0") });
+        let fx = stage(&mut s, 15, "0.14.0");
+        assert!(fx.iter().any(|e| matches!(e, Effect::ShowReadyNotice { version, .. } if *version == v("0.14.0"))));
+    }
+
+    // --- JRST-502: a newer Release replaces the Staged update ---
+
+    #[test]
+    fn newer_release_than_staged_is_downloaded() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(15, "0.14.0")));
+        assert_eq!(info.version, v("0.14.0"));
+    }
+
+    #[test]
+    fn old_staged_stays_until_the_new_one_is_verified() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(15, "0.14.0")));
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+        s.update(Event::DownloadFinished);
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn verified_newer_release_replaces_staged_and_removes_old_files() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        let fx = stage(&mut s, 15, "0.14.0");
+        assert_eq!(fx.len(), 2);
+        assert_eq!(fx[0], Effect::DeleteStaging(v("0.13.0")));
+        assert!(matches!(&fx[1], Effect::ShowReadyNotice { version, .. } if *version == v("0.14.0")));
+        assert_eq!(s.view().ready.unwrap().version, v("0.14.0"));
+    }
+
+    #[test]
+    fn first_staging_removes_nothing() {
+        let mut s = state();
+        let fx = stage(&mut s, 9, "0.13.0");
+        assert!(!fx.iter().any(|e| matches!(e, Effect::DeleteStaging(_))));
+    }
+
+    // --- JRST-503: Restart now ---
+
+    fn swap_relaunch_exit(version: &str) -> Vec<Effect> {
+        vec![
+            Effect::SwapStaged { version: v(version) },
+            Effect::Relaunch,
+            Effect::Exit,
+        ]
+    }
+
+    #[test]
+    fn restart_now_without_busy_terminals_swaps_relaunches_exits() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        assert_eq!(
+            s.update(Event::RestartRequested { busy_terminals: false }),
+            swap_relaunch_exit("0.13.0")
+        );
+    }
+
+    #[test]
+    fn restart_now_with_busy_terminals_confirms_first() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        assert_eq!(
+            s.update(Event::RestartRequested { busy_terminals: true }),
+            vec![Effect::ConfirmRestart { version: v("0.13.0") }]
+        );
+        assert_eq!(s.update(Event::RestartConfirmed), swap_relaunch_exit("0.13.0"));
+        // Answered once; a repeat does nothing.
+        assert_eq!(s.update(Event::RestartConfirmed), vec![]);
+    }
+
+    #[test]
+    fn not_now_keeps_the_staged_update_for_the_next_clean_quit() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::RestartRequested { busy_terminals: true });
+        assert_eq!(s.update(Event::RestartDeclined), vec![]);
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+        // The declined confirm can't be confirmed later by a stray event.
+        assert_eq!(s.update(Event::RestartConfirmed), vec![]);
+    }
+
+    #[test]
+    fn restart_with_nothing_staged_does_nothing() {
+        let mut s = state();
+        assert_eq!(s.update(Event::RestartRequested { busy_terminals: false }), vec![]);
+        assert_eq!(s.update(Event::RestartRequested { busy_terminals: true }), vec![]);
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::tests::{at, finished, v};
+    use super::*;
+
+    fn state() -> UpdaterState {
+        UpdaterState::new(v("0.12.0"))
+    }
+
+    /// A state whose last check finished at `h`:00 and found nothing.
+    fn checked_at(h: u32) -> UpdaterState {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        s.update(finished(h, "0.12.0"));
+        s
+    }
+
+    #[test]
+    fn launch_emits_an_automatic_check() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::Launched { at: at(9) }),
+            vec![Effect::FetchManifest]
+        );
+        assert!(s.is_busy());
+        assert_eq!(s.view().status, Status::Idle); // automatic: nothing shown
+    }
+
+    #[test]
+    fn launch_checks_even_if_checked_recently() {
+        let mut s = checked_at(9);
+        assert_eq!(
+            s.update(Event::Launched { at: at(10) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn tick_before_six_hours_does_nothing() {
+        let mut s = checked_at(1);
+        assert_eq!(s.update(Event::Tick { at: at(6) }), vec![]);
+    }
+
+    #[test]
+    fn tick_six_hours_after_last_check_emits_a_check() {
+        let mut s = checked_at(1);
+        assert_eq!(
+            s.update(Event::Tick { at: at(7) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn tick_with_no_check_yet_emits_a_check() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::Tick { at: at(7) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn tick_while_a_check_runs_does_not_start_another() {
+        let mut s = checked_at(1);
+        s.update(Event::Tick { at: at(7) });
+        assert_eq!(s.update(Event::Tick { at: at(8) }), vec![]);
+    }
+
+    #[test]
+    fn wake_only_checks_when_last_check_is_over_six_hours_old() {
+        let mut s = checked_at(1);
+        assert_eq!(s.update(Event::Woke { at: at(5) }), vec![]);
+        assert_eq!(s.update(Event::Woke { at: at(7) }), vec![]); // exactly 6h
+        assert_eq!(
+            s.update(Event::Woke { at: at(8) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+
+    #[test]
+    fn wake_before_any_check_emits_a_check() {
+        let mut s = state();
+        assert_eq!(
+            s.update(Event::Woke { at: at(8) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_check_tests {
+    use super::tests::{at, finished, v};
+    use super::*;
+
+    fn off() -> UpdaterState {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        assert!(s.auto_check()); // on by default
+        s.update(Event::SetAutoCheck(false));
+        s
+    }
+
+    #[test]
+    fn with_auto_check_off_launch_tick_and_wake_emit_nothing() {
+        let mut s = off();
+        assert_eq!(s.update(Event::Launched { at: at(1) }), vec![]);
+        assert_eq!(s.update(Event::Tick { at: at(20) }), vec![]);
+        assert_eq!(s.update(Event::Woke { at: at(21) }), vec![]);
+        assert!(!s.is_busy());
+    }
+
+    #[test]
+    fn a_manual_check_still_runs_check_download_stage() {
+        let mut s = off();
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Manual)),
+            vec![Effect::FetchManifest]
+        );
+        let fx = s.update(finished(9, "0.13.0"));
+        let [Effect::Download(info)] = fx.as_slice() else {
+            panic!("expected download, got {fx:?}");
+        };
+        assert_eq!(s.update(Event::DownloadFinished), vec![Effect::Stage(info.clone())]);
+        let fx = s.update(Event::StagingVerified);
+        assert!(matches!(fx.as_slice(), [Effect::ShowReadyNotice { .. }]));
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn a_staged_update_survives_turning_auto_check_off() {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        s.update(Event::Launched { at: at(1) });
+        s.update(finished(1, "0.13.0"));
+        s.update(Event::DownloadFinished);
+        s.update(Event::StagingVerified);
+        assert_eq!(s.update(Event::SetAutoCheck(false)), vec![]);
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn turning_auto_check_back_on_resumes_the_schedule() {
+        let mut s = off();
+        assert_eq!(s.update(Event::Tick { at: at(20) }), vec![]);
+        s.update(Event::SetAutoCheck(true));
+        assert_eq!(
+            s.update(Event::Tick { at: at(20) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+}
+
+#[cfg(test)]
+mod quit_drop_tests {
+    use super::tests::{at, finished, v};
+    use super::*;
+
+    fn downloading() -> UpdaterState {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        s.update(Event::Launched { at: at(1) });
+        s.update(finished(1, "0.13.0"));
+        s.update(Event::DownloadProgress { received: 400 });
+        s
+    }
+
+    #[test]
+    fn quit_during_a_download_cancels_it_and_stages_nothing() {
+        let mut s = downloading();
+        assert_eq!(s.update(Event::QuitConfirmed), vec![Effect::CancelDownload]);
+        assert!(!s.is_busy()); // nothing left for the quit to wait on
+        assert_eq!(s.view().ready, None);
+        // The dropped download can't finish into a stage.
+        assert_eq!(s.update(Event::DownloadFinished), vec![]);
+    }
+
+    #[test]
+    fn relaunch_check_finds_the_update_and_downloads_afresh() {
+        let mut s = downloading();
+        s.update(Event::QuitConfirmed);
+        // Next launch: a new state, the launch check, a fresh download.
+        let mut s = UpdaterState::new(v("0.12.0"));
+        assert_eq!(s.update(Event::Launched { at: at(9) }), vec![Effect::FetchManifest]);
+        let fx = s.update(finished(9, "0.13.0"));
+        assert!(matches!(fx.as_slice(), [Effect::Download(i)] if i.version == v("0.13.0")));
+    }
+
+    #[test]
+    fn quit_when_not_downloading_emits_nothing() {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        assert_eq!(s.update(Event::QuitConfirmed), vec![]);
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(Event::QuitConfirmed), vec![]);
+    }
+}

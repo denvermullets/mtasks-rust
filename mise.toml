@@ -2,3 +2,5 @@
 # Exact on purpose: Zig and the libghostty-vt commit in Cargo.toml are upgraded together.
 zig = "0.17.1"
 "cargo:cargo-bundle" = "0.12.0"
+# Publish script uploads Releases with this (scripts/publish-release.sh).
+gh = "2.65.0"
