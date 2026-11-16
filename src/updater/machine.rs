@@ -86,6 +86,10 @@ pub enum Event {
     Tick { at: DateTime<Utc> },
     /// The Mac woke from sleep.
     Woke { at: DateTime<Utc> },
+    /// The "Check for updates automatically" setting changed (also send it at
+    /// startup with the stored value; the default is on). Off stops the launch,
+    /// tick and wake checks; manual checks and a Staged update are unaffected.
+    SetAutoCheck(bool),
 }
 
 /// Things the app must do. The machine returns these.
@@ -170,6 +174,8 @@ pub struct UpdaterState {
     notice_dismissed: Option<Version>,
     /// A "Restart to update?" confirm is open.
     restart_confirming: bool,
+    /// Do launch / 6h / wake checks run? On by default.
+    auto_check: bool,
 }
 
 impl UpdaterState {
@@ -183,6 +189,7 @@ impl UpdaterState {
             staged: None,
             notice_dismissed: None,
             restart_confirming: false,
+            auto_check: true,
         }
     }
 
@@ -239,6 +246,10 @@ impl UpdaterState {
             Event::Launched { .. } => self.scheduled_check(true),
             Event::Tick { at } => self.scheduled_check(self.check_due(at, false)),
             Event::Woke { at } => self.scheduled_check(self.check_due(at, true)),
+            Event::SetAutoCheck(on) => {
+                self.auto_check = on;
+                vec![]
+            }
             Event::NoticeDismissed { version } => {
                 self.notice_dismissed = Some(version);
                 vec![]
@@ -286,6 +297,11 @@ impl UpdaterState {
         }
     }
 
+    /// Is "Check for updates automatically" on?
+    pub fn auto_check(&self) -> bool {
+        self.auto_check
+    }
+
     /// Is the last check old enough for a scheduled check? A tick counts 6h
     /// exactly; a wake needs strictly more than 6h (`strict`).
     fn check_due(&self, now: DateTime<Utc>, strict: bool) -> bool {
@@ -304,7 +320,7 @@ impl UpdaterState {
 
     /// Start an automatic check when `due`. (Schedule gating lives here.)
     fn scheduled_check(&mut self, due: bool) -> Vec<Effect> {
-        if !due {
+        if !due || !self.auto_check {
             return vec![];
         }
         self.check_started(CheckKind::Automatic)
@@ -842,6 +858,67 @@ mod schedule_tests {
         let mut s = state();
         assert_eq!(
             s.update(Event::Woke { at: at(8) }),
+            vec![Effect::FetchManifest]
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_check_tests {
+    use super::tests::{at, finished, v};
+    use super::*;
+
+    fn off() -> UpdaterState {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        assert!(s.auto_check()); // on by default
+        s.update(Event::SetAutoCheck(false));
+        s
+    }
+
+    #[test]
+    fn with_auto_check_off_launch_tick_and_wake_emit_nothing() {
+        let mut s = off();
+        assert_eq!(s.update(Event::Launched { at: at(1) }), vec![]);
+        assert_eq!(s.update(Event::Tick { at: at(20) }), vec![]);
+        assert_eq!(s.update(Event::Woke { at: at(21) }), vec![]);
+        assert!(!s.is_busy());
+    }
+
+    #[test]
+    fn a_manual_check_still_runs_check_download_stage() {
+        let mut s = off();
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Manual)),
+            vec![Effect::FetchManifest]
+        );
+        let fx = s.update(finished(9, "0.13.0"));
+        let [Effect::Download(info)] = fx.as_slice() else {
+            panic!("expected download, got {fx:?}");
+        };
+        assert_eq!(s.update(Event::DownloadFinished), vec![Effect::Stage(info.clone())]);
+        let fx = s.update(Event::StagingVerified);
+        assert!(matches!(fx.as_slice(), [Effect::ShowReadyNotice { .. }]));
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn a_staged_update_survives_turning_auto_check_off() {
+        let mut s = UpdaterState::new(v("0.12.0"));
+        s.update(Event::Launched { at: at(1) });
+        s.update(finished(1, "0.13.0"));
+        s.update(Event::DownloadFinished);
+        s.update(Event::StagingVerified);
+        assert_eq!(s.update(Event::SetAutoCheck(false)), vec![]);
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn turning_auto_check_back_on_resumes_the_schedule() {
+        let mut s = off();
+        assert_eq!(s.update(Event::Tick { at: at(20) }), vec![]);
+        s.update(Event::SetAutoCheck(true));
+        assert_eq!(
+            s.update(Event::Tick { at: at(20) }),
             vec![Effect::FetchManifest]
         );
     }
