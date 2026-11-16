@@ -362,6 +362,47 @@ mod tests {
     }
 
     #[test]
+    fn higher_schema_offers_the_dmg_with_version_and_notes() {
+        let v = with("schema", 2.into());
+        let ParsedManifest::DmgOnly(o) = parse_value(&v).unwrap() else {
+            panic!("expected a DMG offer");
+        };
+        assert_eq!(o.version, Version::new(0, 13, 0));
+        assert!(o.dmg_url.ends_with("JAIT-0.13.0.dmg"));
+        assert!(matches!(o.releases, ReleaseNotes::Available(ref r) if r.len() == 1));
+    }
+
+    #[test]
+    fn higher_schema_with_unreadable_notes_still_offers_the_dmg() {
+        let mut v = with("schema", 2.into());
+        v["releases"] = "new shape".into();
+        let ParsedManifest::DmgOnly(o) = parse_value(&v).unwrap() else {
+            panic!("expected a DMG offer");
+        };
+        assert_eq!(o.releases, ReleaseNotes::Unavailable);
+    }
+
+    #[test]
+    fn higher_schema_never_self_installs_even_if_it_looks_like_schema_1() {
+        for schema in [2, 3, 99] {
+            assert!(matches!(
+                parse_value(&with("schema", schema.into())),
+                Ok(ParsedManifest::DmgOnly(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn higher_schema_without_a_usable_version_or_dmg_is_a_check_failure() {
+        let mut v = with("schema", 2.into());
+        v["version"] = "nope".into();
+        assert!(parse_value(&v).is_err());
+        let mut v = with("schema", 2.into());
+        v.as_object_mut().unwrap().remove("dmg_url");
+        assert!(parse_value(&v).is_err());
+    }
+
+    #[test]
     fn missing_or_broken_releases_does_not_fail_the_parse() {
         let broken = [
             without("releases"),
