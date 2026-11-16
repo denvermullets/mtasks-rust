@@ -100,6 +100,11 @@ pub enum Event {
     /// The download is unusable: sha256 mismatch, truncated, or the unzip
     /// failed. Valid while downloading or verifying.
     BrokenDownload { at: DateTime<Utc>, reason: String },
+    /// Staging found a security problem: failed `codesign` verify, failed
+    /// `spctl` assessment, or an `Info.plist` version that doesn't match the
+    /// manifest or isn't newer than the running app. Valid while downloading
+    /// or verifying.
+    SecurityFailure { at: DateTime<Utc>, reason: String },
 }
 
 /// Things the app must do. The machine returns these.
@@ -175,6 +180,9 @@ pub enum FailureKind {
     Download,
     /// Sha256 mismatch, truncated download, or failed unzip.
     BrokenDownload,
+    /// codesign / spctl / version check failed. Always shown, and blocks the
+    /// version.
+    Security,
 }
 
 /// The most recent failure, quiet or shown, for Settings → Updates.
@@ -223,6 +231,9 @@ pub struct UpdaterState {
     /// Broken-download strikes against the newest version that had any.
     /// A newer version starts again from zero.
     broken: Option<(Version, u8)>,
+    /// Newest version that failed a security check. It and anything older
+    /// are never downloaded; a newer manifest version clears the block.
+    blocked: Option<Version>,
 }
 
 impl UpdaterState {
@@ -240,6 +251,7 @@ impl UpdaterState {
             last_failure: None,
             failure_shown: false,
             broken: None,
+            blocked: None,
         }
     }
 
@@ -321,6 +333,7 @@ impl UpdaterState {
             Event::CheckFailed { at, reason } => self.check_failed(at, reason),
             Event::DownloadFailed { at, reason } => self.download_failed(at, reason),
             Event::BrokenDownload { at, reason } => self.broken_download(at, reason),
+            Event::SecurityFailure { at, reason } => self.security_failure(at, reason),
         }
     }
 
@@ -410,7 +423,13 @@ impl UpdaterState {
         self.activity = Activity::Checking;
         self.manual = kind == CheckKind::Manual;
         self.up_to_date_shown = false;
-        self.failure_shown = false;
+        // A security failure stays on screen through quiet automatic checks.
+        let keep_security = kind == CheckKind::Automatic
+            && self
+                .last_failure
+                .as_ref()
+                .is_some_and(|f| f.kind == FailureKind::Security);
+        self.failure_shown = self.failure_shown && keep_security;
         vec![Effect::FetchManifest]
     }
 
@@ -436,6 +455,26 @@ impl UpdaterState {
             Some((v, n)) if v == version => *n,
             _ => 0,
         }
+    }
+
+    /// The version blocked by a security failure, if any.
+    pub fn blocked_version(&self) -> Option<&Version> {
+        self.blocked.as_ref()
+    }
+
+    fn is_blocked(&self, version: &Version) -> bool {
+        self.blocked.as_ref().is_some_and(|b| version <= b)
+    }
+
+    fn security_failure(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        let info = match &self.activity {
+            Activity::Downloading { info, .. } | Activity::Verifying(info) => info.clone(),
+            _ => return vec![],
+        };
+        self.blocked = Some(info.version.clone());
+        self.fail(at, FailureKind::Security, reason);
+        self.failure_shown = true; // always shown, even for automatic checks
+        vec![Effect::DeleteStaging(info.version)]
     }
 
     /// Has this version been broken too often to try again?
@@ -514,9 +553,12 @@ impl UpdaterState {
             ParsedManifest::SelfInstall(m)
                 if m.is_update(&self.installed)
                     && !self.has_staged(&m.version)
-                    && !self.is_skipped(&m.version) =>
+                    && !self.is_skipped(&m.version)
+                    && !self.is_blocked(&m.version) =>
             {
                 let info = UpdateInfo::from_manifest(&m, &self.installed);
+                self.blocked = None; // only reached for a version past the block
+                self.failure_shown = false;
                 self.activity = Activity::Downloading {
                     info: info.clone(),
                     received: 0,
@@ -922,6 +964,73 @@ pub(super) mod tests {
         let mut s = state();
         assert_eq!(s.update(broken(9)), vec![]);
         assert_eq!(s.view().last_failure, None);
+    }
+
+    // --- security failures (JRST-507) ---
+
+    fn insecure(h: u32) -> Event {
+        Event::SecurityFailure {
+            at: at(h),
+            reason: "codesign verify failed".into(),
+        }
+    }
+
+    #[test]
+    fn automatic_security_failure_is_shown_deletes_staging_and_blocks() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(Event::DownloadFinished);
+        assert_eq!(
+            s.update(insecure(10)),
+            vec![Effect::DeleteStaging(v("0.13.0"))]
+        );
+        assert_eq!(
+            s.view().status,
+            Status::Failed {
+                message: "codesign verify failed".into()
+            }
+        );
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Security);
+        assert_eq!(s.blocked_version(), Some(&v("0.13.0")));
+        assert_eq!(s.view().ready, None);
+    }
+
+    #[test]
+    fn blocked_version_is_never_downloaded_and_a_newer_one_clears_the_block() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(insecure(10));
+        // A later automatic check still shows it, and does not retry.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(finished(11, "0.13.0")), vec![]);
+        assert!(matches!(s.view().status, Status::Failed { .. }));
+        // A newer manifest version clears the block and downloads.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        let info = update_of(s.update(finished(12, "0.13.1")));
+        assert_eq!(info.version, v("0.13.1"));
+        assert_eq!(s.blocked_version(), None);
+        assert_eq!(s.view().status, Status::Idle);
+    }
+
+    #[test]
+    fn manual_check_clears_the_shown_security_failure_but_keeps_the_block() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(insecure(10));
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        assert_eq!(s.update(finished(11, "0.13.0")), vec![]);
+        assert_eq!(s.blocked_version(), Some(&v("0.13.0")));
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Security);
+    }
+
+    #[test]
+    fn stray_security_failure_is_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(insecure(9)), vec![]);
+        assert_eq!(s.blocked_version(), None);
     }
 
     #[test]
