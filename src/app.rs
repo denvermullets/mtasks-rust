@@ -1268,6 +1268,7 @@ impl App {
             terminal_panel_showing: self.terminals.panel_showing(self.panel_scope().as_ref()),
             project_cards_stacked: self.config.project_cards_stacked,
             terminal_dock_right: self.terminals.dock() == crate::terminal::panel::Dock::Right,
+            update_ready: self.updater.view().ready.is_some(),
             tabs: self
                 .tab_labels()
                 .into_iter()
@@ -6976,6 +6977,7 @@ impl App {
                     }
                     PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Settings => return self.update(Message::OpenSettings),
+                    PaletteNav::RestartToUpdate => return self.update(Message::RestartNowClicked),
                     PaletteNav::ToggleSidebar => return self.update(Message::ToggleSidebar),
                     // Status renders only in Settings, so open it to make the check visible.
                     PaletteNav::CheckForUpdates => {

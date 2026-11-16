@@ -54,6 +54,8 @@ pub enum PaletteNav {
     ToggleSidebar,
     /// Check for a newer Release (`Message::UpdateCheckClicked`).
     CheckForUpdates,
+    /// Restart now (`Message::RestartNowClicked`); offered only while an Update is ready.
+    RestartToUpdate,
 }
 
 impl PaletteNav {
@@ -77,7 +79,8 @@ impl PaletteNav {
             | PaletteNav::ToggleTerminalDock
             | PaletteNav::Settings
             | PaletteNav::ToggleSidebar
-            | PaletteNav::CheckForUpdates => "Command",
+            | PaletteNav::CheckForUpdates
+            | PaletteNav::RestartToUpdate => "Command",
             PaletteNav::Tab(_) => "Tab",
         }
     }
@@ -150,6 +153,8 @@ pub struct PaletteData {
     pub project_cards_stacked: bool,
     /// The Terminal panel is docked right (else at the bottom).
     pub terminal_dock_right: bool,
+    /// A Staged update is ready to install (`UpdaterView.ready`).
+    pub update_ready: bool,
 }
 
 /// Most rows the palette ever shows.
@@ -163,7 +168,7 @@ pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     push_issues(query, data, &mut rows);
     push_commands(&needle, data, &mut rows);
     push_tabs(&needle, data, &mut rows);
-    push_views(&needle, &mut rows);
+    push_views(&needle, data, &mut rows);
     push_teams(&needle, data, &mut rows);
     push_projects(&needle, data, &mut rows);
     push_saved_views(&needle, data, &mut rows);
@@ -352,7 +357,7 @@ fn push_tabs(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
     }
 }
 
-fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
+fn push_views(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
     let views = [
         ("Board", "Current team", View::Board),
         ("Projects", "Current team", View::ProjectList),
@@ -391,6 +396,13 @@ fn push_views(needle: &str, rows: &mut Vec<PaletteRow>) {
             primary: "Check for updates".to_string(),
             secondary: "Look for a newer Release".to_string(),
             nav: PaletteNav::CheckForUpdates,
+        });
+    }
+    if data.update_ready && !needle.is_empty() && name_matches(needle, "Restart to update") {
+        rows.push(PaletteRow {
+            primary: "Restart to update".to_string(),
+            secondary: "Install the downloaded Update now".to_string(),
+            nav: PaletteNav::RestartToUpdate,
         });
     }
 }
@@ -868,6 +880,17 @@ mod tests {
         assert_eq!(rows[0].nav, PaletteNav::CheckForUpdates);
         assert_eq!(rows[0].nav.label(), "Command");
         assert!(names("").iter().all(|n| n != "Check for updates"));
+    }
+
+    #[test]
+    fn restart_to_update_shows_only_while_an_update_is_ready() {
+        let ready = PaletteData { update_ready: true, ..PaletteData::default() };
+        let rows = palette_results("restart", &ready);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Restart to update");
+        assert_eq!(rows[0].nav, PaletteNav::RestartToUpdate);
+        assert_eq!(rows[0].nav.label(), "Command");
+        assert!(palette_results("restart", &PaletteData::default()).is_empty());
     }
 
     #[test]
