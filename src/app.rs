@@ -1232,6 +1232,9 @@ pub struct App {
     install: crate::updater::install::InstallContext,
     /// The updater's I/O. Tasks hold a clone of the Arc.
     update_edge: std::sync::Arc<dyn crate::updater::edge::UpdateEdge>,
+    /// Restart now has swapped and is closing Terminals before it exits. A
+    /// quit request in this window must not swap again.
+    restart_exiting: bool,
 }
 
 /// A comment needs text or staged files (Rails: `body_or_files_present`).
@@ -3937,6 +3940,7 @@ impl App {
             updater,
             install,
             update_edge: std::sync::Arc::new(crate::updater::edge::HttpEdge::from_env()),
+            restart_exiting: false,
         };
 
         // Drop partial downloads and unverified extracts from a past run, once,
@@ -4012,6 +4016,11 @@ impl App {
     /// waiting at most `QUIT_WAIT` so a stuck process can't keep the app open.
     fn quit_with(&mut self, confirmed: bool) -> Task<Message> {
         use crate::terminal::panel::QuitPlan;
+        // The restart already swapped and will exit; a pending terminate is
+        // answered by `QuitReady` when the Terminals are gone.
+        if crate::updater::swap::ignores_quit(self.restart_exiting) {
+            return Task::none();
+        }
         match self.terminals.quit_plan(confirmed) {
             QuitPlan::Ignore => Task::none(),
             QuitPlan::Ask => {

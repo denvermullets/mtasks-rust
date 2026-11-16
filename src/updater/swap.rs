@@ -96,6 +96,13 @@ pub fn runs_after_swap(effect: &super::machine::Effect, swap_failed: bool) -> bo
     !(swap_failed && matches!(effect, Effect::Relaunch | Effect::Exit))
 }
 
+/// A quit request while Restart now's exit is under way (swap done, relaunch
+/// waiting, Terminals closing) does nothing: a second swap would fail or undo
+/// the first, and the restart finishes the exit itself. Pure.
+pub fn ignores_quit(restart_exiting: bool) -> bool {
+    restart_exiting
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwapError {
     /// The staged bundle or its verified marker is missing; nothing was touched.
@@ -220,6 +227,12 @@ mod tests {
         assert!(!runs_after_swap(&Effect::Exit, true));
         assert!(runs_after_swap(&Effect::Relaunch, false));
         assert!(runs_after_swap(&Effect::Exit, false));
+    }
+
+    #[test]
+    fn a_quit_during_a_restart_exit_is_ignored() {
+        assert!(ignores_quit(true));
+        assert!(!ignores_quit(false));
     }
 
     #[test]

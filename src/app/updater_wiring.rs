@@ -169,7 +169,10 @@ impl App {
                     }
                 }
                 // Not `on_quit_confirmed`: the swap already ran above.
-                Effect::Exit => tasks.push(self.shutdown_after(Task::none())),
+                Effect::Exit => {
+                    self.restart_exiting = true;
+                    tasks.push(self.shutdown_after(Task::none()));
+                }
                 other => tasks.push(self.run_updater_effect(other)),
             }
         }
