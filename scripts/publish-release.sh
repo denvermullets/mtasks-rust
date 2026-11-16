@@ -12,6 +12,8 @@
 # latest.json are uploaded, the manifest and zip are re-downloaded and checked
 # against their sha256, and only then does the release go live as latest. gh is
 # the mise-pinned one, with a Keychain token (see scripts/lib/publish-steps.sh).
+# Last, the annotated v<version> tag goes on the build commit and is the only
+# thing pushed to origin; then the release URL and first-install link print.
 #
 # Guards, each exits non-zero with its own message:
 #   - the folder has build-info.json and the notarized zip (an unnotarized build
@@ -168,4 +170,5 @@ release_body CHANGELOG.md "$VERSION" \
 publish_release "$NOTES_FILE"
 echo "Published $APP_NAME $VERSION."
 
-# The source tag is added by its own ticket.
+push_source_tag "$TAG" "$COMMIT" "$VERSION"
+print_urls

@@ -109,3 +109,19 @@ publish_release() {
     gh_run release edit "$TAG" --repo "$RELEASES_REPO" --draft=false --latest >/dev/null \
         || refuse "couldn't publish $TAG. It is still a verified draft; rerun to recreate it."
 }
+
+# Annotated source tag on the build commit; it marks the version as published
+# (/changelog starts a new section once it exists). Only this one ref is pushed.
+# The release is already live here, so a failure says how to finish by hand.
+push_source_tag() {
+    local tag="$1" commit="$2" version="$3"
+    git tag -a "$tag" "$commit" -m "$APP_NAME $version" \
+        || refuse "$APP_NAME $version is LIVE, but creating the tag failed. Run: git tag -a $tag $commit -m '$APP_NAME $version' && git push origin refs/tags/$tag"
+    git push origin "refs/tags/$tag" \
+        || refuse "$APP_NAME $version is LIVE and tagged locally, but the push failed. Run: git push origin refs/tags/$tag"
+}
+
+print_urls() {
+    echo "Release:       https://github.com/$RELEASES_REPO/releases/tag/$TAG"
+    echo "First install: https://github.com/$RELEASES_REPO/releases/latest/download/$APP_NAME.dmg"
+}
