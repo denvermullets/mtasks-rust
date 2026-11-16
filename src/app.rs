@@ -501,6 +501,12 @@ pub enum Message {
     UpdateCheckClicked,
     /// Settings → Updates: open the DMG download from the manifest.
     UpdateDmgClicked,
+    /// Settings → Updates: the "Check for updates automatically" toggle.
+    UpdateAutoCheckToggled(bool),
+    /// Periodic background check trigger (the machine decides if one is due).
+    UpdaterTick,
+    /// The Mac woke from sleep.
+    UpdaterWoke,
     /// Any updater input: a task result or a UI action, fed to the machine by
     /// `App::apply_updater_event`.
     Updater(crate::updater::machine::Event),
@@ -3936,6 +3942,10 @@ impl App {
 
         // The app delegate exists once the event loop is up; hook terminate then.
         let task = Task::batch([task, Task::done(Message::InstallTerminateHook)]);
+        // Launch check, after the staging cleanup and restore above. The stored
+        // auto-check setting was already applied by `config.updater.restore`.
+        let launch_check = app.updater_background(updater_wiring::Trigger::Launched);
+        let task = Task::batch([task, launch_check]);
 
         (app, task)
     }
@@ -4114,6 +4124,7 @@ impl App {
             opens,
             resizes,
             self.terminals.subscription(modal_open),
+            self.updater_subscription(),
         ];
         // A pressed Tab follows the pointer until release.
         if self.tab_drag.is_some() {
@@ -7553,6 +7564,9 @@ impl App {
             }
 
             Message::UpdateCheckClicked => return self.update_check_clicked(),
+            Message::UpdateAutoCheckToggled(on) => return self.update_auto_check_toggled(on),
+            Message::UpdaterTick => return self.updater_background(updater_wiring::Trigger::Tick),
+            Message::UpdaterWoke => return self.updater_background(updater_wiring::Trigger::Woke),
             Message::UpdateDmgClicked => return self.update_dmg_clicked(),
             Message::Updater(event) => return self.apply_updater_event(event),
 
@@ -8949,6 +8963,7 @@ impl App {
                             installed: self.updater.installed().clone(),
                             view: self.updater.view(),
                             busy: self.updater.is_busy(),
+                            auto_check: self.updater.auto_check(),
                         },
                     );
                     iced::widget::stack![base, modal].into()

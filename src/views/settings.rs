@@ -230,6 +230,8 @@ pub struct UpdatesInfo {
     pub view: crate::updater::machine::UpdaterView,
     /// A check or download is running: the Check button waits.
     pub busy: bool,
+    /// "Check for updates automatically" is on.
+    pub auto_check: bool,
 }
 
 /// The one line for the current step, with whether it is an error. None when
@@ -277,6 +279,12 @@ fn updates_section<'a>(updates: &UpdatesInfo, note: Option<&str>) -> Element<'a,
         .push(text("Updates").size(12).color(t::text_secondary()))
         .push(line("Installed version", updates.installed.to_string()))
         .push(line("Last checked", last_check_label(updates.view.last_checked)))
+        .push(
+            iced::widget::checkbox("Check for updates automatically", updates.auto_check)
+                .on_toggle(Message::UpdateAutoCheckToggled)
+                .size(16)
+                .text_size(12),
+        )
         .push(
             row![]
                 .spacing(10)

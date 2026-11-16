@@ -26,6 +26,35 @@ fn stage_event(result: Result<(), StageError>, at: chrono::DateTime<Utc>) -> Eve
     }
 }
 
+/// How often the Tick subscription fires. The machine decides whether 6 hours
+/// have passed since the last check; this only bounds how late a check can be.
+pub const TICK_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Which background trigger fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Launched,
+    Tick,
+    Woke,
+}
+
+/// The event for a background trigger, or None when updates are disabled
+/// (a dev build with no `.app`): nothing runs then. Pure.
+fn background_event(
+    install: &InstallContext,
+    trigger: Trigger,
+    at: chrono::DateTime<Utc>,
+) -> Option<Event> {
+    if matches!(install, InstallContext::Disabled) {
+        return None;
+    }
+    Some(match trigger {
+        Trigger::Launched => Event::Launched { at },
+        Trigger::Tick => Event::Tick { at },
+        Trigger::Woke => Event::Woke { at },
+    })
+}
+
 /// Shown when the Check button is pressed in a build with no `.app` around it.
 pub const DISABLED_NOTE: &str =
     "Updates are disabled: this build isn't running from a JAIT.app.";
@@ -42,6 +71,32 @@ impl App {
             return Task::none();
         }
         self.apply_updater_event(Event::CheckStarted(CheckKind::Manual))
+    }
+
+    /// A background trigger (launch, periodic tick, wake from sleep). The
+    /// machine decides whether a check is due; disabled builds do nothing.
+    pub(super) fn updater_background(&mut self, trigger: Trigger) -> Task<Message> {
+        match background_event(&self.install, trigger, Utc::now()) {
+            Some(event) => self.apply_updater_event(event),
+            None => Task::none(),
+        }
+    }
+
+    /// Settings → Updates "Check for updates automatically". Saved through
+    /// the updater's persisted state.
+    pub(super) fn update_auto_check_toggled(&mut self, on: bool) -> Task<Message> {
+        self.apply_updater_event(Event::SetAutoCheck(on))
+    }
+
+    /// Periodic tick and wake-from-sleep notices; none when disabled.
+    pub(super) fn updater_subscription(&self) -> iced::Subscription<Message> {
+        if matches!(self.install, InstallContext::Disabled) {
+            return iced::Subscription::none();
+        }
+        iced::Subscription::batch([
+            iced::time::every(TICK_EVERY).map(|_| Message::UpdaterTick),
+            iced::Subscription::run(crate::wake::wakes).map(|_| Message::UpdaterWoke),
+        ])
     }
 
     /// The "Download JAIT X" button: open the manifest's own `dmg_url`.
@@ -178,6 +233,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_triggers_map_to_events() {
+        let at = Utc::now();
+        let install = InstallContext::SelfInstall {
+            bundle: "/Applications/JAIT.app".into(),
+            staging_dir: "/Applications/.jait-update".into(),
+        };
+        assert_eq!(
+            background_event(&install, Trigger::Launched, at),
+            Some(Event::Launched { at })
+        );
+        assert_eq!(background_event(&install, Trigger::Tick, at), Some(Event::Tick { at }));
+        assert_eq!(background_event(&install, Trigger::Woke, at), Some(Event::Woke { at }));
+    }
+
+    #[test]
+    fn disabled_builds_run_no_background_checks() {
+        let at = Utc::now();
+        for t in [Trigger::Launched, Trigger::Tick, Trigger::Woke] {
+            assert_eq!(background_event(&InstallContext::Disabled, t, at), None);
+        }
+    }
 
     #[test]
     fn stage_results_map_to_updater_events() {
