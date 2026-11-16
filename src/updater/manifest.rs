@@ -118,20 +118,6 @@ impl DmgOffer {
     }
 }
 
-impl ParsedManifest {
-    pub fn version(&self) -> &Version {
-        match self {
-            ParsedManifest::SelfInstall(m) => &m.version,
-            ParsedManifest::DmgOnly(o) => &o.version,
-        }
-    }
-
-    /// Is there an Update (of either kind) for the running app?
-    pub fn is_update(&self, installed: &Version) -> bool {
-        is_update(installed, self.version())
-    }
-}
-
 /// Parse the bytes of `latest.json`.
 pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
     let root: Value =
