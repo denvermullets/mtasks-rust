@@ -5,7 +5,12 @@
 #
 #   --skip-tests   Skip `cargo test`.
 #   --no-notarize  Sign only, with no upload to Apple. The folder is suffixed
-#                  -unnotarized because Gatekeeper rejects this build elsewhere.
+#                  -unnotarized because Gatekeeper rejects this build elsewhere,
+#                  and it gets no update zip, so it can't be published.
+#
+# A notarized build leaves, in exports/<yymmdd>/jait-<version>/: the stapled
+# JAIT.app, JAIT-<version>.dmg (first-install path) and JAIT-<version>-arm64.zip
+# (the update zip the publish script uploads).
 #
 # SIGN_IDENTITY overrides the signing identity (default: the only Developer ID
 # Application identity in the keychain). NOTARY_PROFILE overrides the notarytool
@@ -84,6 +89,7 @@ done
 OUT="$ROOT/exports/$BUILD"
 APP="$OUT/$APP_NAME.app"
 DMG="$OUT/$APP_NAME-$PACKAGE_VERSION.dmg"
+ZIP="$OUT/$APP_NAME-$PACKAGE_VERSION-arm64.zip"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -150,10 +156,23 @@ if [[ "$NOTARIZE" == "1" ]]; then
     echo "==> checking Gatekeeper"
     spctl -a -t open --context context:primary-signature -vv "$DMG"
     xcrun stapler validate "$DMG"
+
+    # The update zip holds the app on its own, so the app needs its own stapled
+    # ticket (the DMG's covers only the DMG). The ticket exists now that Apple
+    # accepted the DMG, which contained this same signed app. A failure here
+    # fails the build (set -e), so nothing publishable is left half-made.
+    echo "==> stapling and validating $APP_NAME.app"
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    spctl -a -t exec -vv "$APP"
+
+    echo "==> zipping the update"
+    ditto -c -k --keepParent "$APP" "$ZIP"
 fi
 
 echo
 du -sh "$APP" "$DMG"
+[[ "$NOTARIZE" != "1" ]] || du -sh "$ZIP"
 echo "Done: exports/$BUILD"
 if [[ "$NOTARIZE" != "1" ]]; then
     echo "Signed but NOT notarized: Gatekeeper rejects this build on other Macs."
