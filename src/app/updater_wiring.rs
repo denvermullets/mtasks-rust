@@ -346,7 +346,7 @@ impl App {
                 Task::none()
             }
             Effect::Stage(info) => self.start_stage(info),
-            Effect::RemoveStaged { version } | Effect::DeleteStaging(version) => {
+            Effect::DeleteStaging(version) => {
                 let InstallContext::SelfInstall { staging_dir, .. } = &self.install else {
                     return Task::none();
                 };

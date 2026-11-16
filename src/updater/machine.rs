@@ -129,9 +129,6 @@ pub enum Effect {
         version: Version,
         notes: ReleaseNotes,
     },
-    /// Delete the staging files of a Staged update that a newer verified one
-    /// replaced (JRST-502).
-    RemoveStaged { version: Version },
     /// Ask "Restart to update?" (busy Terminals). The answer comes back as
     /// `RestartConfirmed` / `RestartDeclined`.
     ConfirmRestart { version: Version },
@@ -141,7 +138,8 @@ pub enum Effect {
     Relaunch,
     /// Exit this process (after the relaunch was spawned).
     Exit,
-    /// Delete the staging files of this version's failed attempt.
+    /// Delete this version's staging files: a failed attempt, or a Staged
+    /// update that a newer verified one replaced.
     DeleteStaging(Version),
 }
 
@@ -621,7 +619,7 @@ impl UpdaterState {
         let replaced = self.staged.replace(info.clone());
         let mut fx = Vec::new();
         if let Some(old) = replaced.filter(|o| o.version != info.version) {
-            fx.push(Effect::RemoveStaged { version: old.version });
+            fx.push(Effect::DeleteStaging(old.version));
         }
         if self.notice_dismissed.as_ref() == Some(&info.version) {
             return fx;
@@ -639,6 +637,14 @@ impl UpdaterState {
         }
         self.last_checked = Some(at);
         self.dmg_update = None; // re-decided by every finished check
+        // A restored Staged update has no notes; this manifest describes it.
+        if let ParsedManifest::SelfInstall(m) = &manifest {
+            if let Some(staged) = self.staged.as_mut() {
+                if staged.version == m.version && staged.notes == ReleaseNotes::Unavailable {
+                    staged.notes = m.notes_since(&self.installed);
+                }
+            }
+        }
         match manifest {
             ParsedManifest::SelfInstall(m)
                 if self.can_self_install
@@ -1342,7 +1348,7 @@ pub(super) mod tests {
         stage(&mut s, 9, "0.13.0");
         let fx = stage(&mut s, 15, "0.14.0");
         assert_eq!(fx.len(), 2);
-        assert_eq!(fx[0], Effect::RemoveStaged { version: v("0.13.0") });
+        assert_eq!(fx[0], Effect::DeleteStaging(v("0.13.0")));
         assert!(matches!(&fx[1], Effect::ShowReadyNotice { version, .. } if *version == v("0.14.0")));
         assert_eq!(s.view().ready.unwrap().version, v("0.14.0"));
     }
@@ -1351,7 +1357,7 @@ pub(super) mod tests {
     fn first_staging_removes_nothing() {
         let mut s = state();
         let fx = stage(&mut s, 9, "0.13.0");
-        assert!(!fx.iter().any(|e| matches!(e, Effect::RemoveStaged { .. })));
+        assert!(!fx.iter().any(|e| matches!(e, Effect::DeleteStaging(_))));
     }
 
     // --- JRST-503: Restart now ---
