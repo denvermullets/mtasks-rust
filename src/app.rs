@@ -510,6 +510,10 @@ pub enum Message {
     /// Any updater input: a task result or a UI action, fed to the machine by
     /// `App::apply_updater_event`.
     Updater(crate::updater::machine::Event),
+    /// The status bar's "↑ X ready" chip: open its popover.
+    OpenUpdatePopover,
+    /// Restart now (popover): ask the updater, with the real busy-Terminal state.
+    RestartNowClicked,
 
     // Sync
     /// Manual sync (`s`, toast retry): runs immediately.
@@ -672,6 +676,8 @@ pub enum Modal {
     QuitConfirm,
     /// Ask before closing a Tab whose Terminal strip has a busy Terminal.
     TabCloseConfirm(crate::tabs::TabKey),
+    /// The update chip's popover (versions, Release notes, Restart now).
+    UpdatePopover,
     Settings,
     ProjectForm,
     /// "New recurring issue" form; state in `App::recurring_form`.
@@ -7574,6 +7580,16 @@ impl App {
             Message::UpdaterWoke => return self.updater_background(updater_wiring::Trigger::Woke),
             Message::UpdateDmgClicked => return self.update_dmg_clicked(),
             Message::Updater(event) => return self.apply_updater_event(event),
+            Message::OpenUpdatePopover => {
+                if self.updater.view().ready.is_some() {
+                    self.modal = Modal::UpdatePopover;
+                }
+            }
+            Message::RestartNowClicked => {
+                self.modal = Modal::None;
+                let busy_terminals = self.terminals.any_busy();
+                return self.apply_updater_event(crate::updater::machine::Event::RestartRequested { busy_terminals });
+            }
 
             Message::SyncTick => return self.drive_sync(SchedEvent::Tick),
             Message::UserInput => return self.drive_sync(SchedEvent::Input),
@@ -8964,6 +8980,22 @@ impl App {
                 );
                 iced::widget::stack![base, confirm].into()
             }
+            Modal::UpdatePopover => match self.updater.view().ready {
+                Some(ready) => {
+                    let ctx = crate::views::body::BodyCtx {
+                        teams: &self.teams,
+                        issues: &[],
+                        members: &[],
+                        images: &self.images,
+                        host: &self.config.api_base_url,
+                        pending_paths: None,
+                        on_image: None,
+                    };
+                    let pop = crate::views::update_chip::popover(&ready, self.updater.installed(), &ctx);
+                    iced::widget::stack![base, pop].into()
+                }
+                None => base,
+            },
             Modal::Settings => {
                 if let Some(ref form) = self.settings_form {
                     let modal = settings::view(

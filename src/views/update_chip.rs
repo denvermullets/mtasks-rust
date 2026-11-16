@@ -3,12 +3,14 @@
 //! Update is staged, hidden otherwise. Automatic downloads never reach
 //! `Status`, so they stay quiet until ready.
 
-use iced::widget::container;
-use iced::{Border, Element, Theme};
+use iced::widget::{button, column, container, mouse_area, row, scrollable};
+use iced::{Alignment, Border, Element, Length, Theme};
+use semver::Version;
 
 use crate::app::Message;
 use crate::theme as t;
-use crate::updater::machine::{Status, UpdaterView};
+use crate::updater::machine::{ReadyUpdate, Status, UpdaterView};
+use crate::updater::manifest::ReleaseNotes;
 use crate::views::text;
 
 /// What the chip says, or `None` when it's hidden.
@@ -26,19 +28,96 @@ pub fn label(view: &UpdaterView) -> Option<String> {
 /// The chip, or `None` when there's nothing to show.
 pub fn chip<'a>(view: &UpdaterView) -> Option<Element<'a, Message>> {
     let label = label(view)?;
-    Some(
-        container(text(label).size(12).color(t::text_primary()))
-            .padding([1, 8])
+    let pill = container(text(label).size(12).color(t::text_primary()))
+        .padding([1, 8])
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::accent())),
+            border: Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    // Only the ready chip opens the popover; download progress is passive.
+    let ready = view.ready.is_some() && !matches!(view.status, Status::Downloading { .. } | Status::Verifying { .. });
+    Some(if ready {
+        mouse_area(pill).on_press(Message::OpenUpdatePopover).into()
+    } else {
+        pill.into()
+    })
+}
+
+/// The Release notes of every Release newer than the installed version,
+/// newest first, rendered as markdown; or "Release notes unavailable".
+fn notes_section<'a>(
+    notes: &ReleaseNotes,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
+    match notes {
+        ReleaseNotes::Available(entries) if !entries.is_empty() => {
+            let mut col = column![].spacing(10);
+            for e in entries {
+                col = col
+                    .push(text(e.version.to_string()).size(13).color(t::text_primary()))
+                    .push(crate::views::body::view(&e.notes, 12.0, t::text_secondary(), ctx));
+            }
+            col.into()
+        }
+        _ => text("Release notes unavailable").size(12).color(t::text_muted()).into(),
+    }
+}
+
+/// The popover over the status bar: the new version, the installed one, the
+/// notes, and Restart now. A click outside closes it.
+pub fn popover<'a>(
+    ready: &ReadyUpdate,
+    installed: &Version,
+    ctx: &crate::views::body::BodyCtx<'a>,
+) -> Element<'a, Message> {
+    let panel = column![]
+        .spacing(8)
+        .push(text(format!("JAIT {} is ready", ready.version)).size(14).color(t::text_primary()))
+        .push(text(format!("You have {installed}. It installs when you quit.")).size(12).color(t::text_muted()))
+        .push(scrollable(notes_section(&ready.notes, ctx)).height(Length::Shrink))
+        .push(
+            row![]
+                .spacing(8)
+                .push(
+                    button(text("Restart now").size(13))
+                        .on_press(Message::RestartNowClicked)
+                        .padding([6, 14])
+                        .style(button::primary),
+                )
+                .push(
+                    button(text("Close").size(13))
+                        .on_press(Message::CloseModal)
+                        .padding([6, 14])
+                        .style(button::secondary),
+                ),
+        );
+    let panel = mouse_area(
+        container(panel)
+            .padding(14)
+            .width(Length::Fixed(380.0))
+            .max_height(420.0)
             .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(t::accent())),
+                background: Some(iced::Background::Color(t::bg_modal())),
                 border: Border {
+                    color: t::border(),
+                    width: 1.0,
                     radius: 8.0.into(),
-                    ..Default::default()
                 },
                 ..Default::default()
-            })
-            .into(),
+            }),
     )
+    .on_press(Message::Noop);
+    let anchored = container(panel)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 34.0, left: 0.0 });
+    mouse_area(anchored).on_press(Message::CloseModal).into()
 }
 
 #[cfg(test)]
