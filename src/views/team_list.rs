@@ -558,7 +558,7 @@ fn home_marker<'a>() -> Element<'a, Message> {
 const SHOW_EXPORT_CSV: bool = false;
 
 /// Sidebar footer: per-team CSV export / import (disabled without a team).
-pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
+pub fn footer<'a>(has_team: bool, settings_dot: bool) -> Element<'a, Message> {
     let btn = |label: &'a str, msg: Message| {
         button(text(label).size(13).color(if has_team {
             t::text_secondary()
@@ -575,7 +575,8 @@ pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
             // Export isn't available to users yet; `Message::ExportCsv` stays
             // wired for when it is.
             .push_maybe(SHOW_EXPORT_CSV.then(|| btn("Export CSV", Message::ExportCsv)))
-            .push(btn("Import CSV", Message::PickCsvImport)),
+            .push(btn("Import CSV", Message::PickCsvImport))
+            .push(settings_row(settings_dot)),
     )
     .padding([6, 0])
     .width(Length::Fill)
@@ -589,6 +590,30 @@ pub fn footer<'a>(has_team: bool) -> Element<'a, Message> {
         ..Default::default()
     })
     .into()
+}
+
+/// The Settings sidebar entry, with a dot while an Update is ready or a shown
+/// failure is active (project 320).
+fn settings_row<'a>(dot: bool) -> Element<'a, Message> {
+    let content = row![text("Settings").size(13).color(t::text_secondary())]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .push_maybe(dot.then(|| {
+            container(iced::widget::Space::new(8, 8)).style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::accent())),
+                border: Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    button(content)
+        .on_press(Message::OpenSettings)
+        .padding([6, 14])
+        .width(Length::Fill)
+        .style(plain_row_style)
+        .into()
 }
 
 /// A muted uppercase section label.

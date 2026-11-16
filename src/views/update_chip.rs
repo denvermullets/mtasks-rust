@@ -137,6 +137,7 @@ mod tests {
             last_checked: None,
             last_failure: None,
             dmg_update: None,
+            failure_shown: false,
         }
     }
 

@@ -225,6 +225,17 @@ pub struct UpdaterView {
     pub last_failure: Option<LastFailure>,
     /// A newer Release that can only be installed from its DMG.
     pub dmg_update: Option<DmgUpdate>,
+    /// A failure is on screen (a manual step failed, or a security failure).
+    /// Quiet failures are recorded in `last_failure` but never shown.
+    pub failure_shown: bool,
+}
+
+impl UpdaterView {
+    /// Should the Settings sidebar entry carry a dot? While an Update is
+    /// ready or a shown failure is active.
+    pub fn needs_attention(&self) -> bool {
+        self.ready.is_some() || self.failure_shown
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +374,7 @@ impl UpdaterState {
             last_checked: self.last_checked,
             last_failure: self.last_failure.clone(),
             dmg_update: self.dmg_update.clone(),
+            failure_shown: self.failure_shown,
         }
     }
 
@@ -1010,6 +1022,32 @@ pub(super) mod tests {
         assert_eq!(f.kind, FailureKind::Check);
         assert_eq!(f.at, at(9));
         assert_eq!(f.message, "offline");
+    }
+
+    #[test]
+    fn attention_dot_follows_ready_update_and_shown_failures_only() {
+        let mut s = state();
+        assert!(!s.view().needs_attention());
+        // A quiet failure adds no dot.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        s.update(failed_check(9));
+        assert!(s.view().last_failure.is_some());
+        assert!(!s.view().needs_attention());
+        // A shown failure does.
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(failed_check(10));
+        assert!(s.view().failure_shown);
+        assert!(s.view().needs_attention());
+        // The next check clears it.
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert!(!s.view().needs_attention());
+    }
+
+    #[test]
+    fn attention_dot_while_an_update_is_staged() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        assert!(s.view().needs_attention());
     }
 
     #[test]

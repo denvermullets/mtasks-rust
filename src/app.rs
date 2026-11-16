@@ -8475,7 +8475,7 @@ impl App {
         });
         let sidebar_column = column![
             iced::widget::scrollable(team_sidebar).height(Length::Fill),
-            team_list::footer(self.selected_team_id.is_some()),
+            team_list::footer(self.selected_team_id.is_some(), self.updater.view().needs_attention()),
         ];
 
         let search = self.active_search();
