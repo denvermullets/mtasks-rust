@@ -2339,8 +2339,12 @@ impl App {
             labels: &self.labels,
             issue_labels: &self.issue_labels,
         };
-        let mut filters = self.board_filters().clone();
-        filters.projects.clear();
+        // The Show chip owns completed/canceled visibility here, and the board's
+        // filters have no control on this page (the header hides Filter), so
+        // neither may narrow the list: "All" means every issue in the project.
+        let mut display_opts = self.board_display().clone();
+        display_opts.show_completed = true;
+        let filters = display::Filters::default();
         let mut out = display::visible_from(
             self.issues
                 .iter()
@@ -2351,7 +2355,7 @@ impl App {
                         || crate::dep_graph::is_active(i, &self.lanes)
                 }),
             &data,
-            self.board_display(),
+            &display_opts,
             &filters,
             needle,
         );
