@@ -71,6 +71,67 @@ pub enum ParsedManifest {
     DmgOnly(DmgOffer),
 }
 
+/// Is `latest` an Update for the running `installed` version? Only when
+/// strictly newer, so the app never downgrades.
+pub fn is_update(installed: &Version, latest: &Version) -> bool {
+    latest > installed
+}
+
+impl ReleaseNotes {
+    /// The Release notes to show for an Update: every item newer than
+    /// `installed` (exclusive) up to `latest` (inclusive), newest first.
+    /// Unavailable stays unavailable.
+    pub fn between(&self, installed: &Version, latest: &Version) -> ReleaseNotes {
+        match self {
+            ReleaseNotes::Unavailable => ReleaseNotes::Unavailable,
+            ReleaseNotes::Available(items) => {
+                let mut picked: Vec<ReleaseEntry> = items
+                    .iter()
+                    .filter(|e| &e.version > installed && &e.version <= latest)
+                    .cloned()
+                    .collect();
+                picked.sort_by(|a, b| b.version.cmp(&a.version));
+                ReleaseNotes::Available(picked)
+            }
+        }
+    }
+}
+
+impl Manifest {
+    pub fn is_update(&self, installed: &Version) -> bool {
+        is_update(installed, &self.version)
+    }
+
+    /// Release notes for updating from `installed` to this manifest's version.
+    pub fn notes_since(&self, installed: &Version) -> ReleaseNotes {
+        self.releases.between(installed, &self.version)
+    }
+}
+
+impl DmgOffer {
+    pub fn is_update(&self, installed: &Version) -> bool {
+        is_update(installed, &self.version)
+    }
+
+    pub fn notes_since(&self, installed: &Version) -> ReleaseNotes {
+        self.releases.between(installed, &self.version)
+    }
+}
+
+impl ParsedManifest {
+    pub fn version(&self) -> &Version {
+        match self {
+            ParsedManifest::SelfInstall(m) => &m.version,
+            ParsedManifest::DmgOnly(o) => &o.version,
+        }
+    }
+
+    /// Is there an Update (of either kind) for the running app?
+    pub fn is_update(&self, installed: &Version) -> bool {
+        is_update(installed, self.version())
+    }
+}
+
 /// Parse the bytes of `latest.json`.
 pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
     let root: Value =
@@ -400,6 +461,86 @@ mod tests {
         let mut v = with("schema", 2.into());
         v.as_object_mut().unwrap().remove("dmg_url");
         assert!(parse_value(&v).is_err());
+    }
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    fn manifest_with_releases(latest: &str, versions: &[&str]) -> Manifest {
+        let items: Vec<Value> = versions
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "version": n, "published_at": "2026-11-17T10:00:00Z", "notes": format!("notes {n}")
+                })
+            })
+            .collect();
+        let mut j = with("version", latest.into());
+        j["releases"] = items.into();
+        match parse_value(&j).unwrap() {
+            ParsedManifest::SelfInstall(m) => m,
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn only_strictly_newer_is_an_update() {
+        let m = manifest_with_releases("0.13.0", &[]);
+        assert!(m.is_update(&v("0.12.0")));
+        assert!(m.is_update(&v("0.13.0-rc.1")));
+        assert!(!m.is_update(&v("0.13.0")));
+        assert!(!m.is_update(&v("0.14.0")));
+        assert!(!m.is_update(&v("1.0.0")));
+    }
+
+    #[test]
+    fn dmg_offer_uses_the_same_newer_rule() {
+        let ParsedManifest::DmgOnly(o) = parse_value(&with("schema", 2.into())).unwrap() else {
+            panic!()
+        };
+        assert!(o.is_update(&v("0.12.0")));
+        assert!(!o.is_update(&v("0.13.0")));
+    }
+
+    #[test]
+    fn notes_cover_every_release_between_installed_and_latest_newest_first() {
+        let m = manifest_with_releases("0.14.0", &["0.12.0", "0.13.0", "0.14.0", "0.13.1"]);
+        let ReleaseNotes::Available(n) = m.notes_since(&v("0.12.0")) else {
+            panic!()
+        };
+        let got: Vec<_> = n.iter().map(|e| e.version.to_string()).collect();
+        assert_eq!(got, ["0.14.0", "0.13.1", "0.13.0"]);
+    }
+
+    #[test]
+    fn notes_exclude_items_newer_than_the_latest() {
+        let m = manifest_with_releases("0.13.0", &["0.12.0", "0.13.0", "0.14.0"]);
+        let ReleaseNotes::Available(n) = m.notes_since(&v("0.12.0")) else {
+            panic!()
+        };
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].version, v("0.13.0"));
+    }
+
+    #[test]
+    fn no_newer_items_gives_empty_available_notes() {
+        let m = manifest_with_releases("0.13.0", &["0.13.0"]);
+        assert_eq!(
+            m.notes_since(&v("0.13.0")),
+            ReleaseNotes::Available(vec![])
+        );
+    }
+
+    #[test]
+    fn broken_releases_means_notes_unavailable_while_the_update_still_exists() {
+        let mut j = valid();
+        j["releases"] = "broken".into();
+        let ParsedManifest::SelfInstall(m) = parse_value(&j).unwrap() else {
+            panic!()
+        };
+        assert!(m.is_update(&v("0.12.0")));
+        assert_eq!(m.notes_since(&v("0.12.0")), ReleaseNotes::Unavailable);
     }
 
     #[test]
