@@ -92,6 +92,11 @@ pub enum Event {
     SetAutoCheck(bool),
     /// A Clean quit was confirmed and is about to run.
     QuitConfirmed,
+    /// The manifest could not be fetched, or was malformed / had a bad URL.
+    CheckFailed { at: DateTime<Utc>, reason: String },
+    /// The zip download failed in transit (network error, HTTP error).
+    /// Not a broken download: no strike is counted.
+    DownloadFailed { at: DateTime<Utc>, reason: String },
 }
 
 /// Things the app must do. The machine returns these.
@@ -148,6 +153,26 @@ pub enum Status {
     Downloading { version: Version, percent: u8 },
     /// Verifying the download (manual checks only).
     Verifying { version: Version },
+    /// A step the user asked for failed. Cleared by the next check.
+    Failed { message: String },
+}
+
+/// What kind of step failed. The system edge picks the kind; the machine
+/// applies the rule for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The manifest fetch or parse failed.
+    Check,
+    /// The download failed in transit.
+    Download,
+}
+
+/// The most recent failure, quiet or shown, for Settings → Updates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastFailure {
+    pub at: DateTime<Utc>,
+    pub kind: FailureKind,
+    pub message: String,
 }
 
 /// A Staged update: downloaded, verified, waiting to install at the next
@@ -164,6 +189,7 @@ pub struct UpdaterView {
     /// The Staged update, if any. Independent of `status`.
     pub ready: Option<ReadyUpdate>,
     pub last_checked: Option<DateTime<Utc>>,
+    pub last_failure: Option<LastFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +207,9 @@ pub struct UpdaterState {
     restart_confirming: bool,
     /// Do launch / 6h / wake checks run? On by default.
     auto_check: bool,
+    last_failure: Option<LastFailure>,
+    /// Is the last failure one the user should see right now?
+    failure_shown: bool,
 }
 
 impl UpdaterState {
@@ -195,6 +224,8 @@ impl UpdaterState {
             notice_dismissed: None,
             restart_confirming: false,
             auto_check: true,
+            last_failure: None,
+            failure_shown: false,
         }
     }
 
@@ -228,6 +259,12 @@ impl UpdaterState {
                 version: info.version.clone(),
             },
             Activity::Idle if self.up_to_date_shown => Status::UpToDate,
+            Activity::Idle if self.failure_shown => match &self.last_failure {
+                Some(f) => Status::Failed {
+                    message: f.message.clone(),
+                },
+                None => Status::Idle,
+            },
             _ => Status::Idle,
         };
         UpdaterView {
@@ -237,6 +274,7 @@ impl UpdaterState {
                 notes: i.notes.clone(),
             }),
             last_checked: self.last_checked,
+            last_failure: self.last_failure.clone(),
         }
     }
 
@@ -266,6 +304,8 @@ impl UpdaterState {
                 self.restart_confirming = false;
                 vec![]
             }
+            Event::CheckFailed { at, reason } => self.check_failed(at, reason),
+            Event::DownloadFailed { at, reason } => self.download_failed(at, reason),
         }
     }
 
@@ -355,7 +395,32 @@ impl UpdaterState {
         self.activity = Activity::Checking;
         self.manual = kind == CheckKind::Manual;
         self.up_to_date_shown = false;
+        self.failure_shown = false;
         vec![Effect::FetchManifest]
+    }
+
+    /// Record a failure and go idle. Quiet unless the user asked for the step.
+    fn fail(&mut self, at: DateTime<Utc>, kind: FailureKind, message: String) {
+        self.activity = Activity::Idle;
+        self.failure_shown = self.manual;
+        self.manual = false;
+        self.last_failure = Some(LastFailure { at, kind, message });
+    }
+
+    fn check_failed(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        if self.activity != Activity::Checking {
+            return vec![]; // stale answer, no check is running
+        }
+        self.fail(at, FailureKind::Check, reason);
+        vec![]
+    }
+
+    fn download_failed(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
+        if !matches!(self.activity, Activity::Downloading { .. }) {
+            return vec![];
+        }
+        self.fail(at, FailureKind::Download, reason);
+        vec![]
     }
 
     /// Is this version already staged (or older than what is)?
@@ -653,6 +718,100 @@ pub(super) mod tests {
         assert_eq!(s.update(Event::DownloadFinished), vec![]);
         assert_eq!(s.update(Event::StagingVerified), vec![]);
         assert_eq!(s.view().ready, None);
+    }
+
+    // --- failures (JRST-500) ---
+
+    fn failed_check(h: u32) -> Event {
+        Event::CheckFailed {
+            at: at(h),
+            reason: "offline".into(),
+        }
+    }
+
+    fn failed_download(h: u32) -> Event {
+        Event::DownloadFailed {
+            at: at(h),
+            reason: "connection reset".into(),
+        }
+    }
+
+    #[test]
+    fn automatic_check_failure_is_quiet_but_recorded() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(failed_check(9)), vec![]);
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(!s.is_busy());
+        let f = s.view().last_failure.unwrap();
+        assert_eq!(f.kind, FailureKind::Check);
+        assert_eq!(f.at, at(9));
+        assert_eq!(f.message, "offline");
+    }
+
+    #[test]
+    fn manual_check_failure_is_shown_and_recorded() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(failed_check(9));
+        assert_eq!(
+            s.view().status,
+            Status::Failed {
+                message: "offline".into()
+            }
+        );
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Check);
+    }
+
+    #[test]
+    fn manual_download_failure_is_shown_automatic_is_quiet() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(failed_download(10));
+        assert_eq!(
+            s.view().status,
+            Status::Failed {
+                message: "connection reset".into()
+            }
+        );
+        assert_eq!(s.view().last_failure.unwrap().kind, FailureKind::Download);
+
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(failed_download(10));
+        assert_eq!(s.view().status, Status::Idle);
+        assert!(s.view().last_failure.is_some());
+        assert_eq!(s.view().ready, None);
+    }
+
+    #[test]
+    fn next_check_retries_after_a_quiet_failure_and_clears_the_shown_failure() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(failed_download(10));
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(failed_check(11));
+        assert!(matches!(s.view().status, Status::Failed { .. }));
+        // The next check retries the Update; the shown failure goes away.
+        assert_eq!(
+            s.update(Event::CheckStarted(CheckKind::Automatic)),
+            vec![Effect::FetchManifest]
+        );
+        assert_eq!(s.view().status, Status::Idle);
+        update_of(s.update(finished(12, "0.13.0")));
+        // The last failure stays recorded until replaced.
+        assert_eq!(s.view().last_failure.unwrap().at, at(11));
+    }
+
+    #[test]
+    fn stray_failure_events_are_ignored() {
+        let mut s = state();
+        assert_eq!(s.update(failed_check(9)), vec![]);
+        assert_eq!(s.update(failed_download(9)), vec![]);
+        assert_eq!(s.view().last_failure, None);
     }
 
     #[test]
