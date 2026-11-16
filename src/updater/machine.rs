@@ -65,6 +65,9 @@ pub enum Event {
     DownloadFinished,
     /// The zip passed every check and is staged next to the installed app.
     StagingVerified,
+    /// Later or x on the ready notice: hide the toast for this version only
+    /// (JRST-501). The chip stays.
+    NoticeDismissed { version: Version },
 }
 
 /// Things the app must do. The machine returns these.
@@ -133,6 +136,8 @@ pub struct UpdaterState {
     last_checked: Option<DateTime<Utc>>,
     up_to_date_shown: bool,
     staged: Option<UpdateInfo>,
+    /// The one version whose ready toast the user dismissed with Later.
+    notice_dismissed: Option<Version>,
 }
 
 impl UpdaterState {
@@ -144,7 +149,18 @@ impl UpdaterState {
             last_checked: None,
             up_to_date_shown: false,
             staged: None,
+            notice_dismissed: None,
         }
+    }
+
+    /// The version whose ready notice was dismissed, for persisting.
+    pub fn dismissed_notice(&self) -> Option<&Version> {
+        self.notice_dismissed.as_ref()
+    }
+
+    /// Restore a persisted dismissal at launch.
+    pub fn set_dismissed_notice(&mut self, version: Option<Version>) {
+        self.notice_dismissed = version;
     }
 
     pub fn installed(&self) -> &Version {
@@ -187,6 +203,10 @@ impl UpdaterState {
             Event::DownloadProgress { received } => self.download_progress(received),
             Event::DownloadFinished => self.download_finished(),
             Event::StagingVerified => self.staging_verified(),
+            Event::NoticeDismissed { version } => {
+                self.notice_dismissed = Some(version);
+                vec![]
+            }
         }
     }
 
@@ -234,6 +254,9 @@ impl UpdaterState {
         self.activity = Activity::Idle;
         self.manual = false;
         self.staged = Some(info.clone());
+        if self.notice_dismissed.as_ref() == Some(&info.version) {
+            return vec![];
+        }
         vec![Effect::ShowReadyNotice {
             version: info.version,
             notes: info.notes,
@@ -499,5 +522,42 @@ pub(super) mod tests {
         let mut s = state();
         assert_eq!(s.update(finished(9, "0.13.0")), vec![]);
         assert_eq!(s.view().last_checked, None);
+    }
+
+    // --- JRST-501: Later hides the notice for one version ---
+
+    fn stage(s: &mut UpdaterState, h: u32, version: &str) -> Vec<Effect> {
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(h, version)));
+        s.update(Event::DownloadFinished);
+        s.update(Event::StagingVerified)
+    }
+
+    #[test]
+    fn later_hides_the_notice_on_a_re_ready_of_the_same_version() {
+        let mut s = state();
+        assert_eq!(stage(&mut s, 9, "0.13.0").len(), 1);
+        s.update(Event::NoticeDismissed { version: v("0.13.0") });
+        assert_eq!(s.dismissed_notice(), Some(&v("0.13.0")));
+        // The same version is staged again (e.g. after a relaunch re-verify).
+        s.staged = None;
+        assert_eq!(stage(&mut s, 15, "0.13.0"), vec![]);
+    }
+
+    #[test]
+    fn later_keeps_the_chip_ready() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::NoticeDismissed { version: v("0.13.0") });
+        assert_eq!(s.view().ready.unwrap().version, v("0.13.0"));
+    }
+
+    #[test]
+    fn a_newer_version_shows_its_notice_after_later() {
+        let mut s = state();
+        stage(&mut s, 9, "0.13.0");
+        s.update(Event::NoticeDismissed { version: v("0.13.0") });
+        let fx = stage(&mut s, 15, "0.14.0");
+        assert!(matches!(fx.as_slice(), [Effect::ShowReadyNotice { version, .. }] if *version == v("0.14.0")));
     }
 }
