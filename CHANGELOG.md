@@ -1,5 +1,11 @@
-<!-- last-sha: 784d1b86a353ffb9b5683dffef9cca62f4ee71e3 -->
+<!-- last-sha: d405b6ad4dec1a6c05d41966df73cecb6bae9c5d -->
 # What's new
+
+## 0.13.0 · 2026-11-17
+- **Reopen a closed tab.** Closed a tab by mistake? Press Shift+Cmd+T, or right-click the tab bar and choose "Reopen closed tab", to bring it back where it was, on the page it was showing. You can keep going to reopen several recently closed tabs.
+- **Switch tabs from the keyboard.** Cmd+Option+Left and Right move to the previous or next tab, wrapping around at either end. They work on the board and in the terminal too.
+- **Move projects on the Roadmap.** Drag a project card to another lane to change when it's planned, or use the ⋮ menu on the card to pick Now, Next or Later, or remove it from the roadmap. Clicking a card still opens the project.
+- **No more crash when quitting.** Quitting with Cmd+Q, from the Dock or from a script could sometimes crash the app on the way out. It now closes cleanly.
 
 ## 0.12.2 · 2026-11-17
 - **A proper app icon.** JAIT now has its own icon in the Dock, Finder, Launchpad and the app switcher, instead of the generic blank one.
