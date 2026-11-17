@@ -33,6 +33,9 @@ pub enum TabMessage {
     DragEnd,
     /// Cmd+Shift+T or the menu: bring back the most recently closed Tab.
     ReopenClosed,
+    /// Cmd+Option+Right (1) / Left (-1): focus the next or previous Tab,
+    /// wrapping at either end.
+    Cycle(isize),
 }
 
 /// How many closed Tabs Cmd+Shift+T can walk back through.
@@ -113,6 +116,12 @@ impl App {
                 }
             }
             TabMessage::ReopenClosed => return self.reopen_closed_tab(),
+            TabMessage::Cycle(delta) => {
+                self.ensure_tab_set();
+                if let Some(index) = self.tab_set.as_ref().map(|s| s.offset_index(delta)) {
+                    return self.update_tab(TabMessage::Focus(index));
+                }
+            }
         }
         Task::none()
     }

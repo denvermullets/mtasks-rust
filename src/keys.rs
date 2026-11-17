@@ -79,6 +79,14 @@ pub fn handle_key_press(
             _ => None,
         },
         Key::Named(named) => match named {
+            // Cmd+Option+Left/Right walk the Tabs; matched before the board's
+            // bare arrows, which ignore modifiers.
+            keyboard::key::Named::ArrowLeft if modifiers.command() && modifiers.alt() => {
+                Some(Message::Tab(TabMessage::Cycle(-1)))
+            }
+            keyboard::key::Named::ArrowRight if modifiers.command() && modifiers.alt() => {
+                Some(Message::Tab(TabMessage::Cycle(1)))
+            }
             keyboard::key::Named::Escape => Some(Message::CloseModal),
             keyboard::key::Named::Enter if on_board => Some(Message::EditFocusedIssue),
             keyboard::key::Named::ArrowDown if on_board => Some(Message::FocusNextIssue),
@@ -580,6 +588,23 @@ mod tests {
         ));
         assert!(press_with("w", Modifiers::empty(), false).is_none());
         assert!(press_with("w", Modifiers::COMMAND, true).is_none());
+    }
+
+    #[test]
+    fn cmd_option_arrows_cycle_tabs_even_on_the_board() {
+        use iced::keyboard::key::Named;
+        let mods = Modifiers::COMMAND | Modifiers::ALT;
+        for on_board in [false, true] {
+            assert!(matches!(
+                handle_key_press(Key::Named(Named::ArrowLeft), mods, false, false, on_board),
+                Some(Message::Tab(TabMessage::Cycle(-1)))
+            ));
+            assert!(matches!(
+                handle_key_press(Key::Named(Named::ArrowRight), mods, false, false, on_board),
+                Some(Message::Tab(TabMessage::Cycle(1)))
+            ));
+        }
+        assert!(handle_key_press(Key::Named(Named::ArrowRight), mods, true, false, false).is_none());
     }
 
     #[test]

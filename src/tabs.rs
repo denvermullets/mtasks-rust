@@ -182,6 +182,13 @@ impl TabSet {
         true
     }
 
+    /// The position `delta` Tabs from the active one, wrapping at either end
+    /// (Cmd+Option+Left/Right).
+    pub fn offset_index(&self, delta: isize) -> usize {
+        let len = self.tabs.len() as isize;
+        (self.active as isize + delta).rem_euclid(len) as usize
+    }
+
     /// Move the Tab at `from` to position `to`, shifting the Tabs between.
     /// The active Tab stays the same Tab, wherever it ends up. Out of range
     /// or `from == to` does nothing; returns whether the order changed.
@@ -328,6 +335,21 @@ mod tests {
 
     fn home() -> TabKey {
         team("home")
+    }
+
+    #[test]
+    fn offset_index_wraps_around_the_bar() {
+        let mut set = TabSet::new(team("a"));
+        set.open(team("b"));
+        set.open(team("c"));
+        set.focus(0);
+        assert_eq!(set.offset_index(1), 1);
+        assert_eq!(set.offset_index(-1), 2);
+        set.focus(2);
+        assert_eq!(set.offset_index(1), 0);
+        let single = TabSet::new(team("a"));
+        assert_eq!(single.offset_index(1), 0);
+        assert_eq!(single.offset_index(-1), 0);
     }
 
     #[test]

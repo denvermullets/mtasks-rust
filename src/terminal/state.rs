@@ -470,6 +470,9 @@ impl TerminalState {
                     Route::ReopenTab => {
                         return Task::done(Message::Tab(crate::app::TabMessage::ReopenClosed))
                     }
+                    Route::CycleTab(delta) => {
+                        return Task::done(Message::Tab(crate::app::TabMessage::Cycle(delta)))
+                    }
                     Route::ToggleSidebar => return Task::done(Message::ToggleSidebar),
                     Route::Send(key) => {
                         if let Some(id) = self.focused_terminal() {
