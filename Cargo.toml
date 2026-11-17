@@ -61,3 +61,5 @@ identifier = "com.jait.desktop"
 version = "0.12.1"
 short_description = "JAIT desktop companion"
 category = "public.app-category.productivity"
+# Generated from assets/appicon-default.svg by scripts/build-icon.sh.
+icon = ["assets/AppIcon.icns"]
