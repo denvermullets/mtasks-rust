@@ -1,5 +1,8 @@
-<!-- last-sha: a35deb557420af66962ce48d69ff1d7eb91a02cd -->
+<!-- last-sha: 8bb35b13deb629808c464132a408d152077f3008 -->
 # What's new
+
+## 0.12.1 · 2026-11-17
+- **The app is called JAIT everywhere.** The app menu's About, Hide and Quit items, and the app's name in Activity Monitor, now say JAIT instead of the old internal name.
 
 ## 0.12.0 · 2026-11-16
 - **The app updates itself.** JAIT now checks for new versions when it opens, every few hours, and when your Mac wakes, then downloads and verifies the update in the background. You can turn automatic checks off, or check any time from Settings or the command palette ("Check for updates"). If the app can't install updates where it's running, you're offered the installer to download instead.
