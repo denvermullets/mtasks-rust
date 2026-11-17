@@ -96,10 +96,9 @@ fn notification_row<'a>(index: usize, n: &'a Notification, selected: bool) -> El
             ..Default::default()
         });
 
-    let headline = match n.actor_name.as_deref() {
-        Some(actor) if !actor.is_empty() => format!("{actor} {}", n.message),
-        _ => n.message.clone(),
-    };
+    // Rails builds `message` with the actor's name already at the front
+    // ("Ann commented on JRST-12"), so it is shown as-is.
+    let headline = n.message.as_str();
     let issue = match (n.issue_identifier.as_deref(), n.issue_title.as_deref()) {
         (Some(id), Some(title)) => format!("{id}  {title}"),
         (Some(id), None) => id.to_string(),
