@@ -4043,7 +4043,11 @@ impl App {
     pub(super) fn shutdown_after(&mut self, update: Task<Message>) -> Task<Message> {
         let closings = self.terminals.begin_shutdown();
         if closings.is_empty() {
-            return Task::batch([update, iced::exit()]);
+            // Through `QuitReady`, not a bare `iced::exit()`: a pending Cmd+Q /
+            // Dock / AppleScript terminate must be answered first, or iced frees
+            // the window while AppKit is still in its terminate-later loop and
+            // the leftover release segfaults.
+            return Task::batch([update, Task::done(Message::QuitReady)]);
         }
         let (tx, rx) = iced::futures::channel::oneshot::channel();
         std::thread::spawn(move || {
