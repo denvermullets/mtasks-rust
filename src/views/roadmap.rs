@@ -1,11 +1,14 @@
-use iced::widget::{button, column, container, mouse_area, row, scrollable};
+use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, stack, svg, Column};
 use crate::views::text;
-use iced::{Alignment, Border, Color, Element, Length, Theme};
+use iced::mouse::Interaction;
+use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
 use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Project, ProjectStatus, RoadmapCommitment, Team};
-use crate::theme as t;
+use crate::theme::{self as t, radius, space};
+use crate::views::dropdown::dropdown;
 use crate::views::header;
 use crate::views::projects::format_target_date;
 
@@ -36,6 +39,88 @@ fn lane_defs() -> [(RoadmapCommitment, &'static str, &'static str, Color); 3] {
 /// Cards per grid row within a lane body.
 const PER_ROW: usize = 3;
 
+/// Web `w-72` commitment picker.
+const MENU_W: f32 = 288.0;
+
+/// Pointer travel (px) before a pressed card counts as a drag, not a click.
+const DRAG_THRESHOLD: f32 = 4.0;
+
+const ICON_KEBAB: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="#000" viewBox="0 0 20 20"><path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z"/></svg>"##;
+
+/// Transient Roadmap interaction state owned by the app: which card's ⋮
+/// commitment menu is open, and the card being dragged between lanes.
+#[derive(Debug, Clone, Default)]
+pub struct RoadmapUi {
+    /// Local project UUID whose commitment menu is open.
+    pub menu: Option<String>,
+    pub drag: Option<RoadmapDrag>,
+}
+
+/// A card pressed on the Roadmap. It stays a click until the pointer travels
+/// past `DRAG_THRESHOLD`; after that, releasing over another lane moves it there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoadmapDrag {
+    pub project_id: String,
+    /// The lane the card started in.
+    pub from: RoadmapCommitment,
+    /// First pointer position seen after the press (the press itself carries none).
+    start: Option<Point>,
+    pub moved: bool,
+    /// The lane under the pointer, if any.
+    pub over: Option<RoadmapCommitment>,
+}
+
+/// What releasing a pressed card means.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DragOutcome {
+    /// The pointer never left the threshold: open the project.
+    Click(String),
+    /// Dropped on a different lane: move the project there.
+    Move(String, RoadmapCommitment),
+    /// Dropped on its own lane or outside every lane.
+    Cancel,
+}
+
+impl RoadmapDrag {
+    pub fn new(project_id: String, from: RoadmapCommitment) -> Self {
+        Self { project_id, from, start: None, moved: false, over: None }
+    }
+
+    pub fn move_to(&mut self, p: Point) {
+        let start = *self.start.get_or_insert(p);
+        if !self.moved && p.distance(start) >= DRAG_THRESHOLD {
+            self.moved = true;
+        }
+    }
+
+    pub fn enter(&mut self, lane: RoadmapCommitment) {
+        self.over = Some(lane);
+    }
+
+    /// Leaving `lane` only clears the hover if it is still the current one:
+    /// moving up a lane delivers the upper lane's enter before the lower's exit.
+    pub fn leave(&mut self, lane: RoadmapCommitment) {
+        if self.over == Some(lane) {
+            self.over = None;
+        }
+    }
+
+    /// The lane a release would move the card to, if any.
+    pub fn target(&self) -> Option<RoadmapCommitment> {
+        self.over.filter(|lane| self.moved && *lane != self.from)
+    }
+
+    pub fn outcome(&self) -> DragOutcome {
+        if !self.moved {
+            return DragOutcome::Click(self.project_id.clone());
+        }
+        match self.target() {
+            Some(lane) => DragOutcome::Move(self.project_id.clone(), lane),
+            None => DragOutcome::Cancel,
+        }
+    }
+}
+
 /// Full-pane Roadmap view: three vertical swimlanes (Now / Next / Later) of
 /// project cards grouped by `roadmap_commitment`, with header status counts and
 /// per-lane "Add project" buttons. `projects` is the selected team's full list;
@@ -47,6 +132,7 @@ pub fn view<'a>(
     projects: &'a [Project],
     team: Option<&'a Team>,
     needle: &str,
+    ui: &'a RoadmapUi,
 ) -> Element<'a, Message> {
     let identifier = team.map(|t| t.identifier.as_str()).unwrap_or("");
 
@@ -110,7 +196,15 @@ pub fn view<'a>(
             .collect();
         // due_date ASC, NULLS LAST (mirrors Project.in_commitment).
         in_lane.sort_by(|a, b| cmp_due_nulls_last(&a.due_date, &b.due_date));
-        lanes = lanes.push(lane_block(commitment, label, subtitle, dot, &in_lane, identifier));
+        // The card in flight, when this lane is where it would drop.
+        let incoming = ui
+            .drag
+            .as_ref()
+            .filter(|d| d.target() == Some(commitment))
+            .and_then(|d| projects.iter().find(|p| p.id == d.project_id));
+        lanes = lanes.push(lane_block(
+            commitment, label, subtitle, dot, &in_lane, incoming, identifier, ui,
+        ));
     }
 
     let body = column![]
@@ -123,14 +217,22 @@ pub fn view<'a>(
                 .height(Length::Fill),
         );
 
-    container(body)
+    let pane = container(body)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: t::repaint(t::bg_primary()),
             ..Default::default()
-        })
-        .into()
+        });
+
+    // Always wrapped (so starting a drag doesn't reshape the widget tree and
+    // reset the scroll); only grabs the cursor while a card is in flight.
+    let pane = mouse_area(pane);
+    if ui.drag.as_ref().is_some_and(|d| d.moved) {
+        pane.interaction(Interaction::Grabbing).into()
+    } else {
+        pane.into()
+    }
 }
 
 /// A single swimlane: fixed header column on the left, wrapped card grid (plus a
@@ -141,7 +243,9 @@ fn lane_block<'a>(
     subtitle: &'a str,
     dot: Color,
     projects: &[&'a Project],
+    incoming: Option<&'a Project>,
     identifier: &'a str,
+    ui: &'a RoadmapUi,
 ) -> Element<'a, Message> {
     let header_col = column![]
         .spacing(6)
@@ -158,8 +262,16 @@ fn lane_block<'a>(
 
     let mut cells: Vec<Element<'a, Message>> = projects
         .iter()
-        .map(|p| card(p, identifier))
+        .map(|p| card(p, identifier, ui))
         .collect();
+    // Where the dragged card will land: lanes sort by due date, so its slot is
+    // known before the drop.
+    if let Some(project) = incoming {
+        let at = projects.partition_point(|p| {
+            cmp_due_nulls_last(&p.due_date, &project.due_date) != std::cmp::Ordering::Greater
+        });
+        cells.insert(at, drop_placeholder(project));
+    }
     cells.push(add_to_lane_cell(commitment));
 
     let block = row![]
@@ -167,30 +279,48 @@ fn lane_block<'a>(
         .push(header_col)
         .push(container(grid(cells)).width(Length::Fill));
 
-    container(block)
+    let drop_target = ui.drag.as_ref().and_then(RoadmapDrag::target) == Some(commitment);
+    let panel = container(block)
         .padding(16)
         .width(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
+        .style(move |_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::bg_secondary())),
             border: Border {
-                color: t::border(),
+                color: if drop_target { t::accent() } else { t::border() },
                 width: 1.0,
                 radius: 12.0.into(),
             },
             ..Default::default()
-        })
-        .into()
+        });
+
+    // Hover tracking only while a card is pressed; the wrapper is always there
+    // so its hover state is current the moment a drag starts.
+    let area = mouse_area(panel);
+    if ui.drag.is_some() {
+        area.on_enter(Message::RoadmapDragEnter(commitment))
+            .on_exit(Message::RoadmapDragLeave(commitment))
+            .into()
+    } else {
+        area.into()
+    }
 }
 
-/// A read-only project card. The whole card is clickable → ProjectDetail.
-fn card<'a>(project: &'a Project, identifier: &'a str) -> Element<'a, Message> {
+/// A project card. Clicking opens ProjectDetail; pressing and dragging moves
+/// it to another lane; the ⋮ menu changes (or removes) its commitment.
+fn card<'a>(project: &'a Project, identifier: &'a str, ui: &'a RoadmapUi) -> Element<'a, Message> {
     let (status_label, status_color) = card_status(project);
+    let dragging = ui
+        .drag
+        .as_ref()
+        .is_some_and(|d| d.moved && d.project_id == project.id);
 
     let top = row![]
         .spacing(6)
         .align_y(Alignment::Center)
         .push(text("\u{25CF}").size(8).color(status_color))
-        .push(text(status_label).size(10).color(status_color));
+        .push(text(status_label).size(10).color(status_color))
+        .push(iced::widget::horizontal_space())
+        .push(commitment_menu(project, identifier, ui.menu.as_deref() == Some(project.id.as_str())));
 
     let due: Element<'a, Message> = match project.due_date.as_deref() {
         Some(d) if !d.is_empty() => text(format!("Due {}", format_target_date(d)))
@@ -239,18 +369,206 @@ fn card<'a>(project: &'a Project, identifier: &'a str) -> Element<'a, Message> {
     let card = container(inner)
         .padding(14)
         .width(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::bg_primary())),
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(if dragging {
+                t::bg_card_focused()
+            } else {
+                t::bg_primary()
+            })),
             border: Border {
-                color: t::border(),
+                color: if dragging { Color::TRANSPARENT } else { t::border() },
                 width: 1.0,
-                radius: 8.0.into(),
+                radius: CARD_RADIUS.into(),
             },
             ..Default::default()
         });
 
-    mouse_area(card)
-        .on_press(Message::OpenProjectDetail(project.id.clone()))
+    // The card being dragged keeps its slot but gets a dashed outline.
+    let card: Element<'a, Message> = if dragging {
+        stack![card, dashed_outline(t::accent())].into()
+    } else {
+        card.into()
+    };
+    let area = mouse_area(card).interaction(Interaction::Pointer);
+    match project.roadmap_commitment {
+        Some(from) => area
+            .on_press(Message::RoadmapDragPress(project.id.clone(), from))
+            .into(),
+        None => area
+            .on_press(Message::OpenProjectDetail(project.id.clone()))
+            .into(),
+    }
+}
+
+/// Corner radius of a card and of the drag outlines drawn over one.
+const CARD_RADIUS: f32 = 8.0;
+
+/// Height of the drop placeholder (web card `min-h-[98px]`).
+const PLACEHOLDER_H: f32 = 98.0;
+
+/// A dashed rounded outline filling its bounds.
+struct DashedOutline(Color);
+
+impl canvas::Program<Message> for DashedOutline {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        // Inset half the stroke so the outline isn't clipped at the edges.
+        let outline = Path::rounded_rectangle(
+            Point::new(0.5, 0.5),
+            Size::new(bounds.width - 1.0, bounds.height - 1.0),
+            CARD_RADIUS.into(),
+        );
+        let mut stroke = Stroke::default().with_color(self.0).with_width(1.0);
+        stroke.line_dash = canvas::LineDash { segments: &[5.0, 4.0], offset: 0 };
+        frame.stroke(&outline, stroke);
+        vec![frame.into_geometry()]
+    }
+}
+
+fn dashed_outline<'a>(color: Color) -> Element<'a, Message> {
+    iced::widget::canvas(DashedOutline(color))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// The dashed slot shown in the lane a dragged card will drop into.
+fn drop_placeholder<'a>(project: &'a Project) -> Element<'a, Message> {
+    let label = container(
+        text(&project.name)
+            .size(13)
+            .color(t::text_muted())
+            .wrapping(text::Wrapping::WordOrGlyph),
+    )
+    .padding(14)
+    .center_y(Length::Fill)
+    .width(Length::Fill);
+    stack![label, dashed_outline(t::accent())]
+        .width(Length::Fill)
+        .height(Length::Fixed(PLACEHOLDER_H))
+        .into()
+}
+
+/// The card's ⋮ trigger plus its commitment menu (web `_commitment_picker`):
+/// Now / Next / Later radios, then "Remove from roadmap".
+fn commitment_menu<'a>(project: &'a Project, identifier: &'a str, open: bool) -> Element<'a, Message> {
+    let anchor = button(
+        svg(svg::Handle::from_memory(ICON_KEBAB.as_bytes()))
+            .width(Length::Fixed(14.0))
+            .height(Length::Fixed(14.0))
+            .style(|_theme: &Theme, _status| svg::Style { color: Some(t::text_secondary()) }),
+    )
+    .padding(space::S0_5)
+    .style(move |_theme: &Theme, status| button::Style {
+        background: (open || matches!(status, button::Status::Hovered))
+            .then(|| iced::Background::Color(t::bg_card_focused())),
+        border: Border { radius: radius::SM.into(), ..Default::default() },
+        ..Default::default()
+    })
+    .on_press(Message::ToggleRoadmapMenu(project.id.clone()));
+
+    let menu = open.then(|| {
+        let current = project.roadmap_commitment;
+        let name: String = if project.name.chars().count() > 30 {
+            project.name.chars().take(27).chain("...".chars()).collect()
+        } else {
+            project.name.clone()
+        };
+        let mut items: Vec<Element<'a, Message>> = vec![
+            container(
+                text(format!("{identifier} \u{2022} {name}"))
+                    .size(12)
+                    .color(t::text_muted()),
+            )
+            .padding([space::S2, space::S3])
+            .into(),
+            divider(),
+        ];
+        let options = [
+            (RoadmapCommitment::Now, "Now", "shipping soon", t::accent()),
+            (RoadmapCommitment::Next, "Next", "up after Now", t::highlight()),
+            (RoadmapCommitment::Later, "Later", "on the radar", t::text_muted()),
+        ];
+        for (commitment, label, subtitle, dot) in options {
+            items.push(menu_option(
+                &project.id,
+                Some(commitment),
+                current == Some(commitment),
+                dot,
+                label.to_string(),
+                Some(subtitle),
+            ));
+        }
+        items.push(divider());
+        items.push(menu_option(
+            &project.id,
+            None,
+            current.is_none(),
+            t::text_muted(),
+            "Remove from roadmap".to_string(),
+            None,
+        ));
+
+        container(Column::with_children(items).width(Length::Fill).padding([space::S1, 0.0]))
+            .width(Length::Fill)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(t::bg_secondary())),
+                border: Border { color: t::border(), width: 1.0, radius: radius::MD.into() },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                    offset: iced::Vector::new(0.0, space::S1),
+                    blur_radius: space::S3,
+                },
+                ..Default::default()
+            })
+            .into()
+    });
+
+    dropdown(anchor, menu, MENU_W, Message::CloseRoadmapMenu).into()
+}
+
+/// One radio row in the commitment menu.
+fn menu_option<'a>(
+    project_id: &str,
+    commitment: Option<RoadmapCommitment>,
+    checked: bool,
+    dot: Color,
+    label: String,
+    subtitle: Option<&'static str>,
+) -> Element<'a, Message> {
+    let radio = text(if checked { "\u{25C9}" } else { "\u{25CB}" })
+        .size(14)
+        .color(if checked { t::accent() } else { t::text_muted() });
+    let mut line = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(radio)
+        .push(text("\u{25CF}").size(7).color(dot))
+        .push(text(label).size(14).color(t::text_secondary()));
+    if let Some(sub) = subtitle {
+        line = line
+            .push(iced::widget::horizontal_space())
+            .push(text(sub).size(12).color(t::text_muted()));
+    }
+    button(line)
+        .on_press(Message::SetRoadmapCommitment(project_id.to_string(), commitment))
+        .padding([space::S2, space::S3])
+        .width(Length::Fill)
+        .style(|_theme: &Theme, status: button::Status| button::Style {
+            background: matches!(status, button::Status::Hovered)
+                .then_some(iced::Background::Color(t::bg_card_focused())),
+            text_color: t::text_primary(),
+            ..Default::default()
+        })
         .into()
 }
 
@@ -578,4 +896,55 @@ pub fn add_modal_view<'a>(
 
     crate::views::util::modal_backdrop(modal)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pressed() -> RoadmapDrag {
+        RoadmapDrag::new("p1".into(), RoadmapCommitment::Now)
+    }
+
+    #[test]
+    fn a_press_without_travel_is_a_click() {
+        let mut d = pressed();
+        d.move_to(Point::new(10.0, 10.0));
+        d.move_to(Point::new(12.0, 11.0));
+        d.enter(RoadmapCommitment::Next);
+        assert_eq!(d.outcome(), DragOutcome::Click("p1".into()));
+    }
+
+    #[test]
+    fn dropping_on_another_lane_moves_the_project() {
+        let mut d = pressed();
+        d.move_to(Point::new(10.0, 10.0));
+        d.move_to(Point::new(10.0, 60.0));
+        d.enter(RoadmapCommitment::Later);
+        assert_eq!(d.target(), Some(RoadmapCommitment::Later));
+        assert_eq!(d.outcome(), DragOutcome::Move("p1".into(), RoadmapCommitment::Later));
+    }
+
+    #[test]
+    fn dropping_on_its_own_lane_or_outside_cancels() {
+        let mut d = pressed();
+        d.move_to(Point::new(0.0, 0.0));
+        d.move_to(Point::new(0.0, 50.0));
+        d.enter(RoadmapCommitment::Now);
+        assert_eq!(d.outcome(), DragOutcome::Cancel);
+        d.leave(RoadmapCommitment::Now);
+        assert_eq!(d.outcome(), DragOutcome::Cancel);
+    }
+
+    #[test]
+    fn a_stale_exit_does_not_clear_the_new_lane() {
+        // Moving up: the upper lane's enter arrives before the lower lane's exit.
+        let mut d = pressed();
+        d.move_to(Point::new(0.0, 0.0));
+        d.move_to(Point::new(0.0, 50.0));
+        d.enter(RoadmapCommitment::Later);
+        d.enter(RoadmapCommitment::Next);
+        d.leave(RoadmapCommitment::Later);
+        assert_eq!(d.outcome(), DragOutcome::Move("p1".into(), RoadmapCommitment::Next));
+    }
 }

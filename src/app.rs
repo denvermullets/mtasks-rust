@@ -577,6 +577,19 @@ pub enum Message {
     // Roadmap
     /// Open the "Add project to roadmap" picker preset to `commitment`.
     OpenRoadmapAdd(RoadmapCommitment),
+    /// Toggle a roadmap card's ⋮ commitment menu (local project UUID).
+    ToggleRoadmapMenu(String),
+    CloseRoadmapMenu,
+    /// Move a project to a lane, or off the roadmap with `None`.
+    SetRoadmapCommitment(String, Option<RoadmapCommitment>),
+    /// The pointer went down on a roadmap card in `from`: a click or a drag.
+    RoadmapDragPress(String, RoadmapCommitment),
+    RoadmapDragMove(iced::Point),
+    /// The pressed card's pointer entered / left a lane.
+    RoadmapDragEnter(RoadmapCommitment),
+    RoadmapDragLeave(RoadmapCommitment),
+    /// Released: a click opens the project, a drag over another lane moves it.
+    RoadmapDragEnd,
 
     // Attachments
     /// "Attach file" on the issue detail: open the multi-file picker.
@@ -1013,6 +1026,8 @@ pub struct App {
     dashboard_form: DashboardForm,
     /// Which dashboard or group ⋮ menu is open.
     dashboard_menu: Option<crate::views::dashboard::MenuTarget>,
+    /// Roadmap card ⋮ menu + in-flight card drag.
+    roadmap_ui: roadmap_view::RoadmapUi,
     /// State of the dashboard "Add group" modal.
     group_form: GroupForm,
     /// The open dashboard's groups with their sources (reloaded with the mirror).
@@ -1578,11 +1593,30 @@ impl App {
         self.recurring_form = None;
     }
 
+    /// Put a project in a roadmap lane (or take it off with `None`), queue
+    /// the change for sync and refresh. A no-op when nothing changes.
+    fn set_roadmap_commitment(&mut self, project_id: &str, commitment: Option<RoadmapCommitment>) {
+        let conn = self.db();
+        let Ok(Some(mut project)) = queries::get_project(&conn, project_id) else {
+            return;
+        };
+        if project.roadmap_commitment == commitment {
+            return;
+        }
+        project.roadmap_commitment = commitment;
+        project.updated_at = crate::db::now_iso();
+        let _ = queries::update_project(&conn, &project);
+        let payload = serde_json::to_string(&project).ok();
+        self.enqueue_sync("project", &project.id, "update", payload.as_deref());
+        self.reload_data();
+    }
+
     fn switch_view(&mut self, view: View) {
         let crossing = self.view.is_cross_team() != view.is_cross_team()
             || matches!(view, View::Dashboard(_));
         self.view = view;
         self.dashboard_menu = None;
+        self.roadmap_ui = roadmap_view::RoadmapUi::default();
         self.composer_focused = false;
         self.retain_open_view();
         if self.view == View::Inbox {
@@ -3890,6 +3924,7 @@ impl App {
             dashboards,
             dashboard_form: DashboardForm::default(),
             dashboard_menu: None,
+            roadmap_ui: roadmap_view::RoadmapUi::default(),
             group_form: GroupForm::default(),
             dashboard_groups: Vec::new(),
             dashboard_header: Default::default(),
@@ -4199,6 +4234,18 @@ impl App {
                 }
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
                     Some(Message::Tab(TabMessage::DragEnd))
+                }
+                _ => None,
+            }));
+        }
+        // A pressed roadmap card follows the pointer until release.
+        if self.roadmap_ui.drag.is_some() {
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::RoadmapDragMove(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
+                    Some(Message::RoadmapDragEnd)
                 }
                 _ => None,
             }));
@@ -7944,17 +7991,50 @@ impl App {
             }
             Message::RoadmapAssignProject(project_id) => {
                 if let Modal::RoadmapAdd(commitment) = self.modal {
-                    let conn = self.db();
-                    if let Ok(Some(mut project)) = queries::get_project(&conn, &project_id) {
-                        project.roadmap_commitment = Some(commitment);
-                        project.updated_at = crate::db::now_iso();
-                        let _ = queries::update_project(&conn, &project);
-                        let payload = serde_json::to_string(&project).ok();
-                        self.enqueue_sync("project", &project.id, "update", payload.as_deref());
-                    }
+                    self.set_roadmap_commitment(&project_id, Some(commitment));
                 }
                 self.modal = Modal::None;
-                self.reload_data();
+            }
+            Message::ToggleRoadmapMenu(project_id) => {
+                self.roadmap_ui.menu =
+                    (self.roadmap_ui.menu.as_ref() != Some(&project_id)).then_some(project_id);
+            }
+            Message::CloseRoadmapMenu => self.roadmap_ui.menu = None,
+            Message::SetRoadmapCommitment(project_id, commitment) => {
+                self.roadmap_ui.menu = None;
+                self.set_roadmap_commitment(&project_id, commitment);
+            }
+            Message::RoadmapDragPress(project_id, from) => {
+                self.roadmap_ui.menu = None;
+                self.roadmap_ui.drag = Some(roadmap_view::RoadmapDrag::new(project_id, from));
+            }
+            Message::RoadmapDragMove(position) => {
+                if let Some(drag) = self.roadmap_ui.drag.as_mut() {
+                    drag.move_to(position);
+                }
+            }
+            Message::RoadmapDragEnter(lane) => {
+                if let Some(drag) = self.roadmap_ui.drag.as_mut() {
+                    drag.enter(lane);
+                }
+            }
+            Message::RoadmapDragLeave(lane) => {
+                if let Some(drag) = self.roadmap_ui.drag.as_mut() {
+                    drag.leave(lane);
+                }
+            }
+            Message::RoadmapDragEnd => {
+                if let Some(drag) = self.roadmap_ui.drag.take() {
+                    match drag.outcome() {
+                        roadmap_view::DragOutcome::Click(id) => {
+                            return self.update(Message::OpenProjectDetail(id));
+                        }
+                        roadmap_view::DragOutcome::Move(id, lane) => {
+                            self.set_roadmap_commitment(&id, Some(lane));
+                        }
+                        roadmap_view::DragOutcome::Cancel => {}
+                    }
+                }
             }
 
             // --- Project detail: buffered text fields ---
@@ -8822,7 +8902,9 @@ impl App {
                     _ => placeholder::view("Issue"),
                 }
             }
-            View::Roadmap => roadmap_view::view(&self.projects, self.selected_team(), &needle),
+            View::Roadmap => {
+                roadmap_view::view(&self.projects, self.selected_team(), &needle, &self.roadmap_ui)
+            }
             View::RecurringIssues => crate::views::recurring_issues::view(&self.recurring_rows),
             View::Inbox => crate::views::inbox::view(&self.inbox),
             View::Dashboard(ref id) => {
