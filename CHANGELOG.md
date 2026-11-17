@@ -1,7 +1,12 @@
-<!-- last-sha: fc35970e231a7b0f04ec11b049fd8461a234f257 -->
+<!-- last-sha: a35deb557420af66962ce48d69ff1d7eb91a02cd -->
 # What's new
 
 ## 0.12.0 · 2026-11-16
+- **The app updates itself.** JAIT now checks for new versions when it opens, every few hours, and when your Mac wakes, then downloads and verifies the update in the background. You can turn automatic checks off, or check any time from Settings or the command palette ("Check for updates"). If the app can't install updates where it's running, you're offered the installer to download instead.
+- **Know when an update is ready.** A chip in the status bar shows download progress, then turns into "ready" with the new version and its release notes. A notice offers Restart now, What's new or Later, and the Settings entry in the sidebar gets a dot. Restart now asks first if a terminal is still busy, installs the update and reopens the app, which then tells you which version you're on. If you'd rather not restart, the update installs the next time you quit.
+- **Safer quitting.** Quitting from the Dock, a script, or a logout, restart or shutdown now asks first when a terminal is still running something, just like Cmd+Q. The quit dialog also mentions when an update will be installed. Enter confirms and Esc cancels these dialogs.
+- **Show active or all issues on a project.** A project's Issues list has Show: All / Active chips. Active, the default, hides completed and canceled issues; All lists every issue in the project, no matter what board filters are set. The Filter button now only appears where it applies, and the Sort and Show chips wrap neatly when space is tight.
+- **Clearer breadcrumbs.** A synced project's breadcrumb shows its number after its name, and issues or projects opened from another team's view show that team in the trail.
 
 ## 2026-11-12
 - **Hide the sidebar.** Press Cmd+B, click the arrows at the top of the sidebar, or choose "Toggle sidebar" in the command palette to hide the teams sidebar and give the page more room. While it's hidden, a button at the left of the tab bar brings it back. Your choice is remembered.
