@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn detects_bundled_executable() {
-        assert!(is_bundled_path(Path::new("/Applications/JAIT.app/Contents/MacOS/mtasks-rusty")));
-        assert!(!is_bundled_path(Path::new("/repo/target/debug/mtasks-rusty")));
+        assert!(is_bundled_path(Path::new("/Applications/JAIT.app/Contents/MacOS/JAIT")));
+        assert!(!is_bundled_path(Path::new("/repo/target/debug/JAIT")));
     }
 }

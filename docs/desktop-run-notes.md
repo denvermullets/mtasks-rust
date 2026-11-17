@@ -52,7 +52,7 @@ Launch: `open target/release/bundle/osx/JAIT.app`
 - The bundle is a release build, so it uses prod and the `JAIT` folder, not your dev data.
 - This plain bundle is not signed or notarised. For a signed build, see below.
 - Verified (JRST-378): `cargo bundle --release` runs the Zig step and produces the `.app`. `libghostty-vt`
-  links statically, so `otool -L target/release/bundle/osx/JAIT.app/Contents/MacOS/mtasks-rusty` lists
+  links statically, so `otool -L target/release/bundle/osx/JAIT.app/Contents/MacOS/JAIT` lists
   only `/System/Library/Frameworks/*` and `/usr/lib/*`: no Ghostty, Zig or Homebrew libraries. Re-run
   that check after any dependency change, and never run the release app against your real HOME.
 - Check the id: `/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" target/release/bundle/osx/JAIT.app/Contents/Info.plist`

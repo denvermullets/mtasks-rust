@@ -115,11 +115,11 @@ mod tests {
         }
     }
 
-    const EXE: &str = "/Applications/JAIT.app/Contents/MacOS/mtasks-rusty";
+    const EXE: &str = "/Applications/JAIT.app/Contents/MacOS/JAIT";
 
     #[test]
     fn dev_build_is_disabled() {
-        let f = Fake { exe: Some("/repo/target/debug/mtasks-rusty"), writable: true };
+        let f = Fake { exe: Some("/repo/target/debug/JAIT"), writable: true };
         assert_eq!(detect(&f), InstallContext::Disabled);
         let f = Fake { exe: None, writable: true };
         assert_eq!(detect(&f), InstallContext::Disabled);

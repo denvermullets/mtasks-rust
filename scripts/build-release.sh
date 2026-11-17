@@ -133,7 +133,7 @@ if [[ "$PLIST_VERSION" != "$PACKAGE_VERSION" ]]; then
 fi
 
 # Never ship a build that talks to the dev server.
-BINARY="$BUNDLED_APP/Contents/MacOS/mtasks-rusty"
+BINARY="$BUNDLED_APP/Contents/MacOS/JAIT"
 if LC_ALL=C grep -qaF "localhost:3005" "$BINARY"; then
     echo "Release binary contains localhost:3005; refusing to ship it." >&2
     exit 1

@@ -3,6 +3,12 @@ name = "mtasks-rusty"
 version = "0.12.0"
 edition = "2021"
 
+# The executable is named after the app: macOS uses it for the process name and
+# the "About/Hide/Quit" items in the app menu.
+[[bin]]
+name = "JAIT"
+path = "src/main.rs"
+
 [dependencies]
 iced = { version = "0.13", features = ["tokio", "canvas", "lazy", "image", "advanced", "svg"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
