@@ -1057,6 +1057,9 @@ pub struct App {
     tab_bar_offset: f32,
     /// A Tab pressed in the bar, until the pointer is released.
     tab_drag: Option<tab_update::TabDrag>,
+    /// Recently closed Tabs, most recent last: each key with the position it
+    /// was closed from and the page it was on, for Cmd+Shift+T.
+    closed_tabs: Vec<tab_update::ClosedTab>,
     parked_tabs: crate::tab_state::Parked,
     /// Project id to (name, team id) for each open project Tab, for its label.
     tab_projects: HashMap<String, (String, String)>,
@@ -3939,6 +3942,7 @@ impl App {
             window_height: 700.0,
             tab_bar_offset: 0.0,
             tab_drag: None,
+            closed_tabs: Vec::new(),
             tab_projects: HashMap::new(),
             terminals: {
                 let mut terminals = crate::terminal::TerminalState::new();
@@ -9004,6 +9008,7 @@ impl App {
                 self.window_width,
                 self.config.sidebar_collapsed,
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
+                !self.closed_tabs.is_empty(),
             ))
             .push_maybe((!self.removed_team_tab()).then_some(header))
             .push(main_pane)

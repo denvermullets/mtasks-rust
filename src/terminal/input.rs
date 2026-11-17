@@ -18,6 +18,8 @@ pub enum Route {
     Tab(usize),
     /// Cmd+W: close the active Tab (its Terminals with it).
     CloseTab,
+    /// Cmd+Shift+T: reopen the most recently closed Tab.
+    ReopenTab,
     /// Cmd+B: collapse or expand the app's teams sidebar.
     ToggleSidebar,
     /// Cmd+] (1) and Cmd+[ (-1): focus the next or previous pane.
@@ -29,7 +31,7 @@ pub enum Route {
 }
 
 /// What a key does while a Terminal has focus. Command keys never reach the
-/// shell: Cmd+J, Cmd+Shift+J, B, K, C, V, W, [, ] and 1 to 9 are the app's, and Cmd+Q is reserved
+/// shell: Cmd+J, Cmd+Shift+J, Cmd+Shift+T, B, K, C, V, W, [, ] and 1 to 9 are the app's, and Cmd+Q is reserved
 /// (Quit is the native menu item; other Command chords do nothing here, so no
 /// program ever sees one).
 pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
@@ -46,6 +48,7 @@ pub fn route(code: Code, mods: Modifiers, text: Option<&str>) -> Route {
             Code::BracketLeft => Route::CyclePane(-1),
             Code::KeyC => Route::Copy,
             Code::KeyW => Route::CloseTab,
+            Code::KeyT if mods.shift() => Route::ReopenTab,
             Code::KeyB if !mods.shift() => Route::ToggleSidebar,
             c => tab_position(c).map_or(Route::Ignore, Route::Tab),
         };
@@ -246,6 +249,7 @@ mod tests {
         assert_eq!(route(Code::Digit0, Modifiers::LOGO, Some("0")), Route::Ignore);
         assert_eq!(route(Code::KeyQ, Modifiers::LOGO, None), Route::Ignore);
         assert_eq!(route(Code::KeyW, Modifiers::LOGO, None), Route::CloseTab);
+        assert_eq!(route(Code::KeyT, Modifiers::LOGO | Modifiers::SHIFT, None), Route::ReopenTab);
         assert_eq!(route(Code::KeyB, Modifiers::LOGO, Some("b")), Route::ToggleSidebar);
     }
 

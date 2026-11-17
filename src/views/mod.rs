@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod board;
 pub mod body;
 pub mod command_palette;
+pub mod context_menu;
 pub mod csv_import;
 pub mod dashboard;
 pub mod date_picker;

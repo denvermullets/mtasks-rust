@@ -31,6 +31,19 @@ pub enum TabMessage {
     DragMove(f32),
     /// The pointer was released: a click focuses, a drag drops.
     DragEnd,
+    /// Cmd+Shift+T or the menu: bring back the most recently closed Tab.
+    ReopenClosed,
+}
+
+/// How many closed Tabs Cmd+Shift+T can walk back through.
+const CLOSED_TABS_KEPT: usize = 20;
+
+/// A closed Tab: where it sat in the bar and the page it was on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosedTab {
+    pub key: TabKey,
+    pub index: usize,
+    pub page: Page,
 }
 
 /// A Tab pressed in the bar. `start_x` is the pointer's first position;
@@ -99,6 +112,7 @@ impl App {
                     }
                 }
             }
+            TabMessage::ReopenClosed => return self.reopen_closed_tab(),
         }
         Task::none()
     }
@@ -145,13 +159,22 @@ impl App {
             self.modal = super::Modal::TabCloseConfirm(key);
             return Task::none();
         }
-        let Some(set) = self.tab_set.as_mut() else {
+        let Some(set) = self.tab_set.as_ref() else {
             return Task::none();
         };
         let from = set.active().clone();
+        let page = self.tab_pages(set).get(index).cloned().unwrap_or(Page::Root);
+        let Some(set) = self.tab_set.as_mut() else {
+            return Task::none();
+        };
         let Some(closed) = tab_state::close_index(set, index, &home) else {
             return Task::none();
         };
+        self.closed_tabs.retain(|c| c.key != closed.closed);
+        self.closed_tabs.push(ClosedTab { key: closed.closed.clone(), index, page });
+        if self.closed_tabs.len() > CLOSED_TABS_KEPT {
+            self.closed_tabs.remove(0);
+        }
         // The closed Tab's comment draft goes with it, staged files included.
         if let Some(draft) = self.parked_tabs.forget(&closed.closed).and_then(|p| p.comment_draft) {
             self.drop_drafts(&draft.owner_ids());
@@ -172,6 +195,33 @@ impl App {
                 self.stash_active_tab(from);
             }
             return self.restore_tab(&to);
+        }
+        Task::none()
+    }
+
+    /// Bring back the most recently closed Tab at the position it was closed
+    /// from, on the page it was on. Its parked state went with it, so it
+    /// opens fresh there. Tabs since opened again, or whose team, project or
+    /// Dashboard is gone, are skipped.
+    fn reopen_closed_tab(&mut self) -> Task<Message> {
+        self.ensure_tab_set();
+        let conn = self.db();
+        while let Some(closed) = self.closed_tabs.pop() {
+            let Some(set) = self.tab_set.as_ref() else {
+                return Task::none();
+            };
+            if set.tabs().contains(&closed.key)
+                || !tab_subject_exists(&self.teams, &self.dashboards, &conn, &closed.key)
+            {
+                continue;
+            }
+            let Some(set) = self.tab_set.as_mut() else {
+                return Task::none();
+            };
+            let from = set.active().clone();
+            set.reopen(closed.key.clone(), closed.index);
+            self.restored_pages.insert(closed.key.clone(), closed.page);
+            return self.apply_switch(Switch::Moved { from, to: closed.key });
         }
         Task::none()
     }

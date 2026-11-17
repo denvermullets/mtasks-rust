@@ -34,6 +34,9 @@ pub fn handle_key_press(
             "f" | "F" if modifiers.command() => Some(Message::FocusSearch),
             "k" if modifiers.command() => Some(Message::OpenCommandPalette),
             "w" if modifiers.command() => Some(Message::Tab(TabMessage::CloseActive)),
+            "t" | "T" if modifiers.command() && modifiers.shift() => {
+                Some(Message::Tab(TabMessage::ReopenClosed))
+            }
             "b" | "B" if modifiers.command() && !modifiers.shift() => Some(Message::ToggleSidebar),
             "j" | "J" if modifiers.command() && modifiers.shift() => Some(Message::Terminal(
                 crate::terminal::TerminalMessage::Hide,
@@ -577,6 +580,17 @@ mod tests {
         ));
         assert!(press_with("w", Modifiers::empty(), false).is_none());
         assert!(press_with("w", Modifiers::COMMAND, true).is_none());
+    }
+
+    #[test]
+    fn cmd_shift_t_reopens_the_last_closed_tab() {
+        for c in ["t", "T"] {
+            assert!(matches!(
+                press_with(c, Modifiers::COMMAND | Modifiers::SHIFT, false),
+                Some(Message::Tab(TabMessage::ReopenClosed))
+            ));
+        }
+        assert!(press_with("T", Modifiers::COMMAND | Modifiers::SHIFT, true).is_none());
     }
 
     #[test]

@@ -4,10 +4,11 @@
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::{button, container, mouse_area, row, scrollable, stack, tooltip};
 use crate::views::text;
-use iced::{Border, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+use iced::{Border, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::{Message, TabMessage};
-use crate::theme as t;
+use crate::theme::{self as t, radius, space, type_scale};
+use crate::views::context_menu::context_menu;
 
 /// Narrowest a Tab shrinks to before the bar scrolls.
 pub const MIN_TAB_WIDTH: f32 = 120.0;
@@ -125,6 +126,8 @@ impl canvas::Program<Message> for DragPlaceholder {
 /// per Tab, what its Terminals wait on the person for (a dot before the label).
 /// `unread` is, per Tab, whether it has unread Notifications (the Inbox Tab);
 /// it shows an accent dot when no Terminal need already takes the slot.
+/// `can_reopen` is whether there is a closed Tab to bring back (the
+/// right-click menu's item).
 pub fn view<'a>(
     tabs: &[(String, bool)],
     needs: &[Option<crate::terminal::Need>],
@@ -132,6 +135,7 @@ pub fn view<'a>(
     window_width: f32,
     sidebar_collapsed: bool,
     dragging: Option<usize>,
+    can_reopen: bool,
 ) -> Element<'a, Message> {
     let tab_w = tab_width(tabs.len(), tab_viewport(window_width, bar_left(sidebar_collapsed)));
     let mut bar = row![].spacing(TAB_SPACING).padding([4.0, BAR_PADDING]);
@@ -222,6 +226,8 @@ pub fn view<'a>(
         ))
         .on_scroll(|v| Message::Tab(TabMessage::BarScrolled(v.absolute_offset().x)))
         .width(Length::Fill);
+    // Right-click anywhere on the Tab row opens its menu at the pointer.
+    let scroller = context_menu(scroller, tab_menu(can_reopen), MENU_WIDTH);
     let plus = button(text("+").size(16).color(t::text_muted()))
         .padding([3, 12])
         .on_press(Message::OpenCommandPalette)
@@ -243,6 +249,44 @@ pub fn view<'a>(
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             border: Border { color: t::border(), width: 0.0, radius: 0.0.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Width of the right-click menu.
+const MENU_WIDTH: f32 = 220.0;
+
+/// The tab bar's right-click menu.
+fn tab_menu<'a>(can_reopen: bool) -> Element<'a, Message> {
+    let reopen = button(
+        row![]
+            .align_y(iced::Alignment::Center)
+            .push(text("Reopen closed tab").size(type_scale::SM))
+            .push(iced::widget::horizontal_space())
+            .push(text("\u{21E7}\u{2318}T").size(type_scale::XS).color(t::text_muted())),
+    )
+    .on_press_maybe(can_reopen.then_some(Message::Tab(TabMessage::ReopenClosed)))
+    .width(Length::Fill)
+    .padding([space::S2, space::S4])
+    .style(move |_theme: &Theme, status| button::Style {
+        background: matches!(status, button::Status::Hovered)
+            .then(|| iced::Background::Color(t::bg_card_focused())),
+        text_color: if can_reopen { t::text_body() } else { t::text_muted() },
+        border: Border { radius: radius::MD.into(), ..Default::default() },
+        ..Default::default()
+    });
+    container(reopen)
+        .width(Length::Fill)
+        .padding(space::S1)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::bg_secondary())),
+            border: Border { color: t::border(), width: 1.0, radius: radius::MD.into() },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                offset: iced::Vector::new(0.0, space::S1),
+                blur_radius: space::S3,
+            },
             ..Default::default()
         })
         .into()

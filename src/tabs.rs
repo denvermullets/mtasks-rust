@@ -217,6 +217,21 @@ impl TabSet {
         self.active
     }
 
+    /// Bring back a closed Tab at `index` (clamped to the end) and focus it.
+    /// Already open, it is only focused. Returns the index of the focused Tab.
+    pub fn reopen(&mut self, key: TabKey, index: usize) -> usize {
+        match self.tabs.iter().position(|k| *k == key) {
+            Some(i) => self.active = i,
+            None => {
+                let at = index.min(self.tabs.len());
+                self.tabs.insert(at, key);
+                self.active = at;
+            }
+        }
+        self.note_active();
+        self.active
+    }
+
     /// Close the Tab at `index`. Out of range does nothing. Closing the active
     /// Tab focuses its right neighbour, or the left one if it was last;
     /// closing another Tab keeps the active Tab focused. Closing the only Tab
@@ -313,6 +328,21 @@ mod tests {
 
     fn home() -> TabKey {
         team("home")
+    }
+
+    #[test]
+    fn reopen_puts_a_closed_tab_back_where_it_was_and_focuses_it() {
+        let mut set = TabSet::new(team("a"));
+        set.open(team("b"));
+        set.open(team("c"));
+        set.close(1, &home());
+        assert_eq!(set.reopen(team("b"), 1), 1);
+        assert_eq!(set.tabs(), &[team("a"), team("b"), team("c")]);
+        assert_eq!(set.active(), &team("b"));
+        // Past the end goes last; an open Tab is only focused.
+        assert_eq!(set.reopen(team("d"), 9), 3);
+        assert_eq!(set.reopen(team("a"), 2), 0);
+        assert_eq!(set.tabs().len(), 4);
     }
 
     #[test]
