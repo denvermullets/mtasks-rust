@@ -1,5 +1,8 @@
-<!-- last-sha: d405b6ad4dec1a6c05d41966df73cecb6bae9c5d -->
+<!-- last-sha: 9de0e2c2c65f9feb98b5b814693b415955af68b7 -->
 # What's new
+
+## 0.13.1 · 2026-11-17
+- **Cleaner Inbox notifications.** Notifications no longer show the person's name twice (like "Ann Ann commented on…").
 
 ## 0.13.0 · 2026-11-17
 - **Reopen a closed tab.** Closed a tab by mistake? Press Shift+Cmd+T, or right-click the tab bar and choose "Reopen closed tab", to bring it back where it was, on the page it was showing. You can keep going to reopen several recently closed tabs.
