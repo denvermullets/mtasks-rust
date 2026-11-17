@@ -1,5 +1,8 @@
-<!-- last-sha: 8bb35b13deb629808c464132a408d152077f3008 -->
+<!-- last-sha: 784d1b86a353ffb9b5683dffef9cca62f4ee71e3 -->
 # What's new
+
+## 0.12.2 · 2026-11-17
+- **A proper app icon.** JAIT now has its own icon in the Dock, Finder, Launchpad and the app switcher, instead of the generic blank one.
 
 ## 0.12.1 · 2026-11-17
 - **The app is called JAIT everywhere.** The app menu's About, Hide and Quit items, and the app's name in Activity Monitor, now say JAIT instead of the old internal name.
