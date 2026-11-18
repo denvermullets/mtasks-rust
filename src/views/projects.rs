@@ -13,7 +13,7 @@ use crate::views::{date_picker, form_page, progress_chart, util};
 
 pub struct ProjectFormState {
     pub name: String,
-    pub description: text_editor::Content,
+    pub description: crate::undo_editor::UndoableContent,
     pub status: ProjectStatus,
     pub priority: Priority,
     pub lead_id: Option<String>,
@@ -28,7 +28,7 @@ impl ProjectFormState {
     pub fn new() -> Self {
         Self {
             name: String::new(),
-            description: text_editor::Content::new(),
+            description: crate::undo_editor::UndoableContent::new(),
             status: ProjectStatus::Backlog,
             priority: Priority::None,
             lead_id: None,
@@ -136,13 +136,16 @@ pub fn page<'a>(
                 .spacing(space::S3)
                 .push(form_page::caption("Description"))
                 .push(
-                    text_editor(&form.description)
-                        .placeholder("Add description\u{2026}")
-                        .on_action(Message::ProjectDescriptionChanged)
-                        .padding(0)
-                        .size(type_scale::SM)
-                        .style(form_page::borderless_editor)
-                        .height(Length::Fixed(160.0)),
+                    crate::undo_editor::view(
+                        &form.description,
+                        Message::ProjectDescriptionChanged,
+                        text_editor::Binding::from_key_press,
+                    )
+                    .placeholder("Add description\u{2026}")
+                    .padding(0)
+                    .size(type_scale::SM)
+                    .style(form_page::borderless_editor)
+                    .height(Length::Fixed(160.0)),
                 ),
         );
 

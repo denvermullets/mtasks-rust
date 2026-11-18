@@ -608,7 +608,7 @@ impl App {
     /// back. When the issue or project is gone the draft is discarded and the
     /// Tab falls back to its root page.
     fn restore_comment_draft(&mut self, draft: CommentDraft, key: &TabKey) {
-        use iced::widget::text_editor::Content;
+        use crate::undo_editor::UndoableContent as Content;
         let conn = self.db();
         let files = crate::views::issue_detail::ComposerFiles {
             comment_id: draft.comment_id.clone(),

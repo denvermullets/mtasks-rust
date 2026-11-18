@@ -21,7 +21,7 @@ use crate::views::projects::MemberOption;
 pub struct ProjectDetailState {
     pub project_id: String,
     pub name: String,
-    pub description: text_editor::Content,
+    pub description: crate::undo_editor::UndoableContent,
     /// True while the description editor is open; otherwise it is drawn rendered.
     pub editing_description: bool,
     /// "YYYY-MM-DD" or "".
@@ -30,10 +30,10 @@ pub struct ProjectDetailState {
     /// Inline validation (blank name). `None` = valid.
     pub error: Option<String>,
     /// New-comment composer, cleared on submit.
-    pub comment_composer: text_editor::Content,
+    pub comment_composer: crate::undo_editor::UndoableContent,
     /// Reply composer state and the mention list (as on issue detail).
     pub reply_to: Option<String>,
-    pub reply_composer: text_editor::Content,
+    pub reply_composer: crate::undo_editor::UndoableContent,
     pub suggest: Option<crate::mentions::SuggestState>,
     /// Files staged on the new-comment composer.
     pub composer_files: crate::views::issue_detail::ComposerFiles,
@@ -69,14 +69,14 @@ impl ProjectDetailState {
         Self {
             project_id: p.id.clone(),
             name: p.name.clone(),
-            description: text_editor::Content::with_text(&body),
+            description: crate::undo_editor::UndoableContent::with_text(&body),
             editing_description: false,
             start_date: p.start_date.clone().unwrap_or_default(),
             due_date: p.due_date.clone().unwrap_or_default(),
             error: None,
-            comment_composer: text_editor::Content::new(),
+            comment_composer: crate::undo_editor::UndoableContent::new(),
             reply_to: None,
-            reply_composer: text_editor::Content::new(),
+            reply_composer: crate::undo_editor::UndoableContent::new(),
             suggest: None,
             composer_files: Default::default(),
             loaded: ProjectFields::default(),
@@ -583,7 +583,7 @@ mod buffer_tests {
     #[test]
     fn an_edited_description_is_written() {
         let mut state = ProjectDetailState::from_project(&project("old"));
-        state.description = text_editor::Content::with_text("mine");
+        state.description = crate::undo_editor::UndoableContent::with_text("mine");
         let mut fresh = project("old");
         assert!(state.apply_edits(&mut fresh));
         assert_eq!(fresh.description.as_deref(), Some("mine"));
@@ -979,16 +979,18 @@ fn description_section<'a>(
         description_editor_id(),
         Message::EditProjectDescription,
         || {
-            let editor = text_editor(&detail.description)
-                .placeholder("Add description…")
-                .on_action(Message::ProjectDetailDescriptionChanged)
-                .key_binding(detail_view::paste_image_binding(
+            let editor = crate::undo_editor::view(
+                &detail.description,
+                Message::ProjectDetailDescriptionChanged,
+                detail_view::paste_image_binding(
                     text_editor::Binding::from_key_press,
                     Message::PasteImageIntoProjectDescription,
-                ))
-                .padding(space::S2_5)
-                .size(type_scale::SM)
-                .height(Length::Fixed(160.0));
+                ),
+            )
+            .placeholder("Add description…")
+            .padding(space::S2_5)
+            .size(type_scale::SM)
+            .height(Length::Fixed(160.0));
             (editor.into(), None)
         },
         || crate::views::body::view(&text_now, type_scale::SM, t::text_body(), ctx),

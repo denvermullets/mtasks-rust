@@ -31,8 +31,8 @@ use crate::views::util::{
 pub struct IssueDetailState {
     pub issue_id: String,
     /// An editor rather than a text input so a long title wraps.
-    pub title: text_editor::Content,
-    pub description: text_editor::Content,
+    pub title: crate::undo_editor::UndoableContent,
+    pub description: crate::undo_editor::UndoableContent,
     /// True while the description editor is open; otherwise it is drawn rendered.
     pub editing_description: bool,
     /// "YYYY-MM-DD" or "".
@@ -42,11 +42,11 @@ pub struct IssueDetailState {
     /// Inline validation message (blank title / non-numeric estimate). `None` = valid.
     pub error: Option<String>,
     /// New-comment composer. Cleared on submit.
-    pub comment_composer: text_editor::Content,
+    pub comment_composer: crate::undo_editor::UndoableContent,
     /// Local id of the comment currently being replied to (inline composer open).
     pub reply_to: Option<String>,
     /// Inline reply composer for `reply_to`. Reset on open/cancel/submit.
-    pub reply_composer: text_editor::Content,
+    pub reply_composer: crate::undo_editor::UndoableContent,
     /// Open `@`/`#` autocomplete list (under the editor named by `target`).
     pub suggest: Option<SuggestState>,
     /// Files staged on the new-comment composer.
@@ -98,8 +98,8 @@ impl IssueDetailState {
         let body = issue.description.clone().unwrap_or_default();
         Self {
             issue_id: issue.id.clone(),
-            title: text_editor::Content::with_text(&issue.title),
-            description: text_editor::Content::with_text(&body),
+            title: crate::undo_editor::UndoableContent::with_text(&issue.title),
+            description: crate::undo_editor::UndoableContent::with_text(&body),
             editing_description: false,
             due_date: issue.due_date.clone().unwrap_or_default(),
             estimate: issue
@@ -113,9 +113,9 @@ impl IssueDetailState {
                 })
                 .unwrap_or_default(),
             error: None,
-            comment_composer: text_editor::Content::new(),
+            comment_composer: crate::undo_editor::UndoableContent::new(),
             reply_to: None,
-            reply_composer: text_editor::Content::new(),
+            reply_composer: crate::undo_editor::UndoableContent::new(),
             suggest: None,
             composer_files: ComposerFiles::default(),
             loaded: IssueFields::default(),
@@ -277,10 +277,8 @@ pub fn view<'a>(
         .push(breadcrumb)
         .push_maybe(recurring_origin.map(|title| origin_line(title, &issue.team_id)))
         .push(
-            text_editor(&detail.title)
+            crate::undo_editor::view(&detail.title, Message::IssueDetailTitleChanged, title_binding)
                 .placeholder("Title")
-                .on_action(Message::IssueDetailTitleChanged)
-                .key_binding(title_binding)
                 .size(type_scale::XXL)
                 .font(crate::fonts::bold_active())
                 .padding(space::S1)
@@ -1243,19 +1241,21 @@ fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> E
         description_editor_id(),
         Message::EditIssueDescription,
         || {
-            let editor = text_editor(&detail.description)
-                .placeholder("Add description…  (@ to mention, # to link an issue)")
-                .on_action(Message::IssueDetailDescriptionChanged)
-                .key_binding(paste_image_binding(
+            let editor = crate::undo_editor::view(
+                &detail.description,
+                Message::IssueDetailDescriptionChanged,
+                paste_image_binding(
                     editor_binding(
                         None,
                         suggesting(detail.suggest.as_ref(), EditorTarget::Description),
                     ),
                     Message::PasteImageIntoDescription,
-                ))
-                .padding(space::S2_5)
-                .size(type_scale::SM)
-                .height(Length::Fixed(220.0));
+                ),
+            )
+            .placeholder("Add description…  (@ to mention, # to link an issue)")
+            .padding(space::S2_5)
+            .size(type_scale::SM)
+            .height(Length::Fixed(220.0));
             (editor.into(), suggestion_list(detail.suggest.as_ref(), EditorTarget::Description))
         },
         || crate::views::body::view(&text_now, type_scale::SM, t::text_body(), ctx),
@@ -1415,7 +1415,7 @@ pub struct ThreadCtx<'a, 'b> {
     /// Offer Reply on comments under the depth cap.
     pub can_reply: bool,
     pub reply_to: Option<&'a str>,
-    pub reply_composer: &'a text_editor::Content,
+    pub reply_composer: &'a crate::undo_editor::UndoableContent,
     pub suggest: Option<&'a SuggestState>,
     /// Files per comment, keyed by the comment's local id.
     pub comment_attachments: &'a CommentAttachments,
@@ -1451,26 +1451,28 @@ pub fn push_thread<'a>(
 
 /// Composer: multiline editor + "Comment" button.
 pub fn new_comment_composer<'a>(
-    content: &'a text_editor::Content,
+    content: &'a crate::undo_editor::UndoableContent,
     suggest: Option<&'a SuggestState>,
     staged: &'a [Attachment],
 ) -> Element<'a, Message> {
     column![]
         .spacing(space::S2)
         .push(
-            text_editor(content)
-                .placeholder("Leave a comment…  (Cmd+Enter to send)")
-                .on_action(Message::CommentComposerChanged)
-                .key_binding(paste_image_binding(
+            crate::undo_editor::view(
+                content,
+                Message::CommentComposerChanged,
+                paste_image_binding(
                     editor_binding(
                         Some(Message::SubmitComment),
                         suggesting(suggest, EditorTarget::Comment),
                     ),
                     Message::PasteImageIntoComment,
-                ))
-                .padding(space::S2_5)
-                .size(type_scale::SM)
-                .height(Length::Fixed(80.0)),
+                ),
+            )
+            .placeholder("Leave a comment…  (Cmd+Enter to send)")
+            .padding(space::S2_5)
+            .size(type_scale::SM)
+            .height(Length::Fixed(80.0)),
         )
         .push_maybe(suggestion_list(suggest, EditorTarget::Comment))
         .push_maybe((!staged.is_empty()).then(|| staged_chips(staged)))
@@ -1559,25 +1561,27 @@ fn indent<'a>(depth: usize, e: Element<'a, Message>) -> Element<'a, Message> {
 /// Inline composer shown under the comment being replied to.
 fn reply_composer<'a>(
     depth: usize,
-    content: &'a text_editor::Content,
+    content: &'a crate::undo_editor::UndoableContent,
     suggest: Option<&'a SuggestState>,
 ) -> Element<'a, Message> {
     let body = column![]
         .spacing(space::S1_5)
         .push(
-            text_editor(content)
-                .placeholder("Write a reply…  (Cmd+Enter to send)")
-                .on_action(Message::ReplyComposerChanged)
-                .key_binding(paste_image_binding(
+            crate::undo_editor::view(
+                content,
+                Message::ReplyComposerChanged,
+                paste_image_binding(
                     editor_binding(
                         Some(Message::SubmitReply),
                         suggesting(suggest, EditorTarget::Reply),
                     ),
                     Message::PasteImageIntoReply,
-                ))
-                .padding(space::S2)
-                .size(type_scale::SM)
-                .height(Length::Fixed(64.0)),
+                ),
+            )
+            .placeholder("Write a reply…  (Cmd+Enter to send)")
+            .padding(space::S2)
+            .size(type_scale::SM)
+            .height(Length::Fixed(64.0)),
         )
         .push(
             row![]
@@ -1810,7 +1814,7 @@ mod buffer_tests {
         assert_eq!(clean.fields().description.as_deref(), Some("new"));
 
         let mut dirty = IssueDetailState::from_issue(&issue("old"));
-        dirty.title = text_editor::Content::with_text("Edited");
+        dirty.title = crate::undo_editor::UndoableContent::with_text("Edited");
         dirty.refresh_from(&issue("new"));
         assert_eq!(dirty.fields().description.as_deref(), Some("old"));
         assert_eq!(dirty.fields().title, "Edited");
