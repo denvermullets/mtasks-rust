@@ -260,8 +260,7 @@ pub fn view<'a>(
                 }),
         )
         .push(
-            text_input("Project name", &detail.name)
-                .on_input(Message::ProjectDetailNameChanged)
+            crate::undo_input::text_input(format!("project-name-{}", detail.project_id), "Project name", &detail.name, Message::ProjectDetailNameChanged)
                 .on_submit(Message::CommitProjectDetail)
                 .size(type_scale::XXL)
                 .font(crate::fonts::bold_active())

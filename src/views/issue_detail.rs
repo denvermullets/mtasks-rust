@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, pick_list, row, scrollable, text_editor, text_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text_editor};
 use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
@@ -436,8 +436,7 @@ fn properties<'a>(
     ));
     fields.push((
         "Estimate",
-        text_input("No estimate", &detail.estimate)
-            .on_input(Message::IssueDetailEstimateChanged)
+        crate::undo_input::text_input(format!("issue-estimate-{}", detail.issue_id), "No estimate", &detail.estimate, Message::IssueDetailEstimateChanged)
             .on_submit(Message::CommitIssueDetail)
             .padding(SIDEBAR_CONTROL_PADDING)
             .size(type_scale::SM)
@@ -446,8 +445,7 @@ fn properties<'a>(
     ));
     fields.push((
         "Due date",
-        text_input("YYYY-MM-DD", &detail.due_date)
-            .on_input(Message::IssueDetailDueDateChanged)
+        crate::undo_input::text_input(format!("issue-due-date-{}", detail.issue_id), "YYYY-MM-DD", &detail.due_date, Message::IssueDetailDueDateChanged)
             .on_submit(Message::CommitIssueDetail)
             .padding(SIDEBAR_CONTROL_PADDING)
             .size(type_scale::SM)

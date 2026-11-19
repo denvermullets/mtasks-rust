@@ -18,7 +18,7 @@
 //! without the UI.
 
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{column, pick_list, row, text_editor, text_input};
+use iced::widget::{column, pick_list, row, text_editor};
 use crate::views::text;
 use iced::{Element, Length};
 
@@ -539,8 +539,7 @@ pub fn page<'a>(
                     .width(Length::Fill)
                     .push(text("Every (interval)").size(12).color(t::text_muted()))
                     .push(
-                        text_input("1", &form.interval)
-                            .on_input(Message::RecurringFormIntervalChanged)
+                        crate::undo_input::text_input("recurring-interval", "1", &form.interval, Message::RecurringFormIntervalChanged)
                             .padding(8)
                             .size(14),
                     ),
@@ -568,8 +567,7 @@ pub fn page<'a>(
                     .spacing(4)
                     .push(text("Day of month").size(12).color(t::text_muted()))
                     .push(
-                        text_input("1-31", &form.day_of_month)
-                            .on_input(Message::RecurringFormDayOfMonthChanged)
+                        crate::undo_input::text_input("recurring-day-of-month", "1-31", &form.day_of_month, Message::RecurringFormDayOfMonthChanged)
                             .padding(8)
                             .size(14),
                     ),
@@ -623,8 +621,7 @@ pub fn page<'a>(
                 .spacing(space::S1)
                 .push(form_page::caption("Title"))
                 .push(
-                    text_input("Title", &form.title)
-                        .on_input(Message::RecurringFormTitleChanged)
+                    crate::undo_input::text_input("recurring-title", "Title", &form.title, Message::RecurringFormTitleChanged)
                         .padding(util::SIDEBAR_CONTROL_PADDING)
                         .size(type_scale::SM)
                         .style(util::sidebar_input_style),

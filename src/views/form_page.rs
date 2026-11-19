@@ -46,8 +46,7 @@ pub fn title_input<'a>(
     value: &str,
     on_input: fn(String) -> Message,
 ) -> Element<'a, Message> {
-    text_input(placeholder, value)
-        .on_input(on_input)
+    crate::undo_input::text_input(format!("title-{placeholder}"), placeholder, value, on_input)
         .padding(0)
         .size(type_scale::XXL)
         .style(borderless_input)

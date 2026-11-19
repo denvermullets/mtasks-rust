@@ -11,17 +11,17 @@ use crate::palette_results::PaletteState;
 use crate::scroll::{self, ScrollKey};
 use crate::theme as t;
 
+const INPUT_KEY: &str = "command-palette-input";
+
 pub fn input_id() -> text_input::Id {
-    text_input::Id::new("command-palette-input")
+    crate::undo_input::id(INPUT_KEY)
 }
 
 /// Palette modal. A click on the backdrop closes it; a click on the panel
 /// itself is swallowed.
 pub fn view(state: &PaletteState) -> Element<'_, Message> {
     let mut content = column![].spacing(14).width(Length::Fixed(520.0)).push(
-        text_input("Search views, teams, projects, issues\u{2026}", &state.query)
-            .id(input_id())
-            .on_input(Message::PaletteQueryChanged)
+        crate::undo_input::text_input(INPUT_KEY, "Search views, teams, projects, issues\u{2026}", &state.query, Message::PaletteQueryChanged)
             .on_submit(Message::PaletteSubmit)
             .padding(8)
             .size(14)

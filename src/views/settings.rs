@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, slider, text_input};
+use iced::widget::{button, checkbox, column, container, pick_list, row, slider};
 use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
@@ -72,8 +72,12 @@ pub fn view<'a>(
                 .spacing(4)
                 .push(text("API base URL").size(12).color(t::text_secondary()))
                 .push(
-                    text_input("https://your-jait-instance.example.com", &form.api_base_url)
-                        .on_input(Message::SettingsBaseUrlChanged)
+                    crate::undo_input::text_input(
+                        "settings-base-url",
+                        "https://your-jait-instance.example.com",
+                        &form.api_base_url,
+                        Message::SettingsBaseUrlChanged,
+                    )
                         .padding(10)
                         .size(14),
                 ),
@@ -83,8 +87,7 @@ pub fn view<'a>(
                 .spacing(4)
                 .push(text("API token").size(12).color(t::text_secondary()))
                 .push(
-                    text_input("Bearer token", &form.api_token)
-                        .on_input(Message::SettingsTokenChanged)
+                    crate::undo_input::text_input("settings-token", "Bearer token", &form.api_token, Message::SettingsTokenChanged)
                         .secure(true)
                         .padding(10)
                         .size(14),
