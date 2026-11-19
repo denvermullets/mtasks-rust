@@ -54,49 +54,44 @@ fn heading<'a>(label: &'a str) -> Element<'a, Message> {
 }
 
 /// A pill-style single-select: highlights `current`, emits `msg(value)`.
+/// Chips flow onto as many lines as the panel width needs, and a label never
+/// breaks inside its chip (JRST-455).
 fn chips<'a, T: Copy + PartialEq + 'a>(
     options: &'a [(T, &'static str)],
     current: T,
     msg: impl Fn(T) -> Message,
-    per_row: usize,
     disabled: impl Fn(T) -> bool,
 ) -> Element<'a, Message> {
-    let mut col: Column<'a, Message> = column![].spacing(4);
-    for chunk in options.chunks(per_row) {
-        let mut r = row![].spacing(4);
-        for (value, label) in chunk {
-            let active = *value == current;
-            let off = disabled(*value);
-            let mut b = button(text(*label).size(12)).padding([3, 9]);
-            if !off {
-                b = b.on_press(msg(*value));
-            }
-            r = r.push(
-                b.style(move |_theme: &Theme, _status| button::Style {
-                        background: Some(iced::Background::Color(if active {
-                            t::bg_card_focused()
-                        } else {
-                            t::bg_card()
-                        })),
-                        text_color: if off {
-                            t::text_muted()
-                        } else if active {
-                            t::accent()
-                        } else {
-                            t::text_secondary()
-                        },
-                        border: Border {
-                            color: if active { t::accent() } else { t::border() },
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        },
-                        ..Default::default()
-                    }),
-            );
+    let mut r = row![].spacing(4);
+    for (value, label) in options {
+        let active = *value == current;
+        let off = disabled(*value);
+        let mut b = button(text(*label).size(12).wrapping(text::Wrapping::None)).padding([3, 9]);
+        if !off {
+            b = b.on_press(msg(*value));
         }
-        col = col.push(r);
+        r = r.push(b.style(move |_theme: &Theme, _status| button::Style {
+            background: Some(iced::Background::Color(if active {
+                t::bg_card_focused()
+            } else {
+                t::bg_card()
+            })),
+            text_color: if off {
+                t::text_muted()
+            } else if active {
+                t::accent()
+            } else {
+                t::text_secondary()
+            },
+            border: Border {
+                color: if active { t::accent() } else { t::border() },
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        }));
     }
-    col.into()
+    r.wrap().into()
 }
 
 /// The "Display" dropdown: columns / rows / order / completed / properties.
@@ -124,7 +119,6 @@ pub fn display_view<'a>(
             &ViewMode::ALL,
             opts.view_mode,
             Message::SetViewMode,
-            2,
             |_| false,
         ))
         // Rails' names: "Columns" on the board, "Grouping" in the list; the
@@ -134,7 +128,6 @@ pub fn display_view<'a>(
             &GroupBy::ALL,
             opts.group_by,
             Message::SetGroupBy,
-            4,
             |_| false,
         ))
         .push_maybe(board.then(|| heading("ROWS")))
@@ -143,7 +136,6 @@ pub fn display_view<'a>(
                 &SubGroup::ALL,
                 opts.sub_group,
                 Message::SetSubGroup,
-                3,
                 |s| opts.sub_group_conflicts(s),
             )
         }))
@@ -152,7 +144,6 @@ pub fn display_view<'a>(
             &OrderBy::ALL,
             opts.order_by,
             Message::SetOrderBy,
-            3,
             |_| false,
         ))
         .push(heading("COMPLETED ISSUES"))
@@ -160,7 +151,6 @@ pub fn display_view<'a>(
             &CompletedFilter::ALL,
             opts.completed_filter(),
             Message::SetCompletedFilter,
-            3,
             |_| false,
         ))
         .push(heading("OPTIONS"))

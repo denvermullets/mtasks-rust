@@ -16,6 +16,46 @@ use crate::views::labels as labels_view;
 use crate::views::lane_icon;
 use crate::views::util;
 
+/// Width of the "Hidden columns" list (Rails' `w-64`).
+const HIDDEN_COLUMNS_W: f32 = 256.0;
+
+/// Rails' "Hidden columns" strip: a left-ruled list of the empty columns the
+/// board left off (`_board_view.html.erb`).
+fn hidden_columns<'a>(hidden: &[display::HiddenColumn]) -> Element<'a, Message> {
+    let mut list: Column<'a, Message> = column![].spacing(space::S2);
+    for h in hidden {
+        list = list.push(
+            row![]
+                .spacing(space::S2)
+                .align_y(iced::Alignment::Center)
+                .push_maybe(h.lane_icon.map(lane_icon::view))
+                .push(text(h.title.clone()).size(type_scale::SM).color(t::text_muted())),
+        );
+    }
+    let body = column![]
+        .spacing(space::S3)
+        .push(
+            text("Hidden columns")
+                .size(type_scale::SM)
+                .color(t::text_muted()),
+        )
+        .push(scrollable(list).height(Length::Fill));
+    row![
+        iced::widget::vertical_rule(1).style(|_theme: &Theme| iced::widget::rule::Style {
+            color: t::border(),
+            width: 1,
+            radius: 0.0.into(),
+            fill_mode: iced::widget::rule::FillMode::Full,
+        }),
+        container(body)
+            .padding(iced::Padding::ZERO.top(space::S2_5).left(space::S3).right(space::S3))
+            .width(Length::Fixed(HIDDEN_COLUMNS_W))
+            .height(Length::Fill),
+    ]
+    .height(Length::Fill)
+    .into()
+}
+
 /// Lookup data cards need for their optional properties.
 pub struct CardData<'a> {
     /// Each card's identifier uses its own team (cross-team views mix teams).
@@ -42,10 +82,11 @@ pub fn view<'a>(
     columns: &[BoardColumn<'a>],
     data: CardData<'a>,
     row_collapsed: &[bool],
+    hidden: &[display::HiddenColumn],
     focused_lane: usize,
     focused_issue: usize,
 ) -> Element<'a, Message> {
-    if columns.is_empty() {
+    if columns.is_empty() && hidden.is_empty() {
         let msg = if data.lanes.is_empty() {
             "No lanes — select a team"
         } else {
@@ -111,6 +152,13 @@ pub fn view<'a>(
         .padding(iced::Padding::ZERO.left(scroll::BOARD_PAD_X))
         .width(Length::Fixed(scroll::board_content_width(columns.len())))
         .height(Length::Fill);
+    // Empty columns hidden by Display > "Show empty columns" off, listed after
+    // the board as Rails does, so empty lanes don't just vanish.
+    let board: Element<'a, Message> = if hidden.is_empty() {
+        board.into()
+    } else {
+        row![board, hidden_columns(hidden)].height(Length::Fill).into()
+    };
 
     // Built horizontal from the start: `scrollable()` validates as vertical, which
     // rejects this `Fill`-height content before `.direction()` could apply.

@@ -2400,8 +2400,14 @@ impl App {
     /// Board columns for the current display options, filters and search.
     /// Focus indices (`focused_lane`/`focused_issue`) index into these.
     fn board_columns(&self) -> Vec<display::Column<'_>> {
+        self.board_layout().0
+    }
+
+    /// `board_columns` plus the empty columns left off the board (Rails'
+    /// "Hidden columns" list; always empty on a dashboard).
+    fn board_layout(&self) -> (Vec<display::Column<'_>>, Vec<display::HiddenColumn>) {
         if matches!(self.view, View::Dashboard(_)) {
-            return self
+            let columns = self
                 .dashboard_evaluation()
                 .groups
                 .into_iter()
@@ -2412,6 +2418,7 @@ impl App {
                     sections: Vec::new(),
                 })
                 .collect();
+            return (columns, Vec::new());
         }
         let my = self.view == View::MyIssues;
         let data = display::Data {
@@ -2429,9 +2436,25 @@ impl App {
         if my {
             let ids = display::my_member_ids(&self.members, self.config.current_user_remote_id);
             let filters = display::my_issues_filters(self.board_filters(), &ids, &self.lanes);
-            return display::build_columns(&data, self.board_display(), &filters, &needle);
+            return display::build_board(&data, self.board_display(), &filters, &needle);
         }
-        display::build_columns(&data, self.board_display(), self.board_filters(), &needle)
+        display::build_board(&data, self.board_display(), self.board_filters(), &needle)
+    }
+
+    /// Point the focus at `issue_id`'s card if it is on the board. Columns
+    /// aren't lanes one-to-one once empty ones are hidden, so a move must
+    /// follow the card rather than the lane index.
+    fn focus_issue_by_id(&mut self, issue_id: &str) {
+        let found = self.board_columns().iter().enumerate().find_map(|(c, col)| {
+            col.issues
+                .iter()
+                .position(|i| i.id == issue_id)
+                .map(|p| (c, p))
+        });
+        if let Some((lane, issue)) = found {
+            self.focused_lane = lane;
+            self.focused_issue = issue;
+        }
     }
 
     /// A project's issues for the detail page: the board's filters (minus the
@@ -6513,8 +6536,8 @@ impl App {
                         let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
                             queries::move_issue_to_lane(c, &issue.id, &target.id)
                         });
-                        self.focused_lane = current_lane_idx + 1;
                         self.reload_data();
+                        self.focus_issue_by_id(&issue.id);
                     }
                 }
             }
@@ -6541,8 +6564,8 @@ impl App {
                         let _ = queries::edit_issue_queued(&conn, &issue.id, "update", None, |c| {
                             queries::move_issue_to_lane(c, &issue.id, &target.id)
                         });
-                        self.focused_lane = current_lane_idx - 1;
                         self.reload_data();
+                        self.focus_issue_by_id(&issue.id);
                     }
                 }
             }
@@ -8701,10 +8724,10 @@ impl App {
             )
         };
 
-        let columns = if matches!(self.view, View::Board | View::MyIssues) {
-            self.board_columns()
+        let (columns, hidden_columns) = if matches!(self.view, View::Board | View::MyIssues) {
+            self.board_layout()
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         let my_empty = if self.view == View::MyIssues {
@@ -8768,6 +8791,7 @@ impl App {
                     deps: dep_lines,
                 },
                 &self.swimlane_collapsed(&columns),
+                &hidden_columns,
                 self.focused_lane,
                 self.focused_issue,
                 );

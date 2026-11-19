@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
+use crate::db::models::{Issue, Label, Lane, Member, Project, ProjectStatus, Team};
 use crate::lane_icon::{icon_for, LaneIcon};
 
 /// Key used for the "none" bucket of an axis (unassigned, no project, ...).
@@ -644,6 +644,9 @@ struct Bucket {
     title: String,
     /// Set for lane (status) buckets.
     lane_icon: Option<LaneIcon>,
+    /// A completed or cancelled project: shown only while it has issues, even
+    /// with "Show empty columns" on (Rails' `closed_project?`).
+    closed: bool,
 }
 
 /// A sub-group inside a column: `issues[start..end]` of the column.
@@ -664,6 +667,14 @@ pub struct Column<'a> {
     pub issues: Vec<&'a Issue>,
     /// Empty when no sub-group is set.
     pub sections: Vec<Section>,
+}
+
+/// A column left off the board because it has no issues (Rails' "Hidden
+/// columns" list). The "No X" bucket is never listed, as in Rails.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HiddenColumn {
+    pub title: String,
+    pub lane_icon: Option<LaneIcon>,
 }
 
 /// Everything `build_columns` reads, borrowed from `App`.
@@ -826,6 +837,7 @@ fn buckets(axis: Axis, data: &Data<'_>, visible: &[&Issue]) -> Vec<Bucket> {
         key: key.to_string(),
         title: title.to_string(),
         lane_icon: None,
+        closed: false,
     };
     let lane_b = |key: &str, l: &Lane| Bucket {
         lane_icon: Some(icon_for(l.category.as_deref())),
@@ -858,7 +870,16 @@ fn buckets(axis: Axis, data: &Data<'_>, visible: &[&Issue]) -> Vec<Bucket> {
         Axis::Project => {
             let mut ps: Vec<&Project> = data.projects.iter().collect();
             ps.sort_by_key(|p| p.name.to_lowercase());
-            let mut v: Vec<Bucket> = ps.iter().map(|p| b(&p.id, &p.name)).collect();
+            let mut v: Vec<Bucket> = ps
+                .iter()
+                .map(|p| Bucket {
+                    closed: matches!(
+                        p.status,
+                        Some(ProjectStatus::Completed | ProjectStatus::Cancelled)
+                    ),
+                    ..b(&p.id, &p.name)
+                })
+                .collect();
             v.push(b(NONE_KEY, "No project"));
             v
         }
@@ -913,31 +934,46 @@ fn keys_for(issue: &Issue, axis: Axis, data: &Data<'_>) -> Vec<String> {
     }
 }
 
-/// Build the board columns for the given options. Status and priority grouping
-/// always show every bucket (so empty lanes stay droppable-looking); other axes
-/// show only non-empty buckets to avoid a wall of empty columns.
+/// Build the board columns for the given options. See [`build_board`].
 pub fn build_columns<'a>(
     data: &Data<'a>,
     opts: &DisplayOptions,
     filters: &Filters,
     needle: &str,
 ) -> Vec<Column<'a>> {
+    build_board(data, opts, filters, needle).0
+}
+
+/// The board columns plus the empty ones left off it. As in Rails, every
+/// group-by axis (status and priority included) drops its empty buckets
+/// unless "Show empty columns" is on; the dropped ones come back as
+/// [`HiddenColumn`]s. Board sub-group rows likewise drop rows with no issues
+/// in any column unless "Show empty rows" is on.
+pub fn build_board<'a>(
+    data: &Data<'a>,
+    opts: &DisplayOptions,
+    filters: &Filters,
+    needle: &str,
+) -> (Vec<Column<'a>>, Vec<HiddenColumn>) {
     let visible = visible_issues(data, opts, filters, needle);
+    let in_bucket = |axis: Axis, bk: &Bucket| -> Vec<&'a Issue> {
+        visible
+            .iter()
+            .copied()
+            .filter(|i| keys_for(i, axis, data).contains(&bk.key))
+            .collect()
+    };
     // Rows (sub-grouping) are a board-only layout, as in Rails: each column
-    // gets the same sections in the same order, empty ones included. The
-    // list ignores them.
+    // gets the same sections in the same order. The list ignores them.
     let rows: Vec<(Axis, Bucket)> = match opts.sub_group.axis() {
-        Some(axis) if opts.view_mode == ViewMode::Board => {
-            let keep_empty = opts.show_empty_rows || matches!(axis, Axis::Priority);
-            buckets(axis, data, &visible)
-                .into_iter()
-                .filter(|bk| {
-                    keep_empty
-                        || visible.iter().any(|i| keys_for(i, axis, data).contains(&bk.key))
-                })
-                .map(|bk| (axis, bk))
-                .collect()
-        }
+        Some(axis) if opts.view_mode == ViewMode::Board => buckets(axis, data, &visible)
+            .into_iter()
+            .filter(|bk| {
+                let empty = in_bucket(axis, bk).is_empty();
+                !empty || (opts.show_empty_rows && !bk.closed)
+            })
+            .map(|bk| (axis, bk))
+            .collect(),
         _ => vec![],
     };
 
@@ -978,21 +1014,23 @@ pub fn build_columns<'a>(
     };
 
     let Some(axis) = opts.group_by.axis() else {
-        return vec![finish("All issues".to_string(), None, visible)];
+        return (vec![finish("All issues".to_string(), None, visible.clone())], vec![]);
     };
 
-    let keep_empty = opts.show_empty_groups || matches!(axis, Axis::Status | Axis::Priority);
-    buckets(axis, data, &visible)
-        .into_iter()
-        .filter_map(|bk| {
-            let members: Vec<&Issue> = visible
-                .iter()
-                .copied()
-                .filter(|i| keys_for(i, axis, data).contains(&bk.key))
-                .collect();
-            (keep_empty || !members.is_empty()).then(|| finish(bk.title, bk.lane_icon, members))
-        })
-        .collect()
+    let mut columns = Vec::new();
+    let mut hidden = Vec::new();
+    for bk in buckets(axis, data, &visible) {
+        let members = in_bucket(axis, &bk);
+        if !members.is_empty() || (opts.show_empty_groups && !bk.closed) {
+            columns.push(finish(bk.title, bk.lane_icon, members));
+        } else if bk.key != NONE_KEY && !bk.closed {
+            hidden.push(HiddenColumn {
+                title: bk.title,
+                lane_icon: bk.lane_icon,
+            });
+        }
+    }
+    (columns, hidden)
 }
 
 /// One sub-group row of the board, spanning every column.
@@ -1175,15 +1213,67 @@ mod tests {
     }
 
     #[test]
-    fn group_by_status_keeps_empty_lanes() {
+    fn group_by_status_hides_empty_lanes_unless_asked() {
+        // JRST-455: as in Rails, an empty lane is a hidden column by default.
         let lanes = [lane("a", "Todo", 0), lane("b", "Done", 1)];
         let issues = [issue("1", "a", 2)];
         let il = HashMap::new();
         let d = data(&lanes, &issues, &[], &il);
-        let cols = build_columns(&d, &DisplayOptions::default(), &Filters::default(), "");
+        let mut o = DisplayOptions::default();
+        let (cols, hidden) = build_board(&d, &o, &Filters::default(), "");
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].title, "Todo");
+        assert_eq!(hidden.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), ["Done"]);
+        assert!(hidden[0].lane_icon.is_some());
+
+        o.show_empty_groups = true;
+        let (cols, hidden) = build_board(&d, &o, &Filters::default(), "");
         assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].issues.len(), 1);
         assert!(cols[1].issues.is_empty());
+        assert!(hidden.is_empty());
+    }
+
+    #[test]
+    fn hidden_columns_skip_the_none_bucket() {
+        let lanes = [lane("a", "Todo", 0)];
+        let mut x = issue("1", "a", 2);
+        x.assignee_id = Some("Ann".into());
+        let issues = [x];
+        let il = HashMap::new();
+        let mut d = data(&lanes, &issues, &[], &il);
+        let members = [member("Ann", "t", None), member("Bob", "t", None)];
+        d.members = &members;
+        let o = DisplayOptions {
+            group_by: GroupBy::Assignee,
+            ..Default::default()
+        };
+        let (cols, hidden) = build_board(&d, &o, &Filters::default(), "");
+        assert_eq!(cols.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Ann"]);
+        // "Unassigned" is empty too, but Rails never lists the "No X" group.
+        assert_eq!(hidden.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), ["Bob"]);
+    }
+
+    #[test]
+    fn closed_projects_need_issues_to_get_a_column() {
+        let lanes = [lane("a", "Todo", 0)];
+        let issues = [issue("1", "a", 2)];
+        let il = HashMap::new();
+        let mut d = data(&lanes, &issues, &[], &il);
+        let mut open = project("p1", "Open");
+        open.status = Some(ProjectStatus::Started);
+        let mut done = project("p2", "Shipped");
+        done.status = Some(ProjectStatus::Completed);
+        let projects = [open, done];
+        d.projects = &projects;
+        let o = DisplayOptions {
+            group_by: GroupBy::Project,
+            show_empty_groups: true,
+            ..Default::default()
+        };
+        let (cols, hidden) = build_board(&d, &o, &Filters::default(), "");
+        let titles: Vec<&str> = cols.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["Open", "No project"]);
+        assert!(hidden.is_empty());
     }
 
     #[test]
@@ -1196,6 +1286,10 @@ mod tests {
             group_by: GroupBy::Priority,
             ..Default::default()
         };
+        let cols = build_columns(&d, &o, &Filters::default(), "");
+        let titles: Vec<&str> = cols.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["Urgent", "Low"]);
+        o.show_empty_groups = true;
         let cols = build_columns(&d, &o, &Filters::default(), "");
         assert_eq!(cols.len(), 5);
         assert_eq!(cols[0].issues.len(), 1);
@@ -1233,6 +1327,7 @@ mod tests {
         let d = data(&lanes, &issues, &[], &il);
         let mut o = DisplayOptions {
             sub_group: SubGroup::Priority,
+            show_empty_rows: true,
             ..Default::default()
         };
         let cols = build_columns(&d, &o, &Filters::default(), "");
@@ -1287,15 +1382,20 @@ mod tests {
     }
 
     #[test]
-    fn priority_rows_always_all_show() {
+    fn empty_priority_rows_follow_show_empty_rows() {
+        // JRST-455: "Show empty rows" governs priority rows like any other.
         let lanes = [lane("a", "Todo", 0)];
         let issues = [issue("1", "a", 2)];
         let il = HashMap::new();
         let d = data(&lanes, &issues, &[], &il);
-        let o = DisplayOptions {
+        let mut o = DisplayOptions {
             sub_group: SubGroup::Priority,
             ..Default::default()
         };
+        let cols = build_columns(&d, &o, &Filters::default(), "");
+        let rows = board_rows(&cols);
+        assert_eq!(rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["Medium"]);
+        o.show_empty_rows = true;
         let cols = build_columns(&d, &o, &Filters::default(), "");
         assert_eq!(board_rows(&cols).len(), 5);
     }
@@ -1439,6 +1539,29 @@ mod tests {
         assert!(o.shows(CardProperty::DueDate));
     }
 
+    fn project(id: &str, name: &str) -> Project {
+        Project {
+            id: id.into(),
+            remote_id: None,
+            team_id: "t".into(),
+            name: name.into(),
+            description: None,
+            status: None,
+            priority: 0,
+            lead_id: None,
+            start_date: None,
+            due_date: None,
+            roadmap_commitment: None,
+            velocity_score: 0,
+            completed_issues_count: 0,
+            total_issues_count: 0,
+            progress_percentage: 0,
+            behind_schedule: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
     pub(super) fn member(id: &str, team: &str, remote: Option<i64>) -> Member {
         Member {
             id: id.into(),
@@ -1500,7 +1623,11 @@ mod tests {
         };
         let ids = vec!["a1".to_string(), "a2".to_string()];
         let f = my_issues_filters(&Filters::default(), &ids, &lanes);
-        let cols = build_columns(&d, &DisplayOptions::default(), &f, "");
+        let all = DisplayOptions {
+            show_empty_groups: true,
+            ..DisplayOptions::default()
+        };
+        let cols = build_columns(&d, &all, &f, "");
         // "Todo" and "todo" merge; "Done" stays.
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0].issues.len(), 2);
