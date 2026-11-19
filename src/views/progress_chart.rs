@@ -28,6 +28,8 @@ pub struct ChartData {
     /// Same length as `snapshots` when present.
     pub expected: Option<Vec<f32>>,
     pub behind: bool,
+    /// The day the chart was computed for; drawn as a "Today" marker.
+    pub today: Option<NaiveDate>,
 }
 
 /// "YYYY-MM-DD" or an RFC3339 timestamp -> date (first 10 chars).
@@ -139,6 +141,7 @@ pub fn compute(project: &Project, issues: &[Issue], today: NaiveDate) -> ChartDa
         snapshots,
         expected,
         behind: behind || project.behind_schedule,
+        today: Some(today),
     }
 }
 
@@ -284,6 +287,35 @@ fn smooth_to(b: &mut canvas::path::Builder, pts: &[(f32, f32)]) {
     }
 }
 
+/// Indices of the samples to label on the x axis: first, last, and evenly
+/// spaced ones in between, at most `max_labels` total.
+pub fn axis_label_indices(n: usize, max_labels: usize) -> Vec<usize> {
+    match n {
+        0 => return Vec::new(),
+        1 => return vec![0],
+        _ => {}
+    }
+    let m = max_labels.clamp(2, n);
+    let mut out: Vec<usize> = (0..m)
+        .map(|k| ((k as f32) * (n - 1) as f32 / (m - 1) as f32).round() as usize)
+        .collect();
+    out.dedup();
+    out
+}
+
+/// Fractional sample index of `date` (samples may skip days), or `None`
+/// when it falls outside the sampled range.
+pub fn date_position(snaps: &[Snapshot], date: NaiveDate) -> Option<f32> {
+    let (first, last) = (snaps.first()?, snaps.last()?);
+    if date < first.date || date > last.date {
+        return None;
+    }
+    let i = snaps.windows(2).position(|w| date <= w[1].date)?;
+    let (a, b) = (snaps[i].date, snaps[i + 1].date);
+    let span = (b - a).num_days().max(1) as f32;
+    Some(i as f32 + (date - a).num_days() as f32 / span)
+}
+
 /// Nearest sample index for a cursor at `px`, or `None` when the cursor is
 /// outside the plot's horizontal extent (with a little slack at the edges).
 pub fn hover_index(px: f32, pl: f32, w: f32, n: usize) -> Option<usize> {
@@ -394,7 +426,8 @@ impl canvas::Program<Message> for ProgressChart {
             nice_scale(raw_max)
         };
         let n = snaps.len();
-        let x = |i: usize| pl + (i as f32 / n.saturating_sub(1).max(1) as f32) * w;
+        let xf = |f: f32| pl + (f / n.saturating_sub(1).max(1) as f32) * w;
+        let x = |i: usize| xf(i as f32);
         let y = |v: f32| pt + h - (v / max_val) * h;
         let base = y(0.0);
 
@@ -415,12 +448,52 @@ impl canvas::Program<Message> for ProgressChart {
                     ..Default::default()
                 });
             }
-            for i in [0, n - 1] {
+            // ~1 date label per 80px of plot width, always incl. start/end.
+            let max_labels = ((w / 80.0).floor() as usize).max(2);
+            for i in axis_label_indices(n, max_labels) {
+                let date = snaps[i].date;
+                let content = if Some(date) == self.data.today {
+                    "Today".to_string()
+                } else {
+                    date.format("%b %-d").to_string()
+                };
                 frame.fill_text(canvas::Text {
-                    content: snaps[i].date.format("%b %-d").to_string(),
+                    content,
                     position: Point::new(x(i), bounds.height - 17.0),
                     color: t::text_muted(),
                     size: 11.0.into(),
+                    horizontal_alignment: iced::alignment::Horizontal::Center,
+                    ..Default::default()
+                });
+            }
+        }
+
+        // "Today" marker inside the range (an endpoint is labelled on the axis).
+        if !self.mini {
+            if let Some(f) = self
+                .data
+                .today
+                .and_then(|today| date_position(snaps, today))
+                .filter(|f| *f > 0.0 && *f < (n - 1) as f32)
+            {
+                let tx = xf(f);
+                frame.stroke(
+                    &Path::line(Point::new(tx, pt), Point::new(tx, base)),
+                    Stroke {
+                        line_dash: canvas::LineDash {
+                            segments: &[2.0, 3.0],
+                            offset: 0,
+                        },
+                        ..Stroke::default()
+                            .with_color(t::text_secondary())
+                            .with_width(1.0)
+                    },
+                );
+                frame.fill_text(canvas::Text {
+                    content: "Today".to_string(),
+                    position: Point::new(tx, 1.0),
+                    color: t::text_secondary(),
+                    size: 10.0.into(),
                     horizontal_alignment: iced::alignment::Horizontal::Center,
                     ..Default::default()
                 });
@@ -743,6 +816,41 @@ mod tests {
         assert_eq!(hover_index(70.0, 32.0, 100.0, 5), Some(2));
         assert_eq!(hover_index(136.0, 32.0, 100.0, 5), Some(4));
         assert_eq!(hover_index(50.0, 32.0, 100.0, 1), Some(0));
+    }
+
+    #[test]
+    fn axis_labels_include_ends_and_spread_evenly() {
+        assert!(axis_label_indices(0, 5).is_empty());
+        assert_eq!(axis_label_indices(1, 5), vec![0]);
+        assert_eq!(axis_label_indices(2, 5), vec![0, 1]);
+        assert_eq!(axis_label_indices(9, 5), vec![0, 2, 4, 6, 8]);
+        assert_eq!(axis_label_indices(60, 2), vec![0, 59]);
+        let idx = axis_label_indices(60, 6);
+        assert_eq!((idx[0], *idx.last().unwrap(), idx.len()), (0, 59, 6));
+    }
+
+    #[test]
+    fn today_position_interpolates_between_samples() {
+        let snap = |s: &str| Snapshot {
+            date: d(s),
+            scope: 0,
+            started: 0,
+            completed: 0,
+        };
+        let snaps = [snap("2026-01-01"), snap("2026-01-05"), snap("2026-01-09")];
+        assert_eq!(date_position(&snaps, d("2026-01-01")), Some(0.0));
+        assert_eq!(date_position(&snaps, d("2026-01-03")), Some(0.5));
+        assert_eq!(date_position(&snaps, d("2026-01-05")), Some(1.0));
+        assert_eq!(date_position(&snaps, d("2026-01-09")), Some(2.0));
+        assert_eq!(date_position(&snaps, d("2025-12-31")), None);
+        assert_eq!(date_position(&snaps, d("2026-01-10")), None);
+    }
+
+    #[test]
+    fn compute_records_today() {
+        let issues = [issue("2026-01-01", None, None)];
+        let c = compute(&project(None, Some("2026-01-20")), &issues, d("2026-01-05"));
+        assert_eq!(c.today, Some(d("2026-01-05")));
     }
 
     #[test]

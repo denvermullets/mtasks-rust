@@ -8,9 +8,12 @@ use crate::db::models::Project;
 use crate::fonts;
 use crate::theme as t;
 
+/// The search box's undo key (the dashboard's search box shares it).
+pub const SEARCH_KEY: &str = "header-search";
+
 /// Id of the header search box, so a shortcut can focus it.
 pub fn search_input_id() -> text_input::Id {
-    text_input::Id::new("header-search")
+    crate::undo_input::id(SEARCH_KEY)
 }
 
 /// One breadcrumb segment. `on_press` navigates to that level; the last
@@ -209,14 +212,14 @@ pub fn view<'a>(
     }
     let trail = crumb_trail(row_trail, crumbs, 14.0, t::text_secondary(), t::text_primary());
 
-    let mut search = text_input(if search_enabled { "Search…" } else { "" }, query)
-        .id(search_input_id())
-        .padding([5, 10])
-        .size(13)
-        .width(Length::Fixed(220.0));
-    if search_enabled {
-        search = search.on_input(Message::HeaderSearchChanged);
+    let search = if search_enabled {
+        crate::undo_input::text_input(SEARCH_KEY, "Search…", query, Message::HeaderSearchChanged)
+    } else {
+        crate::undo_input::UndoInput::from(text_input("", query).id(search_input_id()))
     }
+    .padding([5, 10])
+    .size(13)
+    .width(Length::Fixed(220.0));
 
     let display = button(text("Display").size(13))
         .on_press_maybe(board_controls.map(|_| Message::OpenDisplayOptions))

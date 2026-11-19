@@ -6,7 +6,7 @@
 //! with a `DateField` so only its own popover shows.
 
 use chrono::{Datelike, Duration, NaiveDate};
-use iced::widget::{button, column, container, row, text_input, Space};
+use iced::widget::{button, column, container, row, Space};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::Message;
@@ -112,8 +112,7 @@ pub fn view<'a>(input: DateInput<'a>, open: Option<&DatePickerState>, today: Nai
     .padding(0)
     .style(|_theme: &Theme, _status| button::Style::default());
 
-    let mut field = text_input(input.placeholder, input.value)
-        .on_input(input.on_change)
+    let mut field = crate::undo_input::text_input(format!("date-{:?}", input.field), input.placeholder, input.value, input.on_change)
         .padding(0)
         .size(type_scale::SM)
         .style(form_page::borderless_chip_input);

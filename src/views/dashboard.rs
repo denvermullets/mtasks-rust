@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use iced::alignment::Horizontal;
-use iced::widget::{button, column, container, horizontal_space, mouse_area, pick_list, row, scrollable, stack, svg, text_input, Column, Space};
+use iced::widget::{button, column, container, horizontal_space, mouse_area, pick_list, row, scrollable, stack, svg, Column, Space};
 use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 
@@ -218,9 +218,7 @@ fn intro<'a>(
 
 /// The search box, with the search shortcut's id and the web's icon inside it.
 fn search_box<'a>(query: &str) -> Element<'a, Message> {
-    let input = text_input("Search issues…", query)
-        .id(top_bar::search_input_id())
-        .on_input(Message::HeaderSearchChanged)
+    let input = crate::undo_input::text_input(top_bar::SEARCH_KEY, "Search issues…", query, Message::HeaderSearchChanged)
         .size(type_scale::XS)
         .padding(Padding {
             top: space::S1_5,

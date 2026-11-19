@@ -624,18 +624,20 @@ pub fn confirm_modal_with<'a>(
         .into()
 }
 
+const RENAME_KEY: &str = "terminal-rename";
+
 pub fn rename_input_id() -> text_input::Id {
-    text_input::Id::new("terminal-rename")
+    crate::undo_input::id(RENAME_KEY)
 }
 
 fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
     if let Some(draft) = item.editing {
-        return text_input("Name", &draft)
-            .id(rename_input_id())
+        return crate::undo_input::text_input(RENAME_KEY, "Name", &draft, |s| {
+            Message::Terminal(TerminalMessage::RenameInput(s))
+        })
             .size(12)
             .width(140)
             .padding([1, 6])
-            .on_input(|s| Message::Terminal(TerminalMessage::RenameInput(s)))
             .on_submit(Message::Terminal(TerminalMessage::RenameSubmit))
             .into();
     }

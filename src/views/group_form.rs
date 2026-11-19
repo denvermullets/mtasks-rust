@@ -14,8 +14,10 @@ use crate::db::dashboards::{GroupDraft, GroupSource, SourceType, GROUP_SWATCHES}
 use crate::db::models::{Label, Project, ProjectStatus, Team};
 use crate::theme as t;
 
+const NAME_KEY: &str = "dashboard-group-name";
+
 pub fn name_input_id() -> text_input::Id {
-    text_input::Id::new("dashboard-group-name")
+    crate::undo_input::id(NAME_KEY)
 }
 
 /// Teams the picker offers: only those Rails knows (a remote id), not archived.
@@ -36,9 +38,7 @@ pub fn modal<'a>(
         .spacing(12)
         .push(text(title).size(18).color(t::text_primary()))
         .push(
-            text_input("Name", &draft.name)
-                .id(name_input_id())
-                .on_input(Message::GroupNameChanged)
+            crate::undo_input::text_input(NAME_KEY, "Name", &draft.name, Message::GroupNameChanged)
                 .on_submit(Message::GroupSubmit)
                 .padding([6, 10])
                 .size(14)
@@ -49,8 +49,7 @@ pub fn modal<'a>(
     }
     content = content
         .push(
-            text_input("Description (optional)", &draft.description)
-                .on_input(Message::GroupDescriptionChanged)
+            crate::undo_input::text_input("dashboard-group-description", "Description (optional)", &draft.description, Message::GroupDescriptionChanged)
                 .on_submit(Message::GroupSubmit)
                 .padding([6, 10])
                 .size(14)

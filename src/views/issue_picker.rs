@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use iced::widget::{button, column, container, row, scrollable, text_input};
+use iced::widget::{button, column, container, row, scrollable};
 use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
@@ -130,8 +130,7 @@ pub fn view<'a>(
             text("Tab / Shift+Tab to change kind").size(11).color(t::text_muted())
         }))
         .push(
-            text_input("Search issues…", &state.query)
-                .on_input(Message::DependencyPickerSearchChanged)
+            crate::undo_input::text_input("dependency-picker-search", "Search issues…", &state.query, Message::DependencyPickerSearchChanged)
                 .padding(8)
                 .size(13)
                 .width(Length::Fill),

@@ -334,8 +334,10 @@ pub fn position(anchor: Option<Anchor>, window: Size) -> Point {
     Point::new(left, top)
 }
 
+const SEARCH_KEY: &str = "property-picker-search";
+
 pub fn search_id() -> text_input::Id {
-    text_input::Id::new("property-picker-search")
+    crate::undo_input::id(SEARCH_KEY)
 }
 
 fn dot<'a>(color: Color) -> Element<'a, Message> {
@@ -463,9 +465,7 @@ fn rule<'a>() -> container::Container<'a, Message> {
 
 fn search_box<'a>(state: &'a PickerState, placeholder: &'static str) -> Element<'a, Message> {
     container(
-        text_input(placeholder, &state.query)
-            .id(search_id())
-            .on_input(Message::PropertyPickerQuery)
+        crate::undo_input::text_input(SEARCH_KEY, placeholder, &state.query, Message::PropertyPickerQuery)
             .on_submit(Message::PropertyPickerSubmit)
             .size(type_scale::SM)
             .padding([8, 12]),

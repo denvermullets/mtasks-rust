@@ -62,7 +62,7 @@ pub enum Message {
     /// Open the "New recurring issue" form (JRST-172) for the selected team.
     NewRecurringIssue,
     RecurringFormTitleChanged(String),
-    RecurringFormDescriptionChanged(iced::widget::text_editor::Action),
+    RecurringFormDescriptionChanged(crate::undo_editor::EditorAction),
     RecurringFormPriorityChanged(Priority),
     /// `None` = server default.
     RecurringFormTimeZoneChanged(Option<String>),
@@ -136,7 +136,7 @@ pub enum Message {
 
     // Issue form fields
     IssueTitleChanged(String),
-    IssueDescriptionChanged(iced::widget::text_editor::Action),
+    IssueDescriptionChanged(crate::undo_editor::EditorAction),
     IssuePriorityChanged(Priority),
     IssueLaneChanged(String),
     /// Toggle a label in the issue form's multi-select (by local UUID).
@@ -173,8 +173,8 @@ pub enum Message {
 
     // Issue detail — buffered text fields (committed on Enter / nav-away)
     /// The title editor (it wraps long titles; Enter commits, no newlines).
-    IssueDetailTitleChanged(iced::widget::text_editor::Action),
-    IssueDetailDescriptionChanged(iced::widget::text_editor::Action),
+    IssueDetailTitleChanged(crate::undo_editor::EditorAction),
+    IssueDetailDescriptionChanged(crate::undo_editor::EditorAction),
     /// Click on the rendered description: open the editor with focus.
     EditIssueDescription,
     StopEditingIssueDescription,
@@ -190,13 +190,13 @@ pub enum Message {
 
     // Issue and project detail — comments (threaded)
     /// Composer text-editor action.
-    CommentComposerChanged(iced::widget::text_editor::Action),
+    CommentComposerChanged(crate::undo_editor::EditorAction),
     /// "Comment" button pressed: persist the composer body locally + enqueue push.
     SubmitComment,
     /// "Reply" pressed on a comment (local id): open the inline reply composer.
     StartReply(String),
     CancelReply,
-    ReplyComposerChanged(iced::widget::text_editor::Action),
+    ReplyComposerChanged(crate::undo_editor::EditorAction),
     /// Submit the inline reply composer as a child of `reply_to`.
     SubmitReply,
     /// "Delete" pressed on one of the user's own unsynced comments (local id).
@@ -554,7 +554,7 @@ pub enum Message {
 
     // Project form fields
     ProjectNameChanged(String),
-    ProjectDescriptionChanged(iced::widget::text_editor::Action),
+    ProjectDescriptionChanged(crate::undo_editor::EditorAction),
     ProjectStatusChanged(ProjectStatus),
     ProjectPriorityChanged(Priority),
     ProjectLeadChanged(Option<String>),
@@ -633,7 +633,7 @@ pub enum Message {
 
     // Project detail — buffered text fields (committed on Enter / nav-away)
     ProjectDetailNameChanged(String),
-    ProjectDetailDescriptionChanged(iced::widget::text_editor::Action),
+    ProjectDetailDescriptionChanged(crate::undo_editor::EditorAction),
     ProjectDetailStartDateChanged(String),
     ProjectDetailDueDateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
@@ -667,13 +667,21 @@ pub enum Message {
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
+
+    /// A single-line input changed (see `undo_input`): record it, then
+    /// handle the field's own message.
+    TextInputEdited(crate::undo_input::Edit<Message>),
+    /// Cmd+Z or Cmd+Shift+Z pressed in a focused text field.
+    TextKey(crate::undo_input::KeyAction),
+    /// Apply that key to the focused input, if it is one with a history.
+    TextKeyOn { key: Option<String>, action: crate::undo_input::KeyAction },
 }
 
 /// The comment composers of the open detail view (issue or project).
 struct CommentDrafts<'a> {
-    comment: &'a mut iced::widget::text_editor::Content,
+    comment: &'a mut crate::undo_editor::UndoableContent,
     reply_to: &'a mut Option<String>,
-    reply: &'a mut iced::widget::text_editor::Content,
+    reply: &'a mut crate::undo_editor::UndoableContent,
     suggest: &'a mut Option<crate::mentions::SuggestState>,
     files: &'a mut crate::views::issue_detail::ComposerFiles,
 }
@@ -1065,6 +1073,8 @@ pub struct App {
     tab_projects: HashMap<String, (String, String)>,
     /// Terminals, their panel and its canvas. Outside every Tab.
     terminals: crate::terminal::TerminalState,
+    /// Undo histories of the single-line text inputs.
+    text_undo: crate::undo_input::Fields<Message>,
     /// Saved views per local team id, in sidebar order (see `db::saved_views`).
     saved_views: HashMap<String, Vec<crate::db::saved_views::SavedView>>,
     /// The open Saved view's working copy; while set it stands in for the
@@ -1779,13 +1789,13 @@ impl App {
         let entity = match kind {
             OwnerKind::Issue => {
                 if let Some(d) = self.issue_detail.as_mut().filter(|d| d.issue_id == row.owner_id) {
-                    d.description = iced::widget::text_editor::Content::with_text(&body);
+                    d.description = crate::undo_editor::UndoableContent::with_text(&body);
                 }
                 "issue"
             }
             OwnerKind::Project => {
                 if let Some(d) = self.project_detail.as_mut().filter(|d| d.project_id == row.owner_id) {
-                    d.description = iced::widget::text_editor::Content::with_text(&body);
+                    d.description = crate::undo_editor::UndoableContent::with_text(&body);
                 }
                 "project"
             }
@@ -1891,18 +1901,16 @@ impl App {
     /// Replace the partial token in `content` with suggestion `idx` (or the
     /// highlighted one).
     fn insert_suggestion(
-        content: &mut iced::widget::text_editor::Content,
+        content: &mut crate::undo_editor::UndoableContent,
         s: &crate::mentions::SuggestState,
         idx: Option<usize>,
     ) {
         use iced::widget::text_editor::{Action, Edit};
         if let Some(item) = s.items.get(idx.unwrap_or(s.selected)) {
-            for _ in 0..s.delete_chars {
-                content.perform(Action::Edit(Edit::Backspace));
-            }
-            content.perform(Action::Edit(Edit::Paste(std::sync::Arc::new(
-                item.insert.clone(),
-            ))));
+            // One undo step: undoing a suggestion brings back the partial token.
+            let backspaces = (0..s.delete_chars).map(|_| Action::Edit(Edit::Backspace));
+            let paste = Action::Edit(Edit::Paste(std::sync::Arc::new(item.insert.clone())));
+            content.perform_as_one(backspaces.chain(std::iter::once(paste)));
         }
     }
 
@@ -3944,6 +3952,7 @@ impl App {
             tab_drag: None,
             closed_tabs: Vec::new(),
             tab_projects: HashMap::new(),
+            text_undo: Default::default(),
             terminals: {
                 let mut terminals = crate::terminal::TerminalState::new();
                 if let Ok(dirs) = connection::open().and_then(|c| crate::db::terminal_dirs::all(&c)) {
@@ -4175,7 +4184,9 @@ impl App {
                 // as shortcuts. Escape still passes through so it closes modals.
                 let escape = key == keyboard::Key::Named(keyboard::key::Named::Escape);
                 if status == event::Status::Captured && !escape {
-                    return None;
+                    // Cmd+Z / Cmd+Shift+Z, which iced inputs capture
+                    // without acting on (they have no undo).
+                    return crate::undo_input::key_action(&key, modifiers).map(Message::TextKey);
                 }
                 Some(Message::KeyPressed(key, modifiers))
             } else {
@@ -4561,6 +4572,29 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::TextInputEdited(edit) => {
+                let message = self.text_undo.record(edit);
+                return self.update(message);
+            }
+            Message::TextKey(action) => {
+                let keys = self.text_undo.keys();
+                if keys.is_empty() {
+                    return Task::none();
+                }
+                return crate::undo_input::focused(keys)
+                    .map(move |key| Message::TextKeyOn { key, action });
+            }
+            Message::TextKeyOn { key: Some(key), action } => {
+                let shown = crate::undo_input::shown(&key);
+                let redo = action == crate::undo_input::KeyAction::Redo;
+                let Some((message, restored)) = self.text_undo.undo(&key, redo, shown.as_deref())
+                else {
+                    return Task::none();
+                };
+                let cursor = crate::undo_input::move_cursor(key, &restored.text, restored.cursor);
+                return self.update(message).chain(cursor);
+            }
+            Message::TextKeyOn { key: None, .. } => return Task::none(),
             Message::KeyPressed(key, modifiers) => {
                 // Esc in the strip's rename field cancels the rename.
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
@@ -5761,7 +5795,7 @@ impl App {
             }
             Message::IssueDescriptionChanged(action) => {
                 if let Some(ref mut form) = self.issue_form {
-                    form.description.perform(action);
+                    form.description.apply(action);
                 }
                 self.refresh_form_suggestions();
             }
@@ -5996,14 +6030,14 @@ impl App {
             // --- Issue detail: buffered fields ---
             Message::IssueDetailTitleChanged(action) => {
                 if let Some(d) = &mut self.issue_detail {
-                    if let Some(action) = issue_detail::single_line(action) {
-                        d.title.perform(action);
+                    if let Some(action) = action.filter_action(issue_detail::single_line) {
+                        d.title.apply(action);
                     }
                 }
             }
             Message::IssueDetailDescriptionChanged(action) => {
                 if let Some(d) = &mut self.issue_detail {
-                    d.description.perform(action);
+                    d.description.apply(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Description);
             }
@@ -6041,7 +6075,7 @@ impl App {
             // --- Issue detail: comments ---
             Message::CommentComposerChanged(action) => {
                 if let Some(d) = self.comment_drafts_mut() {
-                    d.comment.perform(action);
+                    d.comment.apply(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Comment);
             }
@@ -6059,7 +6093,7 @@ impl App {
                 };
                 if self.create_comment(body, None) {
                     if let Some(d) = self.comment_drafts_mut() {
-                        *d.comment = iced::widget::text_editor::Content::new();
+                        *d.comment = crate::undo_editor::UndoableContent::new();
                         *d.suggest = None;
                     }
                 }
@@ -6069,7 +6103,7 @@ impl App {
                 if let Some(d) = self.comment_drafts_mut() {
                     *d.reply_to = Some(parent_id);
                     *d.suggest = None;
-                    *d.reply = iced::widget::text_editor::Content::new();
+                    *d.reply = crate::undo_editor::UndoableContent::new();
                     // The previous reply draft is gone: its pasted images go too.
                     dropped = Some(std::mem::replace(
                         &mut d.files.reply_id,
@@ -6084,7 +6118,7 @@ impl App {
                 let mut dropped = None;
                 if let Some(d) = self.comment_drafts_mut() {
                     *d.reply_to = None;
-                    *d.reply = iced::widget::text_editor::Content::new();
+                    *d.reply = crate::undo_editor::UndoableContent::new();
                     *d.suggest = None;
                     dropped = Some(std::mem::replace(
                         &mut d.files.reply_id,
@@ -6097,7 +6131,7 @@ impl App {
             }
             Message::ReplyComposerChanged(action) => {
                 if let Some(d) = self.comment_drafts_mut() {
-                    d.reply.perform(action);
+                    d.reply.apply(action);
                 }
                 self.refresh_suggestions(crate::mentions::EditorTarget::Reply);
             }
@@ -6112,7 +6146,7 @@ impl App {
                 if self.create_comment(body, Some(parent)) {
                     if let Some(d) = self.comment_drafts_mut() {
                         *d.reply_to = None;
-                        *d.reply = iced::widget::text_editor::Content::new();
+                        *d.reply = crate::undo_editor::UndoableContent::new();
                         *d.suggest = None;
                     }
                 }
@@ -7923,7 +7957,7 @@ impl App {
             }
             Message::ProjectDescriptionChanged(action) => {
                 if let Some(form) = self.project_form.as_mut() {
-                    form.description.perform(action);
+                    form.description.apply(action);
                 }
             }
             Message::ProjectStatusChanged(s) => {
@@ -8049,7 +8083,7 @@ impl App {
             }
             Message::ProjectDetailDescriptionChanged(action) => {
                 if let Some(detail) = self.project_detail.as_mut() {
-                    detail.description.perform(action);
+                    detail.description.apply(action);
                 }
             }
             Message::ProjectDetailStartDateChanged(v) => {
@@ -8381,7 +8415,7 @@ impl App {
             }
             Message::RecurringFormDescriptionChanged(action) => {
                 if let Some(f) = self.recurring_form.as_mut() {
-                    f.description.perform(action);
+                    f.description.apply(action);
                 }
             }
             Message::RecurringFormTimeZoneChanged(z) => {
@@ -9646,8 +9680,10 @@ fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
     delete_modal("Delete Comment?", body, Message::DeleteCommentConfirmed)
 }
 
+const DASHBOARD_NAME_KEY: &str = "dashboard-name";
+
 fn dashboard_name_input_id() -> text_input::Id {
-    text_input::Id::new("dashboard-name")
+    crate::undo_input::id(DASHBOARD_NAME_KEY)
 }
 
 /// Name + optional description modal for dashboards (create now, rename later).
@@ -9664,9 +9700,7 @@ fn dashboard_form_modal<'a>(
         .spacing(12)
         .push(text(title).size(18).color(t::text_primary()))
         .push(
-            text_input("Name", &form.name)
-                .id(dashboard_name_input_id())
-                .on_input(Message::NewDashboardNameChanged)
+            crate::undo_input::text_input(DASHBOARD_NAME_KEY, "Name", &form.name, Message::NewDashboardNameChanged)
                 .on_submit(submit.clone())
                 .padding([6, 10])
                 .size(14)
@@ -9677,8 +9711,7 @@ fn dashboard_form_modal<'a>(
     }
     content = content
         .push(
-            text_input("Description (optional)", &form.description)
-                .on_input(Message::NewDashboardDescriptionChanged)
+            crate::undo_input::text_input("dashboard-description", "Description (optional)", &form.description, Message::NewDashboardDescriptionChanged)
                 .on_submit(submit.clone())
                 .padding([6, 10])
                 .size(14)
@@ -9718,8 +9751,10 @@ fn dashboard_form_modal<'a>(
         .into()
 }
 
+const SAVE_VIEW_KEY: &str = "save-view-name";
+
 fn save_view_input_id() -> text_input::Id {
-    text_input::Id::new("save-view-name")
+    crate::undo_input::id(SAVE_VIEW_KEY)
 }
 
 /// Name prompt for "Save view…".
@@ -9731,9 +9766,7 @@ fn save_view_modal<'a>(title: &'a str, name: &'a str, error: Option<&'static str
         .spacing(12)
         .push(text(title).size(18).color(t::text_primary()))
         .push(
-            text_input("View name", name)
-                .id(save_view_input_id())
-                .on_input(Message::SaveViewNameChanged)
+            crate::undo_input::text_input(SAVE_VIEW_KEY, "View name", name, Message::SaveViewNameChanged)
                 .on_submit(Message::SaveViewSubmit)
                 .padding([6, 10])
                 .size(14)

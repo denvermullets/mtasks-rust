@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, row, text_input, Row};
+use iced::widget::{button, column, container, row, Row};
 use crate::views::text;
 use iced::{Border, Color, Element, Length, Theme};
 
@@ -214,8 +214,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .push(
-            text_input("New label name", &form.name)
-                .on_input(Message::LabelNameChanged)
+            crate::undo_input::text_input("label-new-name", "New label name", &form.name, Message::LabelNameChanged)
                 .on_submit(Message::CreateLabel)
                 .padding(8)
                 .size(13)
@@ -257,8 +256,12 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                         .spacing(8)
                         .align_y(iced::Alignment::Center)
                         .push(
-                            text_input("Label name", &form.edit_name)
-                                .on_input(Message::EditLabelNameChanged)
+                            crate::undo_input::text_input(
+                                format!("label-name-{}", form.editing_id.as_deref().unwrap_or_default()),
+                                "Label name",
+                                &form.edit_name,
+                                Message::EditLabelNameChanged,
+                            )
                                 .on_submit(Message::SaveLabelEdit)
                                 .padding(8)
                                 .size(13)

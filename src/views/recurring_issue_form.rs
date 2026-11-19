@@ -18,7 +18,7 @@
 //! without the UI.
 
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{column, pick_list, row, text_editor, text_input};
+use iced::widget::{column, pick_list, row, text_editor};
 use crate::views::text;
 use iced::{Element, Length};
 
@@ -176,7 +176,7 @@ fn time_zone_choices(stored: Option<&str>, with_default: bool) -> Vec<TimeZoneCh
 /// is representable; [`validate`] parses them.
 pub struct RecurringFormState {
     pub title: String,
-    pub description: text_editor::Content,
+    pub description: crate::undo_editor::UndoableContent,
     pub priority: Priority,
     pub frequency: Frequency,
     pub interval: String,
@@ -226,7 +226,7 @@ impl RecurringFormState {
             project,
             lane,
             title: String::new(),
-            description: text_editor::Content::new(),
+            description: crate::undo_editor::UndoableContent::new(),
             priority: Priority::None,
             frequency: Frequency::Daily,
             interval: "1".to_string(),
@@ -249,7 +249,7 @@ impl RecurringFormState {
         let mut f = Self::new(today);
         f.editing = Some(row.id.clone());
         f.title = row.title.clone();
-        f.description = text_editor::Content::with_text(row.description.as_deref().unwrap_or(""));
+        f.description = crate::undo_editor::UndoableContent::with_text(row.description.as_deref().unwrap_or(""));
         f.priority = row.priority;
         f.frequency = match row.frequency.as_str() {
             "weekly" => Frequency::Weekly,
@@ -539,8 +539,7 @@ pub fn page<'a>(
                     .width(Length::Fill)
                     .push(text("Every (interval)").size(12).color(t::text_muted()))
                     .push(
-                        text_input("1", &form.interval)
-                            .on_input(Message::RecurringFormIntervalChanged)
+                        crate::undo_input::text_input("recurring-interval", "1", &form.interval, Message::RecurringFormIntervalChanged)
                             .padding(8)
                             .size(14),
                     ),
@@ -568,8 +567,7 @@ pub fn page<'a>(
                     .spacing(4)
                     .push(text("Day of month").size(12).color(t::text_muted()))
                     .push(
-                        text_input("1-31", &form.day_of_month)
-                            .on_input(Message::RecurringFormDayOfMonthChanged)
+                        crate::undo_input::text_input("recurring-day-of-month", "1-31", &form.day_of_month, Message::RecurringFormDayOfMonthChanged)
                             .padding(8)
                             .size(14),
                     ),
@@ -623,8 +621,7 @@ pub fn page<'a>(
                 .spacing(space::S1)
                 .push(form_page::caption("Title"))
                 .push(
-                    text_input("Title", &form.title)
-                        .on_input(Message::RecurringFormTitleChanged)
+                    crate::undo_input::text_input("recurring-title", "Title", &form.title, Message::RecurringFormTitleChanged)
                         .padding(util::SIDEBAR_CONTROL_PADDING)
                         .size(type_scale::SM)
                         .style(util::sidebar_input_style),
@@ -636,12 +633,15 @@ pub fn page<'a>(
                 .spacing(space::S1)
                 .push(form_page::caption("Description"))
                 .push(
-                    text_editor(&form.description)
-                        .placeholder("Description")
-                        .on_action(Message::RecurringFormDescriptionChanged)
-                        .padding(space::S2_5)
-                        .size(type_scale::SM)
-                        .height(Length::Fixed(120.0)),
+                    crate::undo_editor::view(
+                        &form.description,
+                        Message::RecurringFormDescriptionChanged,
+                        text_editor::Binding::from_key_press,
+                    )
+                    .placeholder("Description")
+                    .padding(space::S2_5)
+                    .size(type_scale::SM)
+                    .height(Length::Fixed(120.0)),
                 ),
         )
         // Web: a two-column grid of Priority / Status / Assignee / Project.

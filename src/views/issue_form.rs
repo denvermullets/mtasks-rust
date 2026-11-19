@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, row, text_editor, Space};
+use iced::widget::{button, checkbox, column, container, row, Space};
 use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
@@ -10,7 +10,7 @@ use crate::views::{date_picker, form_page, util};
 
 pub struct IssueFormState {
     pub title: String,
-    pub description: text_editor::Content,
+    pub description: crate::undo_editor::UndoableContent,
     pub priority: Priority,
     pub lane_id: String,
     pub editing_issue_id: Option<String>,
@@ -57,7 +57,7 @@ impl IssueFormState {
     pub fn new(default_lane_id: String) -> Self {
         Self {
             title: String::new(),
-            description: text_editor::Content::new(),
+            description: crate::undo_editor::UndoableContent::new(),
             priority: Priority::None,
             lane_id: default_lane_id,
             editing_issue_id: None,
@@ -102,7 +102,7 @@ impl IssueFormState {
         let body = issue.description.clone().unwrap_or_default();
         Self {
             title: issue.title.clone(),
-            description: text_editor::Content::with_text(&body),
+            description: crate::undo_editor::UndoableContent::with_text(&body),
             priority: Priority::from_i32(issue.priority),
             lane_id: issue.lane_id.clone(),
             editing_issue_id: Some(issue.id.clone()),
@@ -430,20 +430,22 @@ pub fn page<'a>(
             .fold(column![].spacing(space::S2), |col, (i, path)| col.push(file_row(i, path)))
     });
 
-    let description = text_editor(&form.description)
-        .placeholder("Add description (drop files here)...")
-        .on_action(Message::IssueDescriptionChanged)
-        .key_binding(crate::views::issue_detail::editor_binding(None, form.suggest.is_some()))
-        .padding(0)
-        .size(type_scale::SM)
-        .style(form_page::borderless_editor)
-        // Grows with the text like the web's auto-resize textarea, from a
-        // ~5-line floor (iced 0.13's editor has no min height).
-        .height(if form.description.line_count() > 5 {
-            Length::Shrink
-        } else {
-            Length::Fixed(DESCRIPTION_MIN_HEIGHT)
-        });
+    let description = crate::undo_editor::view(
+        &form.description,
+        Message::IssueDescriptionChanged,
+        crate::views::issue_detail::editor_binding(None, form.suggest.is_some()),
+    )
+    .placeholder("Add description (drop files here)...")
+    .padding(0)
+    .size(type_scale::SM)
+    .style(form_page::borderless_editor)
+    // Grows with the text like the web's auto-resize textarea, from a
+    // ~5-line floor (iced 0.13's editor has no min height).
+    .height(if form.description.line_count() > 5 {
+        Length::Shrink
+    } else {
+        Length::Fixed(DESCRIPTION_MIN_HEIGHT)
+    });
 
     let create_more = (!editing).then(|| {
         checkbox("Create more", form.create_more)

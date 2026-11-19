@@ -1,7 +1,7 @@
 //! Display-options dropdown and filter panel, opened from the header. Both are
 //! rendered as popovers anchored under the header's right edge (see `popover`).
 
-use iced::widget::{button, checkbox, column, container, horizontal_space, mouse_area, row, scrollable, text_input, Column};
+use iced::widget::{button, checkbox, column, container, horizontal_space, mouse_area, row, scrollable, Column};
 use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
@@ -348,8 +348,7 @@ pub fn filter_view<'a>(
         .spacing(12)
         .push(top)
         .push(
-            text_input("Search…", search)
-                .on_input(Message::HeaderSearchChanged)
+            crate::undo_input::text_input("display-search", "Search…", search, Message::HeaderSearchChanged)
                 .padding([5, 10])
                 .size(13),
         )
