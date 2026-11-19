@@ -116,7 +116,8 @@ pub fn view<'a>(
     // rejects this `Fill`-height content before `.direction()` could apply.
     let board = track(
         scrollable::Scrollable::with_direction(
-            board,
+            // JRST-529: a lane's vertical overscroll must not slide the board.
+            crate::views::wheel_guard::wheel_guard(board),
             scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
         ),
         ScrollKey::Board,
