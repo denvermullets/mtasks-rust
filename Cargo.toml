@@ -1,6 +1,6 @@
 [package]
 name = "mtasks-rusty"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 
 # The executable is named after the app: macOS uses it for the process name and
@@ -58,7 +58,7 @@ objc2-foundation = { version = "0.2", default-features = false, features = ["NSS
 [package.metadata.bundle]
 name = "JAIT"
 identifier = "com.jait.desktop"
-version = "0.13.1"
+version = "0.13.2"
 short_description = "JAIT desktop companion"
 category = "public.app-category.productivity"
 # Generated from assets/appicon-default.svg by scripts/build-icon.sh.

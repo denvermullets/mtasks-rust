@@ -1,5 +1,10 @@
-<!-- last-sha: 9de0e2c2c65f9feb98b5b814693b415955af68b7 -->
+<!-- last-sha: 01c5e9175c7466a5543bbac76594058280aad7ab -->
 # What's new
+
+## 0.13.2 · 2026-11-18
+- **Undo while typing.** Cmd+Z and Cmd+Shift+Z now undo and redo in every text box, from issue titles and search fields to issue and project descriptions. Undo goes back a word at a time, and a paste is its own step.
+- **Cmd+Delete in text fields.** In one-line fields, Cmd+Delete now deletes back to the start of the line (or just the selected text), like elsewhere on macOS, and Cmd+Z brings it back.
+- **More dates on progress charts.** A project's burndown chart labels more dates along the bottom as space allows, not just the first and last, and marks today.
 
 ## 0.13.1 · 2026-11-17
 - **Cleaner Inbox notifications.** Notifications no longer show the person's name twice (like "Ann Ann commented on…").
