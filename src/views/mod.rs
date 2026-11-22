@@ -50,3 +50,4 @@ pub mod update_chip;
 pub mod truncated;
 pub mod util;
 pub mod wheel_guard;
+pub mod click_outside;

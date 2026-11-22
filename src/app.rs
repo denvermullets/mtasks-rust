@@ -184,6 +184,9 @@ pub enum Message {
     IssueDetailEstimateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
     CommitIssueDetail,
+    /// A click landed outside an active issue-detail field: close the
+    /// description editor and commit the buffers.
+    IssueDetailClickedOutside,
     // Issue detail — live-apply sidebar assignee pick_list
     /// Assignee picker changed; `None` = "Unassigned". Carries a local member UUID.
     IssueDetailAssigneeChanged(Option<String>),
@@ -638,6 +641,9 @@ pub enum Message {
     ProjectDetailDueDateChanged(String),
     /// Flush buffered detail fields to the DB (text field `on_submit`).
     CommitProjectDetail,
+    /// A click landed outside an active project-detail field: close the
+    /// description editor and commit the buffers.
+    ProjectDetailClickedOutside,
     // Project detail — live-apply sidebar pick_lists
     ProjectDetailStatusChanged(ProjectStatus),
     ProjectDetailPriorityChanged(Priority),
@@ -6305,6 +6311,12 @@ impl App {
             Message::CommitIssueDetail => {
                 self.commit_issue_detail();
             }
+            Message::IssueDetailClickedOutside => {
+                if let Some(d) = &mut self.issue_detail {
+                    d.editing_description = false;
+                }
+                self.commit_issue_detail();
+            }
 
             // --- Issue detail: live-apply pick_lists ---
             Message::IssueDetailAssigneeChanged(member_id) => {
@@ -8120,6 +8132,12 @@ impl App {
                 }
             }
             Message::CommitProjectDetail => {
+                self.commit_project_detail();
+            }
+            Message::ProjectDetailClickedOutside => {
+                if let Some(d) = &mut self.project_detail {
+                    d.editing_description = false;
+                }
                 self.commit_project_detail();
             }
 

@@ -142,6 +142,12 @@ impl IssueDetailState {
         self.fields() != self.loaded
     }
 
+    /// The message a click outside a field sends: only while that field has
+    /// edits to commit, so idle fields don't fire on every click.
+    pub fn outside_click(&self, dirty: impl Fn(&IssueFields, &IssueFields) -> bool) -> Option<Message> {
+        dirty(&self.fields(), &self.loaded).then_some(Message::IssueDetailClickedOutside)
+    }
+
     /// Write only the fields edited since load onto `issue` (the fresh DB
     /// row). Returns whether anything changed, or the estimate parse error.
     pub fn apply_edits(&self, issue: &mut Issue) -> Result<bool, String> {
@@ -277,12 +283,15 @@ pub fn view<'a>(
         .push(breadcrumb)
         .push_maybe(recurring_origin.map(|title| origin_line(title, &issue.team_id)))
         .push(
-            crate::undo_editor::view(&detail.title, Message::IssueDetailTitleChanged, title_binding)
-                .placeholder("Title")
-                .size(type_scale::XXL)
-                .font(crate::fonts::bold_active())
-                .padding(space::S1)
-                .style(title_editor_style),
+            crate::views::click_outside::click_outside(
+                crate::undo_editor::view(&detail.title, Message::IssueDetailTitleChanged, title_binding)
+                    .placeholder("Title")
+                    .size(type_scale::XXL)
+                    .font(crate::fonts::bold_active())
+                    .padding(space::S1)
+                    .style(title_editor_style),
+                detail.outside_click(|now, was| now.title != was.title),
+            ),
         )
         .push_maybe(
             detail
@@ -436,21 +445,27 @@ fn properties<'a>(
     ));
     fields.push((
         "Estimate",
-        crate::undo_input::text_input(format!("issue-estimate-{}", detail.issue_id), "No estimate", &detail.estimate, Message::IssueDetailEstimateChanged)
-            .on_submit(Message::CommitIssueDetail)
-            .padding(SIDEBAR_CONTROL_PADDING)
-            .size(type_scale::SM)
-            .style(sidebar_input_style)
-            .into(),
+        crate::views::click_outside::click_outside(
+            crate::undo_input::text_input(format!("issue-estimate-{}", detail.issue_id), "No estimate", &detail.estimate, Message::IssueDetailEstimateChanged)
+                .on_submit(Message::CommitIssueDetail)
+                .padding(SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(sidebar_input_style),
+            detail.outside_click(|now, was| now.estimate != was.estimate),
+        )
+        .into(),
     ));
     fields.push((
         "Due date",
-        crate::undo_input::text_input(format!("issue-due-date-{}", detail.issue_id), "YYYY-MM-DD", &detail.due_date, Message::IssueDetailDueDateChanged)
-            .on_submit(Message::CommitIssueDetail)
-            .padding(SIDEBAR_CONTROL_PADDING)
-            .size(type_scale::SM)
-            .style(sidebar_input_style)
-            .into(),
+        crate::views::click_outside::click_outside(
+            crate::undo_input::text_input(format!("issue-due-date-{}", detail.issue_id), "YYYY-MM-DD", &detail.due_date, Message::IssueDetailDueDateChanged)
+                .on_submit(Message::CommitIssueDetail)
+                .padding(SIDEBAR_CONTROL_PADDING)
+                .size(type_scale::SM)
+                .style(sidebar_input_style),
+            detail.outside_click(|now, was| now.due_date != was.due_date),
+        )
+        .into(),
     ));
     fields.push(("Project", {
         let select = select(Field::Project, project_label, "No project");
@@ -1238,6 +1253,7 @@ fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> E
         description_display(&text_now, detail.editing_description),
         description_editor_id(),
         Message::EditIssueDescription,
+        detail.editing_description.then_some(Message::IssueDetailClickedOutside),
         || {
             let editor = crate::undo_editor::view(
                 &detail.description,
@@ -1263,14 +1279,17 @@ fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> E
 /// Shared by issue and project detail: lays out one of the three description
 /// modes. `editor` is only built while editing and returns the editor plus an
 /// optional suggestion list; clicking the prompt or the rendered body sends `edit`.
+/// While editing, a click outside the editor and its suggestions sends
+/// `on_outside` (always wrapped, so toggling it keeps the editor's focus).
 pub(crate) fn description_block<'a>(
     display: DescriptionDisplay,
     editor_id: iced::widget::container::Id,
     edit: Message,
+    on_outside: Option<Message>,
     editor: impl FnOnce() -> (Element<'a, Message>, Option<Element<'a, Message>>),
     rendered: impl FnOnce() -> Element<'a, Message>,
 ) -> Element<'a, Message> {
-    match display {
+    let block: Element<'a, Message> = match display {
         DescriptionDisplay::Editor => {
             let (editor, suggestions) = editor();
             column![]
@@ -1292,7 +1311,8 @@ pub(crate) fn description_block<'a>(
                 .interaction(iced::mouse::Interaction::Text)
                 .into()
         }
-    }
+    };
+    crate::views::click_outside::click_outside(block, on_outside).into()
 }
 
 /// Makes a row the hover-card anchor for the issue with local id `issue_id`.

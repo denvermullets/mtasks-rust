@@ -260,12 +260,15 @@ pub fn view<'a>(
                 }),
         )
         .push(
-            crate::undo_input::text_input(format!("project-name-{}", detail.project_id), "Project name", &detail.name, Message::ProjectDetailNameChanged)
-                .on_submit(Message::CommitProjectDetail)
-                .size(type_scale::XXL)
-                .font(crate::fonts::bold_active())
-                .padding(space::S1)
-                .style(title_input_style),
+            crate::views::click_outside::click_outside(
+                crate::undo_input::text_input(format!("project-name-{}", detail.project_id), "Project name", &detail.name, Message::ProjectDetailNameChanged)
+                    .on_submit(Message::CommitProjectDetail)
+                    .size(type_scale::XXL)
+                    .font(crate::fonts::bold_active())
+                    .padding(space::S1)
+                    .style(title_input_style),
+                (detail.fields().name != detail.loaded.name).then_some(Message::ProjectDetailClickedOutside),
+            ),
         );
 
     // ---- Properties: down the right side, or in the header under the title ----
@@ -977,6 +980,7 @@ fn description_section<'a>(
         detail_view::description_display(&text_now, detail.editing_description),
         description_editor_id(),
         Message::EditProjectDescription,
+        detail.editing_description.then_some(Message::ProjectDetailClickedOutside),
         || {
             let editor = crate::undo_editor::view(
                 &detail.description,
