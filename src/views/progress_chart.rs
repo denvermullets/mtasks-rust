@@ -62,28 +62,12 @@ fn sample_days(days: Vec<NaiveDate>, target: usize) -> Vec<NaiveDate> {
 
 /// Compute the chart series for `project` from the issues belonging to it.
 pub fn compute(project: &Project, issues: &[Issue], today: NaiveDate) -> ChartData {
-    let scoped: Vec<&Issue> = issues
-        .iter()
-        .filter(|i| i.project_id.as_deref() == Some(project.id.as_str()))
-        .collect();
-    if scoped.is_empty() {
+    let dates = issue_dates(project, issues);
+    if dates.is_empty() {
         return ChartData::default();
     }
-    let dates: Vec<IssueDates> = scoped
-        .iter()
-        .map(|i| IssueDates {
-            created: parse_date(&i.created_at),
-            started: opt_date(&i.started_at),
-            completed: [opt_date(&i.completed_at), opt_date(&i.canceled_at)]
-                .into_iter()
-                .flatten()
-                .min(),
-        })
-        .collect();
-
-    let start_date = opt_date(&project.start_date);
     let due_date = opt_date(&project.due_date);
-    let effective_start = start_date.or_else(|| dates.iter().filter_map(|d| d.started).min());
+    let effective_start = effective_start(project, &dates);
 
     let chart_start = effective_start
         .or_else(|| dates.iter().filter_map(|d| d.created).min())
@@ -117,7 +101,6 @@ pub fn compute(project: &Project, issues: &[Issue], today: NaiveDate) -> ChartDa
         })
         .collect();
 
-    let total = scoped.len() as f32;
     let expected = match (effective_start, due_date) {
         (Some(s), Some(due)) if (due - s).num_days() > 0 => {
             let total_days = (due - s).num_days() as f32;
@@ -135,14 +118,58 @@ pub fn compute(project: &Project, issues: &[Issue], today: NaiveDate) -> ChartDa
         _ => None,
     };
 
-    let completed_now = dates.iter().filter(|d| d.completed.is_some()).count() as f32;
-    let behind = is_behind(effective_start, due_date, today, total, completed_now);
     ChartData {
         snapshots,
         expected,
-        behind: behind || project.behind_schedule,
+        behind: behind_from_dates(project, &dates, today),
         today: Some(today),
     }
+}
+
+/// Whether `project` is behind schedule, worked out from its local issues so
+/// the answer moves with the calendar. Use this, not `project.behind_schedule`:
+/// that field is Rails' answer as of the project's last pull, and a project is
+/// only re-pulled when its own row changes, so finishing issues (or days
+/// passing) leaves it stale. It's the fallback only when none of the project's
+/// issues are mirrored locally.
+pub fn behind_schedule(project: &Project, issues: &[Issue], today: NaiveDate) -> bool {
+    let dates = issue_dates(project, issues);
+    if dates.is_empty() {
+        return project.behind_schedule;
+    }
+    behind_from_dates(project, &dates, today)
+}
+
+fn behind_from_dates(project: &Project, dates: &[IssueDates], today: NaiveDate) -> bool {
+    let completed = dates.iter().filter(|d| d.completed.is_some()).count() as f32;
+    is_behind(
+        effective_start(project, dates),
+        opt_date(&project.due_date),
+        today,
+        dates.len() as f32,
+        completed,
+    )
+}
+
+fn issue_dates(project: &Project, issues: &[Issue]) -> Vec<IssueDates> {
+    issues
+        .iter()
+        .filter(|i| i.project_id.as_deref() == Some(project.id.as_str()))
+        .map(|i| IssueDates {
+            created: parse_date(&i.created_at),
+            started: opt_date(&i.started_at),
+            completed: [opt_date(&i.completed_at), opt_date(&i.canceled_at)]
+                .into_iter()
+                .flatten()
+                .min(),
+        })
+        .collect()
+}
+
+/// Mirrors `Project#effective_start_date`: the start date, else the earliest
+/// issue start.
+fn effective_start(project: &Project, dates: &[IssueDates]) -> Option<NaiveDate> {
+    opt_date(&project.start_date).or_else(|| dates.iter().filter_map(|d| d.started).min())
 }
 
 /// Mirrors `Project#behind_schedule?`.
@@ -770,6 +797,27 @@ mod tests {
         assert!(c.behind);
         let exp = c.expected.unwrap();
         assert!((exp.last().unwrap() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stale_synced_flag_does_not_override_local_answer() {
+        // Rails said "behind" at the last pull; since then the work got done.
+        let mut p = project(Some("2026-01-01"), Some("2026-01-11"));
+        p.behind_schedule = true;
+        let issues = [
+            issue("2026-01-01", Some("2026-01-02"), Some("2026-01-03")),
+            issue("2026-01-01", None, None),
+        ];
+        let today = d("2026-01-04"); // 3/10 elapsed -> expect 1 of 2 done
+        assert!(!compute(&p, &issues, today).behind);
+        assert!(!behind_schedule(&p, &issues, today));
+    }
+
+    #[test]
+    fn synced_flag_is_fallback_without_local_issues() {
+        let mut p = project(Some("2026-01-01"), Some("2026-01-11"));
+        p.behind_schedule = true;
+        assert!(behind_schedule(&p, &[], d("2026-01-04")));
     }
 
     #[test]

@@ -452,7 +452,8 @@ fn project_row<'a>(
     issues: &'a [Issue],
     show_trend: bool,
 ) -> Element<'a, Message> {
-    let (health_color, health_label) = project_health(project);
+    let behind = progress_chart::behind_schedule(project, issues, progress_chart::today());
+    let (health_color, health_label) = project_health(project, behind);
     let priority = project.priority_enum();
 
     let name_cell = container(
@@ -509,7 +510,7 @@ fn project_row<'a>(
         .width(Length::Fixed(COL_TREND))
     });
 
-    let target_color = if project.behind_schedule {
+    let target_color = if behind {
         t::danger()
     } else {
         t::text_secondary()
@@ -569,7 +570,7 @@ fn accent_button(_theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// Health dot color + label, mirroring Rails `project_health_state`.
-fn project_health(project: &Project) -> (Color, String) {
+fn project_health(project: &Project, behind: bool) -> (Color, String) {
     match project.status {
         Some(ProjectStatus::Completed) => (t::priority_low(), "Complete".to_string()),
         Some(ProjectStatus::Cancelled) => (t::text_muted(), "Cancelled".to_string()),
@@ -577,7 +578,7 @@ fn project_health(project: &Project) -> (Color, String) {
         Some(ProjectStatus::Started) => {
             if project.progress_percentage >= 100 {
                 (t::priority_low(), "Complete".to_string())
-            } else if project.behind_schedule {
+            } else if behind {
                 (t::danger(), "At risk".to_string())
             } else {
                 (t::priority_low(), "On track".to_string())

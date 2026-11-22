@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, stack, svg, Column};
 use crate::views::text;
@@ -6,7 +8,8 @@ use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Renderer
 
 use crate::app::Message;
 use crate::scroll::{track, ScrollKey};
-use crate::db::models::{Project, ProjectStatus, RoadmapCommitment, Team};
+use crate::db::models::{Issue, Project, ProjectStatus, RoadmapCommitment, Team};
+use crate::views::progress_chart;
 use crate::theme::{self as t, radius, space};
 use crate::views::dropdown::dropdown;
 use crate::views::header;
@@ -130,26 +133,34 @@ impl RoadmapDrag {
 /// still reflect the whole roadmap.
 pub fn view<'a>(
     projects: &'a [Project],
+    issues: &[Issue],
     team: Option<&'a Team>,
     needle: &str,
     ui: &'a RoadmapUi,
 ) -> Element<'a, Message> {
     let identifier = team.map(|t| t.identifier.as_str()).unwrap_or("");
+    // Worked out locally, not read from the synced (often stale) flag.
+    let today = progress_chart::today();
+    let behind_ids: HashSet<&str> = roadmap_scope(projects)
+        .filter(|p| progress_chart::behind_schedule(p, issues, today))
+        .map(|p| p.id.as_str())
+        .collect();
+    let is_behind = |p: &Project| behind_ids.contains(p.id.as_str());
 
     // Projects on the roadmap drive the header counts (mirrors the Rails
     // controller, which flattens the three lanes' values).
     let on_roadmap: Vec<&Project> = roadmap_scope(projects)
         .filter(|p| p.roadmap_commitment.is_some())
         .collect();
-    let behind = on_roadmap.iter().filter(|p| p.behind_schedule).count();
+    let behind = on_roadmap.iter().filter(|p| is_behind(p)).count();
     let in_progress = on_roadmap
         .iter()
-        .filter(|p| !p.behind_schedule && p.status == Some(ProjectStatus::Started))
+        .filter(|p| !is_behind(p) && p.status == Some(ProjectStatus::Started))
         .count();
     let planned = on_roadmap
         .iter()
         .filter(|p| {
-            !p.behind_schedule
+            !is_behind(p)
                 && !matches!(
                     p.status,
                     Some(
@@ -203,7 +214,7 @@ pub fn view<'a>(
             .filter(|d| d.target() == Some(commitment))
             .and_then(|d| projects.iter().find(|p| p.id == d.project_id));
         lanes = lanes.push(lane_block(
-            commitment, label, subtitle, dot, &in_lane, incoming, identifier, ui,
+            commitment, label, subtitle, dot, &in_lane, incoming, identifier, ui, &behind_ids,
         ));
     }
 
@@ -246,6 +257,7 @@ fn lane_block<'a>(
     incoming: Option<&'a Project>,
     identifier: &'a str,
     ui: &'a RoadmapUi,
+    behind_ids: &HashSet<&str>,
 ) -> Element<'a, Message> {
     let header_col = column![]
         .spacing(6)
@@ -262,7 +274,7 @@ fn lane_block<'a>(
 
     let mut cells: Vec<Element<'a, Message>> = projects
         .iter()
-        .map(|p| card(p, identifier, ui))
+        .map(|p| card(p, identifier, ui, behind_ids.contains(p.id.as_str())))
         .collect();
     // Where the dragged card will land: lanes sort by due date, so its slot is
     // known before the drop.
@@ -307,8 +319,13 @@ fn lane_block<'a>(
 
 /// A project card. Clicking opens ProjectDetail; pressing and dragging moves
 /// it to another lane; the ⋮ menu changes (or removes) its commitment.
-fn card<'a>(project: &'a Project, identifier: &'a str, ui: &'a RoadmapUi) -> Element<'a, Message> {
-    let (status_label, status_color) = card_status(project);
+fn card<'a>(
+    project: &'a Project,
+    identifier: &'a str,
+    ui: &'a RoadmapUi,
+    behind: bool,
+) -> Element<'a, Message> {
+    let (status_label, status_color) = card_status(project, behind);
     let dragging = ui
         .drag
         .as_ref()
@@ -325,7 +342,7 @@ fn card<'a>(project: &'a Project, identifier: &'a str, ui: &'a RoadmapUi) -> Ele
     let due: Element<'a, Message> = match project.due_date.as_deref() {
         Some(d) if !d.is_empty() => text(format!("Due {}", format_target_date(d)))
             .size(11)
-            .color(if project.behind_schedule {
+            .color(if behind {
                 t::danger()
             } else {
                 t::text_muted()
@@ -363,7 +380,7 @@ fn card<'a>(project: &'a Project, identifier: &'a str, ui: &'a RoadmapUi) -> Ele
         .push(bottom);
 
     if project.total_issues_count > 0 {
-        inner = inner.push(progress_bar(project));
+        inner = inner.push(progress_bar(project, behind));
     }
 
     let card = container(inner)
@@ -573,8 +590,8 @@ fn menu_option<'a>(
 }
 
 /// Status pill label + color, mirroring the Rails `roadmaps/_card` logic.
-fn card_status(project: &Project) -> (&'static str, Color) {
-    if project.behind_schedule {
+fn card_status(project: &Project, behind: bool) -> (&'static str, Color) {
+    if behind {
         return ("Behind", t::danger());
     }
     match project.status {
@@ -593,9 +610,9 @@ fn card_status(project: &Project) -> (&'static str, Color) {
 }
 
 /// Thin 2px progress bar at the card's foot, colored per Rails.
-fn progress_bar<'a>(project: &Project) -> Element<'a, Message> {
+fn progress_bar<'a>(project: &Project, behind: bool) -> Element<'a, Message> {
     let pct = project.progress_percentage.clamp(0, 100);
-    let bar_color = if project.behind_schedule {
+    let bar_color = if behind {
         t::danger()
     } else if project.status == Some(ProjectStatus::Started) && pct < 50 {
         t::warning()

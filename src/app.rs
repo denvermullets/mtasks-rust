@@ -8965,7 +8965,7 @@ impl App {
                 }
             }
             View::Roadmap => {
-                roadmap_view::view(&self.projects, self.selected_team(), &needle, &self.roadmap_ui)
+                roadmap_view::view(&self.projects, &self.issues, self.selected_team(), &needle, &self.roadmap_ui)
             }
             View::RecurringIssues => crate::views::recurring_issues::view(&self.recurring_rows),
             View::Inbox => crate::views::inbox::view(&self.inbox),
