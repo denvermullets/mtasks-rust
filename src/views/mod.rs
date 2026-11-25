@@ -38,6 +38,7 @@ pub mod recurring_issue_form;
 pub mod recurring_issues;
 pub mod roadmap;
 pub mod settings;
+pub mod spinner;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod terminal_panel;
