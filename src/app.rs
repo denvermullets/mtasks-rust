@@ -489,6 +489,8 @@ pub enum Message {
 
     // Settings
     OpenSettings,
+    /// Open the "What's new" modal (the bundled changelog).
+    OpenWhatsNew,
     SettingsBaseUrlChanged(String),
     SettingsTokenChanged(String),
     /// Theme picked in Settings: applies live and saves to config immediately.
@@ -636,10 +638,12 @@ pub enum Message {
     ExportCsv,
     /// Result of the save dialog + write: Ok(Some(path)) saved, Ok(None) cancelled.
     CsvExported(Result<Option<String>, String>),
-    /// Open the native file picker for an import.
-    PickCsvImport,
-    /// Picked file contents: Ok(Some((file name, text))), Ok(None) cancelled.
-    CsvImportLoaded(Result<Option<(String, String)>, String>),
+    /// Open the native file picker for an import into this team (local id),
+    /// from the team's sidebar menu.
+    PickCsvImport(String),
+    /// Picked file contents for the team (local id): Ok(Some((file name,
+    /// text))), Ok(None) cancelled.
+    CsvImportLoaded(String, Result<Option<(String, String)>, String>),
     ConfirmCsvImport,
     /// Switch which lane a picked project will land in (chip selector).
     RoadmapAddLaneChanged(RoadmapCommitment),
@@ -770,6 +774,8 @@ pub enum Modal {
     TeamMembers(String),
     /// Preview of a CSV import (see `csv_import`).
     CsvImport,
+    /// The bundled changelog (see `whats_new`).
+    WhatsNew,
     /// Display-options popover (group/sort/properties), anchored under the header.
     DisplayOptions,
     /// Filter popover, anchored under the header.
@@ -7218,6 +7224,7 @@ impl App {
                     }
                     PaletteNav::Tab(i) => return self.update(Message::Tab(TabMessage::Focus(i))),
                     PaletteNav::Settings => return self.update(Message::OpenSettings),
+                    PaletteNav::WhatsNew => return self.update(Message::OpenWhatsNew),
                     PaletteNav::RestartToUpdate => return self.update(Message::RestartNowClicked),
                     PaletteNav::ToggleSidebar => return self.update(Message::ToggleSidebar),
                     // Status renders only in Settings, so open it to make the check visible.
@@ -7323,6 +7330,8 @@ impl App {
                 self.settings_form = Some(settings::SettingsFormState::from_config(&self.config));
                 self.modal = Modal::Settings;
             }
+
+            Message::OpenWhatsNew => self.modal = Modal::WhatsNew,
 
             Message::SettingsBaseUrlChanged(v) => {
                 if let Some(ref mut form) = self.settings_form {
@@ -7684,8 +7693,9 @@ impl App {
                 self.pending_sync_count = sync_queue::pending_count(&conn).unwrap_or(0);
             }
 
-            Message::PickCsvImport => {
-                if self.selected_team_id.is_none() {
+            Message::PickCsvImport(team_id) => {
+                self.team_menu_open = None;
+                if !self.teams.iter().any(|t| t.id == team_id) {
                     return Task::none();
                 }
                 return Task::perform(
@@ -7703,15 +7713,12 @@ impl App {
                             String::from_utf8_lossy(&bytes).into_owned(),
                         )))
                     },
-                    Message::CsvImportLoaded,
+                    move |result| Message::CsvImportLoaded(team_id.clone(), result),
                 );
             }
 
-            Message::CsvImportLoaded(result) => match result {
+            Message::CsvImportLoaded(team_id, result) => match result {
                 Ok(Some((file_name, text))) => {
-                    let Some(team_id) = self.selected_team_id.clone() else {
-                        return Task::none();
-                    };
                     let Some(team) = self.teams.iter().find(|t| t.id == team_id) else {
                         return Task::none();
                     };
@@ -7734,7 +7741,7 @@ impl App {
                     match csv_io::parse_import(&text, &ctx) {
                         Ok(preview) => {
                             self.csv_import =
-                                Some(csv_import::CsvImportState { file_name, preview });
+                                Some(csv_import::CsvImportState { team_id, file_name, preview });
                             self.modal = Modal::CsvImport;
                         }
                         Err(e) => {
@@ -7747,11 +7754,10 @@ impl App {
             },
 
             Message::ConfirmCsvImport => {
-                let (Some(state), Some(team_id)) =
-                    (self.csv_import.take(), self.selected_team_id.clone())
-                else {
+                let Some(state) = self.csv_import.take() else {
                     return Task::none();
                 };
+                let team_id = state.team_id.clone();
                 let conn = self.db();
                 let skipped = state.preview.errors.len();
                 let duplicates = state.preview.duplicates.len();
@@ -9394,6 +9400,18 @@ impl App {
                 }
                 None => base,
             },
+            Modal::WhatsNew => {
+                let ctx = crate::views::body::BodyCtx {
+                    teams: &self.teams,
+                    issues: &[],
+                    members: &[],
+                    images: &self.images,
+                    host: &self.config.api_base_url,
+                    pending_paths: None,
+                    on_image: None,
+                };
+                iced::widget::stack![base, crate::views::whats_new::view(&ctx)].into()
+            }
             Modal::Settings => {
                 if let Some(ref form) = self.settings_form {
                     let ctx = crate::views::body::BodyCtx {

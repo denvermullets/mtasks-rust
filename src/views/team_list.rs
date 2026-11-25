@@ -353,6 +353,10 @@ fn team_block<'a>(
                     "Members",
                     Some(Message::OpenTeamMembers(team.id.clone())),
                 ))
+                .push(menu_row(
+                    "Import CSV",
+                    Some(Message::PickCsvImport(team.id.clone())),
+                ))
                 .push(web_row("Team settings \u{2197}", TeamWebSection::General))
                 .push(web_row("Lane management \u{2197}", TeamWebSection::Lanes));
         }
@@ -557,7 +561,8 @@ fn home_marker<'a>() -> Element<'a, Message> {
 /// Issue export isn't offered to users yet.
 const SHOW_EXPORT_CSV: bool = false;
 
-/// Sidebar footer: per-team CSV export / import (disabled without a team).
+/// Sidebar footer: What's new and Settings (plus CSV export, once offered,
+/// disabled without a team). CSV import lives in each team's menu.
 pub fn footer<'a>(has_team: bool, settings_dot: bool) -> Element<'a, Message> {
     let btn = |label: &'a str, msg: Message| {
         button(text(label).size(13).color(if has_team {
@@ -575,7 +580,13 @@ pub fn footer<'a>(has_team: bool, settings_dot: bool) -> Element<'a, Message> {
             // Export isn't available to users yet; `Message::ExportCsv` stays
             // wired for when it is.
             .push(SHOW_EXPORT_CSV.then(|| btn("Export CSV", Message::ExportCsv)))
-            .push(btn("Import CSV", Message::PickCsvImport))
+            .push(
+                button(text("What's new").size(13).color(t::text_secondary()))
+                    .on_press(Message::OpenWhatsNew)
+                    .padding([6, 14])
+                    .width(Length::Fill)
+                    .style(plain_row_style),
+            )
             .push(settings_row(settings_dot)),
     )
     .padding([6, 0])

@@ -8,6 +8,8 @@ use crate::theme as t;
 
 /// State for the CSV import preview modal.
 pub struct CsvImportState {
+    /// The team (local id) the rows import into.
+    pub team_id: String,
     /// File name shown in the header.
     pub file_name: String,
     pub preview: ImportPreview,

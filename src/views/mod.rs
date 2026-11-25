@@ -51,6 +51,7 @@ pub mod toast;
 pub mod update_chip;
 pub mod truncated;
 pub mod util;
+pub mod whats_new;
 pub mod wheel_guard;
 pub mod axis_lock;
 pub mod click_outside;

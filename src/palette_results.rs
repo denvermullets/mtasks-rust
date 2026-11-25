@@ -50,6 +50,8 @@ pub enum PaletteNav {
     Tab(usize),
     /// Open the Settings modal (`Message::OpenSettings`).
     Settings,
+    /// Open the changelog (`Message::OpenWhatsNew`).
+    WhatsNew,
     /// Collapse or expand the teams sidebar (`Message::ToggleSidebar`).
     ToggleSidebar,
     /// Check for a newer Release (`Message::UpdateCheckClicked`).
@@ -78,6 +80,7 @@ impl PaletteNav {
             | PaletteNav::ToggleProjectCardsStacked
             | PaletteNav::ToggleTerminalDock
             | PaletteNav::Settings
+            | PaletteNav::WhatsNew
             | PaletteNav::ToggleSidebar
             | PaletteNav::CheckForUpdates
             | PaletteNav::RestartToUpdate => "Command",
@@ -380,6 +383,14 @@ fn push_views(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
             primary: "Settings".to_string(),
             secondary: "Shortcut: ,".to_string(),
             nav: PaletteNav::Settings,
+        });
+    }
+    // Typed for, not listed by default, like the sidebar toggle.
+    if !needle.is_empty() && name_matches(needle, "What's new") {
+        rows.push(PaletteRow {
+            primary: "What's new".to_string(),
+            secondary: "Changelog".to_string(),
+            nav: PaletteNav::WhatsNew,
         });
     }
     // Typed for, not listed by default: the empty palette stays views + teams.
