@@ -7190,8 +7190,8 @@ impl App {
                     // issue/project detail edits first.
                     PaletteNav::View(view) => return self.update(Message::NavigateToView(view)),
                     // Same path as a sidebar team click, so selection follows.
-                    PaletteNav::Team(id) => {
-                        return self.update(Message::SelectTeamView(id, View::Board))
+                    PaletteNav::Team { team_id, view } => {
+                        return self.update(Message::SelectTeamView(team_id, view))
                     }
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),

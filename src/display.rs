@@ -805,8 +805,11 @@ pub fn visible_from<'a>(
     needle: &str,
 ) -> Vec<&'a Issue> {
     let now = Utc::now();
+    // A search looks through closed issues too: the completed setting only
+    // narrows the unsearched list.
+    let searching = !needle.is_empty();
     let mut out: Vec<&Issue> = candidates
-        .filter(|i| passes_completed(i, opts, now))
+        .filter(|i| searching || passes_completed(i, opts, now))
         .filter(|i| opts.show_sub_issues || i.parent_issue_id.is_none())
         .filter(|i| {
             let labels = data
@@ -1498,6 +1501,24 @@ mod tests {
         let cols = build_columns(&d, &o, &Filters::default(), "");
         assert_eq!(cols[0].issues.len(), 1);
         assert_eq!(cols[0].issues[0].id, "2");
+    }
+
+    #[test]
+    fn search_finds_completed_issues_even_when_hidden() {
+        let lanes = [lane("a", "Todo", 0)];
+        let mut done = issue("1", "a", 2);
+        done.title = "old login bug".into();
+        done.completed_at = Some("x".into());
+        let issues = [done, issue("2", "a", 2)];
+        let il = HashMap::new();
+        let d = data(&lanes, &issues, &[], &il);
+        let o = DisplayOptions {
+            show_completed: false,
+            ..Default::default()
+        };
+        let cols = build_columns(&d, &o, &Filters::default(), "login");
+        assert_eq!(cols[0].issues.len(), 1);
+        assert_eq!(cols[0].issues[0].id, "1");
     }
 
     #[test]
