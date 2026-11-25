@@ -5810,6 +5810,7 @@ impl App {
                 let default_lane = lanes.first().map(|l| l.id.clone()).unwrap_or_default();
                 self.issue_form = Some(issue_form::IssueFormState::new(default_lane));
                 self.modal = Modal::IssueForm;
+                return iced::widget::operation::focus(issue_form::title_input_id());
             }
 
             Message::CreateSubIssue(parent_id) => {
@@ -5820,6 +5821,7 @@ impl App {
                         parent,
                     ));
                     self.modal = Modal::IssueForm;
+                    return iced::widget::operation::focus(issue_form::title_input_id());
                 }
             }
 
@@ -6099,10 +6101,11 @@ impl App {
                     let default_lane = lanes.first().map(|l| l.id.clone()).unwrap_or_default();
                     self.issue_form = Some(form.next_after_create(default_lane));
                     self.push_toast("Issue created. Create another?", ToastKind::Info, false);
-                } else {
-                    self.modal = Modal::None;
-                    self.issue_form = None;
+                    self.reload_data();
+                    return iced::widget::operation::focus(issue_form::title_input_id());
                 }
+                self.modal = Modal::None;
+                self.issue_form = None;
                 self.reload_data();
             }
 

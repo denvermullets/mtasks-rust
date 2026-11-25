@@ -244,6 +244,13 @@ const LABEL_MENU_WIDTH: f32 = 320.0;
 /// The description's height until it outgrows it.
 const DESCRIPTION_MIN_HEIGHT: f32 = 110.0;
 
+const TITLE_PLACEHOLDER: &str = "Issue title";
+
+/// The title field's `Id`: a new issue's form opens with it focused.
+pub fn title_input_id() -> iced::widget::Id {
+    form_page::title_input_id(TITLE_PLACEHOLDER)
+}
+
 /// What the page's context row (above the title) names: the team or issue
 /// chip, then "New issue" / "New sub-issue of …" / "Edit issue".
 pub struct PageContext {
@@ -467,7 +474,7 @@ pub fn page<'a>(
     let content = column![]
         .push(context_row)
         .push(Space::new().height(space::S6))
-        .push(form_page::title_input("Issue title", &form.title, Message::IssueTitleChanged))
+        .push(form_page::title_input(TITLE_PLACEHOLDER, &form.title, Message::IssueTitleChanged))
         .push(form.error.as_deref().map(|e| {
             column![Space::new().height(space::S2), form_page::error_text(e)]
         }))

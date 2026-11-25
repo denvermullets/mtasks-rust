@@ -46,11 +46,20 @@ pub fn title_input<'a>(
     value: &str,
     on_input: fn(String) -> Message,
 ) -> Element<'a, Message> {
-    crate::undo_input::text_input(format!("title-{placeholder}"), placeholder, value, on_input)
+    crate::undo_input::text_input(title_input_key(placeholder), placeholder, value, on_input)
         .padding(0)
         .size(type_scale::XXL)
         .style(borderless_input)
         .into()
+}
+
+fn title_input_key(placeholder: &str) -> String {
+    format!("title-{placeholder}")
+}
+
+/// The `Id` of the [`title_input`] built with `placeholder`, to focus it.
+pub fn title_input_id(placeholder: &str) -> iced::widget::Id {
+    crate::undo_input::id(title_input_key(placeholder))
 }
 
 fn borderless_input(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
