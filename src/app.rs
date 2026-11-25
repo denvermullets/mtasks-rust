@@ -3539,9 +3539,13 @@ impl App {
         state.toggle_label(&label_id);
         let ids = state.label_ids();
         let conn = self.db();
-        let _ = queries::edit_issue_queued(&conn, &issue_id, "update", None, |c| {
+        if queries::edit_issue_queued(&conn, &issue_id, "update", None, |c| {
             queries::set_issue_labels(c, &issue_id, &ids)
-        });
+        })
+        .is_err()
+        {
+            self.push_toast("Couldn't save the labels", ToastKind::Error, false);
+        }
         self.reload_data();
         if created {
             // Rebuild so the new label is listed (checked), keeping the anchor.
@@ -8603,9 +8607,13 @@ impl App {
                 if let Some(ref form) = self.label_form {
                     if let Some(ref issue_id) = form.issue_id {
                         let conn = self.db();
-                        let _ = queries::edit_issue_queued(&conn, issue_id, "update", None, |c| {
+                        if queries::edit_issue_queued(&conn, issue_id, "update", None, |c| {
                             queries::set_issue_labels(c, issue_id, &form.selected_label_ids)
-                        });
+                        })
+                        .is_err()
+                        {
+                            self.push_toast("Couldn't save the labels", ToastKind::Error, false);
+                        }
                     }
                 }
                 self.modal = Modal::None;

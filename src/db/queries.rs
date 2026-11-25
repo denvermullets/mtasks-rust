@@ -1286,22 +1286,36 @@ pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(St
 
 /// Replace the full set of labels attached to `issue_id` with `label_ids`.
 /// Mirrors Rails' `label_ids=` collection setter (delete + insert to match).
+///
+/// Atomic via a SAVEPOINT rather than BEGIN, so it also runs inside a caller's
+/// transaction (`edit_issue_queued`): a nested BEGIN fails, which silently
+/// dropped label edits (JRST-531).
 pub fn set_issue_labels(conn: &Connection, issue_id: &str, label_ids: &[String]) -> Result<()> {
     let now = crate::db::now_iso();
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM issue_labels WHERE issue_id = ?1",
-        params![issue_id],
-    )?;
-    for label_id in label_ids {
-        tx.execute(
-            "INSERT INTO issue_labels (issue_id, label_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?3)",
-            params![issue_id, label_id, now],
+    conn.execute_batch("SAVEPOINT set_issue_labels")?;
+    let replace = || -> Result<()> {
+        conn.execute(
+            "DELETE FROM issue_labels WHERE issue_id = ?1",
+            params![issue_id],
         )?;
+        for label_id in label_ids {
+            conn.execute(
+                "INSERT INTO issue_labels (issue_id, label_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)",
+                params![issue_id, label_id, now],
+            )?;
+        }
+        Ok(())
+    };
+    match replace() {
+        Ok(()) => conn.execute_batch("RELEASE set_issue_labels"),
+        Err(e) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO set_issue_labels; RELEASE set_issue_labels",
+            );
+            Err(e)
+        }
     }
-    tx.commit()?;
-    Ok(())
 }
 
 pub fn get_issue_dependency(conn: &Connection, dep_id: &str) -> Result<Option<IssueDependency>> {
@@ -2584,6 +2598,25 @@ mod tests {
         // Empty clears all.
         set_issue_labels(&conn, "i1", &[]).unwrap();
         assert!(label_ids_for_issue(&conn, "i1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_issue_labels_works_inside_a_queued_edit() {
+        // The label picker and the issue form set labels inside
+        // edit_issue_queued's transaction; a nested BEGIN used to fail there
+        // and the edit was silently dropped (JRST-531).
+        let conn = setup();
+        insert_label(&conn, &make_label("lab1", "bug")).unwrap();
+        insert_label(&conn, &make_label("lab2", "ui")).unwrap();
+
+        edit_issue_queued(&conn, "i1", "update", None, |c| {
+            set_issue_labels(c, "i1", &["lab1".into(), "lab2".into()])
+        })
+        .unwrap();
+        let mut ids = label_ids_for_issue(&conn, "i1").unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["lab1".to_string(), "lab2".to_string()]);
+        assert_eq!(crate::db::sync_queue::pending_count(&conn).unwrap(), 1);
     }
 
     #[test]
