@@ -175,7 +175,8 @@ pub fn view<'a>(
                 .center_y(Length::Fixed(scroll::LIST_HEADER_H))
                 .width(Length::Fill),
             )
-            .on_press(Message::ToggleSection(col.title.clone())),
+            .on_press(Message::ToggleSection(col.title.clone()))
+            .interaction(iced::mouse::Interaction::Pointer),
         );
         if is_collapsed {
             continue;
@@ -366,6 +367,7 @@ pub fn issue_row<'a>(
                 ..Default::default()
             }),
     )
-    .on_press(Message::CardPressed(col_idx, issue_idx));
+    .on_press(Message::CardPressed(col_idx, issue_idx))
+    .interaction(iced::mouse::Interaction::Pointer);
     crate::views::row_hover::row_hover(row, issue.id.clone(), Message::CardHover).into()
 }

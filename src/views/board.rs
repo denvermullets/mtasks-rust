@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use iced::widget::{column, container, mouse_area, row, scrollable, Column, Row};
+use iced::widget::{column, container, horizontal_space, mouse_area, row, scrollable, tooltip, Column, Row, Space};
 use crate::views::text;
 use iced::widget::text::LineHeight;
 use iced::{Border, Element, Length, Theme};
@@ -8,10 +8,13 @@ use iced::{Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Label, Lane, Member, Project, Team};
-use crate::display::{self, CardProperty, Column as BoardColumn, DisplayOptions};
+use crate::db::queries::BlockCounts;
+use crate::display::{self, Column as BoardColumn, DisplayOptions};
 use crate::scroll;
 use crate::fonts;
 use crate::theme::{self as t, radius, space, type_scale};
+use crate::views::card_layout::{self as cl, CardLayout, Pill, Placed};
+use crate::views::form_page;
 use crate::views::labels as labels_view;
 use crate::views::lane_icon;
 use crate::views::util;
@@ -64,6 +67,10 @@ pub struct CardData<'a> {
     pub members: &'a [Member],
     pub projects: &'a [Project],
     pub issue_labels: &'a HashMap<String, Vec<Label>>,
+    /// Comments per local issue id (replies included, as the web counts them).
+    pub comment_counts: &'a HashMap<String, usize>,
+    /// Blocking / blocked-by counts per local issue id (`blocks` edges only).
+    pub block_counts: &'a HashMap<String, crate::db::queries::BlockCounts>,
     pub display: &'a DisplayOptions,
     /// Local id of the card or row under the pointer; painted with the hover
     /// highlight (Rails' `hover:bg-hover-highlight`).
@@ -317,7 +324,8 @@ fn swimlane_body<'a>(
                 ..Default::default()
             }),
         )
-        .on_press(Message::ToggleSwimlane(brow.title.clone()));
+        .on_press(Message::ToggleSwimlane(brow.title.clone()))
+        .interaction(iced::mouse::Interaction::Pointer);
 
         let mut block: Column<'_, Message> =
             column![].spacing(scroll::SWIMLANE_HEADER_GAP).push(header);
@@ -360,63 +368,11 @@ fn swimlane_body<'a>(
         .into()
 }
 
-/// The muted "fact" strings on a card's meta line, in display order.
-fn card_facts(issue: &Issue, data: &CardData<'_>) -> Vec<String> {
-    let d = data.display;
-    let mut facts: Vec<String> = Vec::new();
-    if d.shows(CardProperty::Assignee) {
-        let name = issue
-            .assignee_id
-            .as_ref()
-            .and_then(|id| data.members.iter().find(|m| m.id == *id))
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| "Unassigned".to_string());
-        facts.push(name);
-    }
-    if d.shows(CardProperty::Project) {
-        if let Some(p) = issue
-            .project_id
-            .as_ref()
-            .and_then(|id| data.projects.iter().find(|p| p.id == *id))
-        {
-            facts.push(p.name.clone());
-        }
-    }
-    if d.shows(CardProperty::DueDate) {
-        if let Some(due) = issue.due_date.as_deref() {
-            facts.push(format!("Due {}", due.get(..10).unwrap_or(due)));
-        }
-    }
-    if d.shows(CardProperty::Status) {
-        if let Some(l) = data.lanes.iter().find(|l| l.id == issue.lane_id) {
-            facts.push(l.name.clone());
-        }
-    }
-    if d.shows(CardProperty::Estimate) {
-        if let Some(e) = issue.estimate {
-            facts.push(util::format_estimate(e));
-        }
-    }
-    if d.shows(CardProperty::Created) {
-        facts.push(format!("Created {}", util::short_date(&issue.created_at)));
-    }
-    if d.shows(CardProperty::Updated) {
-        facts.push(format!("Updated {}", util::short_date(&issue.updated_at)));
-    }
-    facts
-}
-
-/// Rendered height of `issue`'s card (cards are fixed-height so scroll-to-focus
-/// can be computed; see `scroll::board_card_height`).
+/// Rendered height of `issue`'s card. Cards are sized by `CardLayout`, which
+/// measures the title and packs the footer pills, so scroll-to-focus can place
+/// them without querying the widget tree.
 pub fn card_height(issue: &Issue, data: &CardData<'_>) -> f32 {
-    let d = data.display;
-    let has_chips = d.shows(CardProperty::Labels)
-        && data
-            .issue_labels
-            .get(&issue.id)
-            .is_some_and(|l| !l.is_empty());
-    let has_meta = d.shows(CardProperty::Priority) || !card_facts(issue, data).is_empty();
-    scroll::board_card_height(d.shows(CardProperty::Id), has_chips, has_meta)
+    CardLayout::new(issue, data).height()
 }
 
 /// `(top, height)` of the focused card within its lane's scroll content.
@@ -471,12 +427,12 @@ fn issue_card<'a>(
     lane_idx: usize,
     issue_idx: usize,
 ) -> Element<'a, Message> {
-    let d = data.display;
-    let priority_color = t::priority_color(issue.priority_enum());
-
+    let layout = CardLayout::new(issue, data);
+    let (footer_h, card_h) = (layout.footer_h(), layout.height());
     let mut card_content = column![].spacing(0);
 
-    if d.shows(CardProperty::Id) {
+    // Id row: identifier, comment count pushed right (web `ml-auto`).
+    if layout.show_id {
         let ident = data
             .teams
             .iter()
@@ -487,83 +443,78 @@ fn issue_card<'a>(
             .team_number
             .map(|n| format!("{ident}-{n}"))
             .unwrap_or_default();
-        card_content = card_content.push(
-            container(
-                text(tag)
-                    .size(type_scale::XS)
-                    .line_height(LineHeight::Relative(type_scale::LH_XS))
-                    .font(fonts::code())
-                    .color(t::text_muted()),
-            )
-            .padding(iced::Padding::ZERO.bottom(space::S2)),
-        );
-    }
-    card_content = card_content.push(
-        text(&issue.title)
-            .size(type_scale::SM)
-            .line_height(LineHeight::Relative(type_scale::LH_SM))
-            .color(t::text_primary())
-            .wrapping(text::Wrapping::None),
-    );
-
-    let labels = data
-        .issue_labels
-        .get(&issue.id)
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-    if d.shows(CardProperty::Labels) && !labels.is_empty() {
-        let mut chips: Row<'a, Message> = row![].spacing(space::S1);
-        for label in labels {
-            chips = chips.push(labels_view::static_chip(label));
-        }
-        card_content = card_content.push(
-            container(
-                container(chips)
-                    .height(Length::Fixed(scroll::CARD_CHIP_ROW_H))
-                    .align_y(iced::alignment::Vertical::Center),
-            )
-            .padding(iced::Padding::ZERO.top(space::S2)),
-        );
-    }
-
-    // Meta line: small muted facts, only the enabled ones.
-    let facts = card_facts(issue, data);
-
-    let mut meta: Row<'a, Message> = row![].spacing(space::S1_5).align_y(iced::Alignment::Center);
-    if d.shows(CardProperty::Priority) {
-        // Priority indicator: triangle + number like the Rails app
-        meta = meta.push(
+        let comments = (layout.comments > 0).then(|| {
             row![]
-                .spacing(space::S1)
+                .spacing(space::S0_5)
                 .align_y(iced::Alignment::Center)
-                .push(
-                    text("△")
-                        .size(type_scale::XS)
-                        .line_height(LineHeight::Relative(type_scale::LH_XS))
-                        .color(priority_color),
-                )
-                .push(
-                    text(format!("{}", issue.priority))
-                        .size(type_scale::XS)
-                        .line_height(LineHeight::Relative(type_scale::LH_XS))
-                        .color(t::text_muted()),
-                ),
+                .push(form_page::icon(ICON_CHAT, cl::PILL_ICON, t::text_muted()))
+                .push(xs_text(layout.comments.to_string()))
+        });
+        card_content = card_content.push(
+            container(
+                row![]
+                    .align_y(iced::Alignment::Center)
+                    .push(
+                        text(tag)
+                            .size(type_scale::XS)
+                            .line_height(LineHeight::Relative(type_scale::LH_XS))
+                            .font(fonts::code())
+                            .color(t::text_muted()),
+                    )
+                    .push_maybe(block_icon(layout.blocks))
+                    .push(horizontal_space())
+                    .push_maybe(comments),
+            )
+            .height(Length::Fixed(cl::XS_LINE))
+            .padding(iced::Padding::ZERO)
+            .clip(true),
         );
+        card_content = card_content.push(Space::with_height(cl::ID_GAP));
     }
-    let has_meta = d.shows(CardProperty::Priority) || !facts.is_empty();
-    for f in facts {
-        meta = meta.push(
-            text(f)
-                .size(type_scale::XS)
-                .line_height(LineHeight::Relative(type_scale::LH_XS))
-                .color(t::text_muted())
-                .wrapping(text::Wrapping::None),
-        );
-    }
-    if has_meta {
-        card_content = card_content
-            .push(container(meta).padding(iced::Padding::ZERO.top(space::S3)));
-    }
+
+    // Title: one or two lines as measured; past two it is clipped (web
+    // `line-clamp-2`).
+    card_content = card_content.push(
+        container(
+            text(&issue.title)
+                .size(type_scale::SM)
+                .line_height(LineHeight::Relative(type_scale::LH_SM))
+                .color(t::text_primary())
+                .wrapping(text::Wrapping::WordOrGlyph),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(layout.title_lines as f32 * cl::TITLE_LINE))
+        .clip(true),
+    );
+    card_content = card_content.push(Space::with_height(cl::TITLE_GAP));
+
+    // Footer: the packed pill rows, avatar on the right (web `justify-between
+    // items-start`). No pills shows the web's "···".
+    let pills: Element<'a, Message> = if layout.rows.is_empty() {
+        if layout.assignee.is_some() {
+            Space::with_width(Length::Fill).into()
+        } else {
+            container(form_page::icon(ICON_DOTS, space::S4, t::text_muted()))
+                .center_y(Length::Fixed(cl::PILL_H))
+                .into()
+        }
+    } else {
+        let mut rows: Column<'a, Message> = column![].spacing(cl::PILL_GAP);
+        for placed_row in layout.rows {
+            let mut r: Row<'a, Message> = row![].spacing(cl::PILL_GAP);
+            for placed in placed_row {
+                r = r.push(card_pill(placed));
+            }
+            rows = rows.push(r);
+        }
+        rows.into()
+    };
+    let footer = row![]
+        .spacing(cl::AVATAR_GAP)
+        .push(container(pills).width(Length::Fill))
+        .push_maybe(layout.assignee.map(|m| util::avatar(&m.name)))
+        .height(Length::Fixed(footer_h));
+    card_content = card_content.push(footer);
 
     let hovered = data.hovered == Some(issue.id.as_str());
     let bg = if focused || hovered {
@@ -575,9 +526,9 @@ fn issue_card<'a>(
     let border_color = if focused { t::accent() } else { t::border() };
 
     let card = container(card_content)
-        .padding([space::S2_5, space::S3])
+        .padding([cl::PAD_Y, cl::PAD_X])
         .width(Length::Fill)
-        .height(Length::Fixed(card_height(issue, data)))
+        .height(Length::Fixed(card_h))
         .clip(true)
         .style(move |_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(bg)),
@@ -590,7 +541,9 @@ fn issue_card<'a>(
         });
 
     let card = crate::views::row_hover::row_hover(
-        mouse_area(card).on_press(Message::CardPressed(lane_idx, issue_idx)),
+        mouse_area(card)
+            .on_press(Message::CardPressed(lane_idx, issue_idx))
+            .interaction(iced::mouse::Interaction::Pointer),
         issue.id.clone(),
         Message::CardHover,
     );
@@ -600,3 +553,104 @@ fn issue_card<'a>(
         card.into()
     }
 }
+
+/// The id row's dependency icon (web `issues/_issue_card`): red when the issue
+/// is blocked, yellow when it only blocks others; hover lists both counts.
+fn block_icon<'a>(blocks: BlockCounts) -> Option<Element<'a, Message>> {
+    if blocks.blocking == 0 && blocks.blocked_by == 0 {
+        return None;
+    }
+    let color = if blocks.blocked_by > 0 { t::RED_400 } else { t::YELLOW_400 };
+    let tip = [
+        (blocks.blocking > 0).then(|| format!("Blocking {}", blocks.blocking)),
+        (blocks.blocked_by > 0).then(|| format!("Blocked by {}", blocks.blocked_by)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let icon = container(form_page::icon(ICON_BLOCK, cl::PILL_ICON, color))
+        .padding(iced::Padding::ZERO.left(cl::BLOCK_ICON_GAP));
+    Some(
+        tooltip(
+            icon,
+            container(text(tip).size(type_scale::XS).color(t::text_strong()))
+                .padding([space::S1, space::S2])
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(t::bg_menu())),
+                    border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
+                    ..Default::default()
+                }),
+            tooltip::Position::Top,
+        )
+        .gap(space::S1)
+        .into(),
+    )
+}
+
+/// Muted `XS` text on the `XS` line (pill and comment-count text).
+fn xs_text<'a>(content: String) -> iced::widget::Text<'a> {
+    text(content)
+        .size(type_scale::XS)
+        .line_height(LineHeight::Relative(type_scale::LH_XS))
+        .color(t::text_muted())
+        .wrapping(text::Wrapping::None)
+}
+
+/// One footer pill at its measured width (web `px-1.5 py-0.5 rounded border`).
+fn card_pill<'a>(placed: Placed<'a>) -> Element<'a, Message> {
+    let label = xs_text(placed.pill.text());
+    let face: Element<'a, Message> = match placed.pill {
+        Pill::More(_) => {
+            return container(label)
+                .center_y(Length::Fixed(cl::PILL_H))
+                .width(Length::Fixed(placed.width))
+                .into();
+        }
+        Pill::Priority(_) => row![]
+            .spacing(cl::PRIORITY_ICON_GAP)
+            .align_y(iced::Alignment::Center)
+            .push(form_page::icon(ICON_WARNING, cl::PILL_ICON, t::text_muted()))
+            .push(label)
+            .into(),
+        Pill::Label(l) => {
+            let dot = labels_view::chip_color(l.color.as_deref());
+            row![]
+                .spacing(cl::PILL_ICON_GAP)
+                .align_y(iced::Alignment::Center)
+                .push(
+                    container(Space::new(cl::LABEL_DOT, cl::LABEL_DOT)).style(move |_: &Theme| {
+                        container::Style {
+                            background: Some(iced::Background::Color(dot)),
+                            border: Border { radius: radius::FULL.into(), ..Default::default() },
+                            ..Default::default()
+                        }
+                    }),
+                )
+                .push(label)
+                .into()
+        }
+        Pill::Fact { icon, .. } => row![]
+            .spacing(cl::PILL_ICON_GAP)
+            .align_y(iced::Alignment::Center)
+            .push_maybe(icon.map(|src| form_page::icon(src, cl::PILL_ICON, t::text_muted())))
+            .push(label)
+            .into(),
+    };
+    container(face)
+        .padding([cl::PILL_PAD_Y, cl::PILL_PAD_X])
+        .width(Length::Fixed(placed.width))
+        .height(Length::Fixed(cl::PILL_H))
+        .clip(true)
+        .style(|_: &Theme| container::Style {
+            border: Border { color: t::border(), width: 1.0, radius: radius::SM.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+// Heroicons from the web card.
+const ICON_CHAT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>"##;
+const ICON_WARNING: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>"##;
+const ICON_BLOCK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>"##;
+const ICON_DOTS: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#000" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0z"/></svg>"##;

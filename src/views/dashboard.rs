@@ -666,7 +666,8 @@ fn group_header<'a>(
         .width(Length::Fill)
         .clip(true),
     )
-    .on_press(Message::ToggleDashboardGroup(g.group.id.clone()));
+    .on_press(Message::ToggleDashboardGroup(g.group.id.clone()))
+    .interaction(iced::mouse::Interaction::Pointer);
     container(
         row![]
             .align_y(Alignment::Center)
@@ -692,20 +693,6 @@ fn labelled_cell<'a>(icon: &'static str, label: String, width: f32) -> Element<'
     .width(Length::Fixed(width))
     .clip(true)
     .into()
-}
-
-/// The assignee's initial in an accent circle (web `user_avatar size: "sm"`).
-fn avatar<'a>(name: &str) -> Element<'a, Message> {
-    let initial: String = name.chars().next().into_iter().flat_map(char::to_uppercase).collect();
-    container(text(initial).size(type_scale::XS).font(fonts::bold_active()).color(t::bg_primary()))
-        .center_x(Length::Fixed(space::S5))
-        .center_y(Length::Fixed(space::S5))
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(t::accent())),
-            border: Border { radius: radius::FULL.into(), ..Default::default() },
-            ..Default::default()
-        })
-        .into()
 }
 
 /// A row (web `dashboards/_issue_row`): priority dot, title, team, project,
@@ -771,7 +758,7 @@ fn issue_row<'a>(
                 .clip(true),
         )
         .push(
-            container(row![].push_maybe(assignee.map(|m| avatar(&m.name))))
+            container(row![].push_maybe(assignee.map(|m| util::avatar(&m.name))))
                 .center_x(Length::Fixed(W_ASSIGNEE)),
         )
         .push(

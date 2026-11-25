@@ -1117,6 +1117,10 @@ pub struct App {
     /// Labels attached to each issue, keyed by issue local UUID. Built once per
     /// reload so board cards render chips without a query each.
     issue_labels: HashMap<String, Vec<Label>>,
+    /// Comments per local issue id, for the board cards' count.
+    comment_counts: HashMap<String, usize>,
+    /// Blocking / blocked-by counts per local issue id, for the board cards' icon.
+    block_counts: HashMap<String, queries::BlockCounts>,
     /// Dependency edges for the open detail issue, resolved for the sidebar.
     /// Repopulated each reload only while `view` is `IssueDetail`.
     detail_deps: queries::DependencyGroups,
@@ -1442,11 +1446,16 @@ impl App {
             self.members = queries::members_for_team(&conn, team_id).unwrap_or_default();
             self.labels = queries::labels_for_team(&conn, team_id).unwrap_or_default();
             self.issue_labels = build_issue_labels_map(&conn, team_id);
+            self.comment_counts =
+                queries::comment_counts_for_team(&conn, team_id).unwrap_or_default();
+            self.block_counts = queries::block_counts_for_team(&conn, team_id).unwrap_or_default();
         } else {
             self.projects.clear();
             self.members.clear();
             self.labels.clear();
             self.issue_labels.clear();
+            self.comment_counts.clear();
+            self.block_counts.clear();
         }
 
         self.reload_dashboard_config(&conn);
@@ -1513,6 +1522,8 @@ impl App {
         self.members.clear();
         self.labels.clear();
         self.issue_labels.clear();
+        self.comment_counts.clear();
+        self.block_counts.clear();
         for team in self.teams.iter().filter(|t| t.archived_at.is_none()) {
             let id = &team.id;
             self.lanes
@@ -1526,6 +1537,10 @@ impl App {
             self.labels
                 .extend(queries::labels_for_team(conn, id).unwrap_or_default());
             self.issue_labels.extend(build_issue_labels_map(conn, id));
+            self.comment_counts
+                .extend(queries::comment_counts_for_team(conn, id).unwrap_or_default());
+            self.block_counts
+                .extend(queries::block_counts_for_team(conn, id).unwrap_or_default());
         }
     }
 
@@ -2703,6 +2718,8 @@ impl App {
                     members: &self.members,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
+                    comment_counts: &self.comment_counts,
+                    block_counts: &self.block_counts,
                     display: self.board_display(),
                     hovered: None,
                     deps: None,
@@ -2724,6 +2741,8 @@ impl App {
                     members: &self.members,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
+                    comment_counts: &self.comment_counts,
+                    block_counts: &self.block_counts,
                     display: self.board_display(),
                     hovered: None,
                     deps: None,
@@ -3875,6 +3894,14 @@ impl App {
             LaunchTarget::Default => (default_team_id(&teams), None, None),
         };
 
+        let comment_counts = selected_team_id
+            .as_ref()
+            .map(|tid| queries::comment_counts_for_team(&conn, tid).unwrap_or_default())
+            .unwrap_or_default();
+        let block_counts = selected_team_id
+            .as_ref()
+            .map(|tid| queries::block_counts_for_team(&conn, tid).unwrap_or_default())
+            .unwrap_or_default();
         let (lanes, issues, projects, members, labels, issue_labels) =
             if let Some(ref tid) = selected_team_id {
                 (
@@ -3908,6 +3935,8 @@ impl App {
             members,
             labels,
             issue_labels,
+            comment_counts,
+            block_counts,
             detail_deps: Default::default(),
             map_deps: Vec::new(),
             map_flipped: HashSet::new(),
@@ -8788,6 +8817,8 @@ impl App {
                         members: &self.members,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
+                        comment_counts: &self.comment_counts,
+                        block_counts: &self.block_counts,
                         display: self.board_display(),
                         hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
                         deps: None,
@@ -8812,6 +8843,8 @@ impl App {
                     members: &self.members,
                     projects: &self.projects,
                     issue_labels: &self.issue_labels,
+                    comment_counts: &self.comment_counts,
+                    block_counts: &self.block_counts,
                     display: self.board_display(),
                     hovered: self.hovered_card.as_ref().map(|h| h.issue_id.as_str()),
                     deps: dep_lines,
@@ -9006,6 +9039,8 @@ impl App {
                         members: &self.members,
                         projects: &self.projects,
                         issue_labels: &self.issue_labels,
+                        comment_counts: &self.comment_counts,
+                        block_counts: &self.block_counts,
                         display: DisplayOptions::dashboard_rows(),
                         hovered: None,
                         deps: None,

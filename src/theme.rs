@@ -582,6 +582,8 @@ pub fn priority_dot_color(priority: Priority) -> Color {
 
 /// Web `red-400`: overdue text and the destructive menu items.
 pub const RED_400: Color = hx(0xf87171);
+/// Web `yellow-400`: a board card's "blocking" icon.
+pub const YELLOW_400: Color = hx(0xfacc15);
 /// Web `amber-400`: the "due today" dot.
 pub const AMBER_400: Color = hx(0xfbbf24);
 

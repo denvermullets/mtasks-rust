@@ -1,7 +1,7 @@
 //! Pure scroll math for keeping the keyboard-focused row/card in view.
 //!
 //! List rows, section headers and board cards render at known fixed heights
-//! (see the constants below and `views::board::card_height`), so the focused
+//! (see the constants below and `views::card_layout`), so the focused
 //! item's position can be computed without querying the widget tree. The app
 //! tracks each scrollable's offset/viewport via `on_scroll` and issues
 //! `scrollable::scroll_to` with the result of `offset_to_reveal`.
@@ -163,32 +163,6 @@ pub fn board_content_width(columns: usize) -> f32 {
     2.0 * BOARD_PAD_X + columns as f32 * (BOARD_COLUMN_W + BOARD_COLUMN_GAP) - BOARD_COLUMN_GAP
 }
 
-/// Height of a board card from which optional lines it renders. Line heights
-/// come from the type scale (the card texts set the same `LH_*` multiples), and
-/// the gaps are the web card's: id to title `S2`, title to chips `S2`, and a
-/// `S3` gap before the meta line.
-pub fn board_card_height(show_id: bool, has_chips: bool, has_meta: bool) -> f32 {
-    use crate::theme::{space, type_scale};
-    const TITLE: f32 = type_scale::SM * type_scale::LH_SM;
-    const SMALL: f32 = type_scale::XS * type_scale::LH_XS;
-    let mut h = 2.0 * space::S2_5 + TITLE;
-    if show_id {
-        h += SMALL + space::S2;
-    }
-    if has_chips {
-        h += space::S2 + CARD_CHIP_ROW_H;
-    }
-    if has_meta {
-        h += space::S3 + SMALL;
-    }
-    h
-}
-
-/// Fixed height of the chip row on a board card: one label pill, which is an XS
-/// line plus `S0_5` padding above and below (see `views::labels::pill`).
-pub const CARD_CHIP_ROW_H: f32 =
-    crate::theme::type_scale::XS * crate::theme::type_scale::LH_XS + 2.0 * crate::theme::space::S0_5;
-
 /// `(top, height)` of card `issue` in a board lane. `card_heights` is the
 /// card height per issue; `subhead_starts` are flat indices preceded by a
 /// sub-group heading.
@@ -278,7 +252,6 @@ mod tests {
             BOARD_PAD_TOP + 50.0 + 60.0 + BOARD_SUBHEAD_H + 3.0 * BOARD_SPACING
         );
         assert_eq!(h, 70.0);
-        assert!(board_card_height(true, true, true) > board_card_height(false, false, false));
     }
 
     #[test]
@@ -292,27 +265,6 @@ mod tests {
             offset_to_reveal(left, BOARD_COLUMN_W, 0.0, 1000.0),
             left + BOARD_COLUMN_W + MARGIN - 1000.0
         );
-    }
-
-    #[test]
-    fn chip_row_is_one_label_pill_tall() {
-        assert_eq!(CARD_CHIP_ROW_H, 20.0);
-    }
-
-    #[test]
-    fn board_card_height_follows_the_web_card_spacing() {
-        // (show_id, has_chips, has_meta) -> padding 2 * 10, title line 20, id line 16
-        // + 8 gap, chip row 20 + 8 gap, meta line 16 + 12 gap.
-        let cases = [
-            ((false, false, false), 40.0),
-            ((true, false, false), 64.0),
-            ((false, true, false), 68.0),
-            ((false, false, true), 68.0),
-            ((true, true, true), 120.0),
-        ];
-        for ((id, chips, meta), want) in cases {
-            assert_eq!(board_card_height(id, chips, meta), want, "{id} {chips} {meta}");
-        }
     }
 }
 

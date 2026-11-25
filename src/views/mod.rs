@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod board;
+pub mod card_layout;
 pub mod body;
 pub mod command_palette;
 pub mod context_menu;

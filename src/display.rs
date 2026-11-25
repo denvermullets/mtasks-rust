@@ -935,6 +935,7 @@ fn keys_for(issue: &Issue, axis: Axis, data: &Data<'_>) -> Vec<String> {
 }
 
 /// Build the board columns for the given options. See [`build_board`].
+#[cfg(test)]
 pub fn build_columns<'a>(
     data: &Data<'a>,
     opts: &DisplayOptions,

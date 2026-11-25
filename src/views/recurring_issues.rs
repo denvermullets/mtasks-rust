@@ -263,6 +263,7 @@ fn recurring_row<'a>(r: &'a RecurringIssueRow) -> Element<'a, Message> {
     // capture their own presses first.
     mouse_area(container(content).width(Length::Fill))
         .on_press(Message::EditRecurringIssue(r.id.clone()))
+        .interaction(iced::mouse::Interaction::Pointer)
         .into()
 }
 

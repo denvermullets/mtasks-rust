@@ -1,0 +1,5 @@
+# `block v0.1.6` (pulled in by iced's wgpu/metal backend) trips Cargo's
+# future-incompatibility report on every build. It's not our code and can't be
+# fixed here until iced moves off it, so keep the build output clean.
+[future-incompat-report]
+frequency = "never"

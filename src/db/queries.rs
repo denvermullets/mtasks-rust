@@ -1258,6 +1258,68 @@ pub fn label_ids_for_issue(conn: &Connection, issue_id: &str) -> Result<Vec<Stri
 
 /// Every (issue_id, Label) pair for a team's issues, so the board can render
 /// label chips without a query per card. One join keeps reloads cheap.
+/// How many `blocks` edges an issue sits on each side of (Rails
+/// `blocking_dependencies` / `blocked_dependencies`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlockCounts {
+    /// Issues this one blocks.
+    pub blocking: usize,
+    /// Issues blocking this one.
+    pub blocked_by: usize,
+}
+
+/// `BlockCounts` for the team's live issues, keyed by local issue id; issues
+/// with no `blocks` edge to a live issue are absent.
+pub fn block_counts_for_team(
+    conn: &Connection,
+    team_id: &str,
+) -> Result<std::collections::HashMap<String, BlockCounts>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.issue_id, SUM(e.blocking), SUM(e.blocked_by)
+         FROM (
+             SELECT blocking_issue_id AS issue_id, blocked_issue_id AS other_id,
+                    1 AS blocking, 0 AS blocked_by
+             FROM issue_dependencies WHERE kind = 'blocks'
+             UNION ALL
+             SELECT blocked_issue_id, blocking_issue_id, 0, 1
+             FROM issue_dependencies WHERE kind = 'blocks'
+         ) e
+         JOIN issues i ON i.id = e.issue_id
+         JOIN issues o ON o.id = e.other_id
+         WHERE i.team_id = ?1 AND i.deleted_at IS NULL AND o.deleted_at IS NULL
+         GROUP BY e.issue_id",
+    )?;
+    let rows = stmt.query_map(params![team_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            BlockCounts {
+                blocking: row.get::<_, i64>(1)? as usize,
+                blocked_by: row.get::<_, i64>(2)? as usize,
+            },
+        ))
+    })?;
+    rows.collect()
+}
+
+/// Comment count per issue (replies included) for the team's live issues,
+/// keyed by local issue id. Issues without comments are absent.
+pub fn comment_counts_for_team(
+    conn: &Connection,
+    team_id: &str,
+) -> Result<std::collections::HashMap<String, usize>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.issue_id, COUNT(*)
+         FROM comments c
+         JOIN issues i ON i.id = c.issue_id
+         WHERE i.team_id = ?1 AND i.deleted_at IS NULL
+         GROUP BY c.issue_id",
+    )?;
+    let rows = stmt.query_map(params![team_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    })?;
+    rows.collect()
+}
+
 pub fn issue_labels_for_team(conn: &Connection, team_id: &str) -> Result<Vec<(String, Label)>> {
     let mut stmt = conn.prepare(
         "SELECT il.issue_id,
@@ -2649,6 +2711,19 @@ mod tests {
     }
 
     #[test]
+    fn comment_counts_for_team_counts_replies_per_issue() {
+        let conn = setup();
+        assert!(comment_counts_for_team(&conn, "t1").unwrap().is_empty());
+        insert_comment(&conn, &make_comment("c1", None, "root", "2026-01-01T00:00:00.000Z")).unwrap();
+        let mut reply = make_comment("c2", None, "reply", "2026-01-02T00:00:00.000Z");
+        reply.parent_id = Some("c1".into());
+        insert_comment(&conn, &reply).unwrap();
+        let counts = comment_counts_for_team(&conn, "t1").unwrap();
+        assert_eq!(counts.get("i1"), Some(&2));
+        assert!(comment_counts_for_team(&conn, "other").unwrap().is_empty());
+    }
+
+    #[test]
     fn insert_and_list_comments_ordered_oldest_first() {
         let conn = setup();
         insert_comment(
@@ -2994,6 +3069,25 @@ mod tests {
             created_at: NOW.to_string(),
             updated_at: NOW.to_string(),
         }
+    }
+
+    #[test]
+    fn block_counts_for_team_counts_blocks_edges_on_each_side() {
+        let conn = setup();
+        insert_issue_dependency(&conn, &two_issue_dep(&conn)).unwrap();
+        // A relates edge is not a block.
+        insert_issue_dependency(
+            &conn,
+            &IssueDependency { kind: "relates".into(), ..make_dependency("d2", "i2", "i1") },
+        )
+        .unwrap();
+        let counts = block_counts_for_team(&conn, "t1").unwrap();
+        assert_eq!(counts.get("i1"), Some(&BlockCounts { blocking: 1, blocked_by: 0 }));
+        assert_eq!(counts.get("i2"), Some(&BlockCounts { blocking: 0, blocked_by: 1 }));
+
+        // An edge to a deleted issue no longer counts.
+        delete_issue(&conn, "i2").unwrap();
+        assert!(block_counts_for_team(&conn, "t1").unwrap().is_empty());
     }
 
     fn make_link(dep_id: &str, kind: &str, is_source: bool) -> DependencyLink {

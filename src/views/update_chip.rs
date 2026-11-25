@@ -41,7 +41,10 @@ pub fn chip<'a>(view: &UpdaterView) -> Option<Element<'a, Message>> {
     // Only the ready chip opens the popover; download progress is passive.
     let ready = view.ready.is_some() && !matches!(view.status, Status::Downloading { .. } | Status::Verifying { .. });
     Some(if ready {
-        mouse_area(pill).on_press(Message::OpenUpdatePopover).into()
+        mouse_area(pill)
+            .on_press(Message::OpenUpdatePopover)
+            .interaction(iced::mouse::Interaction::Pointer)
+            .into()
     } else {
         pill.into()
     })

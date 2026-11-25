@@ -147,7 +147,10 @@ fn notification_row<'a>(index: usize, n: &'a Notification, selected: bool) -> El
             ..Default::default()
         });
 
-    mouse_area(card).on_press(Message::InboxOpenAt(index)).into()
+    mouse_area(card)
+        .on_press(Message::InboxOpenAt(index))
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
 }
 
 #[cfg(test)]
