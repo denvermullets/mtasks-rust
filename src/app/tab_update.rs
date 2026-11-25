@@ -758,6 +758,7 @@ impl App {
         }
         self.restore_dashboard_session();
         self.restore_project_detail();
+        self.focus_sidebar_on_active_team();
         // A Saved view reopens fresh: Modified changes aren't restored. A
         // view deleted meanwhile leaves the Tab on its board.
         let opened = match restored {
@@ -765,6 +766,53 @@ impl App {
             _ => Task::none(),
         };
         Task::batch([self.restore_scroll(), opened])
+    }
+
+    /// Accordion the sidebar onto the active Tab's team: only that team's
+    /// rows stay expanded, and only the group holding it stays open. A
+    /// cross-team Tab leaves the sidebar alone.
+    fn focus_sidebar_on_active_team(&mut self) {
+        let Some(team_id) = self.active_tab_team() else {
+            return;
+        };
+        if self.team_menu_open.as_deref().is_some_and(|id| id != team_id) {
+            self.team_menu_open = None;
+        }
+        self.expanded_teams.clear();
+        self.expanded_teams.insert(team_id.clone());
+
+        let remote_id = self.teams.iter().find(|t| t.id == team_id).and_then(|t| t.remote_id);
+        let Some(sidebar) = self.sidebar.as_ref() else {
+            return;
+        };
+        // The first group listing the team claims it (as the layout does).
+        let home = remote_id.and_then(|rid| {
+            sidebar.groups.iter().find(|g| g.team_ids.contains(&rid)).map(|g| g.id.clone())
+        });
+        let changes: Vec<(String, bool)> = sidebar
+            .groups
+            .iter()
+            .filter_map(|g| {
+                let want = home.as_deref() != Some(g.id.as_str());
+                (g.collapsed != want).then(|| (g.id.clone(), want))
+            })
+            .collect();
+        if changes.is_empty() {
+            return;
+        }
+        let conn = self.db();
+        for (group_id, collapsed) in changes {
+            // Same path as a manual toggle: pushed unless the token is read-only.
+            if let Err(e) = crate::db::sidebar_layout::toggle_local(
+                &conn,
+                &group_id,
+                collapsed,
+                !self.sync_read_only,
+            ) {
+                eprintln!("[sidebar] collapse failed: {e}");
+            }
+        }
+        self.sidebar = crate::db::sidebar_layout::load(&conn).unwrap_or_default();
     }
 
     /// A parked Tab's open issue: rebuild its buffers from the local
