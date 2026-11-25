@@ -147,38 +147,13 @@ pub fn view<'a>(
     }
 
     let rows = display::board_rows(columns);
-    let body: Element<'a, Message> = if rows.is_empty() {
-        lanes_body(columns, &data, slot_w, focused_lane, focused_issue)
+    let board: Element<'a, Message> = if rows.is_empty() {
+        lanes_board(columns, header_row, hidden, &data, slot_w, focused_lane, focused_issue)
     } else {
-        swimlane_body(columns, &rows, row_collapsed, &data, slot_w, focused_lane, focused_issue)
+        let body =
+            swimlane_body(columns, &rows, row_collapsed, &data, slot_w, focused_lane, focused_issue);
+        swimlane_board(columns.len(), header_row, body, hidden)
     };
-
-    let board = column![]
-        .push(header_row)
-        .push(body)
-        .padding(iced::Padding::ZERO.left(scroll::BOARD_PAD_X))
-        .width(Length::Fixed(scroll::board_content_width(columns.len())))
-        .height(Length::Fill);
-    // Empty columns hidden by Display > "Show empty columns" off, listed after
-    // the board as Rails does, so empty lanes don't just vanish.
-    let board: Element<'a, Message> = if hidden.is_empty() {
-        board.into()
-    } else {
-        row![board, hidden_columns(hidden)].height(Length::Fill).into()
-    };
-
-    // Built horizontal from the start: `scrollable()` validates as vertical, which
-    // rejects this `Fill`-height content before `.direction()` could apply.
-    let board = track(
-        scrollable::Scrollable::with_direction(
-            // JRST-529: a lane's vertical overscroll must not slide the board.
-            crate::views::wheel_guard::wheel_guard(board),
-            scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
-        ),
-        ScrollKey::Board,
-    )
-        .width(Length::Fill)
-        .height(Length::Fill);
 
     // Dependency lines (JRST-450): only wrapped when the display option is on.
     let board: Element<'a, Message> = match data.deps.clone() {
@@ -195,7 +170,7 @@ pub fn view<'a>(
                 })
                 .into()
         }
-        None => board.into(),
+        None => board,
     };
 
     container(board)
@@ -206,6 +181,89 @@ pub fn view<'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// Lanes mode: headers and lanes in one horizontal scrollable; each lane
+/// scrolls vertically on its own, so its scrollbar belongs to the lane.
+fn lanes_board<'a>(
+    columns: &[BoardColumn<'a>],
+    header_row: Row<'a, Message>,
+    hidden: &[display::HiddenColumn],
+    data: &CardData<'a>,
+    slot_w: f32,
+    focused_lane: usize,
+    focused_issue: usize,
+) -> Element<'a, Message> {
+    let body = lanes_body(columns, data, slot_w, focused_lane, focused_issue);
+    let board = column![]
+        .push(header_row)
+        .push(body)
+        .padding(iced::Padding::ZERO.left(scroll::BOARD_PAD_X))
+        .width(Length::Fixed(scroll::board_content_width(columns.len())))
+        .height(Length::Fill);
+    // Empty columns hidden by Display > "Show empty columns" off, listed after
+    // the board as Rails does, so empty lanes don't just vanish.
+    let board: Element<'a, Message> = if hidden.is_empty() {
+        board.into()
+    } else {
+        row![board, hidden_columns(hidden)].height(Length::Fill).into()
+    };
+
+    // Built horizontal from the start: `scrollable()` validates as vertical, which
+    // rejects this `Fill`-height content before `.direction()` could apply.
+    track(
+        scrollable::Scrollable::with_direction(
+            // JRST-529: a lane's vertical overscroll must not slide the board.
+            crate::views::wheel_guard::wheel_guard(board),
+            scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
+        ),
+        ScrollKey::Board,
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// Swimlanes mode (JRST-530): the rows scroll both ways in one scrollable that
+/// fills the visible board, so its vertical scrollbar sits at the board's
+/// visible right edge rather than past the last column. The column headers
+/// ride in a bar-less strip above it that `Message::SwimlanesScrolled` keeps
+/// at the body's sideways offset. Hidden columns stay pinned to the right.
+fn swimlane_board<'a>(
+    column_count: usize,
+    header_row: Row<'a, Message>,
+    body: Column<'a, Message>,
+    hidden: &[display::HiddenColumn],
+) -> Element<'a, Message> {
+    let content_w = Length::Fixed(scroll::board_content_width(column_count));
+    let pad = iced::Padding::ZERO.left(scroll::BOARD_PAD_X);
+    let hidden_bar = scrollable::Scrollbar::new().width(0).scroller_width(0);
+    // The strip has no bar of its own; wheeling over it moves the body, which
+    // moves the strip, so the two never drift.
+    let headers = mouse_area(container(header_row).padding(pad).width(content_w))
+        .on_scroll(Message::SwimlaneHeaderWheel);
+    let headers = scrollable::Scrollable::with_direction(
+        headers,
+        scrollable::Direction::Horizontal(hidden_bar),
+    )
+    .id(scroll::swimlane_header_id())
+    .width(Length::Fill);
+
+    let body = scrollable::Scrollable::with_direction(
+        container(body).padding(pad).width(content_w),
+        scrollable::Direction::Both {
+            vertical: scrollable::Scrollbar::default(),
+            horizontal: scrollable::Scrollbar::default(),
+        },
+    );
+    let body = scroll::track_swimlanes(body).width(Length::Fill).height(Length::Fill);
+
+    let board = column![headers, body].width(Length::Fill).height(Length::Fill);
+    if hidden.is_empty() {
+        board.into()
+    } else {
+        row![board, hidden_columns(hidden)].height(Length::Fill).into()
+    }
 }
 
 /// Columns side by side, each scrolling on its own (no sub-group).
@@ -283,7 +341,7 @@ fn swimlane_body<'a>(
     slot_w: f32,
     focused_lane: usize,
     focused_issue: usize,
-) -> Element<'a, Message> {
+) -> Column<'a, Message> {
     let row_w = columns.len() as f32 * slot_w - scroll::BOARD_COLUMN_GAP;
     let mut body: Column<'_, Message> = column![]
         .spacing(scroll::SWIMLANE_ROW_GAP)
@@ -363,9 +421,7 @@ fn swimlane_body<'a>(
         body = body.push(block);
     }
 
-    track(scrollable(body), ScrollKey::Swimlanes)
-        .height(Length::Fill)
-        .into()
+    body
 }
 
 /// Rendered height of `issue`'s card. Cards are sized by `CardLayout`, which

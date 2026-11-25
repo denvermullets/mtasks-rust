@@ -389,9 +389,63 @@ pub fn track<'a>(
     })
 }
 
+/// The bar-less strip holding the board's column headers in swimlanes mode.
+/// It is never tracked: it follows the body's sideways offset.
+pub fn swimlane_header_id() -> iced::widget::scrollable::Id {
+    iced::widget::scrollable::Id::new("board-swimlane-headers")
+}
+
+/// Wire the swimlanes body, which scrolls both ways (JRST-530): it answers to
+/// `ScrollKey::Swimlanes` and reports both axes, sideways under
+/// `ScrollKey::Board` and down under `ScrollKey::Swimlanes`.
+pub fn track_swimlanes<'a>(
+    scrollable: iced::widget::Scrollable<'a, crate::app::Message>,
+) -> iced::widget::Scrollable<'a, crate::app::Message> {
+    scrollable.id(ScrollKey::Swimlanes.id()).on_scroll(|vp| {
+        let x = (vp.absolute_offset().x, vp.bounds().width);
+        let y = (vp.absolute_offset().y, vp.bounds().height);
+        crate::app::Message::SwimlanesScrolled(x, y)
+    })
+}
+
+/// Scroll the swimlanes body to `(x, y)`, and the header strip with it. One
+/// widget holds both axes, so a scroll on either must carry the other.
+pub fn swimlanes_scroll_to<T: 'static>(x: f32, y: f32) -> iced::Task<T> {
+    use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
+    iced::Task::batch([
+        scroll_to(ScrollKey::Swimlanes.id(), AbsoluteOffset { x, y }),
+        swimlane_headers_follow(x),
+    ])
+}
+
+/// Line the header strip up with the swimlanes body's sideways offset `x`.
+pub fn swimlane_headers_follow<T: 'static>(x: f32) -> iced::Task<T> {
+    use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
+    scroll_to(swimlane_header_id(), AbsoluteOffset { x, y: 0.0 })
+}
+
+/// The scroll offset a wheel `delta` over the header strip hands the body:
+/// iced's own conversion (60px a line, content moves against the wheel).
+pub fn header_wheel_offset(delta: iced::mouse::ScrollDelta) -> iced::widget::scrollable::AbsoluteOffset {
+    let (x, y) = match delta {
+        iced::mouse::ScrollDelta::Lines { x, y } => (x * 60.0, y * 60.0),
+        iced::mouse::ScrollDelta::Pixels { x, y } => (x, y),
+    };
+    iced::widget::scrollable::AbsoluteOffset { x: -x, y: -y }
+}
+
 #[cfg(test)]
 mod scroll_key_tests {
     use super::ScrollKey;
+
+    #[test]
+    fn header_wheel_moves_the_body_against_the_wheel_like_iced() {
+        use iced::mouse::ScrollDelta;
+        let lines = super::header_wheel_offset(ScrollDelta::Lines { x: 0.0, y: -1.0 });
+        assert_eq!((lines.x, lines.y), (0.0, 60.0));
+        let px = super::header_wheel_offset(ScrollDelta::Pixels { x: 12.0, y: 0.0 });
+        assert_eq!((px.x, px.y), (-12.0, 0.0));
+    }
 
     #[test]
     fn lanes_and_views_never_share_a_key_or_an_id() {

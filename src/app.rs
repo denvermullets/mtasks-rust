@@ -463,6 +463,11 @@ pub enum Message {
     ToggleFocusedSection,
     /// A board lane / the list scrolled: (key, absolute y offset, viewport height).
     Scrolled(ScrollKey, f32, f32),
+    /// The board's swimlanes body scrolled (JRST-530): (x offset, viewport
+    /// width) and (y offset, viewport height).
+    SwimlanesScrolled((f32, f32), (f32, f32)),
+    /// A wheel over the swimlanes header strip: scroll the body instead.
+    SwimlaneHeaderWheel(iced::mouse::ScrollDelta),
     SetGroupBy(GroupBy),
     SetSubGroup(SubGroup),
     SetOrderBy(OrderBy),
@@ -2647,7 +2652,19 @@ impl App {
             return Task::none();
         }
         self.scroll_state.insert(ScrollKey::Board, (new, viewport));
-        ScrollKey::Board.scroll_to(new)
+        self.scroll_key_to(ScrollKey::Board)
+    }
+
+    /// Scroll `key`'s widget to its offset in `scroll_state`. In swimlanes
+    /// mode `Board` (x) and `Swimlanes` (y) are one two-way scrollable, so
+    /// either one scrolls it to both stored offsets.
+    fn scroll_key_to(&self, key: ScrollKey) -> Task<Message> {
+        let offset = |k| self.scroll_state.get(&k).map_or(0.0, |(o, _)| *o);
+        if self.swimlanes_active() && matches!(key, ScrollKey::Board | ScrollKey::Swimlanes) {
+            scroll::swimlanes_scroll_to(offset(ScrollKey::Board), offset(ScrollKey::Swimlanes))
+        } else {
+            key.scroll_to(offset(key))
+        }
     }
 
     /// Scroll the board lane / list so the focused card or row is fully in
@@ -2761,7 +2778,7 @@ impl App {
             return Task::none();
         }
         self.scroll_state.insert(key, (new, viewport));
-        key.scroll_to(new)
+        self.scroll_key_to(key)
     }
 
     /// Keep the selected Inbox row in view. Rows are fixed-height and sit in
@@ -6799,6 +6816,17 @@ impl App {
             }
             Message::Scrolled(key, offset, viewport) => {
                 self.scroll_state.insert(key, (offset, viewport));
+            }
+            Message::SwimlanesScrolled(x, y) => {
+                self.scroll_state.insert(ScrollKey::Board, x);
+                self.scroll_state.insert(ScrollKey::Swimlanes, y);
+                return scroll::swimlane_headers_follow(x.0);
+            }
+            Message::SwimlaneHeaderWheel(delta) => {
+                return iced::widget::scrollable::scroll_by(
+                    ScrollKey::Swimlanes.id(),
+                    scroll::header_wheel_offset(delta),
+                );
             }
             Message::SetGroupBy(g) => {
                 self.board_display_mut().group_by = g;

@@ -811,11 +811,12 @@ impl App {
             ),
             _ => (false, 0),
         };
-        let mut keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
-        // Sub-group rows scroll as one, in place of the per-lane scrolls.
+        // Sub-group rows scroll as one two-way scrollable, in place of the
+        // board and per-lane scrolls; one task restores both its offsets.
         if self.swimlanes_active() {
-            keys = vec![crate::scroll::ScrollKey::Board, crate::scroll::ScrollKey::Swimlanes];
+            return self.scroll_key_to(crate::scroll::ScrollKey::Swimlanes);
         }
+        let keys = tab_state::scroll_keys(&self.view, list_mode, lanes);
         let tasks = tab_state::restore_offsets(&keys, &self.scroll_state)
             .into_iter()
             .map(|(k, offset)| k.scroll_to(offset));
