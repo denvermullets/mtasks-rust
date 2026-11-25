@@ -5,7 +5,7 @@ via the `jait` MCP server (`mcp__jait__*` tools). The `mtasks` MCP server points
 never use it for this repo's tracking.
 
 Team members: Ryan Vaznis — user id 3.
-Lanes: Backlog 210 · In Progress 211 · Done 212 · Cancelled 213.
+Lanes: Backlog 210 · In Progress 211 · Done 212 · Released 254 · Cancelled 213.
 Label ids: needs-triage 291 · needs-info 292 · ready-for-agent 293 · ready-for-human 294 ·
 wontfix 295 · wayfinder:map 296 · wayfinder:research 297 · wayfinder:prototype 298 ·
 wayfinder:grilling 299 · wayfinder:task 300.
@@ -21,6 +21,11 @@ wayfinder:grilling 299 · wayfinder:task 300.
 - **Labels**: `list_labels` / `create_label`; set with `update_issue` `label_ids`
   (replaces the whole set — include existing ids).
 - **Close**: `update_issue` lane_id 212 (Done). Won't-do / out-of-scope: lane_id 213 (Cancelled).
+- **Done vs. Released**: Done means merged to dev. Released means it's in a published build.
+  After a release is published, `/release-issues` moves the tickets named in that release's
+  commits (`JRST-<n>` in a commit subject, body or merge message) to Released, sets their labels
+  to just the version label (`vX.Y.Z`), and comments so reporters know to retest. Commits that
+  should count toward a ticket must name its `JRST-<n>`.
 - Refer to issues by title (+ `JRST-<n>` identifier), never a bare numeric id.
 
 ## When a skill says "publish to the issue tracker"
