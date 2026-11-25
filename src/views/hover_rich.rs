@@ -22,7 +22,7 @@ use iced::advanced::widget::text::{self, Style};
 use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::{Clipboard, Layout, Renderer as _, Shell, Text, Widget};
 use iced::widget::text::{LineHeight, Shaping, Wrapping};
-use iced::{alignment, event, Element, Event, Length, Pixels, Point, Rectangle, Size, Theme, Vector};
+use iced::{alignment, Element, Event, Length, Pixels, Point, Rectangle, Size, Theme, Vector};
 
 /// The span the pointer is over.
 #[derive(Debug, Clone, PartialEq)]
@@ -200,7 +200,7 @@ where
         Size { width: Length::Shrink, height: Length::Shrink }
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
         let state = tree.state.downcast_mut::<State<Link>>();
         layout::sized(limits, Length::Shrink, Length::Shrink, |limits| {
             let bounds = limits.max();
@@ -214,8 +214,8 @@ where
                 size,
                 line_height,
                 font,
-                horizontal_alignment: hx,
-                vertical_alignment: vy,
+                align_x: hx.into(),
+                align_y: vy,
                 shaping: Shaping::Advanced,
                 wrapping: Wrapping::default(),
             };
@@ -229,8 +229,8 @@ where
                     size,
                     line_height,
                     font,
-                    horizontal_alignment: hx,
-                    vertical_alignment: vy,
+                    align_x: hx.into(),
+                    align_y: vy,
                     shaping: Shaping::Advanced,
                     wrapping: Wrapping::default(),
                 }) {
@@ -268,7 +268,7 @@ where
                     for bounds in &regions {
                         let bounds = Rectangle::new(
                             bounds.position() - Vector::new(span.padding.left, span.padding.top),
-                            bounds.size() + Size::new(span.padding.horizontal(), span.padding.vertical()),
+                            bounds.size() + Size::new(span.padding.x(), span.padding.y()),
                         );
                         renderer.fill_quad(
                             renderer::Quad {
@@ -319,22 +319,22 @@ where
             }
         }
 
-        text::draw(renderer, defaults, layout, &state.paragraph, Style::default(), viewport);
+        text::draw(renderer, defaults, layout.bounds(), &state.paragraph, Style::default(), viewport);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &iced::Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let state = tree.state.downcast_mut::<State<Link>>();
-        let Event::Mouse(mouse_event) = &event else { return event::Status::Ignored };
+        let Event::Mouse(mouse_event) = event else { return };
 
         if let mouse::Event::CursorMoved { position } = mouse_event {
             state.window_cursor = Some(*position);
@@ -377,7 +377,7 @@ where
                     let hit = state.paragraph.hit_span(p);
                     if let Some(span) = hit.filter(|&s| takes_press(Some(self.is_clickable(s)))) {
                         state.span_pressed = Some(span);
-                        return event::Status::Captured;
+                        shell.capture_event();
                     }
                 }
             }
@@ -394,7 +394,6 @@ where
             }
             _ => {}
         }
-        event::Status::Ignored
     }
 
     fn mouse_interaction(

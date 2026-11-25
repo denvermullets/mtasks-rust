@@ -90,10 +90,10 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore, deletable: bool) -> E
             row![]
                 .spacing(8)
                 .push(text(meta).size(11).color(t::text_muted()))
-                .push_maybe(pending),
+                .push(pending),
         )
-        .push_maybe(failed)
-        .push_maybe(failed_actions);
+        .push(failed)
+        .push(failed_actions);
     // Only files the server has can be deleted this way; pending/failed ones
     // are cancelled or removed by the upload tickets.
     let delete = (deletable && a.upload_state == UploadState::Synced).then(|| {
@@ -112,10 +112,10 @@ pub fn card<'a>(a: &'a Attachment, images: &'a ImageStore, deletable: bool) -> E
         row![]
             .spacing(8)
             .align_y(Alignment::Center)
-            .push_maybe(thumbnail(a, images))
+            .push(thumbnail(a, images))
             .push(info)
-            .push_maybe(delete)
-            .push_maybe(cancel),
+            .push(delete)
+            .push(cancel),
     )
     .padding(10)
     .width(Length::Fill)

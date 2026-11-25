@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use iced::alignment::Horizontal;
-use iced::widget::{button, column, container, horizontal_space, mouse_area, pick_list, row, scrollable, stack, svg, Column, Space};
+use iced::widget::{button, column, container, mouse_area, pick_list, row, scrollable, stack, svg, Column, Space};
 use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 
@@ -199,7 +199,7 @@ fn intro<'a>(
         .push(assignee_picker(e, header.assignee));
     let second = row![]
         .spacing(space::S2)
-        .push_maybe(label_picker(e, header.label.as_ref()))
+        .push(label_picker(e, header.label.as_ref()))
         .push(status_picker(e, header.status.as_ref()))
         .push(sort_picker(header.sort));
     let controls = column![]
@@ -255,7 +255,7 @@ fn count_chip<'a>(dot: Element<'a, Message>, label: String) -> Element<'a, Messa
 /// "N due today" (amber dot) and "N overdue" (red ring) for the whole dashboard.
 fn due_counts<'a>(e: &Evaluation<'a>) -> Element<'a, Message> {
     let dot = |fill: Option<Color>, stroke: Color| -> Element<'a, Message> {
-        container(Space::new(space::S1_5, space::S1_5))
+        container(Space::new().width(space::S1_5).height(space::S1_5))
             .style(move |_theme: &Theme| container::Style {
                 background: fill.map(iced::Background::Color),
                 border: Border { color: stroke, width: BORDER, radius: radius::FULL.into() },
@@ -405,7 +405,7 @@ fn tabs<'a>(header: &Header) -> Element<'a, Message> {
     .padding([space::S1, space::S2_5])
     .style(control_style(header.mine))
     .on_press(Message::ToggleDashboardMine);
-    container(row![].align_y(Alignment::Center).push(r).push(horizontal_space()).push(mine))
+    container(row![].align_y(Alignment::Center).push(r).push(iced::widget::space::horizontal()).push(mine))
         .width(Length::Fill)
         .center_y(Length::Fixed(TABS_H))
         .into()
@@ -531,7 +531,7 @@ fn empty_message(filter: Filter, mine: bool) -> String {
 
 /// A 1px line across the card.
 fn divider<'a>() -> Element<'a, Message> {
-    container(Space::with_height(BORDER))
+    container(Space::new().height(BORDER))
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::border())),
@@ -604,7 +604,7 @@ fn empty_line<'a>(g: &GroupResult<'a>, header: &Header, read_only: bool) -> Elem
             .spacing(space::S1_5)
             .align_y(Alignment::Center)
             .push(truncated(message, type_scale::SM, t::text_muted()))
-            .push_maybe(action),
+            .push(action),
     )
     .padding([0.0, space::S4])
     .center_y(Length::Fixed(EMPTY_H))
@@ -622,7 +622,7 @@ fn group_header<'a>(
     state: &ViewState<'_>,
 ) -> Element<'a, Message> {
     let color = t::hex_to_color(&g.group.color).unwrap_or_else(t::accent);
-    let swatch = container(Space::new(DOT, DOT)).style(move |_theme: &Theme| container::Style {
+    let swatch = container(Space::new().width(DOT).height(DOT)).style(move |_theme: &Theme| container::Style {
         background: Some(iced::Background::Color(color)),
         border: Border { radius: radius::FULL.into(), ..Default::default() },
         ..Default::default()
@@ -647,7 +647,7 @@ fn group_header<'a>(
         .push(count_pill);
     let has_description = !g.group.description.is_empty();
     let height = if has_description { HEADER_DESC_H } else { HEADER_H };
-    let title = column![].spacing(space::S1).width(Length::Fill).push(name).push_maybe(
+    let title = column![].spacing(space::S1).width(Length::Fill).push(name).push(
         has_description.then(|| {
             truncated(g.group.description.clone(), type_scale::XS, t::text_muted())
         }),
@@ -719,7 +719,7 @@ fn issue_row<'a>(
         .as_ref()
         .and_then(|id| data.members.iter().find(|m| m.id == *id));
     let dot_color = t::priority_dot_color(issue.priority_enum());
-    let dot = container(Space::new(DOT, DOT)).style(move |_theme: &Theme| container::Style {
+    let dot = container(Space::new().width(DOT).height(DOT)).style(move |_theme: &Theme| container::Style {
         background: Some(iced::Background::Color(dot_color)),
         border: Border { radius: radius::FULL.into(), ..Default::default() },
         ..Default::default()
@@ -727,7 +727,7 @@ fn issue_row<'a>(
 
     let project_cell: Element<'a, Message> = match project {
         Some(p) => labelled_cell(ICON_PROJECT, p.name.clone(), W_PROJECT),
-        None => Space::with_width(W_PROJECT).into(),
+        None => Space::new().width(W_PROJECT).into(),
     };
     let due = dashboard_eval::due_label(issue, data.projects, e.today);
     let due_cell = due.map(|d| {
@@ -753,12 +753,12 @@ fn issue_row<'a>(
         ))
         .push(project_cell)
         .push(
-            container(row![].push_maybe(due_cell))
+            container(row![].push(due_cell))
                 .width(Length::Fixed(W_DUE))
                 .clip(true),
         )
         .push(
-            container(row![].push_maybe(assignee.map(|m| util::avatar(&m.name))))
+            container(row![].push(assignee.map(|m| util::avatar(&m.name))))
                 .center_x(Length::Fixed(W_ASSIGNEE)),
         )
         .push(
@@ -773,18 +773,18 @@ fn issue_row<'a>(
             .clip(true),
         );
 
-    let marker = container(Space::new(MARKER_W, space::S4)).style(move |_theme: &Theme| container::Style {
+    let marker = container(Space::new().width(MARKER_W).height(space::S4)).style(move |_theme: &Theme| container::Style {
         background: focused.then(|| iced::Background::Color(t::accent())),
         border: Border { radius: radius::XS.into(), ..Default::default() },
         ..Default::default()
     });
     let content = row![]
         .align_y(Alignment::Center)
-        .push(Space::with_width(MARKER_INSET))
+        .push(Space::new().width(MARKER_INSET))
         .push(marker)
-        .push(Space::with_width(space::S4 - MARKER_INSET - MARKER_W))
+        .push(Space::new().width(space::S4 - MARKER_INSET - MARKER_W))
         .push(cells)
-        .push(Space::with_width(space::S4))
+        .push(Space::new().width(space::S4))
         .height(Length::Fill);
 
     let (group, row_index) = at;
@@ -826,7 +826,7 @@ fn no_groups<'a>(read_only: bool) -> Element<'a, Message> {
                     .size(type_scale::XS)
                     .color(t::text_muted()),
             )
-            .push(Space::with_height(space::S3))
+            .push(Space::new().height(space::S3))
             .push(
                 button(text("Add group").size(type_scale::XS))
                     .on_press_maybe((!read_only).then_some(Message::OpenNewGroup))

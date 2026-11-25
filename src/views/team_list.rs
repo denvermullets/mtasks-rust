@@ -50,7 +50,7 @@ fn open_terminals_badge<'a>(count: usize, need: Option<crate::terminal::Need>) -
             text("\u{2328}").size(11).font(fonts::SYMBOL).color(t::text_muted()),
             text(count.to_string()).size(11).color(t::text_muted()),
         ]
-        .push_maybe(need.map(crate::views::terminal_panel::attention_dot))
+        .push(need.map(crate::views::terminal_panel::attention_dot))
         .spacing(4)
         .align_y(iced::Alignment::Center)
         .into()
@@ -83,7 +83,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         row![]
             .align_y(iced::Alignment::Center)
             .push(section_header("WORKSPACE"))
-            .push(iced::widget::horizontal_space())
+            .push(iced::widget::space::horizontal())
             .push(sidebar_toggle(false)),
     );
     col = col.push(nav_row(
@@ -101,7 +101,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         row![]
             .align_y(iced::Alignment::Center)
             .push(section_header("DASHBOARDS"))
-            .push(iced::widget::horizontal_space())
+            .push(iced::widget::space::horizontal())
             .push(
                 button(text("+").size(14).color(t::text_muted()))
                     .on_press_maybe(new_dashboard.clone())
@@ -133,7 +133,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
                 })]
                 .spacing(6)
                 .align_y(iced::Alignment::Center)
-                .push_maybe(is_home_dashboard(home, d).then(home_marker)),
+                .push(is_home_dashboard(home, d).then(home_marker)),
             )
             .on_press(Message::OpenDashboard(d.id.clone()))
             .padding([6, 14])
@@ -165,7 +165,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
         let toggle = std::mem::take(&mut archived_toggle)
             .then(|| archived_toggle_button(show_archived));
         // Breathing room between sections, like the web's `p-2 mt-1` blocks.
-        col = col.push(iced::widget::vertical_space().height(SECTION_GAP));
+        col = col.push(iced::widget::space::vertical().height(SECTION_GAP));
         let collapsed = match &section.kind {
             SectionKind::Group { id, name, collapsed } => {
                 col = col.push(group_header(id, name, *collapsed, toggle));
@@ -182,8 +182,8 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
                     row![]
                         .align_y(iced::Alignment::Center)
                         .push(section_header(label))
-                        .push_maybe(toggle.is_some().then(iced::widget::horizontal_space))
-                        .push_maybe(toggle),
+                        .push(toggle.is_some().then(iced::widget::space::horizontal))
+                        .push(toggle),
                 );
                 false
             }
@@ -287,10 +287,10 @@ fn team_block<'a>(
             .align_y(iced::Alignment::Center)
             .push(identifier_badge)
             .push(name_text)
-            .push_maybe(show_admin.then(admin_badge))
-            .push_maybe(is_home_team(home, team).then(home_marker))
-            .push_maybe(is_archived.then(|| text("archived").size(10).color(t::text_muted())))
-            .push_maybe(open_terminals_badge(
+            .push(show_admin.then(admin_badge))
+            .push(is_home_team(home, team).then(home_marker))
+            .push(is_archived.then(|| text("archived").size(10).color(t::text_muted())))
+            .push(open_terminals_badge(
                 open_terminals.get(&team.id).copied().unwrap_or(0),
                 terminal_needs.get(&team.id).copied(),
             ));
@@ -385,7 +385,7 @@ fn team_block<'a>(
                     })]
                     .spacing(6)
                     .align_y(iced::Alignment::Center)
-                    .push_maybe(is_home_view(home, sv).then(home_marker)),
+                    .push(is_home_view(home, sv).then(home_marker)),
                 )
                 .on_press(Message::OpenSavedView(sv.id.clone()))
                 .padding([6, 28])
@@ -447,8 +447,8 @@ fn group_header<'a>(
                 .padding([10, 14])
                 .style(plain_row_style),
         )
-        .push_maybe(toggle.is_some().then(iced::widget::horizontal_space))
-        .push_maybe(toggle)
+        .push(toggle.is_some().then(iced::widget::space::horizontal))
+        .push(toggle)
         .into()
 }
 
@@ -534,7 +534,7 @@ pub fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, Message> {
 
 /// A muted glyph-only sidebar button; disabled when `msg` is `None`.
 fn icon_btn<'a>(glyph: &'static str, size: u16, padding: [u16; 2], msg: Option<Message>) -> Element<'a, Message> {
-    button(text(glyph).size(size).font(fonts::SYMBOL).color(t::text_muted()))
+    button(text(glyph).size(f32::from(size)).font(fonts::SYMBOL).color(t::text_muted()))
         .on_press_maybe(msg)
         .padding(padding)
         .style(|_theme: &Theme, _status| button::Style {
@@ -574,7 +574,7 @@ pub fn footer<'a>(has_team: bool, settings_dot: bool) -> Element<'a, Message> {
         column![]
             // Export isn't available to users yet; `Message::ExportCsv` stays
             // wired for when it is.
-            .push_maybe(SHOW_EXPORT_CSV.then(|| btn("Export CSV", Message::ExportCsv)))
+            .push(SHOW_EXPORT_CSV.then(|| btn("Export CSV", Message::ExportCsv)))
             .push(btn("Import CSV", Message::PickCsvImport))
             .push(settings_row(settings_dot)),
     )
@@ -598,8 +598,8 @@ fn settings_row<'a>(dot: bool) -> Element<'a, Message> {
     let content = row![text("Settings").size(13).color(t::text_secondary())]
         .spacing(8)
         .align_y(iced::Alignment::Center)
-        .push_maybe(dot.then(|| {
-            container(iced::widget::Space::new(8, 8)).style(|_theme: &Theme| container::Style {
+        .push(dot.then(|| {
+            container(iced::widget::Space::new().width(8).height(8)).style(|_theme: &Theme| container::Style {
                 background: Some(iced::Background::Color(t::accent())),
                 border: Border {
                     radius: 4.0.into(),
@@ -659,8 +659,8 @@ fn inbox_row<'a>(active: bool, unread_count: i64) -> Element<'a, Message> {
     })]
     .spacing(8)
     .align_y(iced::Alignment::Center)
-    .push(iced::widget::horizontal_space())
-    .push_maybe(badge_label(unread_count).map(|label| {
+    .push(iced::widget::space::horizontal())
+    .push(badge_label(unread_count).map(|label| {
         container(text(label).size(11).color(t::text_primary()))
             .padding([1, 6])
             .style(|_theme: &Theme| container::Style {

@@ -22,7 +22,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::tree::Tree;
 use iced::advanced::widget::Operation;
 use iced::advanced::{Clipboard, Layout, Shell, Widget};
-use iced::{event, Element, Event, Length, Rectangle, Size, Theme, Vector};
+use iced::{Element, Event, Length, Rectangle, Size, Theme, Vector};
 
 /// Whether a wheel delta is mostly vertical, so a horizontal scrollable must
 /// not act on it. Pure.
@@ -57,36 +57,36 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for WheelGuard<'a, 
         self.content.as_widget().size()
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
-        self.content.as_widget().layout(&mut tree.children[0], renderer, limits)
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.content.as_widget().operate(&mut tree.children[0], layout, renderer, operation);
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let vertical_wheel = matches!(
             event,
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) if is_mostly_vertical(delta)
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if is_mostly_vertical(*delta)
         );
-        let status = self.content.as_widget_mut().on_event(
+        self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
             layout,
@@ -97,9 +97,7 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for WheelGuard<'a, 
             viewport,
         );
         if vertical_wheel && cursor.is_over(layout.bounds()) {
-            event::Status::Captured
-        } else {
-            status
+            shell.capture_event();
         }
     }
 
@@ -130,11 +128,12 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for WheelGuard<'a, 
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &iced::Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
-        self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, translation)
+        self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
     }
 }
 

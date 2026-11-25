@@ -197,7 +197,7 @@ pub fn inline_properties<'a, M: Clone + 'a>(
         iced::widget::Row::with_children(props.actions)
             .spacing(space::S4)
             .align_y(iced::Alignment::Center)
-            .push(iced::widget::horizontal_space())
+            .push(iced::widget::space::horizontal())
             .push(
                 text(format!(
                     "Created {} \u{00B7} Updated {}",
@@ -219,7 +219,7 @@ pub fn inline_properties<'a, M: Clone + 'a>(
                     .align_y(iced::Alignment::Center)
                     .wrap(),
             )
-            .push_maybe(footer),
+            .push(footer),
     )
     .padding([space::S3, space::S4])
     .width(Length::Fill)
@@ -301,6 +301,7 @@ pub fn sidebar_menu_style(_theme: &Theme) -> iced::overlay::menu::Style {
         text_color: t::text_body(),
         selected_text_color: t::on_accent(iced::widget::button::Status::Active),
         selected_background: iced::Background::Color(t::accent()),
+        shadow: iced::Shadow::default(),
     }
 }
 
@@ -308,7 +309,7 @@ pub fn sidebar_menu_style(_theme: &Theme) -> iced::overlay::menu::Style {
 /// Use as `.style(util::sidebar_input_style)`.
 pub fn sidebar_input_style(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     let mut border = control_border(matches!(status, text_input::Status::Hovered));
-    if matches!(status, text_input::Status::Focused) {
+    if matches!(status, text_input::Status::Focused { .. }) {
         border.color = t::accent();
     }
     text_input::Style {

@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::{button, column, container, horizontal_space, row, scrollable};
+use iced::widget::{button, column, container, row, scrollable};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 use crate::app::{DependencyMapTab, Message, MAX_DEPENDENCY_DEPTH};
@@ -44,8 +44,8 @@ pub fn view<'a>(
         DependencyMapTab::Dependencies => dependencies_body(issue, depth, data),
         DependencyMapTab::Hierarchy => hierarchy_body(issue, data),
     };
-    let header = row![tab_switch(tab), horizontal_space()]
-        .push_maybe((tab == DependencyMapTab::Dependencies).then(dep_map_canvas::legend))
+    let header = row![tab_switch(tab), iced::widget::space::horizontal()]
+        .push((tab == DependencyMapTab::Dependencies).then(dep_map_canvas::legend))
         .align_y(Alignment::Center);
     track(
         scrollable(
@@ -670,10 +670,10 @@ fn outline_row<'a>(
             .style(button::text)
             .into()
     } else {
-        iced::widget::Space::with_width(Length::Fixed(14.0)).into()
+        iced::widget::Space::new().width(Length::Fixed(14.0)).into()
     };
     row![
-        iced::widget::Space::with_width(Length::Fixed(r.depth as f32 * 20.0)),
+        iced::widget::Space::new().width(Length::Fixed(r.depth as f32 * 20.0)),
         chevron,
         row_btn
     ]

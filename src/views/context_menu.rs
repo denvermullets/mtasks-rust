@@ -12,7 +12,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::widget::Operation;
 use iced::advanced::{mouse, Clipboard, Shell, Widget};
-use iced::{event, keyboard, window, Element, Event, Length, Point, Rectangle, Size, Theme, Vector};
+use iced::{keyboard, Element, Event, Length, Point, Rectangle, Size, Theme, Vector};
 
 pub struct ContextMenu<'a, Message> {
     content: Element<'a, Message>,
@@ -38,7 +38,7 @@ struct State {
 
 fn reflow<Message>(shell: &mut Shell<'_, Message>) {
     shell.invalidate_layout();
-    shell.request_redraw(window::RedrawRequest::NextFrame);
+    shell.request_redraw();
 }
 
 impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for ContextMenu<'a, Message> {
@@ -62,8 +62,8 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Context
         self.content.as_widget().size()
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
-        self.content.as_widget().layout(&mut tree.children[0], renderer, limits)
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
     }
 
     fn draw(
@@ -80,29 +80,29 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Context
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.content.as_widget().operate(&mut tree.children[0], layout, renderer, operation);
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        let status = self.content.as_widget_mut().on_event(
+    ) {
+        self.content.as_widget_mut().update(
             &mut tree.children[0],
-            event.clone(),
+            event,
             layout,
             cursor,
             renderer,
@@ -110,17 +110,16 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Context
             shell,
             viewport,
         );
-        if status == event::Status::Captured {
-            return status;
+        if shell.is_event_captured() {
+            return;
         }
         if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) = event {
             if let Some(position) = cursor.position_over(layout.bounds()) {
                 tree.state.downcast_mut::<State>().open_at = Some(position);
                 reflow(shell);
-                return event::Status::Captured;
+                shell.capture_event();
             }
         }
-        event::Status::Ignored
     }
 
     fn mouse_interaction(
@@ -137,12 +136,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Context
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &iced::Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         let Some(at) = tree.state.downcast_ref::<State>().open_at else {
-            return self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, translation);
+            return self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation);
         };
         let (_, rest) = tree.children.split_at_mut(1);
         Some(overlay::Element::new(Box::new(Menu {
@@ -181,7 +181,7 @@ fn place(at: Point, menu: Size, window: Size) -> Point {
 impl<'a, 'b, Message: Clone> overlay::Overlay<Message, Theme, iced::Renderer> for Menu<'a, 'b, Message> {
     fn layout(&mut self, renderer: &iced::Renderer, bounds: Size) -> layout::Node {
         let limits = layout::Limits::new(Size::ZERO, bounds).width(Length::Fixed(self.width));
-        let node = self.content.as_widget().layout(self.tree, renderer, &limits);
+        let node = self.content.as_widget_mut().layout(self.tree, renderer, &limits);
         let position = place(self.at, node.size(), bounds);
         node.move_to(position)
     }
@@ -198,60 +198,51 @@ impl<'a, 'b, Message: Clone> overlay::Overlay<Message, Theme, iced::Renderer> fo
     }
 
     fn operate(&mut self, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
-        self.content.as_widget().operate(self.tree, layout, renderer, operation);
+        self.content.as_widget_mut().operate(self.tree, layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
-    ) -> event::Status {
+    ) {
         let over = cursor.is_over(layout.bounds());
-        match &event {
+        match event {
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
             }) => {
                 self.state.open_at = None;
                 reflow(shell);
-                return event::Status::Captured;
+                shell.capture_event();
+                return;
             }
             Event::Mouse(mouse::Event::ButtonPressed(button)) if !over => {
                 // A right-click elsewhere in the content moves the menu there.
                 self.state.open_at = None;
                 reflow(shell);
-                return if *button == mouse::Button::Right {
-                    event::Status::Ignored
-                } else {
-                    event::Status::Captured
-                };
+                if *button != mouse::Button::Right {
+                    shell.capture_event();
+                }
+                return;
             }
             _ => {}
         }
         let viewport = layout.bounds();
-        let status = self.content.as_widget_mut().on_event(
-            self.tree, event.clone(), layout, cursor, renderer, clipboard, shell, &viewport,
-        );
+        self.content.as_widget_mut().update(self.tree, event, layout, cursor, renderer, clipboard, shell, &viewport);
         // A click in the menu (buttons publish on release) closes it.
         if over && matches!(event, Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))) {
             self.state.open_at = None;
             reflow(shell);
         }
-        status
     }
 
-    fn mouse_interaction(
-        &self,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &iced::Renderer,
-    ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(self.tree, layout, cursor, viewport, renderer)
+    fn mouse_interaction(&self, layout: Layout<'_>, cursor: mouse::Cursor, renderer: &iced::Renderer) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(self.tree, layout, cursor, &layout.bounds(), renderer)
     }
 }
 

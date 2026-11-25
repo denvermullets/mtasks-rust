@@ -14,8 +14,14 @@ pub const MAX_BLUR_RADIUS: u8 = 60;
 /// Set the background blur behind the latest window. `radius` 0 turns it off.
 pub fn set_blur<M: Send + 'static>(radius: u8) -> Task<M> {
     let radius = radius.min(MAX_BLUR_RADIUS);
-    window::get_latest()
-        .and_then(move |id| window::run_with_handle(id, move |handle| apply_blur(handle, radius)))
+    window::latest()
+        .and_then(move |id| {
+            window::run(id, move |w| {
+                if let Ok(handle) = w.window_handle() {
+                    apply_blur(handle, radius);
+                }
+            })
+        })
         .discard()
 }
 

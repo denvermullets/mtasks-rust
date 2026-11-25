@@ -5,7 +5,7 @@
 //! A new source kind joins by adding a `*_sources` block to `source_picker`
 //! whose rows send `Message::GroupToggleSource` and `Message::GroupSetIncludeAll`.
 
-use iced::widget::{button, checkbox, column, container, row, scrollable, text_input, Column};
+use iced::widget::{button, checkbox, column, container, row, scrollable, Column};
 use crate::views::text;
 use iced::{Element, Length, Theme};
 
@@ -16,7 +16,7 @@ use crate::theme as t;
 
 const NAME_KEY: &str = "dashboard-group-name";
 
-pub fn name_input_id() -> text_input::Id {
+pub fn name_input_id() -> iced::widget::Id {
     crate::undo_input::id(NAME_KEY)
 }
 
@@ -247,7 +247,7 @@ fn label_sources<'a>(
         for label in offered {
             let remote_id = label.remote_id.expect("filtered to labels with a remote id");
             col = col.push(
-                checkbox(label.name.as_str(), draft.is_selected(SourceType::Label, remote_id))
+                checkbox(draft.is_selected(SourceType::Label, remote_id)).label(label.name.as_str())
                     .on_toggle(move |_| Message::GroupToggleSource(SourceType::Label, remote_id))
                     .size(16)
                     .text_size(13),
@@ -280,14 +280,14 @@ fn project_sources<'a>(
             let remote_id = project.remote_id.expect("filtered to projects with a remote id");
             let selected = draft.is_selected(SourceType::Project, remote_id);
             let mut line = row![].spacing(12).push(
-                checkbox(project.name.as_str(), selected)
+                checkbox(selected).label(project.name.as_str())
                     .on_toggle(move |_| Message::GroupToggleSource(SourceType::Project, remote_id))
                     .size(16)
                     .text_size(13),
             );
             if selected {
                 line = line.push(
-                    checkbox("All issues", draft.include_all(SourceType::Project, remote_id))
+                    checkbox(draft.include_all(SourceType::Project, remote_id)).label("All issues")
                         .on_toggle(move |on| {
                             Message::GroupSetIncludeAll(SourceType::Project, remote_id, on)
                         })
@@ -313,14 +313,14 @@ fn team_sources<'a>(draft: &'a GroupDraft, teams: &'a [Team]) -> Element<'a, Mes
         let mut line = row![]
             .spacing(12)
             .push(
-                checkbox(format!("{} ({})", team.name, team.identifier), selected)
+                checkbox(selected).label(format!("{} ({})", team.name, team.identifier))
                     .on_toggle(move |_| Message::GroupToggleSource(SourceType::Team, remote_id))
                     .size(16)
                     .text_size(13),
             );
         if selected {
             line = line.push(
-                checkbox("All issues", draft.include_all(SourceType::Team, remote_id))
+                checkbox(draft.include_all(SourceType::Team, remote_id)).label("All issues")
                     .on_toggle(move |on| {
                         Message::GroupSetIncludeAll(SourceType::Team, remote_id, on)
                     })

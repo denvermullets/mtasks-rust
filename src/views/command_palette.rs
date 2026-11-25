@@ -2,7 +2,7 @@
 //! `PaletteState` (text field plus one button per result row); the state and
 //! results logic live in `palette_results`.
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable};
 use crate::views::text;
 use iced::{Border, Element, Length, Theme};
 
@@ -13,7 +13,7 @@ use crate::theme as t;
 
 const INPUT_KEY: &str = "command-palette-input";
 
-pub fn input_id() -> text_input::Id {
+pub fn input_id() -> iced::widget::Id {
     crate::undo_input::id(INPUT_KEY)
 }
 

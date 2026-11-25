@@ -86,8 +86,8 @@ pub fn drop_index(cursor_x: f32, left: f32, offset: f32, count: usize, tab_w: f3
     (slot.max(0.0) as usize).min(count - 1)
 }
 
-pub fn scroll_id() -> scrollable::Id {
-    scrollable::Id::new("tab-bar")
+pub fn scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("tab-bar")
 }
 
 /// Corner radius of a Tab and of the drag placeholder's outline.
@@ -194,7 +194,7 @@ pub fn view<'a>(
         });
         let tab = container(
             row![]
-                .push_maybe(dot)
+                .push(dot)
                 .push(label_button)
                 .push(close)
                 .align_y(iced::Alignment::Center),
@@ -240,7 +240,7 @@ pub fn view<'a>(
     let expand = sidebar_collapsed.then(|| crate::views::team_list::sidebar_toggle(true));
     container(
         row![]
-            .push_maybe(expand)
+            .push(expand)
             .push(scroller)
             .push(plus)
             .align_y(iced::Alignment::Center),
@@ -263,7 +263,7 @@ fn tab_menu<'a>(can_reopen: bool) -> Element<'a, Message> {
         row![]
             .align_y(iced::Alignment::Center)
             .push(text("Reopen closed tab").size(type_scale::SM))
-            .push(iced::widget::horizontal_space())
+            .push(iced::widget::space::horizontal())
             .push(text("\u{21E7}\u{2318}T").size(type_scale::XS).color(t::text_muted())),
     )
     .on_press_maybe(can_reopen.then_some(Message::Tab(TabMessage::ReopenClosed)))
@@ -297,7 +297,7 @@ const UNREAD_DOT: f32 = 7.0;
 
 /// The accent dot on a Tab with unread Notifications.
 fn unread_dot<'a>() -> Element<'a, Message> {
-    container(iced::widget::Space::new(UNREAD_DOT, UNREAD_DOT))
+    container(iced::widget::Space::new().width(UNREAD_DOT).height(UNREAD_DOT))
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::accent())),
             border: Border { radius: (UNREAD_DOT / 2.0).into(), ..Default::default() },

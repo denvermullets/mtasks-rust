@@ -165,10 +165,7 @@ pub fn view<'a>(
                 .spacing(4)
                 .push(text("Notifications").size(12).color(t::text_secondary()))
                 .push(
-                    checkbox(
-                        "Show native notifications when the window is unfocused",
-                        form.native_notifications,
-                    )
+                    checkbox(form.native_notifications).label("Show native notifications when the window is unfocused")
                     .on_toggle(Message::SettingsNativeNotificationsToggled)
                     .size(16)
                     .text_size(14),
@@ -192,7 +189,7 @@ pub fn view<'a>(
                     .padding([8, 18])
                     .style(button::secondary),
                 )
-                .push(iced::widget::horizontal_space().width(Length::Fill))
+                .push(iced::widget::space::horizontal().width(Length::Fill))
                 .push(
                     button(text("Cancel").size(14))
                         .on_press(Message::CloseModal)
@@ -282,7 +279,7 @@ fn updates_section<'a>(
     let line = |name: &'static str, value: String| {
         row![]
             .push(text(name).size(12).color(t::text_secondary()))
-            .push(iced::widget::horizontal_space().width(Length::Fill))
+            .push(iced::widget::space::horizontal().width(Length::Fill))
             .push(text(value).size(12).color(t::text_muted()))
     };
     let mut col = column![]
@@ -291,7 +288,7 @@ fn updates_section<'a>(
         .push(line("Installed version", updates.installed.to_string()))
         .push(line("Last checked", last_check_label(updates.view.last_checked)))
         .push(
-            iced::widget::checkbox("Check for updates automatically", updates.auto_check)
+            iced::widget::checkbox(updates.auto_check).label("Check for updates automatically")
                 .on_toggle(Message::UpdateAutoCheckToggled)
                 .size(16)
                 .text_size(12),
@@ -392,7 +389,7 @@ fn window_section<'a>(form: &'a SettingsFormState) -> Element<'a, Message> {
     let label = |name: &'static str, value: String| {
         row![]
             .push(text(name).size(12).color(t::text_secondary()))
-            .push(iced::widget::horizontal_space().width(Length::Fill))
+            .push(iced::widget::space::horizontal().width(Length::Fill))
             .push(text(value).size(12).color(t::text_muted()))
     };
     let blur_value = if form.window_blur == 0 {

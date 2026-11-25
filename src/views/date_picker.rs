@@ -173,7 +173,7 @@ fn calendar<'a>(input: &DateInput<'a>, state: DatePickerState, today: NaiveDate)
                 .size(type_scale::SM)
                 .color(t::text_strong()),
         )
-        .push(Space::with_width(Length::Fill))
+        .push(Space::new().width(Length::Fill))
         .push(nav(ICON_PREV, -1))
         .push(nav(ICON_NEXT, 1));
 
@@ -245,7 +245,7 @@ fn calendar<'a>(input: &DateInput<'a>, state: DatePickerState, today: NaiveDate)
     };
     let footer = row![]
         .push(link("Clear", pick(input, String::new())))
-        .push(Space::with_width(Length::Fill))
+        .push(Space::new().width(Length::Fill))
         .push(link("Today", pick(input, today.format("%Y-%m-%d").to_string())));
 
     container(

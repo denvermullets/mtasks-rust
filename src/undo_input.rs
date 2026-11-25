@@ -31,7 +31,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::operation::{Focusable, Operation, Outcome};
 use iced::advanced::widget::{tree, Id, Tree, Widget};
 use iced::advanced::{overlay, text, Clipboard, Shell};
-use iced::event::{self, Event};
+use iced::event::Event;
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::text_input::{cursor, Status, Style, Value};
 use iced::widget::{self, TextInput};
@@ -325,8 +325,8 @@ impl<'a> Widget<Message, Theme, Renderer> for UndoInput<'a> {
         <Inner as Widget<Message, Theme, Renderer>>::size(&self.input)
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
-        <Inner as Widget<Message, Theme, Renderer>>::layout(&self.input, tree, renderer, limits)
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        <Inner as Widget<Message, Theme, Renderer>>::layout(&mut self.input, tree, renderer, limits)
     }
 
     fn draw(
@@ -361,31 +361,31 @@ impl<'a> Widget<Message, Theme, Renderer> for UndoInput<'a> {
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        <Inner as Widget<Message, Theme, Renderer>>::operate(&self.input, tree, layout, renderer, operation);
+        <Inner as Widget<Message, Theme, Renderer>>::operate(&mut self.input, tree, layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         // iced runs Cmd+Delete as a plain Backspace; do the macOS delete.
         if let (
             Event::Keyboard(keyboard::Event::KeyPressed { key: Key::Named(Named::Backspace), modifiers, .. }),
             Some(on_input),
-        ) = (&event, &self.on_input)
+        ) = (event, &self.on_input)
         {
             let state = tree.state.downcast_mut::<widget::text_input::State<Paragraph>>();
             if modifiers.command() && state.is_focused() {
@@ -394,10 +394,11 @@ impl<'a> Widget<Message, Theme, Renderer> for UndoInput<'a> {
                     state.move_cursor_to(at);
                     shell.publish(on_input(rest));
                 }
-                return event::Status::Captured;
+                shell.capture_event();
+                return;
             }
         }
-        <Inner as Widget<Message, Theme, Renderer>>::on_event(
+        <Inner as Widget<Message, Theme, Renderer>>::update(
             &mut self.input, tree, event, layout, cursor, renderer, clipboard, shell, viewport,
         )
     }
@@ -418,11 +419,12 @@ impl<'a> Widget<Message, Theme, Renderer> for UndoInput<'a> {
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        <Inner as Widget<Message, Theme, Renderer>>::overlay(&mut self.input, tree, layout, renderer, translation)
+        <Inner as Widget<Message, Theme, Renderer>>::overlay(&mut self.input, tree, layout, renderer, viewport, translation)
     }
 }
 
@@ -433,14 +435,17 @@ impl<'a> From<UndoInput<'a>> for Element<'a, Message> {
 }
 
 /// The `Id` of the input built with `key`.
-pub fn id(key: impl Into<Cow<'static, str>>) -> widget::text_input::Id {
-    widget::text_input::Id::new(key)
+pub fn id(key: impl Into<Cow<'static, str>>) -> iced::widget::Id {
+    match key.into() {
+        Cow::Borrowed(key) => iced::widget::Id::new(key),
+        Cow::Owned(key) => iced::widget::Id::from(key),
+    }
 }
 
 /// Find which of the inputs `keys` has focus. Produces `None` when none does
 /// (a multi-line editor, or nothing, is focused).
 pub fn focused(keys: Vec<String>) -> Task<Option<String>> {
-    let candidates = keys.into_iter().map(|k| (Id::new(k.clone()), k)).collect();
+    let candidates = keys.into_iter().map(|k| (Id::from(k.clone()), k)).collect();
     iced::advanced::widget::operate(FindFocused { candidates, found: None })
 }
 
@@ -450,16 +455,11 @@ struct FindFocused {
 }
 
 impl Operation<Option<String>> for FindFocused {
-    fn container(
-        &mut self,
-        _id: Option<&Id>,
-        _bounds: Rectangle,
-        operate_on_children: &mut dyn FnMut(&mut dyn Operation<Option<String>>),
-    ) {
-        operate_on_children(self);
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Option<String>>)) {
+        operate(self);
     }
 
-    fn focusable(&mut self, state: &mut dyn Focusable, id: Option<&Id>) {
+    fn focusable(&mut self, id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
         if !state.is_focused() {
             return;
         }
@@ -482,7 +482,7 @@ pub fn move_cursor<T>(key: String, text: &str, cursor: usize) -> Task<T> {
         at -= 1;
     }
     // The input counts its cursor in characters (graphemes, strictly).
-    widget::text_input::move_cursor_to(id(key), text[..at].chars().count())
+    iced::widget::operation::move_cursor_to(id(key), text[..at].chars().count())
 }
 
 #[cfg(test)]

@@ -545,7 +545,7 @@ pub fn page<'a>(
                     ),
             ),
     );
-    schedule = schedule.push_maybe(error_line(&form.errors.interval));
+    schedule = schedule.push(error_line(&form.errors.interval));
     if form.frequency == Frequency::Weekly {
         schedule = schedule
             .push(
@@ -558,7 +558,7 @@ pub fn page<'a>(
                         |w: WeekdayOption| Message::RecurringFormWeekdayChanged(w.0),
                     )),
             )
-            .push_maybe(error_line(&form.errors.weekday));
+            .push(error_line(&form.errors.weekday));
     }
     if form.frequency == Frequency::Monthly {
         schedule = schedule
@@ -572,7 +572,7 @@ pub fn page<'a>(
                             .size(14),
                     ),
             )
-            .push_maybe(error_line(&form.errors.day_of_month));
+            .push(error_line(&form.errors.day_of_month));
     }
     schedule = schedule
         .push(
@@ -594,7 +594,7 @@ pub fn page<'a>(
                     ),
                 ),
         )
-        .push_maybe(error_line(&form.errors.starts_on));
+        .push(error_line(&form.errors.starts_on));
     let editing = form.editing.is_some();
     schedule = schedule
         .push(
@@ -610,8 +610,8 @@ pub fn page<'a>(
                     |c: TimeZoneChoice| Message::RecurringFormTimeZoneChanged(c.0),
                 )),
         )
-        .push_maybe(error_line(&form.errors.time_zone))
-        .push_maybe(form.summary().map(|s| text(s).size(13).color(t::text_secondary())));
+        .push(error_line(&form.errors.time_zone))
+        .push(form.summary().map(|s| text(s).size(13).color(t::text_secondary())));
 
     let issue_fields = column![]
         .spacing(space::S4)
@@ -626,7 +626,7 @@ pub fn page<'a>(
                         .size(type_scale::SM)
                         .style(util::sidebar_input_style),
                 )
-                .push_maybe(error_line(&form.errors.title)),
+                .push(error_line(&form.errors.title)),
         )
         .push(
             column![]

@@ -317,8 +317,8 @@ fn measure(content: &str, size: f32, line_height: f32, width: f32, wrapping: Wra
         size: size.into(),
         line_height: LineHeight::Relative(line_height),
         font: crate::fonts::active(),
-        horizontal_alignment: Horizontal::Left,
-        vertical_alignment: Vertical::Top,
+        align_x: Horizontal::Left.into(),
+        align_y: Vertical::Top,
         shaping: crate::views::text::shaping_for(content),
         wrapping,
     })

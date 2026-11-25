@@ -10,7 +10,7 @@
 //! toggle in place and stay open, with a "Create" row when the search has no
 //! exact match.
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text_input, Space};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, Space};
 use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Rectangle, Size, Theme};
 
@@ -336,12 +336,12 @@ pub fn position(anchor: Option<Anchor>, window: Size) -> Point {
 
 const SEARCH_KEY: &str = "property-picker-search";
 
-pub fn search_id() -> text_input::Id {
+pub fn search_id() -> iced::widget::Id {
     crate::undo_input::id(SEARCH_KEY)
 }
 
 fn dot<'a>(color: Color) -> Element<'a, Message> {
-    container(Space::new(8, 8))
+    container(Space::new().width(8).height(8))
         .style(move |_: &Theme| container::Style {
             background: Some(color.into()),
             border: Border { radius: 4.0.into(), ..Default::default() },
@@ -356,7 +356,7 @@ fn marker<'a>(field: Field, on: bool) -> Element<'a, Message> {
     let inner: Element<'a, Message> = if on && field == Field::Labels {
         text("✓").size(10).color(Color::WHITE).into()
     } else if on {
-        container(Space::new(6, 6))
+        container(Space::new().width(6).height(6))
             .style(|_: &Theme| container::Style {
                 background: Some(Color::WHITE.into()),
                 border: Border { radius: 3.0.into(), ..Default::default() },
@@ -364,7 +364,7 @@ fn marker<'a>(field: Field, on: bool) -> Element<'a, Message> {
             })
             .into()
     } else {
-        Space::new(0, 0).into()
+        Space::new().width(0).height(0).into()
     };
     container(inner)
         .center_x(Length::Fixed(14.0))
@@ -410,15 +410,15 @@ fn list(state: &PickerState) -> Element<'_, Message> {
                         row![]
                             .spacing(8)
                             .align_y(Alignment::Center)
-                            .push_maybe(radio.then(|| marker(state.field, on)))
-                            .push_maybe(option.color.map(dot))
+                            .push(radio.then(|| marker(state.field, on)))
+                            .push(option.color.map(dot))
                             .push(
                                 text(option.label.clone())
                                     .size(type_scale::SM)
                                     .color(if muted { t::text_muted() } else { t::text_primary() })
                                     .width(Length::Fill),
                             )
-                            .push_maybe(
+                            .push(
                                 (!radio && on)
                                     .then(|| text("✓").size(type_scale::SM).color(t::accent())),
                             )
@@ -457,7 +457,7 @@ fn list(state: &PickerState) -> Element<'_, Message> {
 }
 
 fn rule<'a>() -> container::Container<'a, Message> {
-    container(Space::new(Length::Fill, 1)).style(|_: &Theme| container::Style {
+    container(Space::new().width(Length::Fill).height(1)).style(|_: &Theme| container::Style {
         background: Some(t::border().into()),
         ..Default::default()
     })

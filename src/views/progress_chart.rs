@@ -405,7 +405,7 @@ fn draw_tooltip(
             position: Point::new(tx + tw - pad, ry),
             color: t::text_strong(),
             size: 12.0.into(),
-            horizontal_alignment: iced::alignment::Horizontal::Right,
+            align_x: iced::alignment::Horizontal::Right.into(),
             ..Default::default()
         });
     }
@@ -471,7 +471,7 @@ impl canvas::Program<Message> for ProgressChart {
                     position: Point::new(pl - 10.0, y(v) - 6.0),
                     color: t::text_muted(),
                     size: 11.0.into(),
-                    horizontal_alignment: iced::alignment::Horizontal::Right,
+                    align_x: iced::alignment::Horizontal::Right.into(),
                     ..Default::default()
                 });
             }
@@ -489,7 +489,7 @@ impl canvas::Program<Message> for ProgressChart {
                     position: Point::new(x(i), bounds.height - 17.0),
                     color: t::text_muted(),
                     size: 11.0.into(),
-                    horizontal_alignment: iced::alignment::Horizontal::Center,
+                    align_x: iced::alignment::Horizontal::Center.into(),
                     ..Default::default()
                 });
             }
@@ -521,7 +521,7 @@ impl canvas::Program<Message> for ProgressChart {
                     position: Point::new(tx, 1.0),
                     color: t::text_secondary(),
                     size: 10.0.into(),
-                    horizontal_alignment: iced::alignment::Horizontal::Center,
+                    align_x: iced::alignment::Horizontal::Center.into(),
                     ..Default::default()
                 });
             }
@@ -613,7 +613,7 @@ impl canvas::Program<Message> for ProgressChart {
                     position: Point::new(ex + 10.0 + bw / 2.0, ly - 6.0),
                     color: t::text_primary(),
                     size: 11.0.into(),
-                    horizontal_alignment: iced::alignment::Horizontal::Center,
+                    align_x: iced::alignment::Horizontal::Center.into(),
                     ..Default::default()
                 });
             }

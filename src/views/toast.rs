@@ -94,7 +94,7 @@ fn card(toast: &Toast) -> Element<'_, Message> {
                 .color(t::text_primary())
                 .width(Length::Shrink),
         )
-        .push(iced::widget::horizontal_space().width(Length::Fill))
+        .push(iced::widget::space::horizontal().width(Length::Fill))
         .push(dismiss);
 
     let mut body = column![].spacing(8).push(header);
@@ -102,7 +102,7 @@ fn card(toast: &Toast) -> Element<'_, Message> {
     if toast.retry {
         body = body.push(
             row![]
-                .push(iced::widget::horizontal_space().width(Length::Fill))
+                .push(iced::widget::space::horizontal().width(Length::Fill))
                 .push(
                     button(text("Retry now").size(12).color(accent))
                         .on_press(Message::RetrySyncFromToast(toast.id))

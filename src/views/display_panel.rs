@@ -1,7 +1,7 @@
 //! Display-options dropdown and filter panel, opened from the header. Both are
 //! rendered as popovers anchored under the header's right edge (see `popover`).
 
-use iced::widget::{button, checkbox, column, container, horizontal_space, mouse_area, row, scrollable, Column};
+use iced::widget::{button, checkbox, column, container, mouse_area, row, scrollable, Column};
 use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
@@ -103,7 +103,7 @@ pub fn display_view<'a>(
     let mut props: Column<'a, Message> = column![].spacing(4);
     for (prop, label) in CardProperty::ALL {
         props = props.push(
-            checkbox(label, opts.shows(prop))
+            checkbox(opts.shows(prop)).label(label)
                 .on_toggle(move |_| Message::ToggleCardProperty(prop))
                 .size(14)
                 .text_size(12),
@@ -130,8 +130,8 @@ pub fn display_view<'a>(
             Message::SetGroupBy,
             |_| false,
         ))
-        .push_maybe(board.then(|| heading("ROWS")))
-        .push_maybe(board.then(|| {
+        .push(board.then(|| heading("ROWS")))
+        .push(board.then(|| {
             chips(
                 &SubGroup::ALL,
                 opts.sub_group,
@@ -155,26 +155,26 @@ pub fn display_view<'a>(
         ))
         .push(heading("OPTIONS"))
         .push(
-            checkbox("Show sub-issues", opts.show_sub_issues)
+            checkbox(opts.show_sub_issues).label("Show sub-issues")
                 .on_toggle(|_| Message::ToggleShowSubIssues)
                 .size(14)
                 .text_size(12),
         )
         .push(heading("BOARD OPTIONS"))
         .push(
-            checkbox("Show empty columns", opts.show_empty_groups)
+            checkbox(opts.show_empty_groups).label("Show empty columns")
                 .on_toggle(|_| Message::ToggleShowEmptyGroups)
                 .size(14)
                 .text_size(12),
         )
         .push(
-            checkbox("Show empty rows", opts.show_empty_rows)
+            checkbox(opts.show_empty_rows).label("Show empty rows")
                 .on_toggle(|_| Message::ToggleShowEmptyRows)
                 .size(14)
                 .text_size(12),
         )
-        .push_maybe(board.then(|| {
-            checkbox("Dependencies", opts.show_dependencies)
+        .push(board.then(|| {
+            checkbox(opts.show_dependencies).label("Dependencies")
                 .on_toggle(|_| Message::ToggleShowDependencies)
                 .size(14)
                 .text_size(12)
@@ -229,7 +229,7 @@ fn option_group<'a>(
     for (value, label) in options {
         let selected = filters.is_selected(field, &value);
         col = col.push(
-            checkbox(label, selected)
+            checkbox(selected).label(label)
                 .on_toggle(move |_| Message::ToggleFilter(field, value.clone()))
                 .size(14)
                 .text_size(12),
@@ -296,7 +296,7 @@ pub fn filter_view<'a>(
     let top = row![]
         .align_y(Alignment::Center)
         .push(text("Filters").size(14).color(t::text_primary()))
-        .push(horizontal_space())
+        .push(iced::widget::space::horizontal())
         .push(clear.style(button::secondary));
 
     let mut groups = column![].spacing(14);

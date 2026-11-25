@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, horizontal_rule, pick_list, responsive, row, scrollable, text_editor};
+use iced::widget::{button, column, container, pick_list, responsive, row, scrollable, text_editor};
 use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
@@ -127,7 +127,7 @@ pub fn page<'a>(
         .spacing(space::S2)
         .width(Length::Fill)
         .push(form_page::title_input("Project name", &form.name, Message::ProjectNameChanged))
-        .push_maybe(form.error.as_deref().map(form_page::error_text));
+        .push(form.error.as_deref().map(form_page::error_text));
     let left = column![]
         .spacing(space::S8)
         .push(row![].spacing(space::S4).align_y(Alignment::Center).push(icon).push(name))
@@ -312,7 +312,7 @@ pub fn list_view<'a>(
         .spacing(12)
         .align_y(Alignment::Center)
         .push(sort_row)
-        .push(iced::widget::horizontal_space())
+        .push(iced::widget::space::horizontal())
         .push(
             button(
                 text(hide_label)
@@ -391,7 +391,7 @@ pub fn list_view<'a>(
         } else {
             for &project in &projects {
                 rows = rows.push(project_row(project, members, issues, show_trend));
-                rows = rows.push(container(horizontal_rule(1)).style(|_theme: &Theme| {
+                rows = rows.push(container(iced::widget::rule::horizontal(1)).style(|_theme: &Theme| {
                     container::Style {
                         background: Some(iced::Background::Color(
                             t::border().scale_alpha(ROW_SEPARATOR_ALPHA),
@@ -407,7 +407,7 @@ pub fn list_view<'a>(
             .width(Length::Fill)
             .push(header)
             .push(
-                container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
+                container(iced::widget::rule::horizontal(1)).style(|_theme: &Theme| container::Style {
                     background: Some(iced::Background::Color(t::border())),
                     ..Default::default()
                 }),
@@ -423,7 +423,7 @@ pub fn list_view<'a>(
         .width(Length::Fill)
         .push(container(controls).padding([10, 16]))
         .push(
-            container(horizontal_rule(1)).style(|_theme: &Theme| container::Style {
+            container(iced::widget::rule::horizontal(1)).style(|_theme: &Theme| container::Style {
                 background: Some(iced::Background::Color(t::border())),
                 ..Default::default()
             }),
@@ -536,7 +536,7 @@ fn project_row<'a>(
         .push(health_cell)
         .push(priority_cell)
         .push(lead_cell)
-        .push_maybe(trend_cell)
+        .push(trend_cell)
         .push(target_cell)
         .push(status_cell);
 

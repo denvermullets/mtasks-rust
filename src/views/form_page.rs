@@ -82,7 +82,6 @@ pub fn borderless_editor(_theme: &Theme, _status: text_editor::Status) -> text_e
     text_editor::Style {
         background: iced::Background::Color(Color::TRANSPARENT),
         border: Border::default(),
-        icon: t::text_muted(),
         placeholder: t::text_muted(),
         value: t::text_body(),
         selection: Color { a: 0.35, ..t::accent() },
@@ -111,7 +110,7 @@ pub fn error_text<'a>(msg: &str) -> Element<'a, Message> {
 
 /// A 1px stroke-colored rule (web `border-t border-stroke`).
 pub fn rule<'a>() -> Element<'a, Message> {
-    container(Space::new(Length::Fill, Length::Fixed(1.0)))
+    container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(|_theme: &Theme| container::Style {
@@ -133,8 +132,8 @@ pub fn actions_bar<'a>(
         .push(
             row![]
                 .align_y(Alignment::Center)
-                .push_maybe(left)
-                .push(Space::with_width(Length::Fill))
+                .push(left)
+                .push(Space::new().width(Length::Fill))
                 .push(actions),
         )
         .into()
@@ -310,7 +309,7 @@ pub fn label_menu<'a>(
             .size(type_scale::SM)
             .color(t::accent())
             .width(Length::Fixed(14.0));
-        let dot = container(Space::new(Length::Fixed(8.0), Length::Fixed(8.0))).style(move |_theme: &Theme| {
+        let dot = container(Space::new().width(Length::Fixed(8.0)).height(Length::Fixed(8.0))).style(move |_theme: &Theme| {
             container::Style {
                 background: Some(iced::Background::Color(dot_color)),
                 border: Border { radius: radius::FULL.into(), ..Default::default() },

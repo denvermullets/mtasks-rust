@@ -449,6 +449,7 @@ pub fn iced_theme() -> Theme {
             text: text_primary(),
             primary: tk.accent,
             success: priority_low(),
+            warning: priority_high(),
             danger: danger(),
         },
     )

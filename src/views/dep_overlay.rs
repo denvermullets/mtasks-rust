@@ -10,13 +10,13 @@
 //!   state; `draw` paints the board, then whatever the overlay is asked to draw
 //!   (debug outlines for now; connectors in JRST-450) on top.
 //!
-//! Findings (iced 0.13.2): `Widget::operate` receives *untranslated* layout.
+//! Findings (iced 0.14): `Widget::operate` receives *untranslated* layout.
 //! `Scrollable::operate` calls `operation.scrollable(.., bounds, content_bounds,
-//! translation)` and then `operation.container(.., bounds, ..)` for its content,
-//! so an operation sees every enclosing scrollable's viewport and offset. A
-//! child's on-screen position is `layout position - sum(translations)`.
+//! translation, ..)` and then `operation.traverse(..)` for its content, so an
+//! operation sees every enclosing scrollable's viewport and offset. A child's
+//! on-screen position is `layout position - sum(translations)`.
 //! `operate` takes `&mut Tree` but `draw` only gets `&Tree`, so collection runs
-//! in `on_event(RedrawRequested)`, which is dispatched right before `draw` in
+//! in `update(RedrawRequested)`, which is dispatched right before `draw` in
 //! the same frame (so scrolling never lags). Every event is forwarded to the
 //! content untouched, so clicks, drags and scrolls are unaffected.
 
@@ -31,7 +31,7 @@ use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::widget::{Id, Operation};
 use iced::advanced::{Clipboard, Layout, Renderer as _, Shell, Widget};
 use iced::window;
-use iced::{event, Border, Color, Element, Event, Length, Rectangle, Size, Theme, Vector};
+use iced::{Border, Color, Element, Event, Length, Rectangle, Size, Theme, Vector};
 
 // ---------------------------------------------------------------------------
 // Pure translation / clipping math
@@ -73,7 +73,7 @@ pub fn resolve(raw: Rectangle, frames: &[ScrollFrame]) -> (Rectangle, Option<Rec
                 None => hidden = true,
             }
         }
-        offset = offset + f.translation;
+        offset += f.translation;
     }
     let rect = Rectangle { x: raw.x - offset.x, y: raw.y - offset.y, ..raw };
     let visible = if hidden {
@@ -122,33 +122,33 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepAnchor<'a, M
         self.content.as_widget().size()
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
-        let child = self.content.as_widget().layout(&mut tree.children[0], renderer, limits);
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        let child = self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits);
         layout::Node::with_children(child.size(), vec![child])
     }
 
-    fn operate(&self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
         let mut report = AnchorReport { id: self.id.clone(), bounds: layout.bounds() };
-        operation.custom(&mut report, None);
+        operation.custom(None, layout.bounds(), &mut report);
         let child = layout.children().next().expect("anchor has one child");
-        self.content.as_widget().operate(&mut tree.children[0], child, renderer, operation);
+        self.content.as_widget_mut().operate(&mut tree.children[0], child, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let child = layout.children().next().expect("anchor has one child");
         self.content
             .as_widget_mut()
-            .on_event(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
+            .update(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
     }
 
     fn mouse_interaction(
@@ -180,12 +180,13 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepAnchor<'a, M
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &iced::Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         let child = layout.children().next().expect("anchor has one child");
-        self.content.as_widget_mut().overlay(&mut tree.children[0], child, renderer, translation)
+        self.content.as_widget_mut().overlay(&mut tree.children[0], child, renderer, viewport, translation)
     }
 }
 
@@ -201,40 +202,35 @@ impl<'a, Message: 'a> From<DepAnchor<'a, Message>> for Element<'a, Message> {
 #[derive(Default)]
 struct Collector {
     stack: Vec<ScrollFrame>,
-    /// Set by `scrollable`, consumed by the `container` call that follows it.
+    /// Set by `scrollable`, consumed by the `traverse` call that follows it.
     pending: Option<ScrollFrame>,
     found: Vec<Placed>,
 }
 
 impl Operation for Collector {
-    fn container(
-        &mut self,
-        _id: Option<&Id>,
-        _bounds: Rectangle,
-        operate_on_children: &mut dyn FnMut(&mut dyn Operation),
-    ) {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
         match self.pending.take() {
             Some(frame) => {
                 self.stack.push(frame);
-                operate_on_children(self);
+                operate(self);
                 self.stack.pop();
             }
-            None => operate_on_children(self),
+            None => operate(self),
         }
     }
 
     fn scrollable(
         &mut self,
-        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
         _id: Option<&Id>,
         bounds: Rectangle,
         _content_bounds: Rectangle,
         translation: Vector,
+        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
     ) {
         self.pending = Some(ScrollFrame { viewport: bounds, translation });
     }
 
-    fn custom(&mut self, state: &mut dyn Any, _id: Option<&Id>) {
+    fn custom(&mut self, _id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Any) {
         if let Some(a) = state.downcast_mut::<AnchorReport>() {
             let (rect, visible) = resolve(a.bounds, &self.stack);
             self.found.push(Placed { id: a.id.clone(), rect, visible });
@@ -308,32 +304,32 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepOverlay<'a, 
         self.content.as_widget().size()
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
-        let child = self.content.as_widget().layout(&mut tree.children[0], renderer, limits);
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        let child = self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits);
         layout::Node::with_children(child.size(), vec![child])
     }
 
-    fn operate(&self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
         let child = layout.children().next().expect("overlay has one child");
-        self.content.as_widget().operate(&mut tree.children[0], child, renderer, operation);
+        self.content.as_widget_mut().operate(&mut tree.children[0], child, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let child = layout.children().next().expect("overlay has one child");
         if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
             let origin = layout.bounds();
             let mut collector = Collector::default();
-            self.content.as_widget().operate(&mut tree.children[0], child, renderer, &mut collector);
+            self.content.as_widget_mut().operate(&mut tree.children[0], child, renderer, &mut collector);
             let to_local = |r: Rectangle| Rectangle { x: r.x - origin.x, y: r.y - origin.y, ..r };
             let anchors = collector
                 .found
@@ -355,7 +351,7 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepOverlay<'a, 
         // the card's own press handling keeps working.
         self.content
             .as_widget_mut()
-            .on_event(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
+            .update(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
     }
 
     fn mouse_interaction(
@@ -395,12 +391,13 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for DepOverlay<'a, 
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &iced::Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         let child = layout.children().next().expect("overlay has one child");
-        self.content.as_widget_mut().overlay(&mut tree.children[0], child, renderer, translation)
+        self.content.as_widget_mut().overlay(&mut tree.children[0], child, renderer, viewport, translation)
     }
 }
 

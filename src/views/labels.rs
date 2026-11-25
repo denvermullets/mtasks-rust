@@ -299,7 +299,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                                 }),
                         ),
                 )
-                .push_maybe(
+                .push(
                     form.edit_error
                         .as_deref()
                         .map(|e| text(e).size(12).color(t::danger())),
@@ -326,7 +326,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
         )
         .push(text("Create a new label").size(12).color(t::text_muted()))
         .push(create_row)
-        .push_maybe(
+        .push(
             form.error
                 .as_deref()
                 .map(|e| text(e).size(12).color(t::danger())),

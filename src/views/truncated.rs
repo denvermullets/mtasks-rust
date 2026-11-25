@@ -61,12 +61,12 @@ impl Truncated {
     fn measure(&self, content: &str) -> Paragraph {
         Paragraph::with_text(text::Text {
             content,
-            bounds: Size::INFINITY,
+            bounds: Size::INFINITE,
             size: Pixels(self.size),
             line_height: LineHeight::default(),
             font: self.font,
-            horizontal_alignment: Horizontal::Left,
-            vertical_alignment: Vertical::Top,
+            align_x: Horizontal::Left.into(),
+            align_y: Vertical::Top,
             // Full shaping, so characters the font lacks fall back to another.
             shaping: Shaping::Advanced,
             wrapping: Wrapping::None,
@@ -97,7 +97,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Truncated {
         Size::new(Length::Shrink, Length::Shrink)
     }
 
-    fn layout(&self, tree: &mut Tree, _renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, _renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
         let state = tree.state.downcast_mut::<State>();
         let width = limits.max().width;
         let key = (self.content.clone(), width.to_bits(), self.size.to_bits());

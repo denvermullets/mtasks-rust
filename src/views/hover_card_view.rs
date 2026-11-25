@@ -190,7 +190,7 @@ fn project_card<'a>(project: &ProjectCard) -> Element<'a, Message> {
     let pct = project.percent.clamp(0, 100) as u16;
     let bar = row![]
         .height(Length::Fixed(PROGRESS_HEIGHT))
-        .push_maybe((pct > 0).then(|| {
+        .push((pct > 0).then(|| {
             container(text(""))
                 .width(Length::FillPortion(pct))
                 .height(Length::Fixed(PROGRESS_HEIGHT))
@@ -200,7 +200,7 @@ fn project_card<'a>(project: &ProjectCard) -> Element<'a, Message> {
                     ..Default::default()
                 })
         }))
-        .push_maybe((pct < 100).then(|| {
+        .push((pct < 100).then(|| {
             container(text("")).width(Length::FillPortion(100 - pct)).height(Length::Fixed(PROGRESS_HEIGHT))
         }));
     let bar = container(bar).width(Length::Fill).clip(true).style(|_theme: &Theme| container::Style {
@@ -211,7 +211,7 @@ fn project_card<'a>(project: &ProjectCard) -> Element<'a, Message> {
     let progress = column![
         row![
             muted("Progress"),
-            iced::widget::horizontal_space(),
+            iced::widget::space::horizontal(),
             muted(format!("{}/{} · {}%", project.completed, project.total, project.percent)),
         ],
         bar,
@@ -243,7 +243,7 @@ fn issue_card<'a>(issue: &IssueCard) -> Element<'a, Message> {
         .align_y(iced::Alignment::Center);
     if let Some(lane) = &issue.lane {
         top = top
-            .push(iced::widget::horizontal_space())
+            .push(iced::widget::space::horizontal())
             .push(crate::views::lane_icon::view(lane.icon))
             .push(text(lane.name.clone()).size(t::type_scale::XS).color(t::text_muted()));
     }

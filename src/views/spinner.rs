@@ -9,7 +9,7 @@ use iced::advanced::renderer;
 use iced::advanced::svg::{self, Renderer as _};
 use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::{mouse, Clipboard, Shell, Widget};
-use iced::{event, window, Color, Element, Event, Length, Radians, Rectangle, Size, Theme};
+use iced::{window, Color, Element, Event, Length, Radians, Rectangle, Size, Theme};
 
 /// One full turn takes this long.
 const PERIOD_SECS: f32 = 1.0;
@@ -47,25 +47,24 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Spinner {
         Size::new(Length::Fixed(self.size), Length::Fixed(self.size))
     }
 
-    fn layout(&self, _tree: &mut Tree, _renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+    fn layout(&mut self, _tree: &mut Tree, _renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
         layout::Node::new(limits.resolve(self.size, self.size, Size::new(self.size, self.size)))
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         _tree: &mut Tree,
-        event: Event,
+        event: &Event,
         _layout: Layout<'_>,
         _cursor: mouse::Cursor,
         _renderer: &iced::Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
-            shell.request_redraw(window::RedrawRequest::NextFrame);
+            shell.request_redraw();
         }
-        event::Status::Ignored
     }
 
     fn draw(
@@ -82,7 +81,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Spinner {
         let svg = svg::Svg::new(self.handle.clone())
             .color(self.color)
             .rotation(angle(started.elapsed().as_secs_f32()));
-        renderer.draw_svg(svg, layout.bounds());
+        renderer.draw_svg(svg, layout.bounds(), layout.bounds());
     }
 }
 

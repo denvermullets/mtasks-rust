@@ -13,7 +13,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::widget::Operation;
 use iced::advanced::{Clipboard, Layout, Shell, Widget};
-use iced::{event, Element, Event, Length, Rectangle, Size, Theme, Vector};
+use iced::{Element, Event, Length, Rectangle, Size, Theme, Vector};
 
 pub struct Measure<'a, Message> {
     content: Element<'a, Message>,
@@ -58,27 +58,27 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for Measure<'a, Mes
         self.content.as_widget().size()
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
-        let child = self.content.as_widget().layout(&mut tree.children[0], renderer, limits);
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        let child = self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits);
         layout::Node::with_children(child.size(), vec![child])
     }
 
-    fn operate(&self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
         let child = layout.children().next().expect("measure has one child");
-        self.content.as_widget().operate(&mut tree.children[0], child, renderer, operation);
+        self.content.as_widget_mut().operate(&mut tree.children[0], child, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let size = layout.bounds().size();
         let reported = tree.state.downcast_mut::<Reported>();
         if changed(reported.0, size) {
@@ -88,7 +88,7 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for Measure<'a, Mes
         let child = layout.children().next().expect("measure has one child");
         self.content
             .as_widget_mut()
-            .on_event(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
+            .update(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
     }
 
     fn mouse_interaction(
@@ -120,12 +120,13 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for Measure<'a, Mes
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &iced::Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         let child = layout.children().next().expect("measure has one child");
-        self.content.as_widget_mut().overlay(&mut tree.children[0], child, renderer, translation)
+        self.content.as_widget_mut().overlay(&mut tree.children[0], child, renderer, viewport, translation)
     }
 }
 

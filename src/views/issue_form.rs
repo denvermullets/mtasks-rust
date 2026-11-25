@@ -448,7 +448,7 @@ pub fn page<'a>(
     });
 
     let create_more = (!editing).then(|| {
-        checkbox("Create more", form.create_more)
+        checkbox(form.create_more).label("Create more")
             .on_toggle(Message::IssueCreateMoreToggled)
             .size(14)
             .text_size(type_scale::SM)
@@ -456,9 +456,9 @@ pub fn page<'a>(
     let actions = row![]
         .spacing(space::S4)
         .align_y(Alignment::Center)
-        .push_maybe(create_more)
+        .push(create_more)
         // Web: Cancel on the edit page only.
-        .push_maybe(editing.then(form_page::cancel_button))
+        .push(editing.then(form_page::cancel_button))
         .push(form_page::submit_button(
             if editing { "Update issue" } else { "Create issue" },
             Message::SaveIssue,
@@ -466,22 +466,22 @@ pub fn page<'a>(
 
     let content = column![]
         .push(context_row)
-        .push(Space::with_height(space::S6))
+        .push(Space::new().height(space::S6))
         .push(form_page::title_input("Issue title", &form.title, Message::IssueTitleChanged))
-        .push_maybe(form.error.as_deref().map(|e| {
-            column![Space::with_height(space::S2), form_page::error_text(e)]
+        .push(form.error.as_deref().map(|e| {
+            column![Space::new().height(space::S2), form_page::error_text(e)]
         }))
-        .push(Space::with_height(space::S6))
+        .push(Space::new().height(space::S6))
         .push(description)
-        .push_maybe(
+        .push(
             form.suggest
                 .as_ref()
                 .map(crate::views::issue_detail::suggestion_rows),
         )
-        .push(Space::with_height(space::S6))
+        .push(Space::new().height(space::S6))
         .push(properties)
-        .push_maybe(file_list.map(|l| column![Space::with_height(space::S6), l]))
-        .push(Space::with_height(space::S8))
+        .push(file_list.map(|l| column![Space::new().height(space::S6), l]))
+        .push(Space::new().height(space::S8))
         .push(form_page::actions_bar(Some(attach_button()), actions));
 
     form_page::centered(content, form_page::WIDTH_4XL)
@@ -554,7 +554,7 @@ fn context_chip<'a>(label: String, locked: bool) -> Element<'a, Message> {
             .align_y(Alignment::Center)
             .push(form_page::icon(ICON_CHAT, space::S4, t::text_body()))
             .push(text(label).size(type_scale::SM).color(t::text_body()))
-            .push_maybe(locked.then(|| form_page::icon(ICON_LOCK, space::S3, t::text_body()))),
+            .push(locked.then(|| form_page::icon(ICON_LOCK, space::S3, t::text_body()))),
     )
 }
 

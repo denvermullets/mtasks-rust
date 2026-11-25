@@ -194,7 +194,7 @@ pub fn view<'a>(
                         .color(t::text_muted()),
                 ),
         )
-        .push(iced::widget::horizontal_space())
+        .push(iced::widget::space::horizontal())
         .push(chips)
         .push(add_project_button(RoadmapCommitment::Now));
 
@@ -336,7 +336,7 @@ fn card<'a>(
         .align_y(Alignment::Center)
         .push(text("\u{25CF}").size(8).color(status_color))
         .push(text(status_label).size(10).color(status_color))
-        .push(iced::widget::horizontal_space())
+        .push(iced::widget::space::horizontal())
         .push(commitment_menu(project, identifier, ui.menu.as_deref() == Some(project.id.as_str())));
 
     let due: Element<'a, Message> = match project.due_date.as_deref() {
@@ -348,7 +348,7 @@ fn card<'a>(
                 t::text_muted()
             })
             .into(),
-        _ => iced::widget::horizontal_space().into(),
+        _ => iced::widget::space::horizontal().into(),
     };
 
     let ident_pill = container(text(identifier).size(10).color(t::text_secondary()))
@@ -573,7 +573,7 @@ fn menu_option<'a>(
         .push(text(label).size(14).color(t::text_secondary()));
     if let Some(sub) = subtitle {
         line = line
-            .push(iced::widget::horizontal_space())
+            .push(iced::widget::space::horizontal())
             .push(text(sub).size(12).color(t::text_muted()));
     }
     button(line)
@@ -756,7 +756,7 @@ fn grid<'a>(cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 }
 
 fn divider<'a>() -> Element<'a, Message> {
-    container(iced::widget::horizontal_rule(1))
+    container(iced::widget::rule::horizontal(1))
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::border())),
             ..Default::default()
@@ -890,7 +890,7 @@ pub fn add_modal_view<'a>(
         .push(list)
         .push(
             row![]
-                .push(iced::widget::horizontal_space())
+                .push(iced::widget::space::horizontal())
                 .push(
                     button(text("Close").size(14))
                         .on_press(Message::CloseModal)

@@ -123,7 +123,7 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
         .push(
             row![]
                 .spacing(8)
-                .push(iced::widget::horizontal_space().width(Length::Fill))
+                .push(iced::widget::space::horizontal().width(Length::Fill))
                 .push(
                     button(text("Cancel").size(14))
                         .on_press(Message::CloseModal)

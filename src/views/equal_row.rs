@@ -16,7 +16,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::tree::Tree;
 use iced::advanced::widget::Operation;
 use iced::advanced::{Clipboard, Layout, Shell, Widget};
-use iced::{event, Element, Event, Length, Point, Rectangle, Size, Theme, Vector};
+use iced::{Element, Event, Length, Point, Rectangle, Size, Theme, Vector};
 
 pub struct EqualRow<'a, Message> {
     children: Vec<Element<'a, Message>>,
@@ -49,27 +49,27 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for EqualRow<'a, Me
         Size::new(Length::Fill, Length::Shrink)
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
         let total = limits.max().width;
         let w = cell_width(total, self.children.len(), self.spacing);
         // Pass 1: natural height of each cell at its width.
         let measure = layout::Limits::new(Size::new(w, 0.0), Size::new(w, f32::INFINITY));
         let h = self
             .children
-            .iter()
+            .iter_mut()
             .zip(tree.children.iter_mut())
-            .map(|(c, t)| c.as_widget().layout(t, renderer, &measure).size().height)
+            .map(|(c, t)| c.as_widget_mut().layout(t, renderer, &measure).size().height)
             .filter(|h| h.is_finite())
             .fold(0.0_f32, f32::max);
         // Pass 2: every cell at exactly the tallest height.
         let exact = layout::Limits::new(Size::new(w, h), Size::new(w, h));
         let nodes = self
             .children
-            .iter()
+            .iter_mut()
             .zip(tree.children.iter_mut())
             .enumerate()
             .map(|(i, (c, t))| {
-                c.as_widget()
+                c.as_widget_mut()
                     .layout(t, renderer, &exact)
                     .move_to(Point::new(i as f32 * (w + self.spacing), 0.0))
             })
@@ -77,33 +77,33 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for EqualRow<'a, Me
         layout::Node::with_children(Size::new(total, h), nodes)
     }
 
-    fn operate(&self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
-        operation.container(None, layout.bounds(), &mut |operation| {
-            for ((c, t), l) in self.children.iter().zip(tree.children.iter_mut()).zip(layout.children()) {
-                c.as_widget().operate(t, l, renderer, operation);
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            for ((c, t), l) in self.children.iter_mut().zip(tree.children.iter_mut()).zip(layout.children()) {
+                c.as_widget_mut().operate(t, l, renderer, operation);
             }
         });
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         self.children
             .iter_mut()
             .zip(tree.children.iter_mut())
             .zip(layout.children())
-            .map(|((c, t), l)| {
-                c.as_widget_mut().on_event(t, event.clone(), l, cursor, renderer, clipboard, shell, viewport)
-            })
-            .fold(event::Status::Ignored, event::Status::merge)
+            .for_each(|((c, t), l)| {
+                c.as_widget_mut().update(t, event, l, cursor, renderer, clipboard, shell, viewport)
+            });
     }
 
     fn mouse_interaction(
@@ -143,11 +143,12 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for EqualRow<'a, Me
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &iced::Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
-        overlay::from_children(&mut self.children, tree, layout, renderer, translation)
+        overlay::from_children(&mut self.children, tree, layout, renderer, viewport, translation)
     }
 }
 

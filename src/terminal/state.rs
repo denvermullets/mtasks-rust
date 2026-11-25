@@ -392,7 +392,7 @@ impl TerminalState {
                     self.renaming = Some((id, r.name.clone()));
                     // The text field takes the keyboard, not the shell.
                     self.focused = false;
-                    return iced::widget::text_input::focus(terminal_panel::rename_input_id());
+                    return iced::widget::operation::focus(terminal_panel::rename_input_id());
                 }
             }
             TerminalMessage::RenameInput(s) => {
@@ -701,7 +701,7 @@ impl TerminalState {
 
     pub fn subscription(&self, modal_open: bool) -> Subscription<Message> {
         let wake = Subscription::run(|| {
-            iced::stream::channel(1, |mut out| async move {
+            iced::stream::channel(1, |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
                 let rx = WAKE_RX.get().and_then(|m| m.lock().ok()?.take());
                 if let Some(mut rx) = rx {
                     while rx.next().await.is_some() {

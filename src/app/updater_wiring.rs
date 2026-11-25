@@ -253,7 +253,7 @@ impl App {
             staging_dir: staging_dir.to_path_buf(),
         };
         let edge = self.update_edge.clone();
-        let stream = iced::stream::channel(64, move |mut out| async move {
+        let stream = iced::stream::channel(64, move |mut out: iced::futures::channel::mpsc::Sender<Event>| async move {
             let progress_out = std::sync::Mutex::new(out.clone());
             let on_progress = Box::new(move |received| {
                 // Progress is best-effort: a full channel just skips a tick.

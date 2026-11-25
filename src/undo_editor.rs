@@ -142,6 +142,12 @@ impl UndoableContent {
         Self { content: Content::with_text(text), history: History::default() }
     }
 
+    /// The cursor as (line, column); the column is a byte offset into the line.
+    pub fn cursor_position(&self) -> (usize, usize) {
+        let p = self.content.cursor().position;
+        (p.line, p.column)
+    }
+
     /// The wrapped content, for `text_editor(..)`.
     pub fn content(&self) -> &Content {
         &self.content
@@ -182,7 +188,7 @@ impl UndoableContent {
                 Edit::Insert(c) => EditKind::Insert { whitespace: c.is_whitespace() },
                 Edit::Backspace => EditKind::Backspace,
                 Edit::Delete => EditKind::Delete,
-                Edit::Paste(_) | Edit::Enter => EditKind::Standalone,
+                Edit::Paste(_) | Edit::Enter | Edit::Indent | Edit::Unindent => EditKind::Standalone,
             }
         };
         let before = self.snapshot();
@@ -204,11 +210,11 @@ impl UndoableContent {
 
     /// The text without the trailing newline `Content::text` adds.
     fn text_only(&self) -> String {
-        self.content.lines().map(|l| l.to_string()).collect::<Vec<_>>().join("\n")
+        self.content.lines().map(|l| l.text.into_owned()).collect::<Vec<_>>().join("\n")
     }
 
     fn snapshot(&self) -> Snapshot {
-        let (line, index) = self.content.cursor_position();
+        let (line, index) = self.cursor_position();
         let mut cursor = 0;
         let mut text = String::new();
         for (i, l) in self.content.lines().enumerate() {
@@ -216,11 +222,11 @@ impl UndoableContent {
                 text.push('\n');
             }
             if i < line {
-                cursor += l.len() + 1;
+                cursor += l.text.len() + 1;
             } else if i == line {
-                cursor += index.min(l.len());
+                cursor += index.min(l.text.len());
             }
-            text.push_str(&l);
+            text.push_str(&l.text);
         }
         Snapshot { cursor: cursor.min(text.len()), text }
     }
@@ -247,7 +253,7 @@ fn floor_char_boundary(s: &str, mut i: usize) -> usize {
 
 /// Undo/redo for a key press: Cmd+Z and Cmd+Shift+Z.
 pub fn undo_key(press: &KeyPress) -> Option<EditorAction> {
-    if press.status != Status::Focused || !press.modifiers.command() {
+    if !matches!(press.status, Status::Focused { .. }) || !press.modifiers.command() {
         return None;
     }
     match press.key.as_ref() {
@@ -407,18 +413,25 @@ mod tests {
     }
 
     fn press(key: &str, modifiers: Modifiers, status: Status) -> KeyPress {
-        KeyPress { key: Key::Character(key.into()), modifiers, text: None, status }
+        KeyPress {
+            key: Key::Character(key.into()),
+            modified_key: Key::Character(key.into()),
+            physical_key: iced::keyboard::key::Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
+            modifiers,
+            text: None,
+            status,
+        }
     }
 
     #[test]
     fn cmd_z_undoes_and_cmd_shift_z_redoes_only_when_focused() {
         let cmd = Modifiers::COMMAND;
         let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-        assert!(matches!(undo_key(&press("z", cmd, Status::Focused)), Some(EditorAction::Undo)));
-        assert!(matches!(undo_key(&press("Z", cmd_shift, Status::Focused)), Some(EditorAction::Redo)));
-        assert!(matches!(undo_key(&press("z", cmd_shift, Status::Focused)), Some(EditorAction::Redo)));
-        assert!(undo_key(&press("z", Modifiers::empty(), Status::Focused)).is_none());
+        assert!(matches!(undo_key(&press("z", cmd, Status::Focused { is_hovered: false })), Some(EditorAction::Undo)));
+        assert!(matches!(undo_key(&press("Z", cmd_shift, Status::Focused { is_hovered: false })), Some(EditorAction::Redo)));
+        assert!(matches!(undo_key(&press("z", cmd_shift, Status::Focused { is_hovered: false })), Some(EditorAction::Redo)));
+        assert!(undo_key(&press("z", Modifiers::empty(), Status::Focused { is_hovered: false })).is_none());
         assert!(undo_key(&press("z", cmd, Status::Active)).is_none());
-        assert!(undo_key(&press("c", cmd, Status::Focused)).is_none());
+        assert!(undo_key(&press("c", cmd, Status::Focused { is_hovered: false })).is_none());
     }
 }

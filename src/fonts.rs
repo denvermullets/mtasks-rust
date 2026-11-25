@@ -322,7 +322,7 @@ mod tests {
             fs.load_font(std::borrow::Cow::Borrowed(bytes));
         }
         let mut buf = ct::Buffer::new(fs.raw(), ct::Metrics::new(16.0, 20.0));
-        buf.set_text(fs.raw(), "Bold", to_attributes(font), ct::Shaping::Advanced);
+        buf.set_text(fs.raw(), "Bold", &to_attributes(font), ct::Shaping::Advanced, None);
         buf.shape_until_scroll(fs.raw(), false);
         let id = buf.layout_runs().next().unwrap().glyphs[0].font_id;
         let face = fs.raw().db().face(id).unwrap();

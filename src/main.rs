@@ -50,7 +50,8 @@ fn main() -> iced::Result {
     theme::set_by_key(&cfg.theme);
     theme::set_window_opacity(cfg.window_opacity);
     let font_key = cfg.font;
-    let mut app = iced::application(app::App::title, app::App::update, app::App::view);
+    let mut app = iced::application(app::App::new, app::App::update, app::App::view)
+        .title(app::App::title);
     for bytes in fonts::FONT_BYTES {
         app = app.font(bytes);
     }
@@ -77,5 +78,5 @@ fn main() -> iced::Result {
             },
             ..Default::default()
         })
-        .run_with(app::App::new)
+        .run()
 }

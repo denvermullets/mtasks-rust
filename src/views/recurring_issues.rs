@@ -5,7 +5,7 @@
 //! a `header_cell` in `view` and a cell in `recurring_row`; add a row action in
 //! `recurring_row` (a `mouse_area` / button on the row) with its own `Message`.
 
-use iced::widget::{button, column, container, horizontal_rule, mouse_area, row, scrollable};
+use iced::widget::{button, column, container, mouse_area, row, scrollable};
 use crate::views::text;
 use iced::{Alignment, Element, Length, Theme};
 
@@ -88,7 +88,7 @@ pub fn view<'a>(rows: &'a [RecurringIssueRow]) -> Element<'a, Message> {
 }
 
 fn divider<'a>() -> Element<'a, Message> {
-    container(horizontal_rule(1))
+    container(iced::widget::rule::horizontal(1))
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::border())),
             ..Default::default()

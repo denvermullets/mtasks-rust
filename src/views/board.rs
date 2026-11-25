@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use iced::widget::{column, container, horizontal_space, mouse_area, row, scrollable, tooltip, Column, Row, Space};
+use iced::widget::{column, container, mouse_area, row, scrollable, tooltip, Column, Row, Space};
 use crate::views::text;
 use iced::widget::text::LineHeight;
 use iced::{Border, Element, Length, Theme};
@@ -31,7 +31,7 @@ fn hidden_columns<'a>(hidden: &[display::HiddenColumn]) -> Element<'a, Message> 
             row![]
                 .spacing(space::S2)
                 .align_y(iced::Alignment::Center)
-                .push_maybe(h.lane_icon.map(lane_icon::view))
+                .push(h.lane_icon.map(lane_icon::view))
                 .push(text(h.title.clone()).size(type_scale::SM).color(t::text_muted())),
         );
     }
@@ -44,11 +44,11 @@ fn hidden_columns<'a>(hidden: &[display::HiddenColumn]) -> Element<'a, Message> 
         )
         .push(scrollable(list).height(Length::Fill));
     row![
-        iced::widget::vertical_rule(1).style(|_theme: &Theme| iced::widget::rule::Style {
+        iced::widget::rule::vertical(1).style(|_theme: &Theme| iced::widget::rule::Style {
             color: t::border(),
-            width: 1,
             radius: 0.0.into(),
             fill_mode: iced::widget::rule::FillMode::Full,
+            snap: true,
         }),
         container(body)
             .padding(iced::Padding::ZERO.top(space::S2_5).left(space::S3).right(space::S3))
@@ -121,7 +121,7 @@ pub fn view<'a>(
         let header = row![]
             .spacing(space::S2)
             .align_y(iced::Alignment::Center)
-            .push_maybe(col.lane_icon.map(lane_icon::view))
+            .push(col.lane_icon.map(lane_icon::view))
             .push(
                 text(col.title.clone())
                     .size(type_scale::SM)
@@ -517,15 +517,15 @@ fn issue_card<'a>(
                             .font(fonts::code())
                             .color(t::text_muted()),
                     )
-                    .push_maybe(block_icon(layout.blocks))
-                    .push(horizontal_space())
-                    .push_maybe(comments),
+                    .push(block_icon(layout.blocks))
+                    .push(iced::widget::space::horizontal())
+                    .push(comments),
             )
             .height(Length::Fixed(cl::XS_LINE))
             .padding(iced::Padding::ZERO)
             .clip(true),
         );
-        card_content = card_content.push(Space::with_height(cl::ID_GAP));
+        card_content = card_content.push(Space::new().height(cl::ID_GAP));
     }
 
     // Title: one or two lines as measured; past two it is clipped (web
@@ -542,13 +542,13 @@ fn issue_card<'a>(
         .height(Length::Fixed(layout.title_lines as f32 * cl::TITLE_LINE))
         .clip(true),
     );
-    card_content = card_content.push(Space::with_height(cl::TITLE_GAP));
+    card_content = card_content.push(Space::new().height(cl::TITLE_GAP));
 
     // Footer: the packed pill rows, avatar on the right (web `justify-between
     // items-start`). No pills shows the web's "···".
     let pills: Element<'a, Message> = if layout.rows.is_empty() {
         if layout.assignee.is_some() {
-            Space::with_width(Length::Fill).into()
+            Space::new().width(Length::Fill).into()
         } else {
             container(form_page::icon(ICON_DOTS, space::S4, t::text_muted()))
                 .center_y(Length::Fixed(cl::PILL_H))
@@ -568,7 +568,7 @@ fn issue_card<'a>(
     let footer = row![]
         .spacing(cl::AVATAR_GAP)
         .push(container(pills).width(Length::Fill))
-        .push_maybe(layout.assignee.map(|m| util::avatar(&m.name)))
+        .push(layout.assignee.map(|m| util::avatar(&m.name)))
         .height(Length::Fixed(footer_h));
     card_content = card_content.push(footer);
 
@@ -675,7 +675,7 @@ fn card_pill<'a>(placed: Placed<'a>) -> Element<'a, Message> {
                 .spacing(cl::PILL_ICON_GAP)
                 .align_y(iced::Alignment::Center)
                 .push(
-                    container(Space::new(cl::LABEL_DOT, cl::LABEL_DOT)).style(move |_: &Theme| {
+                    container(Space::new().width(cl::LABEL_DOT).height(cl::LABEL_DOT)).style(move |_: &Theme| {
                         container::Style {
                             background: Some(iced::Background::Color(dot)),
                             border: Border { radius: radius::FULL.into(), ..Default::default() },
@@ -689,7 +689,7 @@ fn card_pill<'a>(placed: Placed<'a>) -> Element<'a, Message> {
         Pill::Fact { icon, .. } => row![]
             .spacing(cl::PILL_ICON_GAP)
             .align_y(iced::Alignment::Center)
-            .push_maybe(icon.map(|src| form_page::icon(src, cl::PILL_ICON, t::text_muted())))
+            .push(icon.map(|src| form_page::icon(src, cl::PILL_ICON, t::text_muted())))
             .push(label)
             .into(),
     };

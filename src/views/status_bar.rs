@@ -85,7 +85,7 @@ pub fn view<'a>(
     };
 
     let bar = bar
-        .push_maybe(update_chip)
+        .push(update_chip)
         .push(sync_indicator(status, last_synced_at))
         .align_y(Alignment::Center);
 

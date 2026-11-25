@@ -12,7 +12,7 @@ use crate::theme as t;
 pub const SEARCH_KEY: &str = "header-search";
 
 /// Id of the header search box, so a shortcut can focus it.
-pub fn search_input_id() -> text_input::Id {
+pub fn search_input_id() -> iced::widget::Id {
     crate::undo_input::id(SEARCH_KEY)
 }
 
@@ -139,7 +139,7 @@ pub fn titlebar<'a>(title: String) -> Element<'a, Message> {
             background: Some(iced::Background::Color(t::base(t::bg_menu()))),
             ..Default::default()
         });
-    let rule = container(iced::widget::Space::with_height(1.0))
+    let rule = container(iced::widget::Space::new().height(1.0))
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::border())),
@@ -165,8 +165,8 @@ pub fn dashboard_bar<'a>(
         row![]
             .align_y(Alignment::Center)
             .push(trail)
-            .push(iced::widget::horizontal_space())
-            .push_maybe(menu),
+            .push(iced::widget::space::horizontal())
+            .push(menu),
     )
     .padding([0.0, t::space::S4])
     .center_y(Length::Fixed(t::space::S12 + t::space::S2))
@@ -175,7 +175,7 @@ pub fn dashboard_bar<'a>(
         background: Some(iced::Background::Color(t::base(t::bg_menu()))),
         ..Default::default()
     });
-    let rule = container(iced::widget::Space::with_height(1.0))
+    let rule = container(iced::widget::Space::new().height(1.0))
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::border())),
@@ -293,13 +293,13 @@ pub fn view<'a>(
         .spacing(8)
         .align_y(Alignment::Center)
         .push(trail)
-        .push(iced::widget::horizontal_space())
-        .push_maybe(view_actions);
+        .push(iced::widget::space::horizontal())
+        .push(view_actions);
     if show_controls {
         content = content
             .push(search)
             // Filter only shows where it applies (board and My Issues).
-            .push_maybe(board_controls.is_some().then_some(filter))
+            .push(board_controls.is_some().then_some(filter))
             .push(display)
             .push(new_button);
     }

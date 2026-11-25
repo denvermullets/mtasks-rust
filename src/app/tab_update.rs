@@ -838,7 +838,7 @@ impl App {
         let w = tab_bar::tab_width(now.1, viewport);
         let x = tab_bar::reveal_offset(now.0, now.1, w, viewport, self.tab_bar_offset);
         self.tab_bar_offset = x;
-        iced::widget::scrollable::scroll_to(
+        iced::widget::operation::scroll_to(
             tab_bar::scroll_id(),
             iced::widget::scrollable::AbsoluteOffset { x, y: 0.0 },
         )

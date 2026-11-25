@@ -249,11 +249,11 @@ pub fn view<'a>(
                 .style(button::text),
         )
         .push(text("›").size(type_scale::SM).color(t::text_muted()))
-        .push_maybe(project_name.map(|n| text(n).size(type_scale::SM).color(t::text_secondary())))
-        .push_maybe(project_name.map(|_| text("›").size(type_scale::SM).color(t::text_muted())))
+        .push(project_name.map(|n| text(n).size(type_scale::SM).color(t::text_secondary())))
+        .push(project_name.map(|_| text("›").size(type_scale::SM).color(t::text_muted())))
         .push(text(identifier).size(type_scale::SM).color(t::text_secondary()))
-        .push_maybe(terminal_showing.then(|| claude_prompt_button(&issue.id)))
-        .push(iced::widget::horizontal_space())
+        .push(terminal_showing.then(|| claude_prompt_button(&issue.id)))
+        .push(iced::widget::space::horizontal())
         .push(
             button(text("Dependencies").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenDependencyMap(issue.id.clone()))
@@ -281,7 +281,7 @@ pub fn view<'a>(
     let head = column![]
         .spacing(space::S4)
         .push(breadcrumb)
-        .push_maybe(recurring_origin.map(|title| origin_line(title, &issue.team_id)))
+        .push(recurring_origin.map(|title| origin_line(title, &issue.team_id)))
         .push(
             crate::views::click_outside::click_outside(
                 crate::undo_editor::view(&detail.title, Message::IssueDetailTitleChanged, title_binding)
@@ -293,13 +293,13 @@ pub fn view<'a>(
                 detail.outside_click(|now, was| now.title != was.title),
             ),
         )
-        .push_maybe(
+        .push(
             detail
                 .error
                 .as_deref()
                 .map(|e| text(e).size(type_scale::XS).color(t::danger())),
         )
-        .push_maybe(inline_props);
+        .push(inline_props);
 
     // Title-to-body gap is S6; the sections below are S8 apart. The attach
     // button stays close to the description it belongs to.
@@ -326,8 +326,8 @@ pub fn view<'a>(
     let sections = column![]
         .spacing(space::S8)
         .push(description)
-        .push_maybe(crate::views::attachments::section(attachments, images))
-        .push_maybe(
+        .push(crate::views::attachments::section(attachments, images))
+        .push(
             (!references.is_empty()).then(|| referenced_in_section(references, issues, team)),
         )
         .push(parent_block(parent, team))
@@ -689,7 +689,7 @@ fn sub_issues_section<'a>(
     let actions = row![]
         .spacing(space::S3)
         .align_y(Alignment::Center)
-        .push_maybe(has_tree.then(|| {
+        .push(has_tree.then(|| {
             button(text("View tree →").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenHierarchyTree(issue.id.clone()))
                 .padding(0)
@@ -782,7 +782,7 @@ fn sub_issue_row<'a>(
                     .color(dim(t::text_primary()))
                     .width(Length::Fill),
             )
-            .push_maybe(badge),
+            .push(badge),
     )
     .on_press(Message::OpenIssueDetail(child.id.clone()))
     .padding([space::S1_5, space::S2])
@@ -1136,39 +1136,40 @@ pub(crate) fn description_display(buffered: &str, editing: bool) -> DescriptionD
 }
 
 /// Container id used to find the description editor for focusing.
-pub(crate) fn description_editor_id() -> iced::widget::container::Id {
-    iced::widget::container::Id::new("issue-description-editor")
+pub(crate) fn description_editor_id() -> iced::widget::Id {
+    iced::widget::Id::new("issue-description-editor")
 }
 
 /// Focuses the first focusable widget inside the container `target`
-/// (text_editor has no id of its own in iced 0.13) and unfocuses the rest.
+/// (text_editor has no id of its own) and unfocuses the rest.
+///
+/// iced 0.14 splits a container into `container(id, ..)` followed by
+/// `traverse(..)` for its children, so `container` notes whether the next
+/// traversal enters `target`.
 pub(crate) struct FocusFirstIn {
     target: iced::advanced::widget::Id,
     done: bool,
+    entering: bool,
 }
 
 impl FocusFirstIn {
-    pub(crate) fn new(target: iced::widget::container::Id) -> Self {
-        Self { target: target.into(), done: false }
+    pub(crate) fn new(target: iced::widget::Id) -> Self {
+        Self { target, done: false, entering: false }
     }
 }
 
 struct FocusFirst<'a>(&'a mut bool);
 
 impl iced::advanced::widget::Operation<()> for FocusFirst<'_> {
-    fn container(
-        &mut self,
-        _id: Option<&iced::advanced::widget::Id>,
-        _bounds: iced::Rectangle,
-        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
-    ) {
-        operate_on_children(self);
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>)) {
+        operate(self);
     }
 
     fn focusable(
         &mut self,
-        state: &mut dyn iced::advanced::widget::operation::Focusable,
         _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
     ) {
         if !*self.0 {
             state.focus();
@@ -1178,23 +1179,23 @@ impl iced::advanced::widget::Operation<()> for FocusFirst<'_> {
 }
 
 impl iced::advanced::widget::Operation<()> for FocusFirstIn {
-    fn container(
-        &mut self,
-        id: Option<&iced::advanced::widget::Id>,
-        _bounds: iced::Rectangle,
-        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
-    ) {
-        if id == Some(&self.target) {
-            operate_on_children(&mut FocusFirst(&mut self.done));
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>)) {
+        if std::mem::take(&mut self.entering) {
+            operate(&mut FocusFirst(&mut self.done));
         } else {
-            operate_on_children(self);
+            operate(self);
         }
+    }
+
+    fn container(&mut self, id: Option<&iced::advanced::widget::Id>, _bounds: iced::Rectangle) {
+        self.entering = id == Some(&self.target);
     }
 
     fn focusable(
         &mut self,
-        state: &mut dyn iced::advanced::widget::operation::Focusable,
         _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
     ) {
         // Anything focused outside the target loses focus.
         state.unfocus();
@@ -1204,37 +1205,37 @@ impl iced::advanced::widget::Operation<()> for FocusFirstIn {
 /// Reports whether a focusable widget outside the container `target` has
 /// focus. Run on Escape: the description editor is left unless the pointer's
 /// keyboard focus is in another editor (the comment composer), where Escape
-/// isn't about the description. iced 0.13 can't query focus directly, but an
-/// operation can read it widget by widget.
+/// isn't about the description. An operation reads focus widget by widget.
 pub(crate) struct FocusedOutside {
     target: iced::advanced::widget::Id,
     inside: bool,
+    entering: bool,
     outside: bool,
 }
 
 impl FocusedOutside {
-    pub(crate) fn new(target: iced::widget::container::Id) -> Self {
-        Self { target: target.into(), inside: false, outside: false }
+    pub(crate) fn new(target: iced::widget::Id) -> Self {
+        Self { target, inside: false, entering: false, outside: false }
     }
 }
 
 impl iced::advanced::widget::Operation<bool> for FocusedOutside {
-    fn container(
-        &mut self,
-        id: Option<&iced::advanced::widget::Id>,
-        _bounds: iced::Rectangle,
-        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<bool>),
-    ) {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<bool>)) {
         let was_inside = self.inside;
-        self.inside |= id == Some(&self.target);
-        operate_on_children(self);
+        self.inside |= std::mem::take(&mut self.entering);
+        operate(self);
         self.inside = was_inside;
+    }
+
+    fn container(&mut self, id: Option<&iced::advanced::widget::Id>, _bounds: iced::Rectangle) {
+        self.entering = id == Some(&self.target);
     }
 
     fn focusable(
         &mut self,
-        state: &mut dyn iced::advanced::widget::operation::Focusable,
         _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
     ) {
         if !self.inside && state.is_focused() {
             self.outside = true;
@@ -1283,7 +1284,7 @@ fn description_section<'a>(detail: &'a IssueDetailState, ctx: &BodyCtx<'a>) -> E
 /// `on_outside` (always wrapped, so toggling it keeps the editor's focus).
 pub(crate) fn description_block<'a>(
     display: DescriptionDisplay,
-    editor_id: iced::widget::container::Id,
+    editor_id: iced::widget::Id,
     edit: Message,
     on_outside: Option<Message>,
     editor: impl FnOnce() -> (Element<'a, Message>, Option<Element<'a, Message>>),
@@ -1294,7 +1295,7 @@ pub(crate) fn description_block<'a>(
             let (editor, suggestions) = editor();
             column![]
                 .push(container(editor).id(editor_id))
-                .push_maybe(suggestions)
+                .push(suggestions)
                 .into()
         }
         DescriptionDisplay::Empty => iced::widget::mouse_area(
@@ -1459,7 +1460,7 @@ pub fn push_thread<'a>(
         col = col.push(comment_row(depth, comment, ctx));
         if ctx.reply_to == Some(comment.id.as_str()) {
             col = col.push(reply_composer(depth + 1, ctx.reply_composer, ctx.suggest));
-            col = col.push_maybe(
+            col = col.push(
                 suggestion_list(ctx.suggest, EditorTarget::Reply).map(|e| indent(depth + 1, e)),
             );
         }
@@ -1492,8 +1493,8 @@ pub fn new_comment_composer<'a>(
             .size(type_scale::SM)
             .height(Length::Fixed(80.0)),
         )
-        .push_maybe(suggestion_list(suggest, EditorTarget::Comment))
-        .push_maybe((!staged.is_empty()).then(|| staged_chips(staged)))
+        .push(suggestion_list(suggest, EditorTarget::Comment))
+        .push((!staged.is_empty()).then(|| staged_chips(staged)))
         .push(
             row![]
                 .spacing(space::S2)
@@ -1542,14 +1543,14 @@ fn activity_row<'a>(item: &'a ActivityItem) -> Element<'a, Message> {
         .spacing(space::S1_5)
         .align_y(Alignment::Center)
         .push(text("•").size(type_scale::XS).color(t::text_muted()))
-        .push_maybe(
+        .push(
             item.actor
                 .name
                 .as_deref()
                 .map(|n| text(n).size(type_scale::XS).color(t::text_secondary())),
         )
         .push(text(item.text.as_str()).size(type_scale::XS).color(t::text_muted()))
-        .push_maybe(pending.then(|| text("(pending)").size(type_scale::XS).color(t::text_muted())))
+        .push(pending.then(|| text("(pending)").size(type_scale::XS).color(t::text_muted())))
         .push(
             text(relative_time(&item.at))
                 .size(type_scale::XS)
@@ -1683,7 +1684,7 @@ fn comment_row<'a>(
         .as_ref()
         .is_some_and(|aid| my_member_ids.contains(aid));
     // Attachment delete follows the same author rule.
-    col = col.push_maybe(
+    col = col.push(
         ctx.comment_attachments
             .get(&comment.id)
             .and_then(|files| crate::views::attachments::section_with(files, ctx.images, can_delete)),
@@ -1764,7 +1765,6 @@ fn title_editor_style(_theme: &Theme, _status: text_editor::Status) -> text_edit
             width: 0.0,
             radius: 0.0.into(),
         },
-        icon: t::text_muted(),
         placeholder: t::text_muted(),
         value: t::text_strong(),
         selection: t::accent(),
@@ -1875,18 +1875,22 @@ mod description_tests {
     fn escape_probe_sees_focus_only_outside_the_description_editor() {
         use iced::advanced::widget::Operation;
         let editor = description_editor_id();
-        let editor_id: iced::advanced::widget::Id = editor.clone().into();
+        let editor_id = editor.clone();
         // (focused inside the editor, focused outside it) -> reported "elsewhere"
         let cases = [(false, false, false), (true, false, false), (false, true, true), (true, true, true)];
         for (inside, outside, want) in cases {
             let mut op = FocusedOutside::new(editor.clone());
-            op.container(None, iced::Rectangle::default(), &mut |op| {
-                op.focusable(&mut Fake(outside), None);
-                op.container(Some(&editor_id), iced::Rectangle::default(), &mut |op| {
-                    op.focusable(&mut Fake(inside), None);
+            let r = iced::Rectangle::default();
+            // iced 0.14 order: `container(..)`, then `traverse(..)` into its children.
+            op.container(None, r);
+            op.traverse(&mut |op| {
+                op.focusable(None, r, &mut Fake(outside));
+                op.container(Some(&editor_id), r);
+                op.traverse(&mut |op| {
+                    op.focusable(None, r, &mut Fake(inside));
                 });
                 // Back outside the editor after leaving it.
-                op.focusable(&mut Fake(false), None);
+                op.focusable(None, r, &mut Fake(false));
             });
             let got = matches!(op.finish(), iced::advanced::widget::operation::Outcome::Some(true));
             assert_eq!(got, want, "inside {inside} outside {outside}");

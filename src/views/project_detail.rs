@@ -226,7 +226,7 @@ pub fn view<'a>(
 
     breadcrumb = breadcrumb
         .width(Length::Fill)
-        .push(iced::widget::horizontal_space())
+        .push(iced::widget::space::horizontal())
         .push(
             button(text("Dependencies").size(type_scale::XS).color(t::accent()))
                 .on_press(Message::OpenProjectDependencyMap(project.id.clone()))
@@ -287,13 +287,13 @@ pub fn view<'a>(
         .spacing(space::S4)
         .push(breadcrumb)
         .push(header)
-        .push_maybe(
+        .push(
             detail
                 .error
                 .as_deref()
                 .map(|e| text(e).size(type_scale::XS).color(t::danger())),
         )
-        .push_maybe(inline_props);
+        .push(inline_props);
 
     // Title-to-body gap is S6; the sections below are S8 apart. The attach
     // button stays close to the description it belongs to.
@@ -317,7 +317,7 @@ pub fn view<'a>(
     let sections = column![]
         .spacing(space::S8)
         .push(description)
-        .push_maybe(crate::views::attachments::section(attachments, images))
+        .push(crate::views::attachments::section(attachments, images))
         .push(cards(
             if stack_cards || terminal_width > 0.0 {
                 // A right-docked Terminal leaves the page a tall, narrow
@@ -329,7 +329,7 @@ pub fn view<'a>(
             burndown(project, issues),
             issues_section(visible, display, issue_sort, issue_filter, team, lanes, terminal_showing),
         ))
-        .push_maybe(SHOW_PROJECT_DISCUSSION.then(|| {
+        .push(SHOW_PROJECT_DISCUSSION.then(|| {
             discussion_section(
                 comments, detail, members, comment_authors, teams, issues, comment_attachments, images, host,
                 pending_paths,
@@ -352,7 +352,7 @@ pub fn view<'a>(
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
-        .push_maybe(terminal);
+        .push(terminal);
     // Properties are hidden until `/` (or the palette) shows them.
     match sidebar_panel {
         Some(panel) => page.push(util::vertical_divider()).push(panel).into(),
@@ -735,7 +735,7 @@ fn burndown<'a>(project: &'a Project, issues: &'a [Issue]) -> Element<'a, Messag
                     .spacing(space::S3)
                     .align_y(Alignment::Center)
                     .push(text("Burndown").size(type_scale::SM).color(t::text_secondary()))
-                    .push_maybe(behind.then(|| {
+                    .push(behind.then(|| {
                         text("Behind schedule").size(type_scale::XS).color(t::danger())
                     })),
             )
@@ -1001,8 +1001,8 @@ fn description_section<'a>(
 }
 
 /// Container id used to find the project description editor for focusing.
-pub(crate) fn description_editor_id() -> container::Id {
-    container::Id::new("project-description-editor")
+pub(crate) fn description_editor_id() -> iced::widget::Id {
+    iced::widget::Id::new("project-description-editor")
 }
 
 /// Alpha of the status tile fill (web `bg-accent/20`).

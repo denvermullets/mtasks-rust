@@ -217,7 +217,7 @@ fn rule_margin(size: f32) -> f32 {
 
 /// A horizontal rule: one pixel in the border color across the column.
 fn rule_block<'a>(size: f32) -> Element<'a, Message> {
-    let line = container(iced::widget::Space::new(0, 0))
+    let line = container(iced::widget::Space::new().width(0).height(0))
         .width(iced::Length::Fill)
         .height(1)
         .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() });
@@ -315,7 +315,7 @@ fn code_block<'a>(parsed: &Parsed, code: &document::CodeBlock, size: f32) -> Ele
         })
         .style(|theme: &Theme, status| {
             let mut s = scrollable::default(theme, status);
-            s.horizontal_rail.scroller.color = Color { a: CODE_SCROLLER_ALPHA, ..t::CODE_BLOCK_TEXT };
+            s.horizontal_rail.scroller.background = iced::Background::Color(Color { a: CODE_SCROLLER_ALPHA, ..t::CODE_BLOCK_TEXT });
             s
         });
     container(scroll)
@@ -336,7 +336,7 @@ fn quote_block<'a>(blocks: &[Block], size: f32, plain: Color, ctx: &BodyCtx<'a>,
     for b in blocks {
         content = content.push(block(b, size, plain, ctx, parsed));
     }
-    let rule = container(iced::widget::Space::new(0, 0))
+    let rule = container(iced::widget::Space::new().width(0).height(0))
         .width(3)
         .height(iced::Length::Fill)
         .style(|_| container::Style { background: Some(t::border().into()), ..Default::default() });

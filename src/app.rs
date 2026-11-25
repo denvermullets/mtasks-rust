@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use iced::keyboard;
-use iced::widget::{column, container, row, text_input};
+use iced::widget::{column, container, row};
 use iced::{event, Element, Length, Subscription, Task, Theme};
 
 use crate::api::{ApiClient, ApiError, CommentDto, TeamDto};
@@ -1882,12 +1882,12 @@ impl App {
             },
             _ => return,
         };
-        // Column is a byte offset into the line (iced 0.13 / cosmic-text).
+        // Column is a byte offset into the line (cosmic-text).
         let (line, col) = content.cursor_position();
         let state = match (content.line(line), self.selected_team()) {
             (Some(l), Some(team)) => m::build_suggest(
                 target,
-                &l,
+                &l.text,
                 col,
                 &self.members,
                 &self.issues,
@@ -1910,7 +1910,7 @@ impl App {
         let state = match (form.description.line(line), team) {
             (Some(l), Some(team)) => m::build_suggest(
                 EditorTarget::Description,
-                &l,
+                &l.text,
                 col,
                 &self.members,
                 &self.issues,
@@ -4220,8 +4220,8 @@ impl App {
 
     /// The window's clear color: the page background while opaque, and clear
     /// while translucent so only the base layers (see `theme::base`) tint it.
-    pub fn style(&self, _theme: &Theme) -> iced::application::Appearance {
-        iced::application::Appearance {
+    pub fn style(&self, _theme: &Theme) -> iced::theme::Style {
+        iced::theme::Style {
             background_color: if t::translucent() {
                 iced::Color::TRANSPARENT
             } else {
@@ -4857,7 +4857,7 @@ impl App {
                     self.save_view_error = None;
                     self.save_view_from_open = false;
                     self.modal = Modal::SaveView;
-                    return text_input::focus(save_view_input_id());
+                    return iced::widget::operation::focus(save_view_input_id());
                 }
             }
 
@@ -4867,7 +4867,7 @@ impl App {
                     self.save_view_error = None;
                     self.save_view_from_open = true;
                     self.modal = Modal::SaveView;
-                    return text_input::focus(save_view_input_id());
+                    return iced::widget::operation::focus(save_view_input_id());
                 }
             }
 
@@ -4886,7 +4886,7 @@ impl App {
                 } else {
                     self.dashboard_form = DashboardForm::default();
                     self.modal = Modal::NewDashboard;
-                    return text_input::focus(dashboard_name_input_id());
+                    return iced::widget::operation::focus(dashboard_name_input_id());
                 }
             }
 
@@ -4905,7 +4905,7 @@ impl App {
                         error: None,
                     };
                     self.modal = Modal::EditDashboard;
-                    return text_input::focus(dashboard_name_input_id());
+                    return iced::widget::operation::focus(dashboard_name_input_id());
                 }
             }
 
@@ -5002,7 +5002,7 @@ impl App {
                 } else {
                     self.group_form = GroupForm::default();
                     self.modal = Modal::NewGroup;
-                    return text_input::focus(crate::views::group_form::name_input_id());
+                    return iced::widget::operation::focus(crate::views::group_form::name_input_id());
                 }
             }
 
@@ -5022,7 +5022,7 @@ impl App {
                     Ok(Some(draft)) => {
                         self.group_form = GroupForm { draft, error: None };
                         self.modal = Modal::EditGroup(group_id);
-                        return text_input::focus(crate::views::group_form::name_input_id());
+                        return iced::widget::operation::focus(crate::views::group_form::name_input_id());
                     }
                     Ok(None) => {}
                     Err(e) => eprintln!("[dashboards] group read failed: {e}"),
@@ -5105,7 +5105,7 @@ impl App {
                     self.save_view_name = sv.name.clone();
                     self.save_view_error = None;
                     self.modal = Modal::RenameSavedView(view_id);
-                    return text_input::focus(save_view_input_id());
+                    return iced::widget::operation::focus(save_view_input_id());
                 }
             }
 
@@ -5487,7 +5487,7 @@ impl App {
             }
             Message::BannerClicked(target) => {
                 // macOS usually activates the app on a click; make sure.
-                let focus = iced::window::get_latest().and_then(iced::window::gain_focus);
+                let focus = iced::window::latest().and_then(iced::window::gain_focus);
                 // Don't navigate out from under an open modal (unsaved input).
                 if self.modal != Modal::None {
                     return focus;
@@ -6737,7 +6737,7 @@ impl App {
                 }
             }
             Message::FocusSearch => {
-                return text_input::focus(header::search_input_id());
+                return iced::widget::operation::focus(header::search_input_id());
             }
             Message::OpenDisplayOptions => self.modal = Modal::DisplayOptions,
             Message::OpenFilterPanel => self.modal = Modal::FilterPanel,
@@ -6823,7 +6823,7 @@ impl App {
                 return scroll::swimlane_headers_follow(x.0);
             }
             Message::SwimlaneHeaderWheel(delta) => {
-                return iced::widget::scrollable::scroll_by(
+                return iced::widget::operation::scroll_by(
                     ScrollKey::Swimlanes.id(),
                     scroll::header_wheel_offset(delta),
                 );
@@ -7036,7 +7036,7 @@ impl App {
                     ));
                     // A fresh list widget starts at the top.
                     self.scroll_state.remove(&ScrollKey::Palette);
-                    return text_input::focus(command_palette::input_id());
+                    return iced::widget::operation::focus(command_palette::input_id());
                 }
             }
             Message::PaletteQueryChanged(query) => {
@@ -7095,7 +7095,7 @@ impl App {
                     let focus = state.has_search();
                     self.modal = Modal::PropertyPicker(state);
                     if focus {
-                        return text_input::focus(property_picker::search_id());
+                        return iced::widget::operation::focus(property_picker::search_id());
                     }
                 }
             }
@@ -9157,16 +9157,16 @@ impl App {
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
                 !self.closed_tabs.is_empty(),
             ))
-            .push_maybe((!self.removed_team_tab()).then_some(header))
+            .push((!self.removed_team_tab()).then_some(header))
             .push(main_pane)
-            .push_maybe(terminal_panel)
+            .push(terminal_panel)
             .push(status)
             .width(Length::Fill)
             .height(Length::Fill);
 
         let sidebar_w = self.sidebar_width();
         let layout = row![]
-            .push_maybe((sidebar_w > 0.0).then(|| {
+            .push((sidebar_w > 0.0).then(|| {
                 container(sidebar_column)
                     .width(Length::Fixed(sidebar_w))
                     .height(Length::Fill)
@@ -9558,7 +9558,7 @@ impl App {
         // wrapping `content` in a stack only while they show changes the
         // tree's shape, and iced then rebuilds the widget state underneath,
         // which scrolls a long body back to the top.
-        let empty = || Element::from(iced::widget::Space::new(0, 0));
+        let empty = || Element::from(iced::widget::Space::new().width(0).height(0));
         let card = self.hover_card_overlay().unwrap_or_else(empty);
         // Toasts sit above everything, including any open modal.
         let toasts = if self.toasts.is_empty() {
@@ -9795,7 +9795,7 @@ fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
 
 const DASHBOARD_NAME_KEY: &str = "dashboard-name";
 
-fn dashboard_name_input_id() -> text_input::Id {
+fn dashboard_name_input_id() -> iced::widget::Id {
     crate::undo_input::id(DASHBOARD_NAME_KEY)
 }
 
@@ -9866,7 +9866,7 @@ fn dashboard_form_modal<'a>(
 
 const SAVE_VIEW_KEY: &str = "save-view-name";
 
-fn save_view_input_id() -> text_input::Id {
+fn save_view_input_id() -> iced::widget::Id {
     crate::undo_input::id(SAVE_VIEW_KEY)
 }
 

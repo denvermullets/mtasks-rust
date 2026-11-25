@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use iced::widget::{column, container, horizontal_rule, mouse_area, row, scrollable, Column, Row};
+use iced::widget::{column, container, mouse_area, row, scrollable, Column, Row};
 use crate::views::text;
 use iced::{Alignment, Border, Element, Length, Theme};
 
@@ -163,7 +163,7 @@ pub fn view<'a>(
                         .spacing(8)
                         .align_y(Alignment::Center)
                         .push(text(marker).size(12).font(fonts::SYMBOL).color(t::text_muted()))
-                        .push_maybe(col.lane_icon.map(lane_icon::view))
+                        .push(col.lane_icon.map(lane_icon::view))
                         .push(text(col.title.clone()).size(14).color(t::text_primary()))
                         .push(
                             text(format!("{}", col.issues.len()))
@@ -213,7 +213,7 @@ pub fn view<'a>(
     container(
         column![]
             .push(header_row(data.display))
-            .push(horizontal_rule(1))
+            .push(iced::widget::rule::horizontal(1))
             .push(body),
     )
     .width(Length::Fill)

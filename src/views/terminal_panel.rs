@@ -13,7 +13,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::keyboard;
 use iced::mouse::{self, Cursor};
 use iced::widget::canvas::{self, Cache, Canvas, Geometry, Text};
-use iced::widget::{button, column, container, row, scrollable, text_input};
+use iced::widget::{button, column, container, row, scrollable};
 use crate::views::text;
 use iced::{font, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
@@ -216,28 +216,23 @@ impl Default for Pane {
     }
 }
 
-impl canvas::Program<Message> for Pane {
-    type State = PaneState;
-
-    fn update(
-        &self,
-        state: &mut PaneState,
-        event: canvas::Event,
-        bounds: Rectangle,
-        cursor: Cursor,
-    ) -> (canvas::event::Status, Option<Message>) {
-        use canvas::event::Status::{Captured, Ignored};
+impl Pane {
+    /// Route a pointer or modifier event: whether it's captured, and the
+    /// message it produces. `update` turns this into a canvas `Action`.
+    fn route(&self, state: &mut PaneState, event: canvas::Event, bounds: Rectangle, cursor: Cursor) -> (bool, Option<Message>) {
+        const CAPTURED: bool = true;
+        const IGNORED: bool = false;
         if let canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
             state.mods = m;
             // Cmd going down or up over a link underlines it or not.
             let link = cursor.position_in(bounds).filter(|_| m.logo()).and_then(|p| self.link_under(p));
             if link != self.hover {
-                return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(self.slot, link))));
+                return (IGNORED, Some(Message::Terminal(TerminalMessage::Hover(self.slot, link))));
             }
-            return (Ignored, None);
+            return (IGNORED, None);
         }
         let canvas::Event::Mouse(ev) = event else {
-            return (Ignored, None);
+            return (IGNORED, None);
         };
         let slot = self.slot;
         let send = |input: MouseInput| Some(Message::Terminal(TerminalMessage::Mouse(slot, input)));
@@ -249,16 +244,16 @@ impl canvas::Program<Message> for Pane {
         match ev {
             mouse::Event::ButtonPressed(b) => {
                 let Some(p) = cursor.position_in(bounds) else {
-                    return (Ignored, None);
+                    return (IGNORED, None);
                 };
                 let Some(button) = map_button(b) else {
-                    return (Ignored, None);
+                    return (IGNORED, None);
                 };
                 // Cmd+click opens a link and does nothing else; a plain click never does.
                 if b == mouse::Button::Left && state.mods.logo() {
                     if let Some(link) = self.link_under(p) {
                         return (
-                            Captured,
+                            CAPTURED,
                             Some(Message::Terminal(TerminalMessage::OpenLink {
                                 url: link.url,
                                 explicit: link.explicit,
@@ -269,20 +264,20 @@ impl canvas::Program<Message> for Pane {
                 state.pressed = true;
                 let (col, row) = at(bounds.position() + iced::Vector::new(p.x, p.y));
                 (
-                    Captured,
+                    CAPTURED,
                     send(MouseInput { action: MouseAction::Press(button), col, row, mods }),
                 )
             }
             mouse::Event::ButtonReleased(b) => {
                 let Some(button) = map_button(b) else {
-                    return (Ignored, None);
+                    return (IGNORED, None);
                 };
                 if !std::mem::take(&mut state.pressed) {
-                    return (Ignored, None);
+                    return (IGNORED, None);
                 }
                 let (col, row) = cursor.position().map(at).unwrap_or(state.last_cell);
                 (
-                    Captured,
+                    CAPTURED,
                     send(MouseInput { action: MouseAction::Release(button), col, row, mods }),
                 )
             }
@@ -290,29 +285,29 @@ impl canvas::Program<Message> for Pane {
                 let inside = Point::new(position.x - bounds.x, position.y - bounds.y);
                 let link = bounds.contains(position).then(|| self.link_under(inside)).flatten();
                 if link != self.hover {
-                    return (Ignored, Some(Message::Terminal(TerminalMessage::Hover(slot, link))));
+                    return (IGNORED, Some(Message::Terminal(TerminalMessage::Hover(slot, link))));
                 }
-                (Ignored, None)
+                (IGNORED, None)
             }
             mouse::Event::CursorMoved { position } => {
                 // Moves matter to a program tracking the mouse, and to a drag in
                 // progress (a selection); send one per cell.
                 if !(state.pressed || (self.frame.tracking && cursor.is_over(bounds))) {
-                    return (Ignored, None);
+                    return (IGNORED, None);
                 }
                 let cell = at(position);
                 if cell == state.last_cell {
-                    return (Ignored, None);
+                    return (IGNORED, None);
                 }
                 state.last_cell = cell;
                 (
-                    Ignored,
+                    IGNORED,
                     send(MouseInput { action: MouseAction::Move, col: cell.0, row: cell.1, mods }),
                 )
             }
             mouse::Event::WheelScrolled { delta } => {
                 let Some(p) = cursor.position_in(bounds) else {
-                    return (Ignored, None);
+                    return (IGNORED, None);
                 };
                 let (y, pixels) = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => (y, false),
@@ -321,14 +316,33 @@ impl canvas::Program<Message> for Pane {
                 let (col, row) = pointer::cell_at(p.x, p.y, self.cell.0, self.cell.1);
                 let rows = pointer::wheel_rows(y, pixels, self.cell.1);
                 (
-                    Captured,
+                    CAPTURED,
                     Some(Message::Terminal(TerminalMessage::Wheel(
                         slot,
                         WheelInput { rows, col, row, mods },
                     ))),
                 )
             }
-            _ => (Ignored, None),
+            _ => (IGNORED, None),
+        }
+    }
+}
+
+impl canvas::Program<Message> for Pane {
+    type State = PaneState;
+
+    fn update(
+        &self,
+        state: &mut PaneState,
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        match self.route(state, event.clone(), bounds, cursor) {
+            (false, None) => None,
+            (true, None) => Some(canvas::Action::capture()),
+            (false, Some(message)) => Some(canvas::Action::publish(message)),
+            (true, Some(message)) => Some(canvas::Action::publish(message).and_capture()),
         }
     }
 
@@ -483,13 +497,14 @@ fn draw_run(
             size: Pixels(font_size),
             line_height: iced::widget::text::LineHeight::Absolute(Pixels(ch)),
             font,
-            horizontal_alignment: Horizontal::Left,
-            vertical_alignment: Vertical::Top,
+            align_x: Horizontal::Left.into(),
+            align_y: Vertical::Top,
             shaping: if run.ascii {
                 iced::widget::text::Shaping::Basic
             } else {
                 iced::widget::text::Shaping::Advanced
             },
+            max_width: f32::INFINITY,
         });
     }
     let w = run.cells as f32 * cw;
@@ -509,12 +524,12 @@ pub fn measure_cell(font: TermFont) -> (f32, f32) {
     let n = 100.0;
     let p = P::with_text(adv_text::Text {
         content: &"M".repeat(n as usize),
-        bounds: Size::INFINITY,
+        bounds: Size::INFINITE,
         size: Pixels(font.size),
         line_height: iced::widget::text::LineHeight::Absolute(Pixels(ch)),
         font: Font::with_name(font.family),
-        horizontal_alignment: Horizontal::Left,
-        vertical_alignment: Vertical::Top,
+        align_x: Horizontal::Left.into(),
+        align_y: Vertical::Top,
         shaping: iced::widget::text::Shaping::Basic,
         wrapping: iced::widget::text::Wrapping::None,
     });
@@ -626,7 +641,7 @@ pub fn confirm_modal_with<'a>(
 
 const RENAME_KEY: &str = "terminal-rename";
 
-pub fn rename_input_id() -> text_input::Id {
+pub fn rename_input_id() -> iced::widget::Id {
     crate::undo_input::id(RENAME_KEY)
 }
 
@@ -644,7 +659,7 @@ fn strip_button<'a>(item: StripItem) -> Element<'a, Message> {
     let label = if item.exited { format!("{} (exited)", item.name) } else { item.name };
     let (active, id) = (item.active, item.id);
     let content = row![text(label).size(12)]
-        .push_maybe(item.need.map(attention_dot))
+        .push(item.need.map(attention_dot))
         .spacing(6)
         .align_y(iced::Alignment::Center);
     button(content)
@@ -676,7 +691,7 @@ pub fn attention_dot<'a>(need: crate::terminal::Need) -> Element<'a, Message> {
         n if n.urgent() => t::warning(),
         _ => t::accent(),
     };
-    container(iced::widget::Space::new(DOT, DOT))
+    container(iced::widget::Space::new().width(DOT).height(DOT))
         .style(move |_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(color)),
             border: iced::Border { radius: (DOT / 2.0).into(), ..Default::default() },
@@ -901,7 +916,7 @@ pub fn view<'a>(p: PanelView<'a>) -> Element<'a, Message> {
                 Message::Terminal(TerminalMessage::BodySize(size))
             });
             let handle = iced::widget::mouse_area(
-                container(iced::widget::Space::new(Length::Fixed(HANDLE_WIDTH), Length::Fill))
+                container(iced::widget::Space::new().width(Length::Fixed(HANDLE_WIDTH)).height(Length::Fill))
                     .width(Length::Fixed(HANDLE_WIDTH))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| container::Style {

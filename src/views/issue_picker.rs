@@ -125,8 +125,8 @@ pub fn view<'a>(
             .size(18)
             .color(t::text_primary()),
         )
-        .push_maybe(is_dep.then_some(kinds))
-        .push_maybe(is_dep.then(|| {
+        .push(is_dep.then_some(kinds))
+        .push(is_dep.then(|| {
             text("Tab / Shift+Tab to change kind").size(11).color(t::text_muted())
         }))
         .push(

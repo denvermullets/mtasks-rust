@@ -12,7 +12,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::tree::Tree;
 use iced::advanced::widget::Operation;
 use iced::advanced::{mouse, Clipboard, Shell, Widget};
-use iced::{event, keyboard, Element, Event, Length, Point, Rectangle, Size, Theme, Vector};
+use iced::{keyboard, Element, Event, Length, Point, Rectangle, Size, Theme, Vector};
 
 use crate::theme::space;
 
@@ -61,8 +61,8 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Dropdow
         self.anchor.as_widget().size()
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
-        self.anchor.as_widget().layout(&mut tree.children[0], renderer, limits)
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        self.anchor.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
     }
 
     fn draw(
@@ -79,27 +79,27 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Dropdow
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.anchor.as_widget().operate(&mut tree.children[0], layout, renderer, operation);
+        self.anchor.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        self.anchor.as_widget_mut().on_event(
+    ) {
+        self.anchor.as_widget_mut().update(
             &mut tree.children[0],
             event,
             layout,
@@ -125,8 +125,9 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Dropdow
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         _renderer: &iced::Renderer,
+        _viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         let content = self.menu.as_mut()?;
@@ -170,7 +171,7 @@ fn place(anchor: Rectangle, menu: Size, window: Size, align_left: bool) -> Point
 impl<'a, 'b, Message: Clone> overlay::Overlay<Message, Theme, iced::Renderer> for Menu<'a, 'b, Message> {
     fn layout(&mut self, renderer: &iced::Renderer, bounds: Size) -> layout::Node {
         let limits = layout::Limits::new(Size::ZERO, bounds).width(Length::Fixed(self.width));
-        let node = self.content.as_widget().layout(self.tree, renderer, &limits);
+        let node = self.content.as_widget_mut().layout(self.tree, renderer, &limits);
         let position = place(self.anchor, node.size(), bounds, self.align_left);
         node.move_to(position)
     }
@@ -192,39 +193,41 @@ impl<'a, 'b, Message: Clone> overlay::Overlay<Message, Theme, iced::Renderer> fo
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.content.as_widget().operate(self.tree, layout, renderer, operation);
+        self.content.as_widget_mut().operate(self.tree, layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
-    ) -> event::Status {
-        match &event {
+    ) {
+        match event {
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
             }) => {
                 shell.publish(self.on_dismiss.clone());
-                return event::Status::Captured;
+                shell.capture_event();
+                return;
             }
             Event::Mouse(mouse::Event::ButtonPressed(_))
                 if !cursor.is_over(layout.bounds()) =>
             {
                 if cursor.is_over(self.anchor) {
-                    return event::Status::Ignored;
+                    return;
                 }
                 shell.publish(self.on_dismiss.clone());
-                return event::Status::Captured;
+                shell.capture_event();
+                return;
             }
             _ => {}
         }
         let viewport = layout.bounds();
-        self.content.as_widget_mut().on_event(
+        self.content.as_widget_mut().update(
             self.tree, event, layout, cursor, renderer, clipboard, shell, &viewport,
         )
     }
@@ -233,10 +236,9 @@ impl<'a, 'b, Message: Clone> overlay::Overlay<Message, Theme, iced::Renderer> fo
         &self,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(self.tree, layout, cursor, viewport, renderer)
+        self.content.as_widget().mouse_interaction(self.tree, layout, cursor, &layout.bounds(), renderer)
     }
 }
 

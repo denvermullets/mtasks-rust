@@ -329,10 +329,10 @@ pub enum ScrollKey {
 
 impl ScrollKey {
     /// The scrollable widget this key names.
-    pub fn id(self) -> iced::widget::scrollable::Id {
-        use iced::widget::scrollable::Id;
+    pub fn id(self) -> iced::widget::Id {
+        use iced::widget::Id;
         match self {
-            ScrollKey::Lane(i) => Id::new(format!("board-lane-{i}")),
+            ScrollKey::Lane(i) => Id::from(format!("board-lane-{i}")),
             ScrollKey::Board => Id::new("board-columns"),
             ScrollKey::Swimlanes => Id::new("board-swimlanes"),
             ScrollKey::IssueList => Id::new("issue-list"),
@@ -364,7 +364,7 @@ impl ScrollKey {
 
     /// `scrollable::scroll_to` for a stored `offset`.
     pub fn scroll_to<T: 'static>(self, offset: f32) -> iced::Task<T> {
-        iced::widget::scrollable::scroll_to(self.id(), self.absolute(offset))
+        iced::widget::operation::scroll_to(self.id(), self.absolute(offset))
     }
 
     /// The `(offset, viewport)` pair the scrollable reports for this key.
@@ -391,8 +391,8 @@ pub fn track<'a>(
 
 /// The bar-less strip holding the board's column headers in swimlanes mode.
 /// It is never tracked: it follows the body's sideways offset.
-pub fn swimlane_header_id() -> iced::widget::scrollable::Id {
-    iced::widget::scrollable::Id::new("board-swimlane-headers")
+pub fn swimlane_header_id() -> iced::widget::Id {
+    iced::widget::Id::new("board-swimlane-headers")
 }
 
 /// Wire the swimlanes body, which scrolls both ways (JRST-530): it answers to
@@ -411,7 +411,7 @@ pub fn track_swimlanes<'a>(
 /// Scroll the swimlanes body to `(x, y)`, and the header strip with it. One
 /// widget holds both axes, so a scroll on either must carry the other.
 pub fn swimlanes_scroll_to<T: 'static>(x: f32, y: f32) -> iced::Task<T> {
-    use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
+    use iced::widget::{operation::scroll_to, scrollable::AbsoluteOffset};
     iced::Task::batch([
         scroll_to(ScrollKey::Swimlanes.id(), AbsoluteOffset { x, y }),
         swimlane_headers_follow(x),
@@ -420,7 +420,7 @@ pub fn swimlanes_scroll_to<T: 'static>(x: f32, y: f32) -> iced::Task<T> {
 
 /// Line the header strip up with the swimlanes body's sideways offset `x`.
 pub fn swimlane_headers_follow<T: 'static>(x: f32) -> iced::Task<T> {
-    use iced::widget::scrollable::{scroll_to, AbsoluteOffset};
+    use iced::widget::{operation::scroll_to, scrollable::AbsoluteOffset};
     scroll_to(swimlane_header_id(), AbsoluteOffset { x, y: 0.0 })
 }
 
