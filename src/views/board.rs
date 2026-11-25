@@ -154,6 +154,9 @@ pub fn view<'a>(
             swimlane_body(columns, &rows, row_collapsed, &data, slot_w, focused_lane, focused_issue);
         swimlane_board(columns.len(), header_row, body, hidden)
     };
+    // Near-straight wheel strokes stay on their axis, so a vertical swipe
+    // doesn't drift the board sideways; diagonals still move both ways.
+    let board: Element<'a, Message> = crate::views::axis_lock::axis_lock(board).into();
 
     // Dependency lines (JRST-450): only wrapped when the display option is on.
     let board: Element<'a, Message> = match data.deps.clone() {
