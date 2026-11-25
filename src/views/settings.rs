@@ -8,6 +8,9 @@ use crate::fonts;
 use crate::theme as t;
 use crate::window_effects;
 
+/// The settings form's text fields in Tab order: base URL, then token.
+pub const TAB_ORDER: [&str; 2] = ["settings-base-url", "settings-token"];
+
 #[derive(Debug, Clone)]
 pub struct SettingsFormState {
     pub api_base_url: String,
@@ -73,7 +76,7 @@ pub fn view<'a>(
                 .push(text("API base URL").size(12).color(t::text_secondary()))
                 .push(
                     crate::undo_input::text_input(
-                        "settings-base-url",
+                        TAB_ORDER[0],
                         "https://your-jait-instance.example.com",
                         &form.api_base_url,
                         Message::SettingsBaseUrlChanged,
@@ -87,7 +90,7 @@ pub fn view<'a>(
                 .spacing(4)
                 .push(text("API token").size(12).color(t::text_secondary()))
                 .push(
-                    crate::undo_input::text_input("settings-token", "Bearer token", &form.api_token, Message::SettingsTokenChanged)
+                    crate::undo_input::text_input(TAB_ORDER[1], "Bearer token", &form.api_token, Message::SettingsTokenChanged)
                         .secure(true)
                         .padding(10)
                         .size(14),

@@ -53,7 +53,8 @@ pub fn title_input<'a>(
         .into()
 }
 
-fn title_input_key(placeholder: &str) -> String {
+/// The `undo_input` key of the [`title_input`] built with `placeholder`.
+pub fn title_input_key(placeholder: &str) -> String {
     format!("title-{placeholder}")
 }
 
@@ -183,10 +184,12 @@ pub fn cancel_button<'a>() -> button::Button<'a, Message> {
 
 /// A property chip button (web `px-3 py-1.5 rounded-md bg-foreground border
 /// border-stroke text-sm`), sized like the pick lists beside it.
+/// `focused`: the keyboard is on it (Tab), drawn as an accent ring.
 pub fn chip_button<'a>(
     content: impl Into<Element<'a, Message>>,
     on_press: Message,
     open: bool,
+    focused: bool,
 ) -> Element<'a, Message> {
     button(content)
         .on_press(on_press)
@@ -199,16 +202,62 @@ pub fn chip_button<'a>(
             })),
             text_color: t::text_body(),
             border: Border {
-                color: if open || matches!(status, button::Status::Hovered) {
+                color: if focused {
+                    t::accent()
+                } else if open || matches!(status, button::Status::Hovered) {
                     t::text_muted()
                 } else {
                     t::border()
                 },
-                width: 1.0,
+                width: if focused { 1.5 } else { 1.0 },
                 radius: radius::MD.into(),
             },
             ..Default::default()
         })
+        .into()
+}
+
+/// A full-width select field (the sidebar pick list's look) whose menu is
+/// an [`option_menu`] as wide as the field. Unlike iced's `pick_list` it can
+/// hold the keyboard: `focused` draws the accent ring, and the owner opens
+/// it (`open`) from Enter/Space as well as a click.
+pub fn select<'a>(
+    value: impl Into<String>,
+    open: bool,
+    focused: bool,
+    on_toggle: Message,
+    on_dismiss: Message,
+    menu: impl FnOnce() -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    let face = row![]
+        .spacing(space::S2)
+        .align_y(Alignment::Center)
+        .push(text(value.into()).size(type_scale::SM).color(t::text_body()).width(Length::Fill))
+        .push(text("\u{25be}").size(type_scale::SM).color(t::text_muted()));
+    let anchor = button(face)
+        .on_press(on_toggle)
+        .width(Length::Fill)
+        .padding(util::SIDEBAR_CONTROL_PADDING)
+        .style(move |_theme: &Theme, status| button::Style {
+            background: Some(iced::Background::Color(t::bg_secondary())),
+            text_color: t::text_body(),
+            border: Border {
+                color: if focused {
+                    t::accent()
+                } else if open || matches!(status, button::Status::Hovered) {
+                    t::text_muted()
+                } else {
+                    t::border()
+                },
+                width: if focused { 1.5 } else { 1.0 },
+                radius: radius::MD.into(),
+            },
+            ..Default::default()
+        });
+    crate::views::dropdown::dropdown(anchor, open.then(menu), 0.0, on_dismiss)
+        .align_left()
+        .anchor_width()
+        .keyboard_escape()
         .into()
 }
 
@@ -246,15 +295,17 @@ pub fn chip_frame<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, M
 
 /// A chip's open dropdown (web `min-w-[200px] bg-foreground border
 /// rounded-md shadow-lg`): one `px-3 py-2` row per option, the current one
-/// in the strong text color. Scrolls past ~10 rows.
-pub fn option_menu<'a>(options: Vec<(String, bool, Message)>) -> Element<'a, Message> {
-    let rows = options.into_iter().map(|(label, current, msg)| {
+/// in the strong text color, the keyboard's `cursor` row filled like a
+/// hover. Scrolls past ~10 rows.
+pub fn option_menu<'a>(options: Vec<(String, bool, Message)>, cursor: Option<usize>) -> Element<'a, Message> {
+    let rows = options.into_iter().enumerate().map(|(i, (label, current, msg))| {
+        let under_cursor = cursor == Some(i);
         button(text(label).size(type_scale::SM))
             .on_press(msg)
             .width(Length::Fill)
             .padding([space::S2, space::S3])
             .style(move |_theme: &Theme, status| button::Style {
-                background: matches!(status, button::Status::Hovered)
+                background: (under_cursor || matches!(status, button::Status::Hovered))
                     .then(|| iced::Background::Color(t::bg_card_focused())),
                 text_color: if current { t::text_strong() } else { t::text_body() },
                 border: Border { radius: radius::MD.into(), ..Default::default() },
@@ -262,11 +313,40 @@ pub fn option_menu<'a>(options: Vec<(String, bool, Message)>) -> Element<'a, Mes
             })
             .into()
     });
-    container(scrollable(Column::with_children(rows).width(Length::Fill)).height(Length::Shrink))
-        .max_height(320.0)
+    container(
+        scrollable(Column::with_children(rows).width(Length::Fill))
+            .id(menu_scroll_id())
+            .height(Length::Shrink),
+    )
+        .max_height(OPTION_MENU_MAX_HEIGHT)
         .width(Length::Fill)
         .style(menu_style)
         .into()
+}
+
+/// Height of one `option_menu` / `label_menu` row (`py-2` around `text-sm`).
+pub const MENU_ROW_HEIGHT: f32 = 36.0;
+const OPTION_MENU_MAX_HEIGHT: f32 = 320.0;
+const LABEL_MENU_MAX_HEIGHT: f32 = 240.0;
+
+/// Rows an `option_menu` (or, `labels`, a `label_menu`) shows unscrolled.
+pub fn menu_visible_rows(labels: bool) -> usize {
+    let max = if labels { LABEL_MENU_MAX_HEIGHT } else { OPTION_MENU_MAX_HEIGHT };
+    (max / MENU_ROW_HEIGHT).floor() as usize
+}
+
+/// Scroll the open form menu so `cursor`'s first visible row is at the top.
+pub fn scroll_menu_to<T>(cursor: crate::form_focus::MenuCursor) -> iced::Task<T> {
+    iced::widget::operation::scroll_to(
+        menu_scroll_id(),
+        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: cursor.top as f32 * MENU_ROW_HEIGHT },
+    )
+}
+
+/// The open form menu's scrollable. One form menu is open at a time, so
+/// they share it; the keyboard scrolls it to keep the cursor row in view.
+pub fn menu_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("form-menu-scroll")
 }
 
 fn menu_style(_theme: &Theme) -> container::Style {
@@ -302,6 +382,7 @@ pub fn label_menu<'a>(
     labels: &'a [Label],
     is_selected: impl Fn(&Label) -> bool,
     on_toggle: impl Fn(&Label) -> Message,
+    cursor: Option<usize>,
 ) -> Element<'a, Message> {
     let mut list = column![].spacing(0).width(Length::Fill);
     if labels.is_empty() {
@@ -311,7 +392,8 @@ pub fn label_menu<'a>(
                 .center_x(Length::Fill),
         );
     }
-    for label in labels {
+    for (i, label) in labels.iter().enumerate() {
+        let under_cursor = cursor == Some(i);
         let selected = is_selected(label);
         let dot_color = crate::views::labels::chip_color(label.color.as_deref());
         let check = text(if selected { "\u{2713}" } else { "" })
@@ -336,16 +418,16 @@ pub fn label_menu<'a>(
                 .on_press(on_toggle(label))
                 .width(Length::Fill)
                 .padding([space::S2, space::S3])
-                .style(|_theme: &Theme, status| button::Style {
-                    background: matches!(status, button::Status::Hovered)
+                .style(move |_theme: &Theme, status| button::Style {
+                    background: (under_cursor || matches!(status, button::Status::Hovered))
                         .then(|| iced::Background::Color(t::bg_card_focused())),
                     text_color: t::text_body(),
                     ..Default::default()
                 }),
         );
     }
-    container(scrollable(list).height(Length::Shrink))
-        .max_height(240.0)
+    container(scrollable(list).id(menu_scroll_id()).height(Length::Shrink))
+        .max_height(LABEL_MENU_MAX_HEIGHT)
         .width(Length::Fixed(320.0))
         .padding([space::S1, 0.0])
         .style(|_theme: &Theme| container::Style {

@@ -15,6 +15,12 @@ use crate::db::models::{Label, Project, ProjectStatus, Team};
 use crate::theme as t;
 
 const NAME_KEY: &str = "dashboard-group-name";
+const DESCRIPTION_KEY: &str = "dashboard-group-description";
+
+/// The form's text fields in Tab order: name, then description.
+pub fn tab_order() -> Vec<crate::form_focus::Stop> {
+    vec![crate::form_focus::Stop::field(NAME_KEY), crate::form_focus::Stop::field(DESCRIPTION_KEY)]
+}
 
 pub fn name_input_id() -> iced::widget::Id {
     crate::undo_input::id(NAME_KEY)
@@ -49,7 +55,7 @@ pub fn modal<'a>(
     }
     content = content
         .push(
-            crate::undo_input::text_input("dashboard-group-description", "Description (optional)", &draft.description, Message::GroupDescriptionChanged)
+            crate::undo_input::text_input(DESCRIPTION_KEY, "Description (optional)", &draft.description, Message::GroupDescriptionChanged)
                 .on_submit(Message::GroupSubmit)
                 .padding([6, 10])
                 .size(14)

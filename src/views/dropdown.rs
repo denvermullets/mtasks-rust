@@ -25,6 +25,8 @@ pub struct Dropdown<'a, Message> {
     menu_width: f32,
     on_dismiss: Message,
     align_left: bool,
+    keyboard_escape: bool,
+    anchor_width: bool,
 }
 
 /// `anchor` with `menu` (right-aligned to it, `menu_width` wide) open below it,
@@ -35,13 +37,28 @@ pub fn dropdown<'a, Message>(
     menu_width: f32,
     on_dismiss: Message,
 ) -> Dropdown<'a, Message> {
-    Dropdown { anchor: anchor.into(), menu, menu_width, on_dismiss, align_left: false }
+    Dropdown { anchor: anchor.into(), menu, menu_width, on_dismiss, align_left: false, keyboard_escape: false, anchor_width: false }
 }
 
 impl<Message> Dropdown<'_, Message> {
     /// Open the menu flush with the anchor's left edge (web `left-0`).
     pub fn align_left(mut self) -> Self {
         self.align_left = true;
+        self
+    }
+
+    /// Leave Escape to the app's key handler instead of dismissing here, so
+    /// the owner can close just the menu and keep keyboard focus on its
+    /// anchor (form chips).
+    pub fn keyboard_escape(mut self) -> Self {
+        self.keyboard_escape = true;
+        self
+    }
+
+    /// Make the menu as wide as the anchor (a select field), ignoring
+    /// `menu_width`.
+    pub fn anchor_width(mut self) -> Self {
+        self.anchor_width = true;
         self
     }
 }
@@ -135,9 +152,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, iced::Renderer> for Dropdow
             content,
             tree: &mut tree.children[1],
             anchor: layout.bounds() + translation,
-            width: self.menu_width,
+            width: if self.anchor_width { layout.bounds().width } else { self.menu_width },
             on_dismiss: self.on_dismiss.clone(),
             align_left: self.align_left,
+            keyboard_escape: self.keyboard_escape,
         })))
     }
 }
@@ -156,6 +174,7 @@ struct Menu<'a, 'b, Message> {
     width: f32,
     on_dismiss: Message,
     align_left: bool,
+    keyboard_escape: bool,
 }
 
 /// Where the menu goes: right-aligned (or left-aligned) under the anchor,
@@ -209,7 +228,7 @@ impl<'a, 'b, Message: Clone> overlay::Overlay<Message, Theme, iced::Renderer> fo
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
-            }) => {
+            }) if !self.keyboard_escape => {
                 shell.publish(self.on_dismiss.clone());
                 shell.capture_event();
                 return;

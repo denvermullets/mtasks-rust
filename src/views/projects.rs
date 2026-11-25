@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, pick_list, responsive, row, scrollable, text_editor};
+use iced::widget::{button, column, container, responsive, row, scrollable, text_editor};
 use crate::views::text;
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 
@@ -9,6 +9,7 @@ use crate::scroll::{track, ScrollKey};
 use crate::db::models::{Issue, Member, Priority, Project, ProjectStatus, RoadmapCommitment};
 use crate::theme as t;
 use crate::theme::{radius, space, type_scale};
+use crate::form_focus::{MenuId, Stop};
 use crate::views::{date_picker, form_page, progress_chart, util};
 
 pub struct ProjectFormState {
@@ -22,6 +23,19 @@ pub struct ProjectFormState {
     pub roadmap_commitment: Option<RoadmapCommitment>,
     /// Inline validation message shown under the name field. `None` = valid.
     pub error: Option<String>,
+    /// The sidebar select whose menu is open.
+    pub open_menu: Option<ProjectMenu>,
+    /// The keyboard's select and menu cursor (Tab, arrows).
+    pub keys: crate::form_focus::Keys,
+}
+
+/// The project form's sidebar selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectMenu {
+    Status,
+    Priority,
+    Lead,
+    Roadmap,
 }
 
 impl ProjectFormState {
@@ -36,6 +50,8 @@ impl ProjectFormState {
             due_date: String::new(),
             roadmap_commitment: None,
             error: None,
+            open_menu: None,
+            keys: crate::form_focus::Keys::default(),
         }
     }
 
@@ -91,6 +107,49 @@ const ROADMAPS: [RoadmapOption; 4] = [
     RoadmapOption(Some(RoadmapCommitment::Later)),
 ];
 
+const NAME_PLACEHOLDER: &str = "Project name";
+const DESCRIPTION_KEY: &str = "project-form-description";
+
+/// The form's Tab order, as on screen: name, description, then the
+/// Properties sidebar top to bottom.
+pub fn tab_order() -> Vec<Stop> {
+    let menu = |m| Stop::Menu(MenuId::Project(m));
+    vec![
+        Stop::field(form_page::title_input_key(NAME_PLACEHOLDER)),
+        Stop::field(DESCRIPTION_KEY),
+        menu(ProjectMenu::Status),
+        menu(ProjectMenu::Priority),
+        menu(ProjectMenu::Lead),
+        Stop::field(date_picker::input_key(date_picker::DateField::ProjectStart)),
+        Stop::field(date_picker::input_key(date_picker::DateField::ProjectDue)),
+        menu(ProjectMenu::Roadmap),
+    ]
+}
+
+/// The rows of `which`'s menu: label, whether it is the current value, and
+/// the message picking it. The view and the keyboard both read this.
+pub fn menu_options(form: &ProjectFormState, which: ProjectMenu, members: &[Member]) -> Vec<(String, bool, Message)> {
+    match which {
+        ProjectMenu::Status => STATUSES
+            .iter()
+            .map(|s| (s.to_string(), *s == form.status, Message::ProjectStatusChanged(*s)))
+            .collect(),
+        ProjectMenu::Priority => PRIORITIES
+            .iter()
+            .map(|p| (p.to_string(), *p == form.priority, Message::ProjectPriorityChanged(*p)))
+            .collect(),
+        ProjectMenu::Lead => std::iter::once(("\u{2014}".to_string(), form.lead_id.is_none(), Message::ProjectLeadChanged(None)))
+            .chain(members.iter().map(|m| {
+                (m.name.clone(), form.lead_id.as_ref() == Some(&m.id), Message::ProjectLeadChanged(Some(m.id.clone())))
+            }))
+            .collect(),
+        ProjectMenu::Roadmap => ROADMAPS
+            .iter()
+            .map(|r| (r.to_string(), r.0 == form.roadmap_commitment, Message::ProjectRoadmapCommitmentChanged(r.0)))
+            .collect(),
+    }
+}
+
 /// The full-page "New project" form (web `projects/new`): name and
 /// description on the left, the Properties sidebar on the right.
 pub fn page<'a>(
@@ -98,22 +157,6 @@ pub fn page<'a>(
     members: &'a [Member],
     date_picker_state: Option<&date_picker::DatePickerState>,
 ) -> Element<'a, Message> {
-    let member_options: Vec<MemberOption> = std::iter::once(MemberOption {
-        id: None,
-        name: "—".to_string(),
-    })
-    .chain(members.iter().map(|m| MemberOption {
-        id: Some(m.id.clone()),
-        name: m.name.clone(),
-    }))
-    .collect();
-    let selected_member = member_options
-        .iter()
-        .find(|opt| opt.id == form.lead_id)
-        .cloned();
-
-    let selected_roadmap = RoadmapOption(form.roadmap_commitment);
-
     // Left: icon + big name, then the description (web `projects/new`).
     let icon = container(text("\u{25a3}").size(type_scale::LG).color(t::accent()))
         .center_x(Length::Fixed(40.0))
@@ -126,7 +169,7 @@ pub fn page<'a>(
     let name = column![]
         .spacing(space::S2)
         .width(Length::Fill)
-        .push(form_page::title_input("Project name", &form.name, Message::ProjectNameChanged))
+        .push(form_page::title_input(NAME_PLACEHOLDER, &form.name, Message::ProjectNameChanged))
         .push(form.error.as_deref().map(form_page::error_text));
     let left = column![]
         .spacing(space::S8)
@@ -141,6 +184,7 @@ pub fn page<'a>(
                         Message::ProjectDescriptionChanged,
                         text_editor::Binding::from_key_press,
                     )
+                    .id(crate::undo_input::id(DESCRIPTION_KEY))
                     .placeholder("Add description\u{2026}")
                     .padding(0)
                     .size(type_scale::SM)
@@ -168,6 +212,20 @@ pub fn page<'a>(
             today,
         )
     };
+    // A sidebar select showing its current value, its menu while open.
+    let select = |which: ProjectMenu| -> Element<'a, Message> {
+        let rows = menu_options(form, which, members);
+        let value = rows.iter().find(|(_, current, _)| *current).map(|(l, _, _)| l.clone()).unwrap_or_default();
+        let open = form.open_menu == Some(which);
+        form_page::select(
+            value,
+            open,
+            form.keys.focused == Some(MenuId::Project(which)),
+            Message::ProjectFormMenuToggled(which),
+            Message::ProjectFormMenuClosed,
+            move || form_page::option_menu(rows, Some(form.keys.cursor.row)),
+        )
+    };
     let actions = column![]
         .spacing(space::S3)
         .push(
@@ -177,30 +235,12 @@ pub fn page<'a>(
         .push(form_page::cancel_button().width(Length::Fill));
     let sidebar = column![]
         .spacing(space::S6)
-        .push(field(
-            "Status",
-            pick(pick_list(STATUSES.as_slice(), Some(form.status), Message::ProjectStatusChanged)).into(),
-        ))
-        .push(field(
-            "Priority",
-            pick(pick_list(PRIORITIES.as_slice(), Some(form.priority), Message::ProjectPriorityChanged)).into(),
-        ))
-        .push(field(
-            "Lead",
-            pick(pick_list(member_options, selected_member, |opt: MemberOption| {
-                Message::ProjectLeadChanged(opt.id)
-            }))
-            .into(),
-        ))
+        .push(field("Status", select(ProjectMenu::Status)))
+        .push(field("Priority", select(ProjectMenu::Priority)))
+        .push(field("Lead", select(ProjectMenu::Lead)))
         .push(field("Start Date", date(date_picker::DateField::ProjectStart, &form.start_date, Message::ProjectStartDateChanged)))
         .push(field("Due Date", date(date_picker::DateField::ProjectDue, &form.due_date, Message::ProjectDueDateChanged)))
-        .push(field(
-            "Roadmap commitment",
-            pick(pick_list(ROADMAPS.as_slice(), Some(selected_roadmap), |opt: RoadmapOption| {
-                Message::ProjectRoadmapCommitmentChanged(opt.0)
-            }))
-            .into(),
-        ))
+        .push(field("Roadmap commitment", select(ProjectMenu::Roadmap)))
         .push(column![form_page::rule(), actions].spacing(space::S6));
     let sidebar = container(scrollable(sidebar.padding(space::S6)).height(Length::Fill))
         .width(Length::Fixed(util::SIDEBAR_WIDTH))
@@ -215,20 +255,6 @@ pub fn page<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
-}
-
-/// A sidebar pick list on the project page, full width.
-fn pick<'a, T, L, V>(p: iced::widget::PickList<'a, T, L, V, Message>) -> iced::widget::PickList<'a, T, L, V, Message>
-where
-    T: ToString + PartialEq + Clone + 'a,
-    L: std::borrow::Borrow<[T]> + 'a,
-    V: std::borrow::Borrow<T> + 'a,
-{
-    p.width(Length::Fill)
-        .text_size(type_scale::SM)
-        .padding(util::SIDEBAR_CONTROL_PADDING)
-        .style(util::sidebar_pick_list_style)
-        .menu_style(util::sidebar_menu_style)
 }
 
 // ── Projects table (JAIT-181) ──

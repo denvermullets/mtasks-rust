@@ -14,6 +14,7 @@ mod display;
 mod document;
 mod files;
 mod fonts;
+mod form_focus;
 mod hierarchy;
 mod hover_card;
 mod highlight;

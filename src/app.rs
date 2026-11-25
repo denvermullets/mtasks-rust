@@ -34,6 +34,7 @@ use crate::views::{
     tab_bar, team_list, team_members, team_picker, toast,
 };
 
+mod form_keys;
 mod tab_update;
 mod updater_wiring;
 pub use tab_update::TabMessage;
@@ -143,6 +144,12 @@ pub enum Message {
     IssueLabelToggled(String),
     /// Open/close one property chip's dropdown on the issue form page.
     IssueFormMenuToggled(crate::views::issue_form::FormMenu),
+    /// Open or close one of the project form's sidebar selects.
+    ProjectFormMenuToggled(crate::views::projects::ProjectMenu),
+    ProjectFormMenuClosed,
+    /// Open or close one of the recurring issue form's selects.
+    RecurringFormMenuToggled(crate::views::recurring_issue_form::RecurringMenu),
+    RecurringFormMenuClosed,
     /// Dismiss the open issue form dropdown (Escape / click outside).
     IssueFormMenuClosed,
     /// Open/close a date field's calendar (field, its current text).
@@ -678,6 +685,11 @@ pub enum Message {
 
     // Keyboard event
     KeyPressed(keyboard::Key, keyboard::Modifiers),
+    /// Tab (`forward`) or Shift+Tab in a form, from the focused text field
+    /// (`None`: no field of the form's has focus).
+    FormTabFrom { from: Option<String>, forward: bool },
+    /// A mouse press while a form chip holds the keyboard: drop its ring.
+    FormPointerPressed,
 
     /// A single-line input changed (see `undo_input`): record it, then
     /// handle the field's own message.
@@ -2259,6 +2271,39 @@ impl App {
     }
 
     /// The header's Back for an open issue (`tab_state::back_target`).
+    /// The lanes, labels, members and projects the issue form offers.
+    /// Members and projects are per team; My Issues loads every team's, so
+    /// offer only the issue's own team's. The view and the keyboard (menu
+    /// rows) both read this.
+    fn issue_form_scope<'a>(
+        &'a self,
+        form: &issue_form::IssueFormState,
+    ) -> (&'a [Lane], &'a [Label], issue_form::Choices<'a>) {
+        let editing = form
+            .editing_issue_id
+            .as_ref()
+            .and_then(|id| self.issues.iter().find(|i| i.id == *id));
+        let form_team = editing
+            .map(|i| i.team_id.as_str())
+            .or(self.selected_team_id.as_deref())
+            .unwrap_or_default();
+        let choices = issue_form::Choices {
+            members: self.members.iter().filter(|m| m.team_id == form_team).collect(),
+            projects: self.projects.iter().filter(|p| p.team_id == form_team).collect(),
+            // A new project goes to the selected team.
+            can_create_project: self.selected_team_id.as_deref() == Some(form_team),
+        };
+        let (lanes, labels) = match &self.new_issue_scope {
+            Some((lanes, labels))
+                if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
+            {
+                (lanes.as_slice(), labels.as_slice())
+            }
+            _ => (self.lanes.as_slice(), self.labels.as_slice()),
+        };
+        (lanes, labels, choices)
+    }
+
     /// Whether a create/edit form fills the page (issue, project, recurring
     /// issue: the forms the web serves as `new`/`edit` pages).
     fn form_page_open(&self) -> bool {
@@ -2297,26 +2342,8 @@ impl App {
                     chip: editing.map(ident).unwrap_or_else(|| team_ident.clone()),
                     parent,
                 };
-                // Members and projects are per team; My Issues loads every
-                // team's, so offer only the issue's own team's.
-                let form_team = editing
-                    .map(|i| i.team_id.as_str())
-                    .or(self.selected_team_id.as_deref())
-                    .unwrap_or_default();
-                let choices = issue_form::Choices {
-                    members: self.members.iter().filter(|m| m.team_id == form_team).collect(),
-                    projects: self.projects.iter().filter(|p| p.team_id == form_team).collect(),
-                    // A new project goes to the selected team.
-                    can_create_project: self.selected_team_id.as_deref() == Some(form_team),
-                };
-                let page = match &self.new_issue_scope {
-                    Some((lanes, labels))
-                        if form.editing_issue_id.is_none() && form.parent_issue_id.is_none() =>
-                    {
-                        issue_form::page(form, lanes, labels, choices, context, self.date_picker.as_ref())
-                    }
-                    _ => issue_form::page(form, &self.lanes, &self.labels, choices, context, self.date_picker.as_ref()),
-                };
+                let (lanes, labels, choices) = self.issue_form_scope(form);
+                let page = issue_form::page(form, lanes, labels, choices, context, self.date_picker.as_ref());
                 (label.to_string(), page)
             }
             Modal::ProjectForm => (
@@ -4320,6 +4347,13 @@ impl App {
             self.terminals.subscription(modal_open),
             self.updater_subscription(),
         ];
+        // A form chip holds the keyboard until the mouse is used.
+        if self.form_chip_focused() {
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::FormPointerPressed),
+                _ => None,
+            }));
+        }
         // A pressed Tab follows the pointer until release.
         if self.tab_drag.is_some() {
             subs.push(event::listen_with(|e, _status, _id| match e {
@@ -4674,6 +4708,8 @@ impl App {
                 return self.update(message).chain(cursor);
             }
             Message::TextKeyOn { key: None, .. } => return Task::none(),
+            Message::FormTabFrom { from, forward } => return self.form_tab_from(from, forward),
+            Message::FormPointerPressed => self.form_pointer_pressed(),
             Message::KeyPressed(key, modifiers) => {
                 // Esc in the strip's rename field cancels the rename.
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
@@ -4698,6 +4734,10 @@ impl App {
                             return Task::none();
                         }
                     }
+                }
+                // An open form: Tab order, and Enter/arrows/Esc on its chips.
+                if let Some(task) = self.form_key(&key, modifiers) {
+                    return task;
                 }
                 if self.modal == Modal::IssuePicker
                     && self
@@ -5840,6 +5880,9 @@ impl App {
             Message::IssueFormMenuToggled(which) => {
                 if let Some(ref mut form) = self.issue_form {
                     form.open_menu = (form.open_menu != Some(which)).then_some(which);
+                    if form.open_menu.is_some() {
+                        return self.form_menu_opened(crate::form_focus::MenuId::Issue(which));
+                    }
                 }
             }
             Message::DatePickerToggled(field, value) => {
@@ -8059,19 +8102,35 @@ impl App {
                     form.description.apply(action);
                 }
             }
+            Message::ProjectFormMenuToggled(which) => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.open_menu = (form.open_menu != Some(which)).then_some(which);
+                    if form.open_menu.is_some() {
+                        return self.form_menu_opened(crate::form_focus::MenuId::Project(which));
+                    }
+                }
+            }
+            Message::ProjectFormMenuClosed => {
+                if let Some(form) = self.project_form.as_mut() {
+                    form.open_menu = None;
+                }
+            }
             Message::ProjectStatusChanged(s) => {
                 if let Some(form) = self.project_form.as_mut() {
                     form.status = s;
+                    form.open_menu = None;
                 }
             }
             Message::ProjectPriorityChanged(p) => {
                 if let Some(form) = self.project_form.as_mut() {
                     form.priority = p;
+                    form.open_menu = None;
                 }
             }
             Message::ProjectLeadChanged(id) => {
                 if let Some(form) = self.project_form.as_mut() {
                     form.lead_id = id;
+                    form.open_menu = None;
                 }
             }
             Message::ProjectStartDateChanged(v) => {
@@ -8087,6 +8146,7 @@ impl App {
             Message::ProjectRoadmapCommitmentChanged(c) => {
                 if let Some(form) = self.project_form.as_mut() {
                     form.roadmap_commitment = c;
+                    form.open_menu = None;
                 }
             }
 
@@ -8513,6 +8573,19 @@ impl App {
                     }
                 }
             }
+            Message::RecurringFormMenuToggled(which) => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.open_menu = (f.open_menu != Some(which)).then_some(which);
+                    if f.open_menu.is_some() {
+                        return self.form_menu_opened(crate::form_focus::MenuId::Recurring(which));
+                    }
+                }
+            }
+            Message::RecurringFormMenuClosed => {
+                if let Some(f) = self.recurring_form.as_mut() {
+                    f.open_menu = None;
+                }
+            }
             Message::RecurringFormTitleChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.title = v;
@@ -8526,16 +8599,19 @@ impl App {
             Message::RecurringFormTimeZoneChanged(z) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.time_zone = z;
+                    f.open_menu = None;
                 }
             }
             Message::RecurringFormPriorityChanged(p) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.priority = p;
+                    f.open_menu = None;
                 }
             }
             Message::RecurringFormFrequencyChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.frequency = v;
+                    f.open_menu = None;
                 }
             }
             Message::RecurringFormIntervalChanged(v) => {
@@ -8546,6 +8622,7 @@ impl App {
             Message::RecurringFormWeekdayChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.weekday = v;
+                    f.open_menu = None;
                 }
             }
             Message::RecurringFormDayOfMonthChanged(v) => {
@@ -8562,16 +8639,19 @@ impl App {
             Message::RecurringFormAssigneeChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.assignee = v;
+                    f.open_menu = None;
                 }
             }
             Message::RecurringFormProjectChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.project = v;
+                    f.open_menu = None;
                 }
             }
             Message::RecurringFormLaneChanged(v) => {
                 if let Some(f) = self.recurring_form.as_mut() {
                     f.lane = v;
+                    f.open_menu = None;
                 }
             }
             Message::RecurringFormLabelToggled(label_id) => {
@@ -9797,6 +9877,7 @@ fn delete_comment_confirm_modal<'a>(replies: usize) -> Element<'a, Message> {
 }
 
 const DASHBOARD_NAME_KEY: &str = "dashboard-name";
+const DASHBOARD_DESCRIPTION_KEY: &str = "dashboard-description";
 
 fn dashboard_name_input_id() -> iced::widget::Id {
     crate::undo_input::id(DASHBOARD_NAME_KEY)
@@ -9827,7 +9908,7 @@ fn dashboard_form_modal<'a>(
     }
     content = content
         .push(
-            crate::undo_input::text_input("dashboard-description", "Description (optional)", &form.description, Message::NewDashboardDescriptionChanged)
+            crate::undo_input::text_input(DASHBOARD_DESCRIPTION_KEY, "Description (optional)", &form.description, Message::NewDashboardDescriptionChanged)
                 .on_submit(submit.clone())
                 .padding([6, 10])
                 .size(14)

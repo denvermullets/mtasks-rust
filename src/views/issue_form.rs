@@ -6,6 +6,7 @@ use crate::app::Message;
 use crate::db::models::{Issue, Label, Lane, Member, Priority, Project};
 use crate::theme::{self as t, radius, space, type_scale};
 use crate::views::dropdown::dropdown;
+use crate::form_focus::{self, MenuId, Stop};
 use crate::views::{date_picker, form_page, util};
 
 pub struct IssueFormState {
@@ -40,6 +41,8 @@ pub struct IssueFormState {
     pub suggest: Option<crate::mentions::SuggestState>,
     /// The property chip whose dropdown is open.
     pub open_menu: Option<FormMenu>,
+    /// The keyboard's chip and menu cursor (Tab, arrows).
+    pub keys: form_focus::Keys,
 }
 
 /// The issue form's property chips that open a dropdown.
@@ -72,6 +75,7 @@ impl IssueFormState {
             error: None,
             suggest: None,
             open_menu: None,
+            keys: form_focus::Keys::default(),
         }
     }
 
@@ -117,6 +121,7 @@ impl IssueFormState {
             error: None,
             suggest: None,
             open_menu: None,
+            keys: form_focus::Keys::default(),
         }
     }
 
@@ -208,6 +213,78 @@ fn project_message(opt: ProjectOption) -> Message {
     }
 }
 
+/// The rows of `which`'s dropdown, in order: label, whether it is the
+/// current value, and the message picking it sends. The view and the
+/// keyboard both read this, so Enter picks the row that is drawn.
+pub fn menu_options(
+    form: &IssueFormState,
+    which: FormMenu,
+    lanes: &[Lane],
+    labels: &[Label],
+    choices: &Choices<'_>,
+) -> Vec<(String, bool, Message)> {
+    match which {
+        FormMenu::Lane => lanes
+            .iter()
+            .map(|l| (l.name.clone(), l.id == form.lane_id, Message::IssueLaneChanged(l.id.clone())))
+            .collect(),
+        FormMenu::Priority => PRIORITIES
+            .iter()
+            .map(|p| (p.label().to_string(), *p == form.priority, Message::IssuePriorityChanged(*p)))
+            .collect(),
+        FormMenu::Assignee => std::iter::once((
+            "No assignee".to_string(),
+            form.assignee_id.is_none(),
+            Message::IssueAssigneeChanged(None),
+        ))
+        .chain(choices.members.iter().map(|m| {
+            (
+                m.name.clone(),
+                form.assignee_id.as_ref() == Some(&m.id),
+                Message::IssueAssigneeChanged(Some(m.id.clone())),
+            )
+        }))
+        .collect(),
+        FormMenu::Project => {
+            let mut opts: Vec<ProjectOption> = std::iter::once(ProjectOption::None)
+                .chain(
+                    choices
+                        .projects
+                        .iter()
+                        .map(|p| ProjectOption::Project { id: p.id.clone(), name: p.name.clone() }),
+                )
+                .collect();
+            if choices.can_create_project {
+                opts.push(ProjectOption::New);
+            }
+            opts.into_iter()
+                .map(|o| {
+                    let current = match (&o, &form.project_id) {
+                        (ProjectOption::None, None) => true,
+                        (ProjectOption::Project { id, .. }, Some(sel)) => id == sel,
+                        _ => false,
+                    };
+                    (o.to_string(), current, project_message(o))
+                })
+                .collect()
+        }
+        FormMenu::Estimate => estimate_options(form.estimate)
+            .into_iter()
+            .map(|o| (o.to_string(), o.0 == form.estimate, Message::IssueEstimateChanged(o.0)))
+            .collect(),
+        FormMenu::Labels => labels
+            .iter()
+            .map(|l| {
+                (
+                    l.name.clone(),
+                    form.selected_label_ids.contains(&l.id),
+                    Message::IssueLabelToggled(l.id.clone()),
+                )
+            })
+            .collect(),
+    }
+}
+
 /// The team's members and projects the form offers, and whether "New
 /// Project" can make one for this issue's team.
 pub struct Choices<'a> {
@@ -245,6 +322,24 @@ const LABEL_MENU_WIDTH: f32 = 320.0;
 const DESCRIPTION_MIN_HEIGHT: f32 = 110.0;
 
 const TITLE_PLACEHOLDER: &str = "Issue title";
+const DESCRIPTION_KEY: &str = "issue-form-description";
+
+/// The form's Tab order, as on screen: title, description, then the
+/// property chips left to right (the due date chip is a text field).
+pub fn tab_order() -> Vec<Stop> {
+    let menu = |m| Stop::Menu(MenuId::Issue(m));
+    vec![
+        Stop::field(form_page::title_input_key(TITLE_PLACEHOLDER)),
+        Stop::field(DESCRIPTION_KEY),
+        menu(FormMenu::Lane),
+        menu(FormMenu::Priority),
+        menu(FormMenu::Assignee),
+        menu(FormMenu::Project),
+        menu(FormMenu::Estimate),
+        Stop::field(date_picker::input_key(date_picker::DateField::IssueDue)),
+        menu(FormMenu::Labels),
+    ]
+}
 
 /// The title field's `Id`: a new issue's form opens with it focused.
 pub fn title_input_id() -> iced::widget::Id {
@@ -270,6 +365,7 @@ pub fn page<'a>(
     context: PageContext,
     date_picker_state: Option<&date_picker::DatePickerState>,
 ) -> Element<'a, Message> {
+    let keys = form.keys;
     let editing = form.editing_issue_id.is_some();
 
     let context_row = row![]
@@ -289,18 +385,31 @@ pub fn page<'a>(
         });
 
     let open = form.open_menu;
-    // A chip and, while it is the open one, its dropdown.
-    let chip = |which: FormMenu, face: Element<'a, Message>, menu: &dyn Fn() -> Element<'a, Message>| {
+    // A chip and, while it is the open one, its dropdown. The keyboard's
+    // focused chip draws a ring; its open menu highlights the cursor row.
+    let chip = |which: FormMenu, face: Element<'a, Message>| {
         let is_open = open == Some(which);
         let width = if which == FormMenu::Labels { LABEL_MENU_WIDTH } else { MENU_WIDTH };
+        let cursor = is_open.then_some(keys.cursor.row);
+        let menu = is_open.then(|| match which {
+            FormMenu::Labels => form_page::label_menu(
+                labels,
+                |l| form.selected_label_ids.contains(&l.id),
+                |l| Message::IssueLabelToggled(l.id.clone()),
+                cursor,
+            ),
+            _ => form_page::option_menu(menu_options(form, which, lanes, labels, &choices), cursor),
+        });
+        let focused = keys.focused == Some(MenuId::Issue(which));
         Element::from(
             dropdown(
-                form_page::chip_button(face, Message::IssueFormMenuToggled(which), is_open),
-                is_open.then(menu),
+                form_page::chip_button(face, Message::IssueFormMenuToggled(which), is_open, focused),
+                menu,
                 width,
                 Message::IssueFormMenuClosed,
             )
-            .align_left(),
+            .align_left()
+            .keyboard_escape(),
         )
     };
 
@@ -309,23 +418,8 @@ pub fn page<'a>(
         .find(|l| l.id == form.lane_id)
         .map(|l| l.name.clone())
         .unwrap_or_else(|| "Backlog".to_string());
-    let lane = chip(FormMenu::Lane, form_page::chip_face(ICON_LANE, lane_name), &|| {
-        form_page::option_menu(
-            lanes
-                .iter()
-                .map(|l| (l.name.clone(), l.id == form.lane_id, Message::IssueLaneChanged(l.id.clone())))
-                .collect(),
-        )
-    });
-
-    let priority = chip(FormMenu::Priority, form_page::chip_face(ICON_PRIORITY, form.priority.label()), &|| {
-        form_page::option_menu(
-            PRIORITIES
-                .iter()
-                .map(|p| (p.label().to_string(), *p == form.priority, Message::IssuePriorityChanged(*p)))
-                .collect(),
-        )
-    });
+    let lane = chip(FormMenu::Lane, form_page::chip_face(ICON_LANE, lane_name));
+    let priority = chip(FormMenu::Priority, form_page::chip_face(ICON_PRIORITY, form.priority.label()));
 
     let assignee_name = choices
         .members
@@ -333,20 +427,7 @@ pub fn page<'a>(
         .find(|m| Some(&m.id) == form.assignee_id.as_ref())
         .map(|m| m.name.clone())
         .unwrap_or_else(|| "No assignee".to_string());
-    let members = &choices.members;
-    let assignee = chip(FormMenu::Assignee, form_page::chip_face(ICON_USER, assignee_name), &|| {
-        form_page::option_menu(
-            std::iter::once(("No assignee".to_string(), form.assignee_id.is_none(), Message::IssueAssigneeChanged(None)))
-                .chain(members.iter().map(|m| {
-                    (
-                        m.name.clone(),
-                        form.assignee_id.as_ref() == Some(&m.id),
-                        Message::IssueAssigneeChanged(Some(m.id.clone())),
-                    )
-                }))
-                .collect(),
-        )
-    });
+    let assignee = chip(FormMenu::Assignee, form_page::chip_face(ICON_USER, assignee_name));
 
     let project_name = choices
         .projects
@@ -354,40 +435,11 @@ pub fn page<'a>(
         .find(|p| Some(&p.id) == form.project_id.as_ref())
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "No project".to_string());
-    let projects = &choices.projects;
-    let can_create_project = choices.can_create_project;
-    let project = chip(FormMenu::Project, form_page::chip_face(ICON_PROJECT, project_name), &|| {
-        let mut opts: Vec<ProjectOption> = std::iter::once(ProjectOption::None)
-            .chain(projects.iter().map(|p| ProjectOption::Project { id: p.id.clone(), name: p.name.clone() }))
-            .collect();
-        if can_create_project {
-            opts.push(ProjectOption::New);
-        }
-        form_page::option_menu(
-            opts.into_iter()
-                .map(|o| {
-                    let current = match (&o, &form.project_id) {
-                        (ProjectOption::None, None) => true,
-                        (ProjectOption::Project { id, .. }, Some(sel)) => id == sel,
-                        _ => false,
-                    };
-                    (o.to_string(), current, project_message(o))
-                })
-                .collect(),
-        )
-    });
+    let project = chip(FormMenu::Project, form_page::chip_face(ICON_PROJECT, project_name));
 
     let estimate = chip(
         FormMenu::Estimate,
         form_page::chip_face(ICON_ESTIMATE, EstimateOption(form.estimate).to_string()),
-        &|| {
-            form_page::option_menu(
-                estimate_options(form.estimate)
-                    .into_iter()
-                    .map(|o| (o.to_string(), o.0 == form.estimate, Message::IssueEstimateChanged(o.0)))
-                    .collect(),
-            )
-        },
     );
 
     // Web: a `<label>` chip around a native date field.
@@ -407,13 +459,6 @@ pub fn page<'a>(
     let labels_chip = chip(
         FormMenu::Labels,
         form_page::chip_face(ICON_TAG, form_page::labels_summary(labels, &form.selected_label_ids)),
-        &|| {
-            form_page::label_menu(
-                labels,
-                |l| form.selected_label_ids.contains(&l.id),
-                |l| Message::IssueLabelToggled(l.id.clone()),
-            )
-        },
     );
 
     // Web order: lane, priority, assignee, project, estimate, due date, labels.
@@ -442,6 +487,7 @@ pub fn page<'a>(
         Message::IssueDescriptionChanged,
         crate::views::issue_detail::editor_binding(None, form.suggest.is_some()),
     )
+    .id(crate::undo_input::id(DESCRIPTION_KEY))
     .placeholder("Add description (drop files here)...")
     .padding(0)
     .size(type_scale::SM)
@@ -591,6 +637,33 @@ fn parent_chip<'a>(id: &str, title: &str) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_order_is_title_description_then_the_chips_in_web_order() {
+        let order = tab_order();
+        assert_eq!(order[0], Stop::field("title-Issue title"));
+        assert_eq!(order[1], Stop::field(DESCRIPTION_KEY));
+        let due = order.iter().position(|s| *s == Stop::field("date-IssueDue")).unwrap();
+        let estimate = order.iter().position(|s| *s == Stop::Menu(MenuId::Issue(FormMenu::Estimate))).unwrap();
+        assert_eq!(due, estimate + 1);
+        assert_eq!(order.last(), Some(&Stop::Menu(MenuId::Issue(FormMenu::Labels))));
+    }
+
+    #[test]
+    fn single_choice_menus_mark_the_current_value() {
+        let f = IssueFormState::new("l".into());
+        let choices = Choices { members: vec![], projects: vec![], can_create_project: true };
+        let current = |which| {
+            menu_options(&f, which, &[], &[], &choices).iter().position(|(_, c, _)| *c)
+        };
+        assert_eq!(current(FormMenu::Priority), Some(0));
+        assert_eq!(current(FormMenu::Assignee), Some(0));
+        assert_eq!(current(FormMenu::Project), Some(0));
+        assert_eq!(current(FormMenu::Estimate), Some(0));
+        // "+ New Project" is offered last when the team can make one.
+        let rows = menu_options(&f, FormMenu::Project, &[], &[], &choices);
+        assert!(matches!(rows.last(), Some((_, false, Message::IssueFormNewProject))));
+    }
 
     #[test]
     fn estimate_labels_match_the_web() {

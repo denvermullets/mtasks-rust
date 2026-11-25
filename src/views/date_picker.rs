@@ -99,6 +99,11 @@ fn pick(input: &DateInput<'_>, value: String) -> Message {
     Message::DatePicked(msgs)
 }
 
+/// The `undo_input` key of `field`'s text input.
+pub fn input_key(field: DateField) -> String {
+    format!("date-{field:?}")
+}
+
 pub fn view<'a>(input: DateInput<'a>, open: Option<&DatePickerState>, today: NaiveDate) -> Element<'a, Message> {
     let state = open.filter(|s| s.field == input.field).copied();
     let is_open = state.is_some();
@@ -112,7 +117,7 @@ pub fn view<'a>(input: DateInput<'a>, open: Option<&DatePickerState>, today: Nai
     .padding(0)
     .style(|_theme: &Theme, _status| button::Style::default());
 
-    let mut field = crate::undo_input::text_input(format!("date-{:?}", input.field), input.placeholder, input.value, input.on_change)
+    let mut field = crate::undo_input::text_input(input_key(input.field), input.placeholder, input.value, input.on_change)
         .padding(0)
         .size(type_scale::SM)
         .style(form_page::borderless_chip_input);

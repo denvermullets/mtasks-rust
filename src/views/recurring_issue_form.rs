@@ -18,7 +18,7 @@
 //! without the UI.
 
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{column, pick_list, row, text_editor};
+use iced::widget::{column, row, text_editor};
 use crate::views::text;
 use iced::{Element, Length};
 
@@ -29,6 +29,7 @@ use crate::db::recurring_issues::{
 };
 use crate::theme::{self as t, space, type_scale};
 use crate::views::labels as labels_view;
+use crate::form_focus::{MenuId, Stop};
 use crate::views::{date_picker, form_page, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +209,102 @@ pub struct RecurringFormState {
     /// The zone stored on the row being edited (kept even when not in
     /// [`US_TIME_ZONES`]; the server cannot unset it).
     pub stored_time_zone: Option<String>,
+    /// The select whose menu is open.
+    pub open_menu: Option<RecurringMenu>,
+    /// The keyboard's select and menu cursor (Tab, arrows).
+    pub keys: crate::form_focus::Keys,
+}
+
+/// The recurring issue form's selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecurringMenu {
+    Priority,
+    Lane,
+    Assignee,
+    Project,
+    Frequency,
+    Weekday,
+    TimeZone,
+}
+
+const TITLE_KEY: &str = "recurring-title";
+const DESCRIPTION_KEY: &str = "recurring-description";
+const INTERVAL_KEY: &str = "recurring-interval";
+const DAY_OF_MONTH_KEY: &str = "recurring-day-of-month";
+
+/// The form's Tab order, as on screen: the Issue section, then the
+/// Schedule section (its weekday or day-of-month field only when shown).
+pub fn tab_order(form: &RecurringFormState) -> Vec<Stop> {
+    let menu = |m| Stop::Menu(MenuId::Recurring(m));
+    let mut order = vec![
+        Stop::field(TITLE_KEY),
+        Stop::field(DESCRIPTION_KEY),
+        menu(RecurringMenu::Priority),
+        menu(RecurringMenu::Lane),
+        menu(RecurringMenu::Assignee),
+        menu(RecurringMenu::Project),
+        menu(RecurringMenu::Frequency),
+        Stop::field(INTERVAL_KEY),
+    ];
+    match form.frequency {
+        Frequency::Weekly => order.push(menu(RecurringMenu::Weekday)),
+        Frequency::Monthly => order.push(Stop::field(DAY_OF_MONTH_KEY)),
+        Frequency::Daily => {}
+    }
+    order.push(Stop::field(date_picker::input_key(date_picker::DateField::RecurringStartsOn)));
+    order.push(menu(RecurringMenu::TimeZone));
+    order
+}
+
+/// The rows of `which`'s menu: label, whether it is the current value, and
+/// the message picking it. The view and the keyboard both read this.
+pub fn menu_options(form: &RecurringFormState, which: RecurringMenu) -> Vec<(String, bool, Message)> {
+    fn rows<T: ToString + PartialEq>(
+        options: impl IntoIterator<Item = T>,
+        current: &T,
+        message: impl Fn(T) -> Message,
+    ) -> Vec<(String, bool, Message)> {
+        options
+            .into_iter()
+            .map(|o| {
+                let is_current = &o == current;
+                (o.to_string(), is_current, message(o))
+            })
+            .collect()
+    }
+    match which {
+        RecurringMenu::Priority => rows(PRIORITIES, &form.priority, Message::RecurringFormPriorityChanged),
+        RecurringMenu::Lane => rows(form.lane_options.clone(), &form.lane, Message::RecurringFormLaneChanged),
+        RecurringMenu::Assignee => {
+            rows(form.assignee_options.clone(), &form.assignee, Message::RecurringFormAssigneeChanged)
+        }
+        RecurringMenu::Project => {
+            rows(form.project_options.clone(), &form.project, Message::RecurringFormProjectChanged)
+        }
+        RecurringMenu::Frequency => rows(FREQUENCIES, &form.frequency, Message::RecurringFormFrequencyChanged),
+        RecurringMenu::Weekday => rows((0..7).map(WeekdayOption), &WeekdayOption(form.weekday), |w| {
+            Message::RecurringFormWeekdayChanged(w.0)
+        }),
+        RecurringMenu::TimeZone => rows(
+            time_zone_choices(form.stored_time_zone.as_deref(), form.stored_time_zone.is_none()),
+            &TimeZoneChoice(form.time_zone.clone()),
+            |c| Message::RecurringFormTimeZoneChanged(c.0),
+        ),
+    }
+}
+
+/// A select showing `which`'s current value, its menu while open.
+fn select<'a>(form: &'a RecurringFormState, which: RecurringMenu) -> Element<'a, Message> {
+    let rows = menu_options(form, which);
+    let value = rows.iter().find(|(_, current, _)| *current).map(|(l, _, _)| l.clone()).unwrap_or_default();
+    form_page::select(
+        value,
+        form.open_menu == Some(which),
+        form.keys.focused == Some(MenuId::Recurring(which)),
+        Message::RecurringFormMenuToggled(which),
+        Message::RecurringFormMenuClosed,
+        move || form_page::option_menu(rows, Some(form.keys.cursor.row)),
+    )
 }
 
 impl RecurringFormState {
@@ -239,6 +336,8 @@ impl RecurringFormState {
             errors: FormErrors::default(),
             editing: None,
             stored_time_zone: None,
+            open_menu: None,
+            keys: crate::form_focus::Keys::default(),
         }
     }
 
@@ -478,17 +577,12 @@ fn error_line<'a>(e: &'a Option<String>) -> Option<Element<'a, Message>> {
         .map(|m| text(m).size(12).color(t::danger()).into())
 }
 
-fn choice_pick<'a>(
-    label: &'a str,
-    options: &'a [Choice],
-    selected: &'a Choice,
-    on_pick: fn(Choice) -> Message,
-) -> Element<'a, Message> {
+fn labeled_select<'a>(label: &'a str, form: &'a RecurringFormState, which: RecurringMenu) -> Element<'a, Message> {
     column![]
         .spacing(4)
         .width(Length::Fill)
         .push(form_page::caption(label))
-        .push(pick_list(options, Some(selected.clone()), on_pick).width(Length::Fill))
+        .push(select(form, which))
         .into()
 }
 
@@ -517,8 +611,6 @@ pub fn page<'a>(
     labels: &'a [Label],
     date_picker_state: Option<&date_picker::DatePickerState>,
 ) -> Element<'a, Message> {
-    let weekday_options: Vec<WeekdayOption> = (0..7).map(WeekdayOption).collect();
-
     let mut schedule = column![].spacing(10).push(
         row![]
             .spacing(12)
@@ -527,11 +619,7 @@ pub fn page<'a>(
                     .spacing(4)
                     .width(Length::Fill)
                     .push(text("Repeats").size(12).color(t::text_muted()))
-                    .push(pick_list(
-                        FREQUENCIES.as_slice(),
-                        Some(form.frequency),
-                        Message::RecurringFormFrequencyChanged,
-                    )),
+                    .push(select(form, RecurringMenu::Frequency)),
             )
             .push(
                 column![]
@@ -539,7 +627,7 @@ pub fn page<'a>(
                     .width(Length::Fill)
                     .push(text("Every (interval)").size(12).color(t::text_muted()))
                     .push(
-                        crate::undo_input::text_input("recurring-interval", "1", &form.interval, Message::RecurringFormIntervalChanged)
+                        crate::undo_input::text_input(INTERVAL_KEY, "1", &form.interval, Message::RecurringFormIntervalChanged)
                             .padding(8)
                             .size(14),
                     ),
@@ -552,11 +640,7 @@ pub fn page<'a>(
                 column![]
                     .spacing(4)
                     .push(text("On").size(12).color(t::text_muted()))
-                    .push(pick_list(
-                        weekday_options,
-                        Some(WeekdayOption(form.weekday)),
-                        |w: WeekdayOption| Message::RecurringFormWeekdayChanged(w.0),
-                    )),
+                    .push(select(form, RecurringMenu::Weekday)),
             )
             .push(error_line(&form.errors.weekday));
     }
@@ -567,7 +651,7 @@ pub fn page<'a>(
                     .spacing(4)
                     .push(text("Day of month").size(12).color(t::text_muted()))
                     .push(
-                        crate::undo_input::text_input("recurring-day-of-month", "1-31", &form.day_of_month, Message::RecurringFormDayOfMonthChanged)
+                        crate::undo_input::text_input(DAY_OF_MONTH_KEY, "1-31", &form.day_of_month, Message::RecurringFormDayOfMonthChanged)
                             .padding(8)
                             .size(14),
                     ),
@@ -601,14 +685,7 @@ pub fn page<'a>(
             column![]
                 .spacing(4)
                 .push(text("Time zone").size(12).color(t::text_muted()))
-                .push(pick_list(
-                    time_zone_choices(
-                        form.stored_time_zone.as_deref(),
-                        form.stored_time_zone.is_none(),
-                    ),
-                    Some(TimeZoneChoice(form.time_zone.clone())),
-                    |c: TimeZoneChoice| Message::RecurringFormTimeZoneChanged(c.0),
-                )),
+                .push(select(form, RecurringMenu::TimeZone)),
         )
         .push(error_line(&form.errors.time_zone))
         .push(form.summary().map(|s| text(s).size(13).color(t::text_secondary())));
@@ -621,7 +698,7 @@ pub fn page<'a>(
                 .spacing(space::S1)
                 .push(form_page::caption("Title"))
                 .push(
-                    crate::undo_input::text_input("recurring-title", "Title", &form.title, Message::RecurringFormTitleChanged)
+                    crate::undo_input::text_input(TITLE_KEY, "Title", &form.title, Message::RecurringFormTitleChanged)
                         .padding(util::SIDEBAR_CONTROL_PADDING)
                         .size(type_scale::SM)
                         .style(util::sidebar_input_style),
@@ -638,6 +715,7 @@ pub fn page<'a>(
                         Message::RecurringFormDescriptionChanged,
                         text_editor::Binding::from_key_press,
                     )
+                    .id(crate::undo_input::id(DESCRIPTION_KEY))
                     .placeholder("Description")
                     .padding(space::S2_5)
                     .size(type_scale::SM)
@@ -653,32 +731,15 @@ pub fn page<'a>(
                         .spacing(space::S1)
                         .width(Length::Fill)
                         .push(form_page::caption("Priority"))
-                        .push(
-                            pick_list(
-                                PRIORITIES.as_slice(),
-                                Some(form.priority),
-                                Message::RecurringFormPriorityChanged,
-                            )
-                            .width(Length::Fill),
-                        ),
+                        .push(select(form, RecurringMenu::Priority)),
                 )
-                .push(choice_pick("Status", &form.lane_options, &form.lane, Message::RecurringFormLaneChanged)),
+                .push(labeled_select("Status", form, RecurringMenu::Lane)),
         )
         .push(
             row![]
                 .spacing(space::S4)
-                .push(choice_pick(
-                    "Assignee",
-                    &form.assignee_options,
-                    &form.assignee,
-                    Message::RecurringFormAssigneeChanged,
-                ))
-                .push(choice_pick(
-                    "Project",
-                    &form.project_options,
-                    &form.project,
-                    Message::RecurringFormProjectChanged,
-                )),
+                .push(labeled_select("Assignee", form, RecurringMenu::Assignee))
+                .push(labeled_select("Project", form, RecurringMenu::Project)),
         )
         .push(labels_section(form, labels));
 
@@ -708,6 +769,37 @@ pub fn page<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_order_follows_the_frequency_fields_on_screen() {
+        let mut f = RecurringFormState::new(today());
+        let has = |f: &RecurringFormState, stop: Stop| tab_order(f).contains(&stop);
+        let weekday = Stop::Menu(MenuId::Recurring(RecurringMenu::Weekday));
+        let day = Stop::field(DAY_OF_MONTH_KEY);
+        assert!(!has(&f, weekday.clone()) && !has(&f, day.clone()));
+        f.frequency = Frequency::Weekly;
+        assert!(has(&f, weekday.clone()) && !has(&f, day.clone()));
+        f.frequency = Frequency::Monthly;
+        assert!(!has(&f, weekday) && has(&f, day));
+        assert_eq!(tab_order(&f).first(), Some(&Stop::field(TITLE_KEY)));
+    }
+
+    #[test]
+    fn every_menu_marks_exactly_one_current_row() {
+        let f = RecurringFormState::new(today());
+        for which in [
+            RecurringMenu::Priority,
+            RecurringMenu::Lane,
+            RecurringMenu::Assignee,
+            RecurringMenu::Project,
+            RecurringMenu::Frequency,
+            RecurringMenu::Weekday,
+            RecurringMenu::TimeZone,
+        ] {
+            let current = menu_options(&f, which).iter().filter(|(_, c, _)| *c).count();
+            assert_eq!(current, 1, "{which:?}");
+        }
+    }
 
     fn today() -> NaiveDate {
         // A Wednesday, the 4th.
