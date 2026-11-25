@@ -1,5 +1,11 @@
-<!-- last-sha: 01c5e9175c7466a5543bbac76594058280aad7ab -->
+<!-- last-sha: 0248e74b6bf742e45118b9a93f879007bf9643a1 -->
 # What's new
+
+## 0.14.0 · 2026-11-25
+- **Board display matches the web app.** Empty columns are now left off the board unless "Show empty columns" is on, whatever you group by, and they're listed in a "Hidden columns" strip beside the board so they don't just vanish. Empty rows work the same way with "Show empty rows". The Display panel's options wrap neatly to fit its width.
+- **Accurate "behind schedule".** Project burndown charts and Roadmap cards now work out whether a project is behind from its current issues and today's date, so finishing work clears the warning right away instead of waiting for the next sync.
+- **Clicking away saves your edit.** Clicking outside an issue or project field you're editing, like the description, title or estimate, now closes the editor and saves the change.
+- **Steadier board scrolling.** Scrolling past the top or bottom of a lane with the mouse wheel no longer slides the whole board sideways. Trackpad swipes and Shift+scroll still move it left and right.
 
 ## 0.13.2 · 2026-11-18
 - **Undo while typing.** Cmd+Z and Cmd+Shift+Z now undo and redo in every text box, from issue titles and search fields to issue and project descriptions. Undo goes back a word at a time, and a paste is its own step.
