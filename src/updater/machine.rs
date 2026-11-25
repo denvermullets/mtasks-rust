@@ -514,6 +514,12 @@ impl UpdaterState {
         self.last_failure = Some(LastFailure { at, kind, message });
     }
 
+    /// Forget the last failure: a later step succeeded.
+    fn clear_failure(&mut self) {
+        self.last_failure = None;
+        self.failure_shown = false;
+    }
+
     fn check_failed(&mut self, at: DateTime<Utc>, reason: String) -> Vec<Effect> {
         if self.activity != Activity::Checking {
             return vec![]; // stale answer, no check is running
@@ -616,6 +622,7 @@ impl UpdaterState {
         let info = info.clone();
         self.activity = Activity::Idle;
         self.manual = false;
+        self.clear_failure(); // a verified download supersedes any failure
         let replaced = self.staged.replace(info.clone());
         let mut fx = Vec::new();
         if let Some(old) = replaced.filter(|o| o.version != info.version) {
@@ -637,6 +644,16 @@ impl UpdaterState {
         }
         self.last_checked = Some(at);
         self.dmg_update = None; // re-decided by every finished check
+        // A successful check clears the last failure. A security failure stays
+        // while its version is still blocked; it clears below once a newer
+        // version passes the block.
+        if self
+            .last_failure
+            .as_ref()
+            .is_some_and(|f| f.kind != FailureKind::Security)
+        {
+            self.clear_failure();
+        }
         // A restored Staged update has no notes; this manifest describes it.
         if let ParsedManifest::SelfInstall(m) = &manifest {
             if let Some(staged) = self.staged.as_mut() {
@@ -655,7 +672,7 @@ impl UpdaterState {
             {
                 let info = UpdateInfo::from_manifest(&m, &self.installed);
                 self.blocked = None; // only reached for a version past the block
-                self.failure_shown = false;
+                self.clear_failure();
                 self.activity = Activity::Downloading {
                     info: info.clone(),
                     received: 0,
@@ -1128,8 +1145,43 @@ pub(super) mod tests {
         );
         assert_eq!(s.view().status, Status::Idle);
         update_of(s.update(finished(12, "0.13.0")));
-        // The last failure stays recorded until replaced.
-        assert_eq!(s.view().last_failure.unwrap().at, at(11));
+        // The successful check wipes the recorded failure.
+        assert_eq!(s.view().last_failure, None);
+    }
+
+    #[test]
+    fn a_successful_up_to_date_check_clears_the_last_failure() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Manual));
+        s.update(failed_check(9));
+        assert!(s.view().last_failure.is_some());
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        assert_eq!(s.update(finished(10, "0.12.0")), vec![]);
+        assert_eq!(s.view().last_failure, None);
+        assert!(!s.view().needs_attention());
+    }
+
+    #[test]
+    fn a_verified_download_clears_the_last_failure() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(failed_download(10));
+        assert!(s.view().last_failure.is_some());
+        stage(&mut s, 11, "0.13.0");
+        assert_eq!(s.view().last_failure, None);
+        assert!(s.view().ready.is_some());
+    }
+
+    #[test]
+    fn a_newer_version_past_the_block_clears_the_security_failure() {
+        let mut s = state();
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(9, "0.13.0")));
+        s.update(insecure(10));
+        s.update(Event::CheckStarted(CheckKind::Automatic));
+        update_of(s.update(finished(11, "0.13.1")));
+        assert_eq!(s.view().last_failure, None);
     }
 
     #[test]
