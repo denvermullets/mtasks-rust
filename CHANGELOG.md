@@ -1,5 +1,13 @@
-<!-- last-sha: 3900bbedeb8ae00c503d96a15f876ae3f8e472d4 -->
+<!-- last-sha: 17492b816ca23633580dab9d07a75731ae7bd49a -->
 # What's new
+
+## 0.15.0 · 2026-11-25
+- **What's new, in the app.** A "What's new" button at the bottom of the sidebar opens this changelog, and shows which version you have. You can also type "What's new" in the command palette. Import CSV has moved into each team's menu in the sidebar.
+- **Get around forms with the keyboard.** Tab and Shift+Tab move through the fields of the issue, project, recurring issue, dashboard, group and Settings forms. On a dropdown, Enter or Space opens it, the arrow keys pick an option and Esc closes it. New issues open with the cursor already in the title.
+- **Tidier board cards.** Cards now match the web app: titles show up to two lines, properties wrap onto at most two rows, and every card has a consistent height. A red icon marks an issue that's blocked, a yellow one marks an issue that blocks others, and hovering over it shows the counts.
+- **Smoother scrolling.** Small sideways drift from trackpads and smooth-scrolling mice no longer slides the board while you scroll a lane, and a sideways swipe no longer nudges lanes up or down. In swimlanes, scroll bars now stay inside the board and the column headers follow as you scroll sideways.
+- **A calmer sync indicator.** The status bar shows a small icon (spinning while syncing, a check when done, a warning when something's wrong) and the time since the last sync, without shifting as it updates. Hover over it to see the full status and how many changes are waiting.
+- **Old update errors clear.** Once a later update check or download works, the earlier update error goes away instead of staying on screen.
 
 ## 0.14.1 · 2026-11-25
 - **Label changes stick.** Adding or removing labels on an issue, from the label picker or the issue form, now saves every time. Before, the change could quietly fail to save. If saving ever fails now, you'll see a message instead.
