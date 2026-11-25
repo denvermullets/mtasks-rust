@@ -1,5 +1,9 @@
-<!-- last-sha: 0248e74b6bf742e45118b9a93f879007bf9643a1 -->
+<!-- last-sha: 3900bbedeb8ae00c503d96a15f876ae3f8e472d4 -->
 # What's new
+
+## 0.14.1 · 2026-11-25
+- **Label changes stick.** Adding or removing labels on an issue, from the label picker or the issue form, now saves every time. Before, the change could quietly fail to save. If saving ever fails now, you'll see a message instead.
+- **Board stays put with smooth-scrolling mice.** Mice whose drivers add a little sideways movement to each scroll, such as those set up with Logi Options+, no longer nudge the board sideways when you scroll up or down a lane.
 
 ## 0.14.0 · 2026-11-25
 - **Board display matches the web app.** Empty columns are now left off the board unless "Show empty columns" is on, whatever you group by, and they're listed in a "Hidden columns" strip beside the board so they don't just vanish. Empty rows work the same way with "Show empty rows". The Display panel's options wrap neatly to fit its width.
