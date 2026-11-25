@@ -6,10 +6,14 @@
 //! overscroll bubbled up to the board and slid it left or right.
 //!
 //! Wrap the horizontal scrollable's *content* in [`wheel_guard`]: the content
-//! sees every event first, as before. A purely vertical wheel event it leaves
+//! sees every event first, as before. A mostly-vertical wheel event it leaves
 //! uncaptured is marked captured here, so the scrollable around it ignores it.
 //! Horizontal input (trackpad swipes, tilt wheels, and Shift+wheel, which
 //! macOS sends with the axes already swapped) still scrolls the board.
+//!
+//! "Mostly" matters: smooth-scrolling mouse drivers (e.g. Logi Options+) send
+//! pixel deltas with a little sideways jitter, like `Pixels { x: 0.4, y: 18 }`.
+//! Requiring `x == 0` let those through and nudged the board right.
 
 use iced::advanced::layout;
 use iced::advanced::mouse;
@@ -20,12 +24,12 @@ use iced::advanced::widget::Operation;
 use iced::advanced::{Clipboard, Layout, Shell, Widget};
 use iced::{event, Element, Event, Length, Rectangle, Size, Theme, Vector};
 
-/// Whether a wheel delta has no horizontal part, so a horizontal scrollable
-/// must not act on it. Pure.
-pub fn is_vertical_only(delta: mouse::ScrollDelta) -> bool {
+/// Whether a wheel delta is mostly vertical, so a horizontal scrollable must
+/// not act on it. Pure.
+pub fn is_mostly_vertical(delta: mouse::ScrollDelta) -> bool {
     match delta {
         mouse::ScrollDelta::Lines { x, y } | mouse::ScrollDelta::Pixels { x, y } => {
-            x == 0.0 && y != 0.0
+            y.abs() > x.abs()
         }
     }
 }
@@ -80,7 +84,7 @@ impl<'a, Message: 'a> Widget<Message, Theme, iced::Renderer> for WheelGuard<'a, 
     ) -> event::Status {
         let vertical_wheel = matches!(
             event,
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) if is_vertical_only(delta)
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if is_mostly_vertical(delta)
         );
         let status = self.content.as_widget_mut().on_event(
             &mut tree.children[0],
@@ -142,11 +146,11 @@ impl<'a, Message: 'a> From<WheelGuard<'a, Message>> for Element<'a, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_vertical_only;
+    use super::is_mostly_vertical;
     use iced::mouse::ScrollDelta::{Lines, Pixels};
 
     #[test]
-    fn only_purely_vertical_deltas_are_swallowed() {
+    fn mostly_vertical_deltas_are_swallowed() {
         let cases = [
             (Lines { x: 0.0, y: -1.0 }, true),
             (Lines { x: 0.0, y: 3.0 }, true),
@@ -154,11 +158,16 @@ mod tests {
             // Shift+wheel on macOS arrives with the axes already swapped.
             (Lines { x: -1.0, y: 0.0 }, false),
             (Pixels { x: 8.0, y: 0.0 }, false),
-            (Pixels { x: 2.0, y: 9.0 }, false),
+            // Smooth-scroll mouse drivers add sideways jitter (JRST-529).
+            (Pixels { x: 2.0, y: 9.0 }, true),
+            (Pixels { x: -0.4, y: -18.0 }, true),
+            (Lines { x: 0.1, y: 1.0 }, true),
+            (Pixels { x: 9.0, y: 2.0 }, false),
+            (Pixels { x: 5.0, y: 5.0 }, false),
             (Lines { x: 0.0, y: 0.0 }, false),
         ];
         for (delta, want) in cases {
-            assert_eq!(is_vertical_only(delta), want, "{delta:?}");
+            assert_eq!(is_mostly_vertical(delta), want, "{delta:?}");
         }
     }
 }
