@@ -24,7 +24,7 @@ wayfinder:grilling 299 · wayfinder:task 300.
 - **Done vs. Released**: Done means merged to dev. Released means it's in a published build.
   After a release is published, `/release-issues` moves the tickets named in that release's
   commits (`JRST-<n>` in a commit subject, body or merge message) to Released, sets their labels
-  to just the version label (`vX.Y.Z`), and comments so reporters know to retest. Commits that
+  to just the version label (`vX.Y.Z`). It doesn't comment on them. Commits that
   should count toward a ticket must name its `JRST-<n>`.
 - Refer to issues by title (+ `JRST-<n>` identifier), never a bare numeric id.
 

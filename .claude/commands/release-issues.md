@@ -1,5 +1,5 @@
 ---
-description: After a published release, move the JRST issues it shipped to Released, label them with the version, and tell their reporters
+description: After a published release, move the JRST issues it shipped to Released, and label them with the version
 argument-hint: "[vX.Y.Z]  (default: the newest published tag)"
 ---
 
@@ -35,7 +35,7 @@ Lane ids: Done **212**, Released **254**, Cancelled **213**.
 
 6. **Apply, for each ticket being shipped:**
    - `update_issue` (team 47) with `lane_id: 254` and `label_ids: [<version label id>]`. This **replaces** all of its other labels (triage, wayfinder, older version labels, design and so on) with the one release label. That's intended.
-   - `create_comment` (team 47), with the body: `Shipped in <tag>. Update JAIT (Settings → Check for updates) to get it.` The comment notifies the reporter so they know to retest on the new build.
+   - Don't comment on the ticket. The label and lane change are the whole update.
    - If a call fails, keep going with the rest and collect the failures.
 
 7. **Report.** List what moved, what was skipped or left for me and why, any failures, and the untagged commits from step 2.
