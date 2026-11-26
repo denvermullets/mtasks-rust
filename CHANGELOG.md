@@ -1,5 +1,11 @@
-<!-- last-sha: 20e735741836009aacf46a8b5084bde36a5c74f4 -->
+<!-- last-sha: 41dcb7f4e6fef4f10fe14b66ac124a372174807b -->
 # What's new
+
+## 0.17.0 · 2026-11-26
+- **Resize the sidebar.** Drag the sidebar's right edge to make it wider or narrower, and JAIT remembers the width. Double-click the edge to go back to the default.
+- **Easier-to-read text.** Dimmed and secondary text across the app, from forms and Settings to labels, toasts and the CSV import, now has more contrast so it's easier to read.
+- **Terminals named after their team.** New terminals in a team's tab are named after the team, like "JRST", then "JRST 2", instead of "Terminal 1".
+- **Tidier updates.** Updates are now prepared in your Caches folder instead of a hidden folder in Applications, and that leftover folder is cleaned up.
 
 ## 0.16.0 · 2026-11-25
 - **Unread badge on the Dock icon.** A red dot appears on JAIT's Dock icon while you have unread notifications. When the sidebar is hidden, a red dot on its show-sidebar button does the same job, since the Inbox count can't be seen.
