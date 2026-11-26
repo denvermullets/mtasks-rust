@@ -4573,6 +4573,7 @@ impl App {
         let panel_scope = self.panel_scope();
         self.terminals.set_pinned(self.removed_team_tab());
         self.terminals.sync(panel_scope.as_ref());
+        crate::dock_badge::set_unread(self.notif_unread_count > 0);
         let task = Task::batch([task, self.request_visible_images()]);
         if sync_queue::take_local_write() && self.config.api_token.is_some() {
             return Task::batch([task, self.drive_sync(SchedEvent::LocalWrite)]);
@@ -7190,8 +7191,8 @@ impl App {
                     // issue/project detail edits first.
                     PaletteNav::View(view) => return self.update(Message::NavigateToView(view)),
                     // Same path as a sidebar team click, so selection follows.
-                    PaletteNav::Team(id) => {
-                        return self.update(Message::SelectTeamView(id, View::Board))
+                    PaletteNav::Team { team_id, view } => {
+                        return self.update(Message::SelectTeamView(team_id, view))
                     }
                     PaletteNav::SavedView(id) => return self.update(Message::OpenSavedView(id)),
                     PaletteNav::Dashboard(id) => return self.update(Message::OpenDashboard(id)),
@@ -9243,6 +9244,7 @@ impl App {
                 &self.tab_unread(),
                 self.window_width,
                 self.config.sidebar_collapsed,
+                self.notif_unread_count > 0,
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
                 !self.closed_tabs.is_empty(),
             ))

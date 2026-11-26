@@ -14,8 +14,9 @@ use crate::issue_match::IssueQuery;
 pub enum PaletteNav {
     /// Switch view for the current team (`Message::NavigateToView`).
     View(View),
-    /// Open this team's Board (`Message::SelectTeamView(id, View::Board)`).
-    Team(String),
+    /// Open one of this team's pages (`Message::SelectTeamView(team_id, view)`):
+    /// its Board for the team row, or a sub-page row (Projects, Roadmap, ...).
+    Team { team_id: String, view: View },
     /// Open this issue's detail (`App::open_issue_detail`).
     Issue(String),
     /// Open a project's detail, switching to `team_id` first when needed.
@@ -65,7 +66,7 @@ impl PaletteNav {
     pub fn label(&self) -> &'static str {
         match self {
             PaletteNav::View(_) => "View",
-            PaletteNav::Team(_) => "Team",
+            PaletteNav::Team { .. } => "Team",
             PaletteNav::Issue(_) => "Issue",
             PaletteNav::Project { .. } => "Project",
             PaletteNav::SavedView(_) => "View",
@@ -168,11 +169,19 @@ pub const MAX_ROWS: usize = 20;
 pub fn palette_results(query: &str, data: &PaletteData) -> Vec<PaletteRow> {
     let needle = query.trim().to_lowercase();
     let mut rows = Vec::new();
+    // A typed query that names a team ranks the team (and its pages) above
+    // issues whose titles merely contain it. The empty palette keeps views
+    // first.
+    if !needle.is_empty() {
+        push_teams(&needle, data, &mut rows);
+    }
     push_issues(query, data, &mut rows);
     push_commands(&needle, data, &mut rows);
     push_tabs(&needle, data, &mut rows);
     push_views(&needle, data, &mut rows);
-    push_teams(&needle, data, &mut rows);
+    if needle.is_empty() {
+        push_teams(&needle, data, &mut rows);
+    }
     push_projects(&needle, data, &mut rows);
     push_saved_views(&needle, data, &mut rows);
     push_dashboards(&needle, data, &mut rows);
@@ -418,14 +427,57 @@ fn push_views(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
     }
 }
 
+/// A team's pages besides its Board, as the sidebar lists them under it.
+const TEAM_PAGES: [(&str, View); 3] = [
+    ("Projects", View::ProjectList),
+    ("Roadmap", View::Roadmap),
+    ("Recurring issues", View::RecurringIssues),
+];
+
+/// Team rows (each opens the team's Board), and once something is typed, each
+/// matching team's other pages right under it. A page row also matches a
+/// "team page" query such as `jrst road`.
 fn push_teams(needle: &str, data: &PaletteData, rows: &mut Vec<PaletteRow>) {
+    let team_matches = |team: &Team, n: &str| name_matches(n, &team.name) || name_matches(n, &team.identifier);
+    // `jrst road` → ("jrst", "road"); both halves must be non-empty.
+    let split = needle
+        .split_once(char::is_whitespace)
+        .map(|(t, p)| (t, p.trim_start()))
+        .filter(|(t, p)| !t.is_empty() && !p.is_empty());
     for team in &data.teams {
-        if name_matches(needle, &team.name) || name_matches(needle, &team.identifier) {
+        let whole = team_matches(team, needle);
+        let (team_part, page_part) = match split {
+            Some((t, p)) if team_matches(team, t) => (true, Some(p)),
+            _ => (false, None),
+        };
+        if !whole && !team_part {
+            continue;
+        }
+        if whole {
             rows.push(PaletteRow {
                 primary: team.name.clone(),
                 secondary: team.identifier.clone(),
-                nav: PaletteNav::Team(team.id.clone()),
+                nav: PaletteNav::Team {
+                    team_id: team.id.clone(),
+                    view: View::Board,
+                },
             });
+        }
+        if needle.is_empty() {
+            continue;
+        }
+        for (page, view) in &TEAM_PAGES {
+            let page_ok = whole || page_part.is_some_and(|p| page.to_lowercase().starts_with(p));
+            if page_ok {
+                rows.push(PaletteRow {
+                    primary: format!("{} \u{203a} {page}", team.name),
+                    secondary: team.identifier.clone(),
+                    nav: PaletteNav::Team {
+                        team_id: team.id.clone(),
+                        view: view.clone(),
+                    },
+                });
+            }
         }
     }
 }
@@ -646,16 +698,25 @@ mod tests {
         );
     }
 
+    /// Just the team rows (no sub-pages) for `query`.
+    fn team_names(query: &str) -> Vec<String> {
+        palette_results(query, &data())
+            .into_iter()
+            .filter(|r| matches!(&r.nav, PaletteNav::Team { view: View::Board, .. }))
+            .map(|r| r.primary)
+            .collect()
+    }
+
     #[test]
     fn team_matches_name_substring_ignoring_case() {
-        assert_eq!(names("RAILS"), ["Rails API"]);
-        assert_eq!(names("app"), ["JAIT App"]);
+        assert_eq!(team_names("RAILS"), ["Rails API"]);
+        assert_eq!(team_names("app"), ["JAIT App"]);
     }
 
     #[test]
     fn team_matches_identifier() {
-        assert_eq!(names("jrst"), ["JAIT App"]);
-        assert_eq!(names("rail"), ["Rails API"]);
+        assert_eq!(team_names("jrst"), ["JAIT App"]);
+        assert_eq!(team_names("rail"), ["Rails API"]);
     }
 
     #[test]
@@ -663,7 +724,45 @@ mod tests {
         let rows = palette_results("rails", &data());
         assert_eq!(rows[0].nav.label(), "Team");
         assert_eq!(rows[0].secondary, "RAIL");
-        assert_eq!(rows[0].nav, PaletteNav::Team("t2".into()));
+        assert_eq!(
+            rows[0].nav,
+            PaletteNav::Team { team_id: "t2".into(), view: View::Board }
+        );
+    }
+
+    #[test]
+    fn typed_team_lists_its_pages_under_it() {
+        assert_eq!(
+            names("jrst"),
+            [
+                "JAIT App",
+                "JAIT App \u{203a} Projects",
+                "JAIT App \u{203a} Roadmap",
+                "JAIT App \u{203a} Recurring issues",
+            ]
+        );
+        let rows = palette_results("jrst", &data());
+        assert_eq!(
+            rows[2].nav,
+            PaletteNav::Team { team_id: "t1".into(), view: View::Roadmap }
+        );
+    }
+
+    #[test]
+    fn team_then_page_query_narrows_to_that_page() {
+        assert_eq!(names("jrst road"), ["JAIT App \u{203a} Roadmap"]);
+        assert_eq!(names("rails  pro"), ["Rails API \u{203a} Projects"]);
+        assert!(names("jrst zzz").is_empty());
+    }
+
+    #[test]
+    fn matching_team_ranks_above_issues_titled_like_it() {
+        let mut data = issue_data(Some("t-eng"), vec![si("a", "ENG", Some(1), "fix jrst sync")]);
+        data.teams = vec![team("t1", "JAIT App", "JRST")];
+        let rows = palette_results("jrst", &data);
+        assert_eq!(rows[0].nav.label(), "Team");
+        assert_eq!(rows[0].primary, "JAIT App");
+        assert_eq!(rows[4].nav.label(), "Issue");
     }
 
     #[test]

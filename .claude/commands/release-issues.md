@@ -1,5 +1,5 @@
 ---
-description: After a published release, move the JRST issues it shipped to Released, and label them with the version
+description: After a published release, move the JRST issues it shipped, plus everything else in Done, to Released, and label them with the version
 argument-hint: "[vX.Y.Z]  (default: the newest published tag)"
 ---
 
@@ -20,7 +20,7 @@ Lane ids: Done **212**, Released **254**, Cancelled **213**.
    - `git log <prev>..<tag> --format='%h %s%n%b'`. Include merge commits, because a ticket can be named only in a PR's merge message or body.
    - Extract the unique `JRST-<n>` identifiers, case-insensitively, and normalise them to upper case.
    - Also list the commits in the range that name no ticket. Skip commits that only touch `CHANGELOG.md`, `Cargo.toml` or `Cargo.lock` version lines. Report these at the end so I can match them to tickets by hand. Don't guess a ticket for them.
-   - If no identifiers are found, report the untagged commits and **stop**.
+   - If no identifiers are found, note it and carry on. The Done sweep in step 4b still runs.
 
 3. **Find or create the version label.** The label name is the tag itself, e.g. `v0.13.3`. Look it up with `list_labels` (team 47). If it's missing, `create_label` with that name and color `#64748b`.
 
@@ -30,6 +30,8 @@ Lane ids: Done **212**, Released **254**, Cancelled **213**.
    - **Ask:** it's in Backlog or In Progress. The commit may be partial work, so don't move it without my say-so.
    - **Skip:** it's in Cancelled. Report it, don't move it.
    - **Not found:** the identifier doesn't resolve. Report it.
+
+4b. **Sweep the Done lane.** `list_issues` (team 47, lane 212) and page through all of it. Every issue in Done that isn't already in the Ship set is also shipped with this release's label, whether or not a commit names it. Mark these as **Ship (Done sweep)** so the plan shows they came from the lane, not the commit range.
 
 5. **Show the plan.** Print a table of identifier, title, current lane, current labels and action. If anything is in **Ask**, ask me about those tickets now. Apply the confirmed set after I answer. If nothing needs asking, go straight on.
 
@@ -42,6 +44,6 @@ Lane ids: Done **212**, Released **254**, Cancelled **213**.
 
 ## Hard rules
 
-- Only touch issues whose identifier appears in the release's commit range.
+- Only touch issues whose identifier appears in the release's commit range, or that sit in the Done lane (212) when the command runs.
 - Never move an issue out of Cancelled, and never move a Backlog or In Progress issue without asking.
 - Don't edit files, commit, push or create tags. This command only writes to JAIT.

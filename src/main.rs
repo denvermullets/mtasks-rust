@@ -11,6 +11,7 @@ mod db;
 mod dep_connectors;
 mod dep_graph;
 mod display;
+mod dock_badge;
 mod document;
 mod files;
 mod fonts;

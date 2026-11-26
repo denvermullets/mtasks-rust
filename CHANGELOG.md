@@ -1,5 +1,11 @@
-<!-- last-sha: 17492b816ca23633580dab9d07a75731ae7bd49a -->
+<!-- last-sha: 20e735741836009aacf46a8b5084bde36a5c74f4 -->
 # What's new
+
+## 0.16.0 · 2026-11-25
+- **Unread badge on the Dock icon.** A red dot appears on JAIT's Dock icon while you have unread notifications. When the sidebar is hidden, a red dot on its show-sidebar button does the same job, since the Inbox count can't be seen.
+- **Jump to a team's pages from the command palette.** Typing a team's name or identifier in Cmd+K now lists that team first, above issues that only mention it, with its Projects, Roadmap and Recurring issues pages right under it. Type more to narrow it down, like "jrst road" for that team's Roadmap.
+- **Search finds closed issues.** Searching now includes completed issues even when completed issues are hidden from the board.
+- **Sidebar follows your tab.** Switching to a team's tab expands that team in the sidebar and collapses the others, so you can always see where you are.
 
 ## 0.15.0 · 2026-11-25
 - **What's new, in the app.** A "What's new" button at the bottom of the sidebar opens this changelog, and shows which version you have. You can also type "What's new" in the command palette. Import CSV has moved into each team's menu in the sidebar.
