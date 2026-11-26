@@ -84,7 +84,7 @@ pub fn view<'a>(state: SidebarState<'a>) -> Element<'a, Message> {
             .align_y(iced::Alignment::Center)
             .push(section_header("WORKSPACE"))
             .push(iced::widget::space::horizontal())
-            .push(sidebar_toggle(false)),
+            .push(sidebar_toggle(false, false)),
     );
     col = col.push(nav_row(
         "My Issues",
@@ -501,17 +501,23 @@ pub const TOGGLE_WIDTH: f32 = 32.0;
 
 /// The button that collapses the sidebar (at the right of its top row) or,
 /// once `collapsed`, expands it again (leading the Tab bar). Cmd+B does both.
-pub fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, Message> {
+pub fn sidebar_toggle<'a>(collapsed: bool, unread: bool) -> Element<'a, Message> {
     let (icon, tip) = if collapsed {
         (ICON_EXPAND, "Show sidebar  \u{2318}B")
     } else {
         (ICON_COLLAPSE, "Hide sidebar  \u{2318}B")
     };
-    let btn = button(
-        container(crate::views::form_page::icon(icon, 14.0, t::text_muted()))
-            .center_x(Length::Fill)
-            .center_y(Length::Shrink),
-    )
+    let glyph = container(crate::views::form_page::icon(icon, 14.0, t::text_muted()))
+        .center_x(Length::Fill)
+        .center_y(Length::Shrink);
+    // Unread Notifications while collapsed (JRST-551): a red dot at the icon's
+    // top right, standing in for the hidden Inbox badge.
+    let glyph: Element<'a, Message> = if unread {
+        iced::widget::stack![glyph, unread_corner_dot()].into()
+    } else {
+        glyph.into()
+    };
+    let btn = button(glyph)
     .width(Length::Fixed(TOGGLE_WIDTH))
     .padding([5, 0])
     .on_press(Message::ToggleSidebar)
@@ -534,6 +540,26 @@ pub fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, Message> {
     )
     .gap(4)
     .into()
+}
+
+/// Diameter of the expand button's unread dot.
+const UNREAD_DOT: f32 = 6.0;
+
+/// The red unread dot, pinned to the top right of the expand icon.
+fn unread_corner_dot<'a>() -> Element<'a, Message> {
+    let dot = container(iced::widget::Space::new().width(UNREAD_DOT).height(UNREAD_DOT)).style(
+        |_theme: &Theme| container::Style {
+            background: Some(iced::Background::Color(t::danger())),
+            border: Border { radius: (UNREAD_DOT / 2.0).into(), ..Default::default() },
+            ..Default::default()
+        },
+    );
+    // The icon is 14px, centred in the button: sit the dot on its corner.
+    container(dot)
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center)
+        .padding(iced::Padding { left: 14.0, ..Default::default() })
+        .into()
 }
 
 /// A muted glyph-only sidebar button; disabled when `msg` is `None`.

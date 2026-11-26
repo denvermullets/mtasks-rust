@@ -126,6 +126,8 @@ impl canvas::Program<Message> for DragPlaceholder {
 /// per Tab, what its Terminals wait on the person for (a dot before the label).
 /// `unread` is, per Tab, whether it has unread Notifications (the Inbox Tab);
 /// it shows an accent dot when no Terminal need already takes the slot.
+/// `any_unread` puts a red dot on the expand button that leads the bar while
+/// the sidebar (and its Inbox badge) is collapsed.
 /// `can_reopen` is whether there is a closed Tab to bring back (the
 /// right-click menu's item).
 pub fn view<'a>(
@@ -134,6 +136,7 @@ pub fn view<'a>(
     unread: &[bool],
     window_width: f32,
     sidebar_collapsed: bool,
+    any_unread: bool,
     dragging: Option<usize>,
     can_reopen: bool,
 ) -> Element<'a, Message> {
@@ -237,7 +240,7 @@ pub fn view<'a>(
             border: Border { radius: 4.0.into(), ..Default::default() },
             ..Default::default()
         });
-    let expand = sidebar_collapsed.then(|| crate::views::team_list::sidebar_toggle(true));
+    let expand = sidebar_collapsed.then(|| crate::views::team_list::sidebar_toggle(true, any_unread));
     container(
         row![]
             .push(expand)
