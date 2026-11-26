@@ -3,6 +3,7 @@
 //! Decisions (which bundle, preconditions, the fallback plan) are pure and
 //! tested here. `SystemOps` does the real renames. No re-verify happens: the
 //! verified marker written at staging is the proof. No backup, no rollback.
+//! Afterwards the staging folder itself goes too, if nothing else is in it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -137,6 +138,8 @@ pub trait SwapOps {
     /// Bump the bundle's mtime so LaunchServices re-reads it.
     fn touch(&self, p: &Path);
     fn remove_dir_all(&self, p: &Path);
+    /// Remove `p` only if it is empty (best effort).
+    fn remove_empty_dir(&self, p: &Path);
 }
 
 /// Swap the Staged update in. Atomic exchange first; on failure two renames
@@ -150,6 +153,10 @@ pub fn run(ops: &dyn SwapOps, plan: &SwapPlan) -> Result<(), SwapError> {
     ops.touch(&plan.installed);
     // After either path the old bundle sits inside staged_dir.
     ops.remove_dir_all(&plan.staged_dir);
+    // Leave nothing behind, e.g. a `.jait-update` beside the bundle.
+    if let Some(staging_dir) = plan.staged_dir.parent() {
+        ops.remove_empty_dir(staging_dir);
+    }
     Ok(())
 }
 
@@ -200,6 +207,10 @@ impl SwapOps for SystemOps {
 
     fn remove_dir_all(&self, p: &Path) {
         let _ = std::fs::remove_dir_all(p);
+    }
+
+    fn remove_empty_dir(&self, p: &Path) {
+        let _ = std::fs::remove_dir(p);
     }
 }
 
@@ -335,6 +346,9 @@ mod tests {
         fn remove_dir_all(&self, _: &Path) {
             let _ = self.step("remove");
         }
+        fn remove_empty_dir(&self, _: &Path) {
+            let _ = self.step("rmdir");
+        }
     }
 
     fn calls(f: &Fake) -> Vec<String> {
@@ -345,7 +359,7 @@ mod tests {
     fn atomic_exchange_then_touch_then_delete() {
         let f = Fake::new(&[]);
         run(&f, &plan()).unwrap();
-        assert_eq!(calls(&f), ["exchange", "touch", "remove"]);
+        assert_eq!(calls(&f), ["exchange", "touch", "remove", "rmdir"]);
     }
 
     #[test]
@@ -360,7 +374,7 @@ mod tests {
     fn exchange_failure_falls_back_to_two_renames() {
         let f = Fake::new(&["exchange"]);
         run(&f, &plan()).unwrap();
-        assert_eq!(calls(&f), ["exchange", "aside", "in", "touch", "remove"]);
+        assert_eq!(calls(&f), ["exchange", "aside", "in", "touch", "remove", "rmdir"]);
     }
 
     #[test]
@@ -402,6 +416,16 @@ mod tests {
         run(&SystemOps, &p).unwrap();
         assert_eq!(fs::read_to_string(p.installed.join("ver")).unwrap(), "new");
         assert!(!p.staged_dir.exists());
+        assert!(!p.staged_dir.parent().unwrap().exists(), "empty staging folder removed");
+    }
+
+    #[test]
+    fn real_swap_keeps_a_staging_folder_that_still_holds_files() {
+        let p = fixture("keep");
+        let staging = p.staged_dir.parent().unwrap().to_path_buf();
+        fs::write(staging.join("other"), b"x").unwrap();
+        run(&SystemOps, &p).unwrap();
+        assert!(staging.join("other").exists());
     }
 
     #[test]

@@ -4115,6 +4115,11 @@ impl App {
             restart_exiting: false,
         };
 
+        // Older versions staged in `.jait-update` beside the bundle; this one
+        // stages in the cache folder, so sweep the old folder away.
+        if let Some(legacy) = app.install.legacy_staging_dir() {
+            let _ = std::fs::remove_dir_all(legacy);
+        }
         // Drop partial downloads and unverified extracts from a past run, once,
         // before any download can take the update lock.
         if let Some(staging_dir) = app.install.staging_dir() {
