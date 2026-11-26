@@ -499,6 +499,34 @@ const ICON_EXPAND: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none
 /// it while the sidebar is collapsed, and its layout math counts it.
 pub const TOGGLE_WIDTH: f32 = 32.0;
 
+/// Narrowest and widest the sidebar drags to.
+pub const MIN_SIDEBAR_WIDTH: f32 = 160.0;
+pub const MAX_SIDEBAR_WIDTH: f32 = 480.0;
+/// Width of the grab strip on the sidebar's right edge.
+pub const RESIZE_HANDLE_WIDTH: f32 = 4.0;
+
+/// The sidebar's width for a stored (or dragged-to) `width`: the default
+/// when unset, otherwise kept within the drag limits.
+pub fn sidebar_width(width: Option<f32>) -> f32 {
+    width
+        .unwrap_or(crate::terminal::panel::SIDEBAR_WIDTH)
+        .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+}
+
+/// The grab strip on the sidebar's right edge: drag to resize, double-click
+/// to go back to the default width.
+pub fn resize_handle<'a>() -> Element<'a, Message> {
+    iced::widget::mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fixed(RESIZE_HANDLE_WIDTH))
+            .height(Length::Fill),
+    )
+    .on_press(Message::SidebarDragStart)
+    .on_double_click(Message::SidebarWidthReset)
+    .interaction(iced::mouse::Interaction::ResizingHorizontally)
+    .into()
+}
+
 /// The button that collapses the sidebar (at the right of its top row) or,
 /// once `collapsed`, expands it again (leading the Tab bar). Cmd+B does both.
 pub fn sidebar_toggle<'a>(collapsed: bool, unread: bool) -> Element<'a, Message> {
@@ -787,6 +815,15 @@ fn plain_row_style(_theme: &Theme, _status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sidebar_width_defaults_and_clamps() {
+        use super::{sidebar_width, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
+        assert_eq!(sidebar_width(None), crate::terminal::panel::SIDEBAR_WIDTH);
+        assert_eq!(sidebar_width(Some(300.0)), 300.0);
+        assert_eq!(sidebar_width(Some(10.0)), MIN_SIDEBAR_WIDTH);
+        assert_eq!(sidebar_width(Some(9000.0)), MAX_SIDEBAR_WIDTH);
+    }
+
     use super::{
         badge_label, is_home_dashboard, is_home_team, is_home_view, ordered_dashboards, sidebar_row_view,
     };

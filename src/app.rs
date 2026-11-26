@@ -351,6 +351,14 @@ pub enum Message {
     ToggleHelp,
     /// Cmd+B: collapse or expand the left teams sidebar.
     ToggleSidebar,
+    /// The sidebar's right edge was pressed: it follows the pointer until release.
+    SidebarDragStart,
+    /// The pointer moved (window x) while dragging the sidebar's edge.
+    SidebarDragMove(f32),
+    /// The sidebar drag ended: store the width.
+    SidebarDragEnd,
+    /// The sidebar's edge was double-clicked: back to the default width.
+    SidebarWidthReset,
     /// `/` or the palette command on the issue or project page: show or hide
     /// that page's Properties.
     ToggleProperties,
@@ -1094,6 +1102,9 @@ pub struct App {
     tab_bar_offset: f32,
     /// A Tab pressed in the bar, until the pointer is released.
     tab_drag: Option<tab_update::TabDrag>,
+    /// Whether the sidebar's right edge is being dragged (its live width is
+    /// `config.sidebar_width`, saved on release).
+    sidebar_drag: bool,
     /// Recently closed Tabs, most recent last: each key with the position it
     /// was closed from and the page it was on, for Cmd+Shift+T.
     closed_tabs: Vec<tab_update::ClosedTab>,
@@ -4062,6 +4073,7 @@ impl App {
             window_height: 700.0,
             tab_bar_offset: 0.0,
             tab_drag: None,
+            sidebar_drag: false,
             closed_tabs: Vec::new(),
             tab_projects: HashMap::new(),
             text_undo: Default::default(),
@@ -4226,13 +4238,13 @@ impl App {
 
     /// Adopt `new_cfg` for this session and persist it, surfacing a save
     /// failure in the Settings form (and clearing a stale `config_error` on success).
-    /// Width the left teams sidebar takes now: its fixed width, or nothing
-    /// while collapsed (Cmd+B).
+    /// Width the left teams sidebar takes now: its stored (or default)
+    /// width, or nothing while collapsed (Cmd+B).
     pub(crate) fn sidebar_width(&self) -> f32 {
         if self.config.sidebar_collapsed {
             0.0
         } else {
-            crate::terminal::panel::SIDEBAR_WIDTH
+            team_list::sidebar_width(self.config.sidebar_width)
         }
     }
 
@@ -4369,6 +4381,16 @@ impl App {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
                     Some(Message::Tab(TabMessage::DragEnd))
                 }
+                _ => None,
+            }));
+        }
+        // A pressed sidebar edge follows the pointer until release.
+        if self.sidebar_drag {
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::SidebarDragMove(position.x))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => Some(Message::SidebarDragEnd),
                 _ => None,
             }));
         }
@@ -7261,6 +7283,33 @@ impl App {
                 self.terminals.set_sidebar_width(self.sidebar_width());
             }
 
+            Message::SidebarDragStart => {
+                self.sidebar_drag = true;
+            }
+
+            Message::SidebarDragMove(x) => {
+                // The sidebar starts at the window's left edge, so its width
+                // is where the pointer is.
+                if self.sidebar_drag {
+                    self.config.sidebar_width = Some(team_list::sidebar_width(Some(x)));
+                    self.terminals.set_sidebar_width(self.sidebar_width());
+                }
+            }
+
+            Message::SidebarDragEnd => {
+                self.sidebar_drag = false;
+                let new_cfg = self.config.clone();
+                self.save_config_change(new_cfg);
+            }
+
+            Message::SidebarWidthReset => {
+                self.sidebar_drag = false;
+                let mut new_cfg = self.config.clone();
+                new_cfg.sidebar_width = None;
+                self.save_config_change(new_cfg);
+                self.terminals.set_sidebar_width(self.sidebar_width());
+            }
+
             Message::ToggleMoreProperties => {
                 self.more_properties = !self.more_properties;
             }
@@ -9243,7 +9292,7 @@ impl App {
                 &self.tab_needs(),
                 &self.tab_unread(),
                 self.window_width,
-                self.config.sidebar_collapsed,
+                self.sidebar_width(),
                 self.notif_unread_count > 0,
                 self.tab_drag.as_ref().filter(|d| d.moved).map(|d| d.index),
                 !self.closed_tabs.is_empty(),
@@ -9258,7 +9307,10 @@ impl App {
         let sidebar_w = self.sidebar_width();
         let layout = row![]
             .push((sidebar_w > 0.0).then(|| {
-                container(sidebar_column)
+                container(row![
+                    container(sidebar_column).width(Length::Fill).height(Length::Fill),
+                    team_list::resize_handle(),
+                ])
                     .width(Length::Fixed(sidebar_w))
                     .height(Length::Fill)
                     .style(|_theme: &Theme| iced::widget::container::Style {

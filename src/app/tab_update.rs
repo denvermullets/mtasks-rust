@@ -130,7 +130,7 @@ impl App {
     /// threshold. Parked state is keyed by Tab, so only the order changes.
     fn drag_tab_to(&mut self, x: f32) {
         use crate::views::tab_bar;
-        let left = crate::views::tab_bar::bar_left(self.config.sidebar_collapsed);
+        let left = crate::views::tab_bar::bar_left(self.sidebar_width());
         let Some(drag) = self.tab_drag.as_mut() else {
             return;
         };
@@ -882,7 +882,7 @@ impl App {
         if now == before {
             return Task::none();
         }
-        let viewport = tab_bar::tab_viewport(self.window_width, tab_bar::bar_left(self.config.sidebar_collapsed));
+        let viewport = tab_bar::tab_viewport(self.window_width, tab_bar::bar_left(self.sidebar_width()));
         let w = tab_bar::tab_width(now.1, viewport);
         let x = tab_bar::reveal_offset(now.0, now.1, w, viewport, self.tab_bar_offset);
         self.tab_bar_offset = x;

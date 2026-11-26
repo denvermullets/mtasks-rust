@@ -21,12 +21,13 @@ const PLUS_WIDTH: f32 = 36.0;
 const BAR_PADDING: f32 = 8.0;
 
 /// Window x where the Tab row's own area starts: right of the sidebar, or
-/// right of the expand button that leads the bar while it is collapsed.
-pub fn bar_left(sidebar_collapsed: bool) -> f32 {
-    if sidebar_collapsed {
+/// right of the expand button that leads the bar while it is collapsed
+/// (`sidebar_width` 0).
+pub fn bar_left(sidebar_width: f32) -> f32 {
+    if sidebar_width <= 0.0 {
         crate::views::team_list::TOGGLE_WIDTH
     } else {
-        crate::terminal::panel::SIDEBAR_WIDTH
+        sidebar_width
     }
 }
 
@@ -135,12 +136,12 @@ pub fn view<'a>(
     needs: &[Option<crate::terminal::Need>],
     unread: &[bool],
     window_width: f32,
-    sidebar_collapsed: bool,
+    sidebar_width: f32,
     any_unread: bool,
     dragging: Option<usize>,
     can_reopen: bool,
 ) -> Element<'a, Message> {
-    let tab_w = tab_width(tabs.len(), tab_viewport(window_width, bar_left(sidebar_collapsed)));
+    let tab_w = tab_width(tabs.len(), tab_viewport(window_width, bar_left(sidebar_width)));
     let mut bar = row![].spacing(TAB_SPACING).padding([4.0, BAR_PADDING]);
     for (i, (label, active)) in tabs.iter().enumerate() {
         let active = *active;
@@ -240,7 +241,7 @@ pub fn view<'a>(
             border: Border { radius: 4.0.into(), ..Default::default() },
             ..Default::default()
         });
-    let expand = sidebar_collapsed.then(|| crate::views::team_list::sidebar_toggle(true, any_unread));
+    let expand = (sidebar_width <= 0.0).then(|| crate::views::team_list::sidebar_toggle(true, any_unread));
     container(
         row![]
             .push(expand)
@@ -324,8 +325,8 @@ mod tests {
         assert_eq!(drop_index(0.0, SIDEBAR, 0.0, 5, 120.0), 0);
         assert_eq!(drop_index(5000.0, SIDEBAR, 0.0, 5, 120.0), 4);
         // Sidebar collapsed: the bar starts right of the expand button.
-        let left = bar_left(true) + BAR_PADDING;
-        assert_eq!(drop_index(left + 130.0, bar_left(true), 0.0, 5, 120.0), 1);
+        let left = bar_left(0.0) + BAR_PADDING;
+        assert_eq!(drop_index(left + 130.0, bar_left(0.0), 0.0, 5, 120.0), 1);
     }
 
     #[test]
@@ -365,9 +366,9 @@ mod tests {
     #[test]
     fn a_collapsed_sidebar_leaves_room_for_the_expand_button_only() {
         for window in [800.0, 1100.0, 1920.0] {
-            let used = bar_left(true) + 2.0 * BAR_PADDING + tab_viewport(window, bar_left(true)) + PLUS_WIDTH;
+            let used = bar_left(0.0) + 2.0 * BAR_PADDING + tab_viewport(window, bar_left(0.0)) + PLUS_WIDTH;
             assert!((used - window).abs() < 0.01, "{used} != {window}");
-            assert!(tab_viewport(window, bar_left(true)) > tab_viewport(window, bar_left(false)));
+            assert!(tab_viewport(window, bar_left(0.0)) > tab_viewport(window, bar_left(SIDEBAR)));
         }
     }
 
