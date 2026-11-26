@@ -726,7 +726,7 @@ fn inbox_row<'a>(active: bool, unread_count: i64) -> Element<'a, Message> {
     .align_y(iced::Alignment::Center)
     .push(iced::widget::space::horizontal())
     .push(badge_label(unread_count).map(|label| {
-        container(text(label).size(11).color(t::text_primary()))
+        container(text(label).size(11).color(t::on_fill(t::accent())))
             .padding([1, 6])
             .style(|_theme: &Theme| container::Style {
                 background: Some(iced::Background::Color(t::accent())),

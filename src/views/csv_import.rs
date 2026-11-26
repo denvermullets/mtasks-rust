@@ -133,21 +133,20 @@ pub fn view(state: &CsvImportState) -> Element<'_, Message> {
                         .style(button::secondary),
                 )
                 .push(
-                    button(text("Import").size(14).color(t::bg_primary()))
+                    button(text("Import").size(14))
                         .on_press_maybe(can_import.then_some(Message::ConfirmCsvImport))
                         .padding([8, 24])
-                        .style(move |_theme: &Theme, _status| button::Style {
-                            background: Some(iced::Background::Color(if can_import {
-                                t::accent()
-                            } else {
-                                t::text_muted()
-                            })),
-                            text_color: t::bg_primary(),
-                            border: Border {
-                                radius: 4.0.into(),
+                        .style(move |_theme: &Theme, _status| {
+                            let fill = if can_import { t::accent() } else { t::text_muted() };
+                            button::Style {
+                                background: Some(iced::Background::Color(fill)),
+                                text_color: t::on_fill(fill),
+                                border: Border {
+                                    radius: 4.0.into(),
+                                    ..Default::default()
+                                },
                                 ..Default::default()
-                            },
-                            ..Default::default()
+                            }
                         }),
                 ),
         );

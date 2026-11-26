@@ -398,7 +398,7 @@ fn modal_layer<'a, M: 'a>(panel: impl Into<Element<'a, M>>, top: bool) -> Elemen
 /// The assignee's initial in an accent circle (web `user_avatar size: "sm"`).
 pub fn avatar<'a, Message: 'a>(name: &str) -> Element<'a, Message> {
     let initial: String = name.chars().next().into_iter().flat_map(char::to_uppercase).collect();
-    container(text(initial).size(type_scale::XS).font(crate::fonts::bold_active()).color(t::bg_primary()))
+    container(text(initial).size(type_scale::XS).font(crate::fonts::bold_active()).color(t::on_fill(t::accent())))
         .center_x(Length::Fixed(space::S5))
         .center_y(Length::Fixed(space::S5))
         .style(|_theme: &Theme| container::Style {

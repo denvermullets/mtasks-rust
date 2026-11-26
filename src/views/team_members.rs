@@ -46,9 +46,7 @@ pub fn modal_view<'a>(team: &'a Team, members: &'a [Member]) -> Element<'a, Mess
     if team.remote_id.is_some() {
         footer = footer.push(
             button(
-                text("Manage in web app \u{2197}")
-                    .size(14)
-                    .color(t::bg_primary()),
+                text("Manage in web app \u{2197}").size(14),
             )
             .on_press(Message::OpenTeamWebSettings(
                 team.id.clone(),

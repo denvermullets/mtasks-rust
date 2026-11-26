@@ -354,11 +354,11 @@ fn dot<'a>(color: Color) -> Element<'a, Message> {
 fn marker<'a>(field: Field, on: bool) -> Element<'a, Message> {
     let round = if field == Field::Labels { 3.0 } else { 7.0 };
     let inner: Element<'a, Message> = if on && field == Field::Labels {
-        text("✓").size(10).color(Color::WHITE).into()
+        text("✓").size(10).color(t::on_fill(t::accent())).into()
     } else if on {
         container(Space::new().width(6).height(6))
             .style(|_: &Theme| container::Style {
-                background: Some(Color::WHITE.into()),
+                background: Some(t::on_fill(t::accent()).into()),
                 border: Border { radius: 3.0.into(), ..Default::default() },
                 ..Default::default()
             })

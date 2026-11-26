@@ -159,7 +159,7 @@ pub fn submit_button<'a>(label: &str, on_press: Message) -> button::Button<'a, M
             let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
             button::Style {
                 background: hovered.then(|| iced::Background::Color(t::accent())),
-                text_color: if hovered { t::on_accent(status) } else { t::accent() },
+                text_color: if hovered { t::on_fill(t::accent()) } else { t::accent() },
                 border: Border { color: t::accent(), width: 1.0, radius: radius::MD.into() },
                 ..Default::default()
             }

@@ -1,8 +1,8 @@
 //! Display-options dropdown and filter panel, opened from the header. Both are
 //! rendered as popovers anchored under the header's right edge (see `popover`).
 
-use iced::widget::{button, checkbox, column, container, mouse_area, row, scrollable, Column};
-use crate::views::text;
+use iced::widget::{button, column, container, mouse_area, row, scrollable, Column};
+use crate::views::{checkbox, text};
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;

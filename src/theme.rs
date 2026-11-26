@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use iced::theme::Palette;
-use iced::widget::button;
+use iced::widget::{button, checkbox};
 use iced::{Color, Theme};
 
 use crate::db::models::{Priority, ProjectStatus};
@@ -388,12 +388,11 @@ pub fn contrast_ratio(a: Color, b: Color) -> f32 {
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
-/// Label color on an accent fill: whichever of the page background and
-/// `text_strong` contrasts more with the fill. That is the dark page
-/// background on Default's light accent, and the dark `gray[0]` on Warm
-/// Paper's orange, where the light page background falls short of 4.5:1.
-pub fn on_accent_for(t: &Tokens, hovered: bool) -> Color {
-    let fill = if hovered { t.accent_hover } else { t.accent };
+/// Label color for text and icons drawn on `fill`: whichever of the page
+/// background and `text_strong` contrasts more with it. On Default's light
+/// accent that is the dark page background; on Warm Paper's orange it is the
+/// dark `gray[0]`, since the light page background falls short of 4.5:1.
+pub fn on_fill_for(t: &Tokens, fill: Color) -> Color {
     if contrast_ratio(t.background, fill) >= contrast_ratio(t.gray[0], fill) {
         t.background
     } else {
@@ -401,7 +400,20 @@ pub fn on_accent_for(t: &Tokens, hovered: bool) -> Color {
     }
 }
 
-/// Label color for an accent-filled button in `status`.
+/// Label color on the accent fill (`hovered`: on `accent_hover`).
+pub fn on_accent_for(t: &Tokens, hovered: bool) -> Color {
+    on_fill_for(t, if hovered { t.accent_hover } else { t.accent })
+}
+
+/// Label color for text and icons drawn on `fill` in the current theme. Every
+/// text or icon on an accent fill takes its color from here (or `on_accent`),
+/// passing the fill it is drawn on: never a fixed white, `text_primary` or
+/// `bg_primary`, which drop below 4.5:1 on some themes (JRST-528).
+pub fn on_fill(fill: Color) -> Color {
+    on_fill_for(tok(), fill)
+}
+
+/// Label color for an accent-filled button in `status`; pairs with `accent_fill`.
 pub fn on_accent(status: button::Status) -> Color {
     on_accent_for(tok(), matches!(status, button::Status::Hovered))
 }
@@ -439,20 +451,57 @@ pub fn choice_for_key(key: &str) -> ThemeChoice {
     }
 }
 
-/// The built-in Iced theme (text inputs, scrollbars, pick lists) derived from the current tokens.
+/// The built-in Iced theme (text inputs, scrollbars, pick lists, checkboxes,
+/// `button::primary`) derived from the current tokens.
 pub fn iced_theme() -> Theme {
     let tk = tok();
-    Theme::custom(
-        tk.name.to_string(),
-        Palette {
-            background: tk.background,
-            text: text_primary(),
-            primary: tk.accent,
-            success: priority_low(),
-            warning: priority_high(),
-            danger: danger(),
-        },
-    )
+    Theme::custom_with_fn(tk.name.to_string(), iced_palette(tk), |p| {
+        extended_palette(tk, p)
+    })
+}
+
+fn iced_palette(tk: &Tokens) -> Palette {
+    Palette {
+        background: tk.background,
+        text: text_primary(),
+        primary: tk.accent,
+        success: priority_low(),
+        warning: priority_high(),
+        danger: danger(),
+    }
+}
+
+/// Iced's generated palette, with the primary set rebuilt on the theme's own
+/// accent pair. Iced picks primary text with its own `readable()`, which isn't
+/// tied to `on_fill` and lands below 4.5:1 on Cool Linen, Dusk, Deep Navy, Ash
+/// and Chalk. `strong` is `accent_hover`, as on our own accent buttons. `weak`
+/// is left as generated: Iced only uses its color (selections, sliders).
+fn extended_palette(tk: &Tokens, p: Palette) -> iced::theme::palette::Extended {
+    use iced::theme::palette::{Extended, Pair};
+    let mut ext = Extended::generate(p);
+    let pair = |color: Color| Pair {
+        color,
+        text: on_fill_for(tk, color),
+    };
+    ext.primary.base = pair(tk.accent);
+    ext.primary.strong = pair(tk.accent_hover);
+    ext
+}
+
+/// Checkbox style for every checkbox: Iced's primary checkbox, with the check
+/// mark colored for the box it sits on. Iced keeps `primary.base.text` while
+/// the checked box turns `strong` on hover, and no one label reads on both of
+/// Warm Paper's fills.
+pub fn checkbox_style(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
+    checkbox_style_for(tok(), theme, status)
+}
+
+fn checkbox_style_for(tk: &Tokens, theme: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let mut style = checkbox::primary(theme, status);
+    if let iced::Background::Color(fill) = style.background {
+        style.icon_color = on_fill_for(tk, fill);
+    }
+    style
 }
 
 macro_rules! token_fn {
@@ -685,6 +734,51 @@ mod tests {
         }
     }
 
+    /// Iced's built-in widgets (`button::primary`, pick list menus) draw
+    /// `primary.*.text` on `primary.*.color`.
+    #[test]
+    fn iced_primary_text_meets_4_5_to_1_on_every_primary_fill() {
+        for t in THEMES.iter() {
+            let p = extended_palette(t, iced_palette(t)).primary;
+            let pairs = [
+                ("base", p.base.text, p.base.color),
+                ("strong", p.strong.text, p.strong.color),
+            ];
+            for (what, fg, bg) in pairs {
+                let ratio = contrast_ratio(fg, bg);
+                assert!(ratio >= 4.5, "{} {what}: {ratio:.2}:1", t.name);
+            }
+        }
+    }
+
+    #[test]
+    fn checked_checkbox_mark_meets_4_5_to_1_at_rest_and_hovered() {
+        use checkbox::Status;
+        for t in THEMES.iter() {
+            let theme = Theme::custom_with_fn(t.name, iced_palette(t), |p| extended_palette(t, p));
+            for status in [
+                Status::Active { is_checked: true },
+                Status::Hovered { is_checked: true },
+            ] {
+                let style = checkbox_style_for(t, &theme, status);
+                let iced::Background::Color(fill) = style.background else {
+                    panic!("{}: gradient fill", t.name)
+                };
+                let ratio = contrast_ratio(style.icon_color, fill);
+                assert!(ratio >= 4.5, "{} {status:?}: {ratio:.2}:1", t.name);
+            }
+        }
+    }
+
+    #[test]
+    fn iced_primary_fills_are_the_theme_accent_pair() {
+        for t in THEMES.iter() {
+            let p = extended_palette(t, iced_palette(t)).primary;
+            assert_eq!(p.base.color, t.accent, "{}", t.name);
+            assert_eq!(p.strong.color, t.accent_hover, "{}", t.name);
+        }
+    }
+
     #[test]
     fn warm_paper_accent_label_is_dark_not_the_page_background() {
         let t = tokens_for("warm-paper");
@@ -875,7 +969,9 @@ mod tests {
         use type_scale::*;
         let sizes = [XS, SM, BASE, LG, XL, XXL, XXXL, XXXXL];
         assert_eq!(sizes, [12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 30.0, 36.0]);
-        let lines = [LH_XS, LH_SM, LH_BASE, LH_LG, LH_XL, LH_XXL, LH_XXXL, LH_XXXXL];
+        let lines = [
+            LH_XS, LH_SM, LH_BASE, LH_LG, LH_XL, LH_XXL, LH_XXXL, LH_XXXXL,
+        ];
         let px = [16.0, 20.0, 24.0, 28.0, 28.0, 32.0, 36.0, 40.0];
         for ((s, l), want) in sizes.iter().zip(lines).zip(px) {
             assert!((s * l - want).abs() < 0.01, "{s}px line height");

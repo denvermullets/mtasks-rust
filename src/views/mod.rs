@@ -47,6 +47,8 @@ pub mod team_members;
 pub mod team_picker;
 pub mod text;
 pub use text::text;
+pub mod checkbox;
+pub use checkbox::checkbox;
 pub mod toast;
 pub mod update_chip;
 pub mod truncated;

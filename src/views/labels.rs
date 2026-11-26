@@ -222,7 +222,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
         )
         .push(color_swatches(&form.color, Message::LabelColorChanged))
         .push(
-            button(text("Add").size(13).color(t::bg_primary()))
+            button(text("Add").size(13))
                 .on_press(Message::CreateLabel)
                 .padding([8, 16])
                 .style(move |_theme: &Theme, status| button::Style {
@@ -269,7 +269,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
                         )
                         .push(color_swatches(&form.edit_color, Message::EditLabelColorChanged))
                         .push(
-                            button(text("Save").size(13).color(t::bg_primary()))
+                            button(text("Save").size(13))
                                 .on_press(Message::SaveLabelEdit)
                                 .padding([8, 16])
                                 .style(move |_theme: &Theme, status| button::Style {
@@ -343,7 +343,7 @@ pub fn modal_view<'a>(form: &'a LabelFormState, labels: &'a [Label]) -> Element<
         row![]
             .spacing(8)
             .push(
-                button(text(done_label).size(14).color(t::bg_primary()))
+                button(text(done_label).size(14))
                     .on_press(done_msg)
                     .padding([8, 24])
                     .style(move |_theme: &Theme, status| button::Style {

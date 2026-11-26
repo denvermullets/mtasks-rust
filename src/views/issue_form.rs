@@ -1,5 +1,5 @@
-use iced::widget::{button, checkbox, column, container, row, Space};
-use crate::views::text;
+use iced::widget::{button, column, container, row, Space};
+use crate::views::{checkbox, text};
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::app::Message;

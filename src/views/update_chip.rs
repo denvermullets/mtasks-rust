@@ -28,7 +28,7 @@ pub fn label(view: &UpdaterView) -> Option<String> {
 /// The chip, or `None` when there's nothing to show.
 pub fn chip<'a>(view: &UpdaterView) -> Option<Element<'a, Message>> {
     let label = label(view)?;
-    let pill = container(text(label).size(12).color(t::text_primary()))
+    let pill = container(text(label).size(12).color(t::on_fill(t::accent())))
         .padding([1, 8])
         .style(|_theme: &Theme| container::Style {
             background: Some(iced::Background::Color(t::accent())),

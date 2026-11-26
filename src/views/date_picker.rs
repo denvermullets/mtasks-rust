@@ -216,7 +216,7 @@ fn calendar<'a>(input: &DateInput<'a>, state: DatePickerState, today: NaiveDate)
                         None
                     },
                     text_color: if is_selected {
-                        t::on_accent(status)
+                        t::on_fill(t::accent())
                     } else if in_month {
                         t::text_body()
                     } else {

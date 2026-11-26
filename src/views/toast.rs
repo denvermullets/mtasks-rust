@@ -116,10 +116,10 @@ fn card(toast: &Toast) -> Element<'_, Message> {
         let mut acts = row![].spacing(8);
         for a in &toast.actions {
             let b = if a.primary {
-                button(text(&a.label).size(12).color(Color::WHITE)).style(
+                button(text(&a.label).size(12)).style(
                     |_theme: &Theme, status| button::Style {
                         background: Some(iced::Background::Color(t::accent_fill(status))),
-                        text_color: Color::WHITE,
+                        text_color: t::on_accent(status),
                         border: Border { radius: 4.0.into(), ..Default::default() },
                         ..Default::default()
                     },

@@ -1,5 +1,5 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, slider};
-use crate::views::text;
+use iced::widget::{button, column, container, pick_list, row, slider};
+use crate::views::{checkbox, text};
 use iced::{Border, Element, Length, Theme};
 
 use crate::app::Message;
@@ -200,7 +200,7 @@ pub fn view<'a>(
                         .style(button::secondary),
                 )
                 .push(
-                    button(text("Save").size(14).color(t::bg_primary()))
+                    button(text("Save").size(14))
                         .on_press(Message::SaveSettings)
                         .padding([8, 24])
                         .style(move |_theme: &Theme, status| button::Style {
@@ -291,7 +291,7 @@ fn updates_section<'a>(
         .push(line("Installed version", updates.installed.to_string()))
         .push(line("Last checked", last_check_label(updates.view.last_checked)))
         .push(
-            iced::widget::checkbox(updates.auto_check).label("Check for updates automatically")
+            checkbox(updates.auto_check).label("Check for updates automatically")
                 .on_toggle(Message::UpdateAutoCheckToggled)
                 .size(16)
                 .text_size(12),

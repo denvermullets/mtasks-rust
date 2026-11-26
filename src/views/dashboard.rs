@@ -835,7 +835,7 @@ fn no_groups<'a>(read_only: bool) -> Element<'a, Message> {
                         background: matches!(status, button::Status::Hovered)
                             .then(|| iced::Background::Color(t::accent())),
                         text_color: if matches!(status, button::Status::Hovered) {
-                            t::on_accent(status)
+                            t::on_fill(t::accent())
                         } else {
                             t::text_primary()
                         },
