@@ -5458,6 +5458,9 @@ impl App {
                     crate::terminal::TerminalMessage::Close(_)
                         | crate::terminal::TerminalMessage::CloseConfirmed(_)
                 );
+                self.terminals.set_team_labels(
+                    self.teams.iter().map(|t| (t.id.clone(), t.identifier.clone())).collect(),
+                );
                 let task = self.terminals.update(m, scope.as_ref());
                 self.post_terminal_alerts();
                 return if closes {

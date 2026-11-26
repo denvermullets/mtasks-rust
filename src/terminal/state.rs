@@ -135,6 +135,8 @@ pub struct TerminalState {
     team_dirs: HashMap<String, std::path::PathBuf>,
     /// Each project's starting directory; unset means its team's.
     project_dirs: HashMap<String, std::path::PathBuf>,
+    /// Each team's identifier ("JRST"), which new Terminals are named after.
+    team_labels: HashMap<String, String>,
     /// For the app to show (`take_notices`).
     notices: Vec<String>,
     panel: PanelState,
@@ -201,6 +203,7 @@ impl TerminalState {
             shutting_down: false,
             team_dirs: HashMap::new(),
             project_dirs: HashMap::new(),
+            team_labels: HashMap::new(),
             notices: Vec::new(),
             panel: PanelState::default(),
             dock: Dock::Bottom,
@@ -881,6 +884,11 @@ impl TerminalState {
         self.project_dirs = dirs;
     }
 
+    /// Team id → identifier, for naming new Terminals.
+    pub fn set_team_labels(&mut self, labels: HashMap<String, String>) {
+        self.team_labels = labels;
+    }
+
     /// New shells in the strip of `scope` start in `dir`; running shells
     /// don't move. A project's folder is its own: clearing it falls back to
     /// the team's, and setting the team's leaves it alone. Records that were
@@ -1209,7 +1217,8 @@ impl TerminalState {
     fn create(&mut self, scope: &Scope, slot: usize) {
         let cwd = self.dir_for(scope).cloned();
         if let Some(id) = self.spawn(&scope.team, cwd.clone()) {
-            self.roster.add(id, scope, cwd);
+            let label = self.team_labels.get(&scope.team).map(String::as_str);
+            self.roster.add_labeled(id, scope, cwd, label);
             self.focus_slot(slot);
             self.place(self.panel.focused_pane, id);
         }

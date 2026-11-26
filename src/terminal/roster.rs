@@ -41,20 +41,35 @@ impl Default for Roster {
     }
 }
 
-/// "Terminal N" with the lowest N no name in `taken` uses.
-pub fn default_name(taken: &[&str]) -> String {
-    let n = (1..)
-        .find(|n| !taken.contains(&format!("Terminal {n}").as_str()))
-        .unwrap_or(1);
-    format!("Terminal {n}")
+/// The first name no name in `taken` uses. With the team's identifier: "JRST",
+/// then "JRST 2", "JRST 3"…; without one: "Terminal 1", "Terminal 2"…
+pub fn default_name(label: Option<&str>, taken: &[&str]) -> String {
+    let candidate = |n: usize| match label {
+        Some(l) if n == 1 => l.to_string(),
+        Some(l) => format!("{l} {n}"),
+        None => format!("Terminal {n}"),
+    };
+    let n = (1..).find(|&n| !taken.contains(&candidate(n).as_str())).unwrap_or(1);
+    candidate(n)
 }
 
 impl Roster {
     /// Add a Terminal to the strip of `scope`; returns the default name it got.
     pub fn add(&mut self, id: TerminalId, scope: &Scope, cwd: Option<PathBuf>) -> String {
+        self.add_labeled(id, scope, cwd, None)
+    }
+
+    /// `add`, naming the Terminal after `label` (the team's identifier) when given.
+    pub fn add_labeled(
+        &mut self,
+        id: TerminalId,
+        scope: &Scope,
+        cwd: Option<PathBuf>,
+        label: Option<&str>,
+    ) -> String {
         let name = {
             let taken: Vec<&str> = self.of_scope(scope).map(|r| r.name.as_str()).collect();
-            default_name(&taken)
+            default_name(label, &taken)
         };
         let key = uuid::Uuid::new_v4().to_string();
         self.changes.push(Change::Added(Stored {
@@ -222,6 +237,17 @@ mod tests {
         assert_eq!(r.add(id(1), &Scope::team("a"), None), "Terminal 1");
         assert_eq!(r.add(id(2), &Scope::team("a"), None), "Terminal 2");
         assert_eq!(r.add(id(3), &Scope::team("b"), None), "Terminal 1");
+    }
+
+    #[test]
+    fn names_start_with_the_team_identifier() {
+        let mut r = Roster::default();
+        let a = Scope::team("a");
+        assert_eq!(r.add_labeled(id(1), &a, None, Some("JRST")), "JRST");
+        assert_eq!(r.add_labeled(id(2), &a, None, Some("JRST")), "JRST 2");
+        r.remove(id(1));
+        assert_eq!(r.add_labeled(id(3), &a, None, Some("JRST")), "JRST");
+        assert_eq!(r.add_labeled(id(4), &a, None, Some("JRST")), "JRST 3");
     }
 
     #[test]
